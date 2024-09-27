@@ -1,2 +1,8 @@
-# caddy-cache-proxy
+# Cache Proxy
 
+> 带去重的文件反向代理工具
+
+## TODO
+
+- [ ] 支持热数据装入内存降低磁盘读写速率 (blobs)
+- [ ] 优化索引操作减少磁盘读写速率 (meta)

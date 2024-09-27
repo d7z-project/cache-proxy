@@ -1,0 +1,9 @@
+bind: 127.0.0.1:18080
+backend: build/tests
+gc: 10s
+caches:
+  archlinux:
+    urls:
+      - https://mirrors.ustc.edu.cn/archlinux
+    rules:
+      "**.db$":
