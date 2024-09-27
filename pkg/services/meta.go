@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-type Meta struct {
+type FileMeta struct {
 	localDir string
 	cache    sync.Map
 	gcLocker sync.RWMutex
 }
 
-func NewMeta(root string) (*Meta, error) {
+func NewFileMeta(root string) (*FileMeta, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -23,7 +23,7 @@ func NewMeta(root string) (*Meta, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
-	return &Meta{
+	return &FileMeta{
 		localDir: root,
 		cache:    sync.Map{},
 		gcLocker: sync.RWMutex{},
@@ -31,7 +31,7 @@ func NewMeta(root string) (*Meta, error) {
 }
 
 // Gc 清理数据, 将更新时间超过参数的内容进行清理并返回 meta
-func (m *Meta) Gc(ttl time.Duration) (map[string]map[string]string, error) {
+func (m *FileMeta) Gc(ttl time.Duration) (map[string]map[string]string, error) {
 	gcBegin := time.Now()
 	// TODO: 优化锁结构，降低重锁导致的停机时间
 	m.gcLocker.Lock()
@@ -87,10 +87,10 @@ func newMetaCache() *metaCache {
 	}
 }
 
-func (m *Meta) getContent(metaKey string) (*metaCache, error) {
-	actual, find := m.cache.LoadOrStore(metaKey, newMetaCache())
+func (m *FileMeta) getContent(filePath string) (*metaCache, error) {
+	actual, find := m.cache.LoadOrStore(filePath, newMetaCache())
 	cache := actual.(*metaCache)
-	localPath := filepath.Join(m.localDir, metaKey)
+	localPath := filepath.Join(m.localDir, filePath)
 	if !find {
 		data, err := os.ReadFile(localPath)
 		if err != nil && !os.IsNotExist(err) {
@@ -106,7 +106,7 @@ func (m *Meta) getContent(metaKey string) (*metaCache, error) {
 	return cache, nil
 }
 
-func (m *Meta) Get(metaKey string, key string) (string, error) {
+func (m *FileMeta) Get(metaKey string, key string) (string, error) {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
 	content, err := m.getContent(base64.URLEncoding.EncodeToString([]byte(metaKey)))
@@ -118,12 +118,12 @@ func (m *Meta) Get(metaKey string, key string) (string, error) {
 	return content.data[key], nil
 }
 
-func (m *Meta) Put(metaKey string, key string, value string, safe bool) error {
+func (m *FileMeta) Put(filePath string, key string, value string, safe bool) error {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
-	metaKey = base64.URLEncoding.EncodeToString([]byte(metaKey))
-	localPath := filepath.Join(m.localDir, metaKey)
-	content, err := m.getContent(metaKey)
+	filePath = base64.URLEncoding.EncodeToString([]byte(filePath))
+	localPath := filepath.Join(m.localDir, filePath)
+	content, err := m.getContent(filePath)
 	if err != nil {
 		return err
 	}

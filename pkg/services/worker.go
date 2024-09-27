@@ -9,7 +9,7 @@ import (
 type Worker struct {
 	baseDir string
 	blobs   *Blobs
-	meta    *Meta
+	meta    *FileMeta
 	locker  sync.RWMutex
 	route   map[string]any
 }
@@ -19,7 +19,7 @@ func NewWorker(baseDir string) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	meta, err := NewMeta(filepath.Join(baseDir, "meta"))
+	meta, err := NewFileMeta(filepath.Join(baseDir, "meta"))
 	if err != nil {
 		return nil, err
 	}

@@ -11,7 +11,7 @@ import (
 
 func TestMeta(t *testing.T) {
 	dir := t.TempDir()
-	meta, err := NewMeta(dir)
+	meta, err := NewFileMeta(dir)
 	assert.NoError(t, err)
 	err = meta.Put("any", "key", "value", false)
 	assert.NoError(t, err)
