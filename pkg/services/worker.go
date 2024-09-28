@@ -8,8 +8,8 @@ import (
 
 type Worker struct {
 	baseDir string
-	blobs   *Blobs
 	meta    *FileMeta
+	blobs   *Blobs
 	locker  sync.RWMutex
 	route   map[string]any
 }

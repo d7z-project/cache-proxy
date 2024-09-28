@@ -20,7 +20,7 @@ func NewFileMeta(root string) (*FileMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil && !os.IsExist(err) {
+	if err := os.MkdirAll(root, 0o700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
 	return &FileMeta{
@@ -87,29 +87,55 @@ func newMetaCache() *metaCache {
 	}
 }
 
-func (m *FileMeta) getContent(filePath string) (*metaCache, error) {
-	actual, find := m.cache.LoadOrStore(filePath, newMetaCache())
+func (m *FileMeta) getContent(filePath string, create bool) (*metaCache, error) {
+	newMeta := newMetaCache()
+	newMeta.locker.Lock()
+	defer newMeta.locker.Unlock()
+	actual, find := m.cache.LoadOrStore(filePath, newMeta)
 	cache := actual.(*metaCache)
 	localPath := filepath.Join(m.localDir, filePath)
 	if !find {
 		data, err := os.ReadFile(localPath)
+		if !create && os.IsNotExist(err) {
+			return nil, os.ErrNotExist
+		}
+		if err = os.MkdirAll(filepath.Dir(filePath), 0700); err != nil && !os.IsExist(err) {
+			return nil, err
+		}
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
-		if err == nil {
+		if err != nil {
+			file, err := os.Create(filePath)
+			if err != nil {
+				return nil, err
+			}
+			if _, err = file.Write([]byte("{}")); err != nil {
+				_ = file.Close()
+				_ = os.Remove(filePath)
+				return nil, err
+			}
+			_ = file.Close()
+		} else {
 			if err = json.Unmarshal(data, &cache.data); err != nil {
 				return nil, err
 			}
 		}
+		if stat, err := os.Stat(localPath); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		} else if err != nil {
+			cache.update = time.Now()
+		} else {
+			cache.update = stat.ModTime()
+		}
 	}
-	cache.update = time.Now()
 	return cache, nil
 }
 
-func (m *FileMeta) Get(metaKey string, key string) (string, error) {
+func (m *FileMeta) Get(filePath string, key string) (string, error) {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
-	content, err := m.getContent(base64.URLEncoding.EncodeToString([]byte(metaKey)))
+	content, err := m.getContent(filePath, false)
 	if err != nil {
 		return "", err
 	}
@@ -121,21 +147,20 @@ func (m *FileMeta) Get(metaKey string, key string) (string, error) {
 func (m *FileMeta) Put(filePath string, key string, value string, safe bool) error {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
-	filePath = base64.URLEncoding.EncodeToString([]byte(filePath))
-	localPath := filepath.Join(m.localDir, filePath)
-	content, err := m.getContent(filePath)
+	content, err := m.getContent(filePath, true)
 	if err != nil {
 		return err
 	}
 	content.locker.Lock()
 	defer content.locker.Unlock()
 	content.data[key] = value
+	content.update = time.Now()
 	if safe {
 		data, err := json.Marshal(&content.data)
 		if err != nil {
 			return err
 		}
-		if err = os.WriteFile(localPath, data, 0o600); err != nil {
+		if err = os.WriteFile(filepath.Join(m.localDir, filePath), data, 0o600); err != nil {
 			return err
 		}
 	}
