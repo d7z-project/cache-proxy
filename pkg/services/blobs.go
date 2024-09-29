@@ -107,7 +107,7 @@ func (b blobReader) Close() error {
 func (b *Blobs) Get(key string) (io.ReadCloser, error) {
 	lockerAny, _ := b.locker.LoadOrStore(key, &sync.RWMutex{})
 	locker := lockerAny.(*sync.RWMutex)
-	locker.RLocker()
+	locker.RLock()
 	open, err := os.Open(filepath.Join(b.root, key[:4], key[4:]))
 	if err != nil {
 		locker.RUnlock()

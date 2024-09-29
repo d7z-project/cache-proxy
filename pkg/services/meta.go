@@ -1,10 +1,10 @@
 package services
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,44 +31,40 @@ func NewFileMeta(root string) (*FileMeta, error) {
 }
 
 // Gc 清理数据, 将更新时间超过参数的内容进行清理并返回 meta
-func (m *FileMeta) Gc(ttl time.Duration) (map[string]map[string]string, error) {
+func (m *FileMeta) Gc(ttl time.Duration, filter func(string) bool) (map[string]map[string]string, error) {
 	gcBegin := time.Now()
-	// TODO: 优化锁结构，降低重锁导致的停机时间
+	files := make([]string, 0)
+	_ = filepath.Walk(m.localDir, func(path string, info os.FileInfo, err error) error {
+		subFile := strings.Trim(strings.TrimPrefix(path, m.localDir), string(filepath.Separator))
+		if filter(subFile) && info.Mode().Type().IsRegular() && gcBegin.Sub(info.ModTime()) > ttl {
+			files = append(files, subFile)
+		}
+		return nil
+	})
 	m.gcLocker.Lock()
 	defer m.gcLocker.Unlock()
-	dir, err := os.ReadDir(m.localDir)
-	if err != nil {
-		return nil, err
-	}
 	result := make(map[string]map[string]string)
-	for _, entry := range dir {
-		info, _ := entry.Info()
-		modTime := info.ModTime()
-		item := map[string]string{}
-		if value, ok := m.cache.Load(entry.Name()); ok {
-			modTime = value.(*metaCache).update
-			item = value.(*metaCache).data
+	for _, file := range files {
+		if err := func() error {
+			content, err := m.getContent(file, false)
+			if err != nil {
+				return err
+			}
+			content.locker.Lock()
+			defer content.locker.Unlock()
+			if gcBegin.Sub(content.update) <= ttl {
+				return nil
+			}
+			// 任务结束缓存已经被移除，此时 map 已线程安全
+			result[file] = content.data
+			if err = os.Remove(filepath.Join(m.localDir, file)); err != nil {
+				return err
+			}
+			m.cache.Delete(file)
+			return nil
+		}(); err == nil {
+			return result, err
 		}
-		if gcBegin.Sub(modTime) <= ttl {
-			continue
-		}
-		localPath := filepath.Join(m.localDir, entry.Name())
-		data, err := os.ReadFile(localPath)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(data, &item); err != nil {
-			return nil, err
-		}
-		decodeString, err := base64.URLEncoding.DecodeString(entry.Name())
-		if err != nil {
-			return nil, err
-		}
-		result[string(decodeString)] = item
-		if err = os.Remove(localPath); err != nil {
-			return nil, err
-		}
-		m.cache.Delete(entry.Name())
 	}
 	return result, nil
 }
@@ -87,39 +83,37 @@ func newMetaCache() *metaCache {
 	}
 }
 
-func (m *FileMeta) getContent(filePath string, create bool) (*metaCache, error) {
+func (m *FileMeta) getContent(pathKey string, create bool) (*metaCache, error) {
 	newMeta := newMetaCache()
 	newMeta.locker.Lock()
 	defer newMeta.locker.Unlock()
-	actual, find := m.cache.LoadOrStore(filePath, newMeta)
+	actual, find := m.cache.LoadOrStore(pathKey, newMeta)
 	cache := actual.(*metaCache)
-	localPath := filepath.Join(m.localDir, filePath)
+	localPath := filepath.Join(m.localDir, pathKey)
 	if !find {
 		data, err := os.ReadFile(localPath)
 		if !create && os.IsNotExist(err) {
 			return nil, os.ErrNotExist
-		}
-		if err = os.MkdirAll(filepath.Dir(filePath), 0700); err != nil && !os.IsExist(err) {
+		} else if err != nil && !os.IsNotExist(err) {
 			return nil, err
-		}
-		if err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-		if err != nil {
-			file, err := os.Create(filePath)
+		} else if err != nil {
+			if err := os.MkdirAll(filepath.Dir(localPath), 0700); err != nil && !os.IsExist(err) {
+				return nil, err
+			}
+			file, err := os.Create(localPath)
 			if err != nil {
 				return nil, err
 			}
-			if _, err = file.Write([]byte("{}")); err != nil {
+			data = []byte(`{"_meta":"1.0"}`)
+			if _, err = file.Write(data); err != nil {
 				_ = file.Close()
-				_ = os.Remove(filePath)
+				_ = os.Remove(localPath)
 				return nil, err
 			}
 			_ = file.Close()
-		} else {
-			if err = json.Unmarshal(data, &cache.data); err != nil {
-				return nil, err
-			}
+		}
+		if err = json.Unmarshal(data, &cache.data); err != nil {
+			return nil, err
 		}
 		if stat, err := os.Stat(localPath); err != nil && !os.IsNotExist(err) {
 			return nil, err
@@ -132,10 +126,37 @@ func (m *FileMeta) getContent(filePath string, create bool) (*metaCache, error) 
 	return cache, nil
 }
 
-func (m *FileMeta) Get(filePath string, key string) (string, error) {
+func (m *FileMeta) GetLastUpdate(pathKey string) (*time.Time, error) {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
-	content, err := m.getContent(filePath, false)
+	content, err := m.getContent(pathKey, false)
+	if err != nil {
+		return nil, err
+	}
+	return &content.update, nil
+}
+
+func (m *FileMeta) GetAll(pathKey string) (map[string]string, error) {
+	m.gcLocker.RLock()
+	defer m.gcLocker.RUnlock()
+
+	content, err := m.getContent(pathKey, false)
+	if err != nil {
+		return nil, err
+	}
+	content.locker.RLock()
+	defer content.locker.RUnlock()
+	result := make(map[string]string)
+	for s, s2 := range content.data {
+		result[s] = s2
+	}
+	return result, nil
+}
+
+func (m *FileMeta) Get(pathKey string, key string) (string, error) {
+	m.gcLocker.RLock()
+	defer m.gcLocker.RUnlock()
+	content, err := m.getContent(pathKey, false)
 	if err != nil {
 		return "", err
 	}
@@ -144,24 +165,29 @@ func (m *FileMeta) Get(filePath string, key string) (string, error) {
 	return content.data[key], nil
 }
 
-func (m *FileMeta) Put(filePath string, key string, value string, safe bool) error {
+func (m *FileMeta) Put(pathKey string, data map[string]string, safe bool) error {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
-	content, err := m.getContent(filePath, true)
+	content, err := m.getContent(pathKey, true)
 	if err != nil {
 		return err
 	}
 	content.locker.Lock()
 	defer content.locker.Unlock()
-	content.data[key] = value
+	for key, value := range data {
+		content.data[key] = value
+	}
 	content.update = time.Now()
 	if safe {
 		data, err := json.Marshal(&content.data)
 		if err != nil {
 			return err
 		}
-		if err = os.WriteFile(filepath.Join(m.localDir, filePath), data, 0o600); err != nil {
-			return err
+		if _, find := m.cache.Load(pathKey); find {
+			// 可能内容已被移除
+			if err = os.WriteFile(filepath.Join(m.localDir, pathKey), data, 0o600); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
