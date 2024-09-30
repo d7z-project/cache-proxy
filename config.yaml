@@ -1,11 +1,19 @@
 bind: 127.0.0.1:18080
 backend: build/tests
-gc: 10s
+gc:
+  meta: 10s
+  blob: 20s
 caches:
   archlinux:
     urls:
       - https://mirrors.ustc.edu.cn/archlinux
     rules:
       - regex: ".*.db"
-        ttl: 10s
+        ttl: "10s"
+        refresh: 5s
+      - regex: ".*.zst"
+        ttl: "10s"
+        refresh: 5s
+      - regex: ".*.qcow2"
+        ttl: "10s"
         refresh: 5s

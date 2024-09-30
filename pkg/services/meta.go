@@ -31,20 +31,21 @@ func NewFileMeta(root string) (*FileMeta, error) {
 }
 
 // Gc 清理数据, 将更新时间超过参数的内容进行清理并返回 meta
-func (m *FileMeta) Gc(ttl time.Duration, filter func(string) bool) (map[string]map[string]string, error) {
+func (m *FileMeta) Gc(filter func(string) time.Duration) (map[string]map[string]string, error) {
 	gcBegin := time.Now()
-	files := make([]string, 0)
+	files := make(map[string]time.Duration)
 	_ = filepath.Walk(m.localDir, func(path string, info os.FileInfo, err error) error {
 		subFile := strings.Trim(strings.TrimPrefix(path, m.localDir), string(filepath.Separator))
-		if filter(subFile) && info.Mode().Type().IsRegular() && gcBegin.Sub(info.ModTime()) > ttl {
-			files = append(files, subFile)
+		duration := filter(subFile)
+		if duration >= 0 && info.Mode().Type().IsRegular() && gcBegin.Sub(info.ModTime()) > duration {
+			files[subFile] = duration
 		}
 		return nil
 	})
 	m.gcLocker.Lock()
 	defer m.gcLocker.Unlock()
 	result := make(map[string]map[string]string)
-	for _, file := range files {
+	for file, ttl := range files {
 		if err := func() error {
 			content, err := m.getContent(file, false)
 			if err != nil {
@@ -93,11 +94,12 @@ func (m *FileMeta) getContent(pathKey string, create bool) (*metaCache, error) {
 	if !find {
 		data, err := os.ReadFile(localPath)
 		if !create && os.IsNotExist(err) {
+			m.cache.Delete(pathKey)
 			return nil, os.ErrNotExist
 		} else if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		} else if err != nil {
-			if err := os.MkdirAll(filepath.Dir(localPath), 0700); err != nil && !os.IsExist(err) {
+			if err := os.MkdirAll(filepath.Dir(localPath), 0o700); err != nil && !os.IsExist(err) {
 				return nil, err
 			}
 			file, err := os.Create(localPath)
@@ -136,7 +138,15 @@ func (m *FileMeta) GetLastUpdate(pathKey string) (*time.Time, error) {
 	return &content.update, nil
 }
 
-func (m *FileMeta) GetAll(pathKey string) (map[string]string, error) {
+func (m *FileMeta) Exists(pathKey string) bool {
+	m.gcLocker.RLock()
+	defer m.gcLocker.RUnlock()
+
+	_, err := m.getContent(pathKey, false)
+	return err == nil
+}
+
+func (m *FileMeta) GetMeta(pathKey string) (map[string]string, error) {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()
 

@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"code.d7z.net/d7z-project/cache-proxy/pkg/models"
 	"code.d7z.net/d7z-project/cache-proxy/pkg/services"
@@ -26,7 +27,12 @@ func init() {
 
 func mainExit() error {
 	flag.Parse()
-	cfg := &models.Config{}
+	cfg := &models.Config{
+		Gc: models.ConfigGc{
+			Meta: 10 * time.Second,
+			Blob: 24 * time.Hour,
+		},
+	}
 	if cfgB, err := os.ReadFile(conf); err != nil {
 		return errors.Wrapf(err, "配置文件不存在 %s", conf)
 	} else {
@@ -34,13 +40,13 @@ func mainExit() error {
 			return errors.Wrapf(err, "配置解析失败")
 		}
 	}
-	worker, err := services.NewWorker(cfg.Backend, cfg.Gc)
+	worker, err := services.NewWorker(cfg.Backend, cfg.Gc.Meta, cfg.Gc.Blob)
 	if err != nil {
 		return err
 	}
 	for name, cache := range cfg.Caches {
 		log.Printf("添加反向代理路径 %s[%s]", name, strings.Join(cache.URLs, ","))
-		target := services.NewTarget(cache.URLs...)
+		target := services.NewTarget(name, cache.URLs...)
 		for _, rule := range cache.Rules {
 			err := target.AddRule(rule.Regex, rule.Ttl, rule.Refresh)
 			if err != nil {

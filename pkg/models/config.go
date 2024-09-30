@@ -6,7 +6,12 @@ type Config struct {
 	Bind    string                 `yaml:"bind"`    // 绑定地址
 	Backend string                 `yaml:"backend"` // 存储位置
 	Caches  map[string]ConfigCache `yaml:"caches"`  // 缓存配置
-	Gc      time.Duration          `yaml:"gc"`      // 缓存重建时间
+	Gc      ConfigGc               `yaml:"gc"`      // 缓存重建时间
+}
+
+type ConfigGc struct {
+	Meta time.Duration `yaml:"meta"`
+	Blob time.Duration `yaml:"blob"`
 }
 
 type ConfigCache struct {
