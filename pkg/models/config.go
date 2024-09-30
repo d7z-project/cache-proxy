@@ -3,10 +3,11 @@ package models
 import "time"
 
 type Config struct {
-	Bind    string                 `yaml:"bind"`    // 绑定地址
-	Backend string                 `yaml:"backend"` // 存储位置
-	Caches  map[string]ConfigCache `yaml:"caches"`  // 缓存配置
-	Gc      ConfigGc               `yaml:"gc"`      // 缓存重建时间
+	Bind      string                 `yaml:"bind"`    // 绑定地址
+	Backend   string                 `yaml:"backend"` // 存储位置
+	Caches    map[string]ConfigCache `yaml:"caches"`  // 缓存配置
+	Gc        ConfigGc               `yaml:"gc"`      // 缓存重建时间
+	ErrorHtml string                 `yaml:"page"`    // 错误页面
 }
 
 type ConfigGc struct {

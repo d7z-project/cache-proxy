@@ -1,6 +1,7 @@
 package services
 
 import (
+	_ "embed"
 	"log"
 	"net/http"
 	"os"
@@ -9,11 +10,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"text/template"
 	"time"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
+
+//go:embed default.tmpl
+var data []byte
 
 type Worker struct {
 	baseDir       string
@@ -24,12 +29,16 @@ type Worker struct {
 	metaTracker   *time.Ticker
 	blobTracker   *time.Ticker
 	closed        atomic.Bool
+
+	html *template.Template
 }
 
 func NewWorker(baseDir string, metaGc time.Duration, blobGc time.Duration) (*Worker, error) {
 	if err := os.MkdirAll(baseDir, os.ModePerm); err != nil {
 		return nil, err
 	}
+
+	tmpl, _ := template.New("memory").Parse(string(data))
 	var err error
 	w := &Worker{
 		baseDir:     baseDir,
@@ -37,6 +46,7 @@ func NewWorker(baseDir string, metaGc time.Duration, blobGc time.Duration) (*Wor
 		blobTracker: time.NewTicker(blobGc),
 		locker:      sync.RWMutex{},
 		targets:     make(map[string]*Target),
+		html:        tmpl,
 	}
 	w.blobs, err = NewBlobs(filepath.Join(baseDir, "blobs"))
 	if err != nil {
@@ -88,6 +98,12 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		resp.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	if strings.HasSuffix(req.URL.Path, "robots.txt") {
+		resp.Header().Set("Content-Type", "text/plain")
+		resp.WriteHeader(http.StatusOK)
+		_, _ = resp.Write([]byte("User-agent: *\nDisallow: /\n"))
+		return
+	}
 	if req.Method != "GET" && req.Method != "HEAD" {
 		resp.Header().Add("Allow", "GET, HEAD")
 		resp.Header().Add("Content-Type", "text/plain")
@@ -101,16 +117,38 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		if strings.HasPrefix(req.RequestURI, target) {
 			forward, err := w.targets[target].forward(req.RequestURI[len(target):])
 			if err != nil {
+				resp.Header().Add("Content-Type", "text/html; charset=utf-8")
 				resp.WriteHeader(http.StatusNotFound)
-				_, _ = resp.Write([]byte(http.StatusText(http.StatusNotFound)))
+				_ = w.html.Execute(resp, map[string]any{
+					"code":    http.StatusNotFound,
+					"error":   err,
+					"path":    req.RequestURI,
+					"request": req,
+				})
 				zap.L().Debug("target error", zap.String("target", target), zap.Error(err))
 				return
 			}
-			_ = forward.FlushClose(resp)
+			_ = forward.FlushClose(req, resp)
 			return
 		}
 	}
-	resp.WriteHeader(http.StatusNotFound)
+	resp.Header().Add("Content-Type", "text/html; charset=utf-8")
+	if req.RequestURI == "/" {
+		resp.WriteHeader(http.StatusOK)
+		_ = w.html.Execute(resp, map[string]any{
+			"code":    http.StatusOK,
+			"path":    req.RequestURI,
+			"request": req,
+			"routes":  w.sortedTargets,
+		})
+	} else {
+		resp.WriteHeader(http.StatusNotFound)
+		_ = w.html.Execute(resp, map[string]any{
+			"code":    http.StatusNotFound,
+			"path":    req.RequestURI,
+			"request": req,
+		})
+	}
 }
 
 func (w *Worker) Close() error {
@@ -142,4 +180,8 @@ func (w *Worker) MetaRefresh() {
 			zap.L().Error("Meta GC 执行失败", zap.String("target", name), zap.Error(err))
 		}
 	}
+}
+
+func (w *Worker) SetHtmlPage(tmpl *template.Template) {
+	w.html = tmpl
 }

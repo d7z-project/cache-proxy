@@ -15,5 +15,5 @@ caches:
         ttl: "10s"
         refresh: 5s
       - regex: ".*.qcow2"
-        ttl: "10s"
+        ttl: "100h"
         refresh: 5s

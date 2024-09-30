@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -15,14 +16,28 @@ type ResponseWrapper struct {
 	Body       io.ReadCloser
 }
 
-func (receiver *ResponseWrapper) FlushClose(resp http.ResponseWriter) error {
+func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {
 	defer receiver.Body.Close()
 	for key, value := range receiver.Headers {
 		resp.Header().Add(key, value)
 	}
-	resp.WriteHeader(receiver.StatusCode)
-	_, err := io.Copy(resp, receiver.Body)
-	return err
+
+	if closer, ok := receiver.Body.(io.ReadSeekCloser); ok {
+		var lDate time.Time
+		if date, ok := receiver.Headers["Last-Modified"]; ok {
+			parse, err := time.Parse(http.TimeFormat, date)
+			if err != nil {
+				return err
+			}
+			lDate = parse
+		}
+		http.ServeContent(resp, req, "", lDate, closer)
+		return nil
+	} else {
+		resp.WriteHeader(receiver.StatusCode)
+		_, err := io.Copy(resp, receiver.Body)
+		return err
+	}
 }
 
 func (receiver *ResponseWrapper) Close() error {

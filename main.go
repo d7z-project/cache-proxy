@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"code.d7z.net/d7z-project/cache-proxy/pkg/models"
@@ -41,6 +42,18 @@ func mainExit() error {
 		}
 	}
 	worker, err := services.NewWorker(cfg.Backend, cfg.Gc.Meta, cfg.Gc.Blob)
+
+	if cfg.ErrorHtml != "" {
+		file, err := os.ReadFile(cfg.ErrorHtml)
+		if err != nil {
+			return err
+		}
+		parse, err := template.New(cfg.ErrorHtml).Parse(string(file))
+		if err == nil {
+			return err
+		}
+		worker.SetHtmlPage(parse)
+	}
 	if err != nil {
 		return err
 	}

@@ -69,7 +69,12 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 	}
 	if cacheTime == -1 {
 		// direct
-		return t.openRemote(childPath, true)
+		remote, err := t.openRemote(childPath, true)
+		if remote != nil {
+			remote.Headers["Cache-Control"] = "no-cache"
+			remote.Headers["X-Cache"] = "MISS"
+		}
+		return remote, err
 	}
 	pathLocker := t.locker.Open(childPath)
 	lock := pathLocker.Lock(true)
