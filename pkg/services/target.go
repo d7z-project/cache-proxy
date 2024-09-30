@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -78,16 +79,19 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 	}
 	pathLocker := t.locker.Open(childPath)
 	lock := pathLocker.Lock(true)
-	defer lock.Close()
 	if !t.meta.Exists(childPath) {
 		// 确保缓存仅仅被下载一次
 		lock.AsLocker()
 		if t.meta.Exists(childPath) {
+			lock.Close()
 			return t.openBlob(childPath)
 		} else {
-			return t.download(childPath, cacheTime, refreshTime)
+			return t.download(childPath, cacheTime, refreshTime, func() {
+				lock.Close()
+			})
 		}
 	} else {
+		lock.Close()
 		return t.openBlob(childPath)
 	}
 }
@@ -132,7 +136,7 @@ func (t *Target) openRemote(path string, allowError bool) (*utils.ResponseWrappe
 	return resp, err
 }
 
-func (t *Target) download(path string, cache, refresh time.Duration) (*utils.ResponseWrapper, error) {
+func (t *Target) download(path string, cache, refresh time.Duration, finishHook func()) (*utils.ResponseWrapper, error) {
 	update, err := t.meta.GetLastUpdate(path)
 	now := time.Now()
 	if err == nil && cache == 0 {
@@ -162,20 +166,43 @@ func (t *Target) download(path string, cache, refresh time.Duration) (*utils.Res
 		// 自上次以来文件未更新
 		return t.openBlob(path)
 	}
-	token, err := t.blobs.Update(fmt.Sprintf("%s@%s", t.name, path), resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if err = t.meta.Put(path, map[string]string{
-		"blob":          token,
-		"last-modified": lastModified,
-		"length":        length,
-		"content-type":  contentType,
-	}, true); err != nil {
-		return nil, err
-	}
-	return t.openBlob(path)
+	pipe1, writer1 := io.Pipe()
+	pipe2, writer2 := io.Pipe()
+	go func() {
+		defer finishHook()
+		defer writer1.Close()
+		defer writer2.Close()
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.MultiWriter(writer1, writer2), resp.Body)
+		zap.L().Debug("结束内容缓存", zap.String("path", path))
+	}()
+	go func() {
+		defer pipe1.Close()
+		token, err := t.blobs.Update(fmt.Sprintf("%s@%s", t.name, path), pipe1)
+		_ = resp.Body.Close()
+		if err != nil {
+			zap.L().Debug("保存内容错误", zap.String("path", path), zap.Error(err))
+		}
+		if err = t.meta.Put(path, map[string]string{
+			"blob":          token,
+			"last-modified": lastModified,
+			"length":        length,
+			"content-type":  contentType,
+		}, true); err != nil {
+			_ = resp.Body.Close()
+			zap.L().Debug("推送配置错误", zap.String("path", path), zap.Error(err))
+		}
+	}()
+	return &utils.ResponseWrapper{
+		StatusCode: http.StatusOK,
+		Headers: map[string]string{
+			"Last-Modified":  lastModified,
+			"X-Cache":        "WAIT",
+			"Content-Length": length,
+			"Content-Type":   contentType,
+		},
+		Body: pipe2,
+	}, nil
 }
 
 func (t *Target) Gc() error {
