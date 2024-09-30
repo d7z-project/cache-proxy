@@ -173,7 +173,11 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 		defer writer1.Close()
 		defer writer2.Close()
 		defer resp.Body.Close()
-		_, _ = io.Copy(io.MultiWriter(writer1, writer2), resp.Body)
+		_, err := io.Copy(io.MultiWriter(writer1, writer2), resp.Body)
+		if err != nil {
+			_ = writer1.CloseWithError(err)
+			_ = writer2.CloseWithError(err)
+		}
 		zap.L().Debug("结束内容缓存", zap.String("path", path))
 	}()
 	go func() {
@@ -182,6 +186,7 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 		_ = resp.Body.Close()
 		if err != nil {
 			zap.L().Debug("保存内容错误", zap.String("path", path), zap.Error(err))
+			return
 		}
 		if err = t.meta.Put(path, map[string]string{
 			"blob":          token,
@@ -191,6 +196,7 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 		}, true); err != nil {
 			_ = resp.Body.Close()
 			zap.L().Debug("推送配置错误", zap.String("path", path), zap.Error(err))
+			return
 		}
 	}()
 	return &utils.ResponseWrapper{
