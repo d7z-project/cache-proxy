@@ -1,19 +1,28 @@
 bind: 127.0.0.1:18080
 backend: build/tests
 gc:
-  meta: 10s
-  blob: 20s
+  meta: 1h
+  blob: 24h
 caches:
   archlinux:
     urls:
       - https://mirrors.ustc.edu.cn/archlinux
+      - https://mirror.sjtu.edu.cn/archlinux
     rules:
       - regex: ".*.db"
-        ttl: "10s"
-        refresh: 5s
+        ttl: "12h"
+        refresh: 6h
       - regex: ".*.zst"
-        ttl: "10s"
-        refresh: 5s
-      - regex: ".*.qcow2"
-        ttl: "100h"
-        refresh: 5s
+        ttl: "0"
+        refresh: 12h
+  rocky:
+    urls:
+      - https://mirrors.ustc.edu.cn/rocky
+      - https://mirror.sjtu.edu.cn/rocky
+    rules:
+      - regex: ".*.(db|xml|gz)"
+        ttl: "24h"
+        refresh: 12h
+      - regex: ".*.rpm"
+        ttl: "360h"
+        refresh: 12h

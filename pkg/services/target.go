@@ -3,6 +3,7 @@ package services
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -45,7 +46,8 @@ func (t *Target) AddRule(regex string, cache, refresh time.Duration) error {
 	if err != nil {
 		return err
 	}
-	if cache <= refresh {
+	if cache <= refresh && cache > 0 {
+		log.Printf("注意，%s 中缓存时间小于刷新时间，刷新时间可能无效", t.name)
 		return errors.New("invalid cache duration, cache less than refresh.")
 	}
 	t.rules = append(t.rules, &TargetRule{
