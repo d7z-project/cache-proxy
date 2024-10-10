@@ -138,6 +138,18 @@ func (m *FileMeta) GetLastUpdate(pathKey string) (*time.Time, error) {
 	return &content.update, nil
 }
 
+func (m *FileMeta) Refresh(pathKey string) error {
+	m.gcLocker.RLock()
+	defer m.gcLocker.RLock()
+	content, err := m.getContent(pathKey, false)
+	if err != nil {
+		return err
+	}
+	content.update = time.Now()
+
+	return nil
+}
+
 func (m *FileMeta) Exists(pathKey string) bool {
 	m.gcLocker.RLock()
 	defer m.gcLocker.RUnlock()

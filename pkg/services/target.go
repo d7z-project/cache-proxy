@@ -81,17 +81,26 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 	}
 	pathLocker := t.locker.Open(childPath)
 	lock := pathLocker.Lock(true)
-	if !t.meta.Exists(childPath) {
-		// 确保缓存仅仅被下载一次
+
+	download := true
+	lastUpdate, err := t.meta.GetLastUpdate(childPath)
+	now := time.Now()
+	if err == nil && (cacheTime == 0 || lastUpdate.Add(cacheTime).After(now)) {
+		// 无 ttl ，跳过
+		download = false
+	}
+	if download == false && err == nil && (refreshTime == 0 || lastUpdate.Add(refreshTime).After(now)) {
+		// 当前缓存正常，跳过刷新
+		download = false
+	} else {
+		zap.L().Debug("文件需要刷新", zap.String("child", childPath))
+		download = true
+	}
+	if download || err != nil {
 		lock.AsLocker()
-		if t.meta.Exists(childPath) {
+		return t.download(childPath, func() {
 			lock.Close()
-			return t.openBlob(childPath)
-		} else {
-			return t.download(childPath, cacheTime, refreshTime, func() {
-				lock.Close()
-			})
-		}
+		})
 	} else {
 		lock.Close()
 		return t.openBlob(childPath)
@@ -138,23 +147,16 @@ func (t *Target) openRemote(path string, allowError bool) (*utils.ResponseWrappe
 	return resp, err
 }
 
-func (t *Target) download(path string, cache, refresh time.Duration, finishHook func()) (*utils.ResponseWrapper, error) {
-	update, err := t.meta.GetLastUpdate(path)
-	now := time.Now()
-	if err == nil && cache == 0 {
-		// 永久缓存
+func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrapper, error) {
+	resp, respErr := t.openRemote(path, false)
+	if respErr != nil {
 		finishHook()
-		return t.openBlob(path)
-	}
-	if err == nil && update.Add(cache).After(now) && update.Add(refresh).After(now) && cache != -1 {
-		// 当前缓存正常，跳过刷新
-		finishHook()
-		return t.openBlob(path)
-	}
-	resp, err := t.openRemote(path, false)
-	if err != nil {
-		finishHook()
-		return nil, errors.Wrapf(err, "文件下载失败")
+		if t.meta.Exists(path) {
+			// 回退到本地缓存
+			return t.openBlob(path)
+		} else {
+			return nil, errors.Wrapf(respErr, "文件下载失败")
+		}
 	}
 	lastModified, _ := resp.Headers["Last-Modified"]
 	contentType, _ := resp.Headers["Content-Type"]
@@ -171,6 +173,7 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 	if err == nil && get == lastModified {
 		// 自上次以来文件未更新
 		finishHook()
+		_ = t.meta.Refresh(path)
 		return t.openBlob(path)
 	}
 	pipe1, writer1 := io.Pipe()
