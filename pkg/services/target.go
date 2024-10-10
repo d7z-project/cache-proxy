@@ -143,14 +143,17 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 	now := time.Now()
 	if err == nil && cache == 0 {
 		// 永久缓存
+		finishHook()
 		return t.openBlob(path)
 	}
 	if err == nil && update.Add(cache).After(now) && update.Add(refresh).After(now) && cache != -1 {
 		// 当前缓存正常，跳过刷新
+		finishHook()
 		return t.openBlob(path)
 	}
 	resp, err := t.openRemote(path, false)
 	if err != nil {
+		finishHook()
 		return nil, errors.Wrapf(err, "文件下载失败")
 	}
 	lastModified, _ := resp.Headers["Last-Modified"]
@@ -158,6 +161,7 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 	length, _ := resp.Headers["Content-Length"]
 	if lastModified == "" || length == "" {
 		// 无法查询相关的缓存策略, 跳过
+		finishHook()
 		return resp, nil
 	}
 	if contentType == "" {
@@ -166,6 +170,7 @@ func (t *Target) download(path string, cache, refresh time.Duration, finishHook 
 	get, err := t.meta.Get(path, "last-modified")
 	if err == nil && get == lastModified {
 		// 自上次以来文件未更新
+		finishHook()
 		return t.openBlob(path)
 	}
 	pipe1, writer1 := io.Pipe()
