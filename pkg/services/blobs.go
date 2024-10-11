@@ -188,12 +188,12 @@ type blobMeta struct {
 	SHA512 string `json:"sha512,omitempty"`
 }
 
-type blobReader struct {
+type BlobReader struct {
 	*os.File
 	readLock func()
 }
 
-func (b blobReader) Close() error {
+func (b BlobReader) Close() error {
 	defer b.readLock()
 	return b.File.Close()
 }
@@ -207,7 +207,7 @@ func (b *Blobs) Get(key string) (io.ReadSeekCloser, error) {
 		locker.RUnlock()
 		return nil, err
 	}
-	return blobReader{
+	return BlobReader{
 		File: open,
 		readLock: func() {
 			locker.RUnlock()

@@ -81,7 +81,6 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 	}
 	pathLocker := t.locker.Open(childPath)
 	lock := pathLocker.Lock(true)
-
 	download := true
 	lastUpdate, err := t.meta.GetLastUpdate(childPath)
 	now := time.Now()
@@ -236,7 +235,7 @@ func (t *Target) Gc() error {
 	}
 	var errs []error
 	for path, m := range result {
-		zap.L().Debug("删除文件", zap.String("path", path), zap.String("blob", m["blob"]))
+		zap.L().Debug("为 blob 删除索引", zap.String("path", path), zap.String("blob", m["blob"]))
 		if err = t.blobs.DelPointer(m["blob"], fmt.Sprintf("%s@%s", t.name, path)); err != nil {
 			errs = append(errs, err)
 		}

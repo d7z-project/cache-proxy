@@ -7,12 +7,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type FileMeta struct {
 	localDir string
 	cache    sync.Map
-	gcLocker sync.RWMutex
 }
 
 func NewFileMeta(root string) (*FileMeta, error) {
@@ -26,7 +27,6 @@ func NewFileMeta(root string) (*FileMeta, error) {
 	return &FileMeta{
 		localDir: root,
 		cache:    sync.Map{},
-		gcLocker: sync.RWMutex{},
 	}, nil
 }
 
@@ -42,8 +42,9 @@ func (m *FileMeta) Gc(filter func(string) time.Duration) (map[string]map[string]
 		}
 		return nil
 	})
-	m.gcLocker.Lock()
-	defer m.gcLocker.Unlock()
+	if len(files) == 0 {
+		return map[string]map[string]string{}, nil
+	}
 	result := make(map[string]map[string]string)
 	for file, ttl := range files {
 		if err := func() error {
@@ -61,6 +62,7 @@ func (m *FileMeta) Gc(filter func(string) time.Duration) (map[string]map[string]
 			if err = os.Remove(filepath.Join(m.localDir, file)); err != nil {
 				return err
 			}
+			zap.L().Debug("销毁 metadata", zap.String("file", file), zap.String("name", m.localDir))
 			m.cache.Delete(file)
 			return nil
 		}(); err == nil {
@@ -129,8 +131,6 @@ func (m *FileMeta) getContent(pathKey string, create bool) (*metaCache, error) {
 }
 
 func (m *FileMeta) GetLastUpdate(pathKey string) (*time.Time, error) {
-	m.gcLocker.RLock()
-	defer m.gcLocker.RUnlock()
 	content, err := m.getContent(pathKey, false)
 	if err != nil {
 		return nil, err
@@ -139,8 +139,6 @@ func (m *FileMeta) GetLastUpdate(pathKey string) (*time.Time, error) {
 }
 
 func (m *FileMeta) Refresh(pathKey string) error {
-	m.gcLocker.RLock()
-	defer m.gcLocker.RLock()
 	content, err := m.getContent(pathKey, false)
 	if err != nil {
 		return err
@@ -151,17 +149,11 @@ func (m *FileMeta) Refresh(pathKey string) error {
 }
 
 func (m *FileMeta) Exists(pathKey string) bool {
-	m.gcLocker.RLock()
-	defer m.gcLocker.RUnlock()
-
 	_, err := m.getContent(pathKey, false)
 	return err == nil
 }
 
 func (m *FileMeta) GetMeta(pathKey string) (map[string]string, error) {
-	m.gcLocker.RLock()
-	defer m.gcLocker.RUnlock()
-
 	content, err := m.getContent(pathKey, false)
 	if err != nil {
 		return nil, err
@@ -176,8 +168,6 @@ func (m *FileMeta) GetMeta(pathKey string) (map[string]string, error) {
 }
 
 func (m *FileMeta) Get(pathKey string, key string) (string, error) {
-	m.gcLocker.RLock()
-	defer m.gcLocker.RUnlock()
 	content, err := m.getContent(pathKey, false)
 	if err != nil {
 		return "", err
@@ -188,8 +178,6 @@ func (m *FileMeta) Get(pathKey string, key string) (string, error) {
 }
 
 func (m *FileMeta) Put(pathKey string, data map[string]string, safe bool) error {
-	m.gcLocker.RLock()
-	defer m.gcLocker.RUnlock()
 	content, err := m.getContent(pathKey, true)
 	if err != nil {
 		return err
