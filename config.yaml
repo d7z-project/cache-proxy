@@ -15,3 +15,16 @@ caches:
       - regex: ".*.rpm"
         ttl: 1h
         refresh: 1m
+  npm:
+    urls:
+      - https://registry.npmjs.org
+    rules:
+      - regex: ".*.tgz"
+        ttl: "0s"
+        refresh: "72h"
+      - regex: ".*package\\.json"
+        ttl: "0s"
+        refresh: "12h"
+      - regex: ".*\\.\\w"
+        ttl: "120h"
+        refresh: "10m"

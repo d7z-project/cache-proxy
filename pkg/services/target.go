@@ -101,7 +101,7 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 			lock.Close()
 		})
 	} else {
-		lock.Close()
+		defer lock.Close()
 		return t.openBlob(childPath)
 	}
 }
