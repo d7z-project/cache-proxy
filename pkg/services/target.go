@@ -175,6 +175,13 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 		_ = t.meta.Refresh(path)
 		return t.openBlob(path)
 	}
+	pointer := fmt.Sprintf("%s@%s", t.name, path)
+	if lastBlobId, err := t.meta.Get(path, "blob"); err == nil {
+		// 移除旧文件指针
+		if err = t.blobs.DelPointer(lastBlobId, pointer); err != nil {
+			return nil, err
+		}
+	}
 	pipe1, writer1 := io.Pipe()
 	pipe2, writer2 := io.Pipe()
 	go func() {
@@ -191,7 +198,7 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 	}()
 	go func() {
 		defer pipe1.Close()
-		token, err := t.blobs.Update(fmt.Sprintf("%s@%s", t.name, path), pipe1)
+		token, err := t.blobs.Update(pointer, pipe1)
 		_ = resp.Body.Close()
 		if err != nil {
 			zap.L().Debug("保存内容错误", zap.String("path", path), zap.Error(err))

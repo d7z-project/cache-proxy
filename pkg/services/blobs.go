@@ -257,7 +257,8 @@ func (b *Blobs) Gc() error {
 		if strings.HasSuffix(path, ".meta.json") && info.Mode().IsRegular() {
 			meta, err := parseFileMeta(path)
 			if err != nil {
-				return err
+				zap.L().Warn("解析 blob meta 错误", zap.String("path", path), zap.Error(err))
+				return nil
 			}
 			if len(meta.Linker) == 0 {
 				emptyKey = append(emptyKey, meta.SHA256)

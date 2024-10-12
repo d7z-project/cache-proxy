@@ -10,7 +10,7 @@ caches:
       - https://mirror.sjtu.edu.cn/rocky
     rules:
       - regex: ".*.(db|xml|gz)"
-        ttl: 30s
+        ttl: 1m
         refresh: 10s
       - regex: ".*.rpm"
         ttl: 1h
