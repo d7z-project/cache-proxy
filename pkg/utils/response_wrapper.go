@@ -14,14 +14,14 @@ type ResponseWrapper struct {
 	StatusCode int
 	Headers    map[string]string
 	Body       io.ReadCloser
+	Closes     func()
 }
 
 func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {
-	defer receiver.Body.Close()
+	defer receiver.Close()
 	for key, value := range receiver.Headers {
 		resp.Header().Add(key, value)
 	}
-
 	if closer, ok := receiver.Body.(io.ReadSeekCloser); ok {
 		var lDate time.Time
 		if date, ok := receiver.Headers["Last-Modified"]; ok {
@@ -41,7 +41,11 @@ func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.Respons
 }
 
 func (receiver *ResponseWrapper) Close() error {
-	return receiver.Body.Close()
+	err := receiver.Body.Close()
+	if receiver.Closes != nil {
+		receiver.Closes()
+	}
+	return err
 }
 
 func OpenRequest(url string, allowError bool) (*ResponseWrapper, error) {

@@ -101,8 +101,7 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 			lock.Close()
 		})
 	} else {
-		defer lock.Close()
-		return t.openBlob(childPath)
+		return t.openBlob(childPath, lock.Close)
 	}
 }
 
@@ -111,7 +110,7 @@ func (t *Target) Close() error {
 	return nil
 }
 
-func (t *Target) openBlob(path string) (*utils.ResponseWrapper, error) {
+func (t *Target) openBlob(path string, closeHook func()) (*utils.ResponseWrapper, error) {
 	all, err := t.meta.GetMeta(path)
 	if err != nil {
 		return nil, err
@@ -128,7 +127,8 @@ func (t *Target) openBlob(path string) (*utils.ResponseWrapper, error) {
 			"Content-Length": all["length"],
 			"Content-Type":   all["content-type"],
 		},
-		Body: body,
+		Body:   body,
+		Closes: closeHook,
 	}, nil
 }
 
@@ -149,11 +149,11 @@ func (t *Target) openRemote(path string, allowError bool) (*utils.ResponseWrappe
 func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrapper, error) {
 	resp, respErr := t.openRemote(path, false)
 	if respErr != nil {
-		finishHook()
 		if t.meta.Exists(path) {
 			// 回退到本地缓存
-			return t.openBlob(path)
+			return t.openBlob(path, finishHook)
 		} else {
+			finishHook()
 			return nil, errors.Wrapf(respErr, "文件下载失败")
 		}
 	}
@@ -171,9 +171,8 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 	get, err := t.meta.Get(path, "last-modified")
 	if err == nil && get == lastModified {
 		// 自上次以来文件未更新
-		finishHook()
 		_ = t.meta.Refresh(path)
-		return t.openBlob(path)
+		return t.openBlob(path, finishHook)
 	}
 	pointer := fmt.Sprintf("%s@%s", t.name, path)
 	if lastBlobId, err := t.meta.Get(path, "blob"); err == nil {

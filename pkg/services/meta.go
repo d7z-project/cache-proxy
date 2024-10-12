@@ -54,7 +54,8 @@ func (m *FileMeta) Gc(filter func(string) time.Duration) (map[string]map[string]
 			}
 			content.locker.Lock()
 			defer content.locker.Unlock()
-			if gcBegin.Sub(content.update) <= ttl {
+			if gcBegin.Sub(content.update) <= ttl || ttl <= 0 {
+				// 当 ttl 为 0 或小于 0 时禁用清理
 				return nil
 			}
 			// 任务结束缓存已经被移除，此时 map 已线程安全
