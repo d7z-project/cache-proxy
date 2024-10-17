@@ -61,8 +61,12 @@ func mainExit() error {
 		log.Printf("添加反向代理路径 %s[%s]", name, strings.Join(cache.URLs, ","))
 		target := services.NewTarget(name, cache.URLs...)
 		for _, rule := range cache.Rules {
-			err := target.AddRule(rule.Regex, rule.Ttl, rule.Refresh)
-			if err != nil {
+			if err = target.AddRule(rule.Regex, rule.Ttl, rule.Refresh); err != nil {
+				return errors.Wrapf(err, "处理 %s 失败.", name)
+			}
+		}
+		for _, replace := range cache.Replaces {
+			if err = target.AddReplace(replace.Regex, replace.Old, replace.New); err != nil {
 				return errors.Wrapf(err, "处理 %s 失败.", name)
 			}
 		}

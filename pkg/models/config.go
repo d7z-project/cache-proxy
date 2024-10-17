@@ -16,12 +16,19 @@ type ConfigGc struct {
 }
 
 type ConfigCache struct {
-	URLs  []string          `yaml:"urls"`  // 缓存后端地址
-	Rules []ConfigCacheRule `yaml:"rules"` // 缓存策略 , 如果没有命中则跳过缓存
+	URLs     []string          `yaml:"urls"`     // 缓存后端地址
+	Rules    []ConfigCacheRule `yaml:"rules"`    // 缓存策略, 如果没有命中则跳过缓存
+	Replaces []ConfigReplace   `yaml:"replaces"` // 替换策略
 }
 
 type ConfigCacheRule struct {
-	Regex   string        `yaml:"regex"`   // 命中正则表达式
+	Regex   string        `yaml:"regex"`   // 路径命中正则表达式
 	Ttl     time.Duration `yaml:"ttl"`     // 缓存超时，以下载时间为准，如果为 0 则永不过期
 	Refresh time.Duration `yaml:"refresh"` // 缓存刷新时间，文件下载后将在此时间过期后在调用时刷新
+}
+
+type ConfigReplace struct {
+	Regex string `yaml:"regex"` // 路径命中正则表达式
+	Old   string `yaml:"old"`   // 旧字符串
+	New   string `yaml:"new"`   // 新字符串
 }

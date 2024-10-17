@@ -28,3 +28,13 @@ caches:
       - regex: ".*\\.\\w"
         ttl: "120h"
         refresh: "10m"
+    replaces:
+      - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
+        old: "https://"
+        new: "http://"
+      - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
+        old: "http://"
+        new: "ntp://"
+
+
+

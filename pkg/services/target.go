@@ -24,8 +24,10 @@ type Target struct {
 	blobs  *Blobs // 文件归档信息
 	locker *utils.RWLockGroup
 
-	rules []*TargetRule
-	wait  *sync.WaitGroup
+	rules    []*TargetRule
+	replaces []*TargetReplace
+
+	wait *sync.WaitGroup
 }
 
 func NewTarget(name string, urls ...string) *Target {
@@ -33,11 +35,12 @@ func NewTarget(name string, urls ...string) *Target {
 		urls[i] = strings.Trim(strings.TrimSpace(url), "/")
 	}
 	return &Target{
-		name:   name,
-		locker: utils.NewRWLockGroup(),
-		urls:   urls,
-		rules:  make([]*TargetRule, 0),
-		wait:   new(sync.WaitGroup),
+		name:     name,
+		locker:   utils.NewRWLockGroup(),
+		urls:     urls,
+		rules:    make([]*TargetRule, 0),
+		replaces: make([]*TargetReplace, 0),
+		wait:     new(sync.WaitGroup),
 	}
 }
 
@@ -58,7 +61,39 @@ func (t *Target) AddRule(regex string, cache, refresh time.Duration) error {
 	return nil
 }
 
+func (t *Target) AddReplace(regex, old, new string) error {
+	compile, err := regexp.Compile(regex)
+	if err != nil {
+		return err
+	}
+	if len(old) == 0 {
+		return errors.New("invalid old str , len() == 0.")
+	}
+	t.replaces = append(t.replaces, &TargetReplace{
+		regex: compile,
+		src:   []byte(old),
+		dest:  []byte(new),
+	})
+	return nil
+}
+
 func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
+	res, err := t.fetchResource(childPath)
+	if err != nil {
+		return nil, err
+	}
+	// post: replace
+	for _, replace := range t.replaces {
+		if replace.regex.MatchString(childPath) {
+			zap.L().Debug("后处理替换内容", zap.String("childPath", childPath))
+			delete(res.Headers, "Content-Length")
+			res.Body = utils.NewKMPReplaceReader(res.Body, replace.src, replace.dest)
+		}
+	}
+	return res, nil
+}
+
+func (t *Target) fetchResource(childPath string) (*utils.ResponseWrapper, error) {
 	t.wait.Add(1)
 	defer t.wait.Done()
 	var cacheTime time.Duration = -1
@@ -256,4 +291,10 @@ type TargetRule struct {
 	regex   *regexp.Regexp // 正则匹配
 	cache   time.Duration  // 缓存时间
 	refresh time.Duration  // 刷新时间，缓存未过期时可用 (需要支持 head 请求查询状态)
+}
+
+type TargetReplace struct {
+	regex *regexp.Regexp
+	src   []byte
+	dest  []byte
 }
