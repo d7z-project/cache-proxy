@@ -1,6 +1,8 @@
 package models
 
-import "time"
+import (
+	"time"
+)
 
 type Config struct {
 	Bind      string                 `yaml:"bind"`    // 绑定地址
@@ -16,9 +18,16 @@ type ConfigGc struct {
 }
 
 type ConfigCache struct {
-	URLs     []string          `yaml:"urls"`     // 缓存后端地址
-	Rules    []ConfigCacheRule `yaml:"rules"`    // 缓存策略, 如果没有命中则跳过缓存
-	Replaces []ConfigReplace   `yaml:"replaces"` // 替换策略
+	URLs      []string          `yaml:"urls"`                // 缓存后端地址
+	Rules     []ConfigCacheRule `yaml:"rules"`               // 缓存策略, 如果没有命中则跳过缓存
+	Replaces  []ConfigReplace   `yaml:"replaces"`            // 替换策略
+	Transport *ConfigTransport  `yaml:"transport,omitempty"` // 配置请求细节
+}
+
+type ConfigTransport struct {
+	Proxy     string        `yaml:"proxy"`
+	UserAgent string        `yaml:"ua"`
+	Timeout   time.Duration `yaml:"timeout"`
 }
 
 type ConfigCacheRule struct {

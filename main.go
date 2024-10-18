@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"text/template"
 	"time"
+
+	"code.d7z.net/d7z-project/cache-proxy/pkg/utils"
 
 	"code.d7z.net/d7z-project/cache-proxy/pkg/models"
 	"code.d7z.net/d7z-project/cache-proxy/pkg/services"
@@ -69,6 +72,26 @@ func mainExit() error {
 			if err = target.AddReplace(replace.Regex, replace.Old, replace.New); err != nil {
 				return errors.Wrapf(err, "处理 %s 失败.", name)
 			}
+		}
+		transport := cache.Transport
+		if transport != nil {
+			client := utils.DefaultHttpClientWrapper()
+			if transport.Proxy != "" {
+				proxyUrl, err := url.Parse(transport.Proxy)
+				if err != nil {
+					return errors.Wrapf(err, "处理 %s 失败.", name)
+				}
+				client.Transport = &http.Transport{
+					Proxy: http.ProxyURL(proxyUrl),
+				}
+			}
+			if transport.Timeout > 0 {
+				client.Transport.(*http.Transport).DialContext = utils.DefaultDialContext(transport.Timeout)
+			}
+			if transport.UserAgent != "" {
+				client.UserAgent = transport.UserAgent
+			}
+			target.SetHttpClient(client)
 		}
 		if err := worker.Bind(name, target); err != nil {
 			return errors.Wrapf(err, "处理 %s 失败.", name)

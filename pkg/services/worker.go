@@ -161,7 +161,7 @@ func (w *Worker) Close() error {
 	w.blobTracker.Stop()
 
 	for name, target := range w.targets {
-		log.Printf("销毁代理目标 %s ,可能存在请求，需等待所有请求结束", name)
+		log.Printf("销毁代理目标 %s", name)
 		if err := target.Close(); err != nil {
 			log.Printf("销毁 %s 失败: %v", name, err)
 		}

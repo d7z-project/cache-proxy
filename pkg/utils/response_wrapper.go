@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"context"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,20 +12,38 @@ import (
 	"github.com/pkg/errors"
 )
 
-var httpClient = &http.Client{}
-
-func init() {
-	httpClient.Timeout = 3 * time.Second
-	httpClient.Transport = &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-	}
-}
-
 type ResponseWrapper struct {
 	StatusCode int
 	Headers    map[string]string
 	Body       io.ReadCloser
 	Closes     func()
+}
+
+type HttpClientWrapper struct {
+	*http.Client
+	UserAgent string
+}
+
+func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := net.DialTimeout(network, addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	}
+}
+
+func DefaultHttpClientWrapper() *HttpClientWrapper {
+	return &HttpClientWrapper{
+		Client: &http.Client{
+			Transport: &http.Transport{
+				Proxy:       nil,
+				DialContext: DefaultDialContext(3 * time.Second),
+			},
+		},
+		UserAgent: "curl/8.10.0",
+	}
 }
 
 func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {
@@ -57,14 +77,14 @@ func (receiver *ResponseWrapper) Close() error {
 	return err
 }
 
-func OpenRequest(url string, errorAccept bool) (*ResponseWrapper, error) {
+func OpenRequest(client *HttpClientWrapper, url string, errorAccept bool) (*ResponseWrapper, error) {
 	request, _ := http.NewRequest("GET", url, nil)
-	request.Header.Set("User-Agent", "curl/8.10.0")
-	resp, err := httpClient.Do(request)
+	request.Header.Set("User-Agent", client.UserAgent)
+	resp, err := client.Do(request)
 	if err != nil && resp == nil {
 		return nil, err
 	}
-	if !errorAccept && resp.StatusCode != 200 {
+	if !errorAccept && resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 		return nil, errors.New("Request failed with status code " + strconv.Itoa(resp.StatusCode))
 	}

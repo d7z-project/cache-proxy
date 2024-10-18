@@ -28,19 +28,23 @@ type Target struct {
 	replaces []*TargetReplace
 
 	wait *sync.WaitGroup
+
+	httpClient *utils.HttpClientWrapper
 }
 
 func NewTarget(name string, urls ...string) *Target {
 	for i, url := range urls {
 		urls[i] = strings.Trim(strings.TrimSpace(url), "/")
 	}
+
 	return &Target{
-		name:     name,
-		locker:   utils.NewRWLockGroup(),
-		urls:     urls,
-		rules:    make([]*TargetRule, 0),
-		replaces: make([]*TargetReplace, 0),
-		wait:     new(sync.WaitGroup),
+		name:       name,
+		locker:     utils.NewRWLockGroup(),
+		urls:       urls,
+		rules:      make([]*TargetRule, 0),
+		replaces:   make([]*TargetReplace, 0),
+		wait:       new(sync.WaitGroup),
+		httpClient: utils.DefaultHttpClientWrapper(),
 	}
 }
 
@@ -75,6 +79,10 @@ func (t *Target) AddReplace(regex, old, new string) error {
 		dest:  []byte(new),
 	})
 	return nil
+}
+
+func (t *Target) SetHttpClient(client *utils.HttpClientWrapper) {
+	t.httpClient = client
 }
 
 func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
@@ -171,9 +179,10 @@ func (t *Target) openRemote(path string, errorAccept bool) (*utils.ResponseWrapp
 	var resp *utils.ResponseWrapper
 	var err error
 	for _, url := range t.urls {
-		resp, err = utils.OpenRequest(fmt.Sprintf("%s/%s", url, path), errorAccept)
+		resp, err = utils.OpenRequest(t.httpClient, fmt.Sprintf("%s/%s", url, path), errorAccept)
 		if err != nil {
 			resp = nil
+			zap.L().Debug("请求失败", zap.String("url", url), zap.Error(err))
 			continue
 		}
 		break
