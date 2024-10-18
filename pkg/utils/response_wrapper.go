@@ -10,6 +10,15 @@ import (
 	"github.com/pkg/errors"
 )
 
+var httpClient = &http.Client{}
+
+func init() {
+	httpClient.Timeout = 3 * time.Second
+	httpClient.Transport = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	}
+}
+
 type ResponseWrapper struct {
 	StatusCode int
 	Headers    map[string]string
@@ -48,14 +57,14 @@ func (receiver *ResponseWrapper) Close() error {
 	return err
 }
 
-func OpenRequest(url string, allowError bool) (*ResponseWrapper, error) {
+func OpenRequest(url string, errorAccept bool) (*ResponseWrapper, error) {
 	request, _ := http.NewRequest("GET", url, nil)
 	request.Header.Set("User-Agent", "curl/8.10.0")
-	resp, err := http.DefaultClient.Do(request)
-	if err != nil || resp == nil {
+	resp, err := httpClient.Do(request)
+	if err != nil && resp == nil {
 		return nil, err
 	}
-	if !allowError && resp.StatusCode != 200 {
+	if !errorAccept && resp.StatusCode != 200 {
 		_ = resp.Body.Close()
 		return nil, errors.New("Request failed with status code " + strconv.Itoa(resp.StatusCode))
 	}

@@ -167,11 +167,11 @@ func (t *Target) openBlob(path string, closeHook func()) (*utils.ResponseWrapper
 	}, nil
 }
 
-func (t *Target) openRemote(path string, allowError bool) (*utils.ResponseWrapper, error) {
+func (t *Target) openRemote(path string, errorAccept bool) (*utils.ResponseWrapper, error) {
 	var resp *utils.ResponseWrapper
 	var err error
 	for _, url := range t.urls {
-		resp, err = utils.OpenRequest(fmt.Sprintf("%s/%s", url, path), allowError)
+		resp, err = utils.OpenRequest(fmt.Sprintf("%s/%s", url, path), errorAccept)
 		if err != nil {
 			resp = nil
 			continue

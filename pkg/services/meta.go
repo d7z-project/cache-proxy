@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"go.uber.org/zap"
 )
 
@@ -88,6 +90,9 @@ func newMetaCache() *metaCache {
 }
 
 func (m *FileMeta) getContent(pathKey string, create bool) (*metaCache, error) {
+	if pathKey == "" || strings.HasSuffix(pathKey, "/") {
+		return nil, errors.Wrapf(os.ErrNotExist, "invalid path: '%s'", pathKey)
+	}
 	newMeta := newMetaCache()
 	newMeta.locker.Lock()
 	defer newMeta.locker.Unlock()

@@ -4,37 +4,102 @@ gc:
   meta: 10s
   blob: 20s
 caches:
+  archlinux:
+    urls:
+      - https://mirrors.ustc.edu.cn/archlinux
+      - https://mirror.sjtu.edu.cn/archlinux
+    rules:
+      - regex: ".*\\.db$"
+        ttl: "12h"
+        refresh: 1m
+      - regex: ".*\\.zst$"
+        ttl: "360h"
+        refresh: 12h
+      - regex: ".*\\.zst\\.sig$"
+        ttl: "360h"
+        refresh: 12h
+  archlinuxarm:
+    urls:
+      - https://mirrors.ustc.edu.cn/archlinuxarm
+      - https://mirror.sjtu.edu.cn/archlinuxarm
+    rules:
+      - regex: ".*\\.db$"
+        ttl: "12h"
+        refresh: 1m
+      - regex: ".*\\.xz$"
+        ttl: "360h"
+        refresh: 12h
+      - regex: ".*\\.xz\\.sig$"
+        ttl: "360h"
+        refresh: 12h
   rocky:
     urls:
       - https://mirrors.ustc.edu.cn/rocky
       - https://mirror.sjtu.edu.cn/rocky
     rules:
-      - regex: ".*.(db|xml|gz)"
-        ttl: 1m
-        refresh: 10s
-      - regex: ".*.rpm"
-        ttl: 1h
+      - regex: ".*\\.(db|xml|gz|bz2)$"
+        ttl: "24h"
         refresh: 1m
+      - regex: ".*\\.rpm$"
+        ttl: "360h"
+        refresh: 12h
+  epel:
+    urls:
+      - https://mirrors.ustc.edu.cn/epel
+      - https://mirror.sjtu.edu.cn/fedora/epel
+    rules:
+      - regex: ".*\\.(db|xml|gz|bz2)$"
+        ttl: "24h"
+        refresh: 1m
+      - regex: ".*\\.rpm$"
+        ttl: "360h"
+        refresh: 12h
+  maven/google/android:
+    urls:
+      - https://dl.google.com/dl/android/maven2
+    rules:
+      - regex: ".*\\.(jar|pom|xml)$"
+        ttl: "1440h"
+        refresh: "48h"
+      - regex: ".*"
+        ttl: "12h"
+        refresh: "1m"
+
+  maven/apache:
+    urls:
+      - https://repo.maven.apache.org/maven2
+    rules:
+      - regex: ".*\\.(jar|pom|xml)$"
+        ttl: "1440h"
+        refresh: "48h"
+      - regex: ".*"
+        ttl: "12h"
+        refresh: "1m"
+
+  maven/gradle/plugins:
+    urls:
+      - https://plugins.gradle.org/m2
+    rules:
+      - regex: ".*\\.(jar|pom|xml)$"
+        ttl: "1440h"
+        refresh: "48h"
+      - regex: ".*"
+        ttl: "12h"
+        refresh: "1m"
   npm:
     urls:
       - https://registry.npmjs.org
     rules:
-      - regex: ".*.tgz"
-        ttl: "0s"
+      - regex: ".*.tgz$"
+        ttl: "1440h"
         refresh: "72h"
-      - regex: ".*package\\.json"
-        ttl: "0s"
+      - regex: ".*package\\.json$"
+        ttl: "1440h"
         refresh: "12h"
-      - regex: ".*\\.\\w"
-        ttl: "120h"
-        refresh: "10m"
+      - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
+        ttl: "1440h"
+        refresh: "1m"
     replaces:
       - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
-        old: "https://"
-        new: "http://"
-      - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
-        old: "http://"
-        new: "ntp://"
-
-
-
+        old: "https://registry.npmjs.org"
+        new: "https://mirrors.d7z.net/npm"

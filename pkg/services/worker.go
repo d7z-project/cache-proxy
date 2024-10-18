@@ -115,7 +115,9 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	defer w.locker.RUnlock()
 	for _, target := range w.sortedTargets {
 		if strings.HasPrefix(req.RequestURI, target) {
-			forward, err := w.targets[target].forward(req.RequestURI[len(target):])
+			path := req.RequestURI[len(target):]
+			zap.L().Debug("转发到目标", zap.String("target", target), zap.String("path", path))
+			forward, err := w.targets[target].forward(path)
 			if err != nil {
 				resp.Header().Add("Content-Type", "text/html; charset=utf-8")
 				resp.WriteHeader(http.StatusNotFound)
