@@ -1,7 +1,7 @@
 {{- if eq .code 200  }}
 <html lang="">
 <head>
-    <title>欢迎使用反向代理服务</title>
+<title>欢迎使用反向代理服务</title>
 </head>
 <body>
 <h1 align="center">欢迎使用反向代理服务</h1>
@@ -15,15 +15,14 @@
 </html>
 {{- end }}
 {{- if eq .code 404 }}
-    <html lang="">
-    <head>
-        <title>文件不存在</title>
-    </head>
-    <body>
-    <h1 align="center">文件不存在</h1>
-    <hr>
-    <p>文件 {{ .path }} 不存在</p>
-
-    </body>
-    </html>
+<html lang="">
+<head>
+<title>文件不存在</title>
+</head>
+<body>
+<h1 align="center">文件不存在</h1>
+<hr>
+<p>文件 {{ .path }} 不存在</p>
+</body>
+</html>
 {{- end}}
