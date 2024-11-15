@@ -215,6 +215,7 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 	get, err := t.meta.Get(path, "last-modified")
 	if err == nil && get == lastModified {
 		// 自上次以来文件未更新
+		_ = resp.Close()
 		_ = t.meta.Refresh(path)
 		return t.openBlob(path, finishHook)
 	}
@@ -225,23 +226,25 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 			return nil, err
 		}
 	}
-	pipe1, writer1 := io.Pipe()
-	pipe2, writer2 := io.Pipe()
+	pipeBlob, writerBlob := io.Pipe()
+	pipeSync, writerSync := io.Pipe()
 	go func() {
 		defer finishHook()
-		defer writer1.Close()
-		defer writer2.Close()
+		defer writerBlob.Close()
+		defer writerSync.Close()
 		defer resp.Body.Close()
-		_, err := io.Copy(io.MultiWriter(writer1, writer2), resp.Body)
+		_, err := io.Copy(io.MultiWriter(writerBlob, writerSync), resp.Body)
 		if err != nil {
-			_ = writer1.CloseWithError(err)
-			_ = writer2.CloseWithError(err)
+			_ = writerBlob.CloseWithError(err)
+			_ = writerSync.CloseWithError(err)
+			zap.L().Debug("内容缓存失败", zap.String("path", path), zap.Error(err))
+			return
 		}
 		zap.L().Debug("结束内容缓存", zap.String("path", path))
 	}()
 	go func() {
-		defer pipe1.Close()
-		token, err := t.blobs.Update(pointer, pipe1)
+		defer pipeBlob.Close()
+		token, err := t.blobs.Update(pointer, pipeBlob)
 		_ = resp.Body.Close()
 		if err != nil {
 			zap.L().Debug("保存内容错误", zap.String("path", path), zap.Error(err))
@@ -266,7 +269,7 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 			"Content-Length": length,
 			"Content-Type":   contentType,
 		},
-		Body: pipe2,
+		Body: pipeSync,
 	}, nil
 }
 

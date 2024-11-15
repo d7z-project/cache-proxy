@@ -1,5 +1,6 @@
 bind: 127.0.0.1:18080
 backend: build/tests
+pprof: 127.0.0.1:6000
 gc:
   meta: 10s
   blob: 20s
@@ -39,7 +40,7 @@ caches:
     rules:
       - regex: ".*\\.(db|xml|gz|bz2)$"
         ttl: "24h"
-        refresh: 1m
+        refresh: 10s
       - regex: ".*\\.rpm$"
         ttl: "360h"
         refresh: 12h
@@ -50,7 +51,7 @@ caches:
     rules:
       - regex: ".*\\.(db|xml|gz|bz2)$"
         ttl: "24h"
-        refresh: 1m
+        refresh: 10s
       - regex: ".*\\.rpm$"
         ttl: "360h"
         refresh: 12h

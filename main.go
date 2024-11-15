@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -102,6 +103,12 @@ func mainExit() error {
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	if cfg.PprofBind != "" {
+		go func() {
+			log.Printf("开启 pprof ，请访问 %s", cfg.PprofBind)
+			log.Println(http.ListenAndServe(cfg.PprofBind, nil))
+		}()
+	}
 	go func() {
 		var err error
 		sig := <-sigs
