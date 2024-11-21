@@ -90,6 +90,7 @@ func newMetaCache() *metaCache {
 }
 
 func (m *FileMeta) getContent(pathKey string, create bool) (*metaCache, error) {
+	// TODO: 重构 index ，使其支持父路径和子路径缓存
 	if pathKey == "" || strings.HasSuffix(pathKey, "/") {
 		return nil, errors.Wrapf(os.ErrNotExist, "invalid path: '%s'", pathKey)
 	}
@@ -98,7 +99,7 @@ func (m *FileMeta) getContent(pathKey string, create bool) (*metaCache, error) {
 	defer newMeta.locker.Unlock()
 	actual, find := m.cache.LoadOrStore(pathKey, newMeta)
 	cache := actual.(*metaCache)
-	localPath := filepath.Join(m.localDir, pathKey)
+	localPath := filepath.Join(m.localDir, pathKey, "cache-meta.json")
 	if !find {
 		data, err := os.ReadFile(localPath)
 		if !create && os.IsNotExist(err) {

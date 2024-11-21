@@ -131,14 +131,14 @@ func (t *Target) fetchResource(childPath string) (*utils.ResponseWrapper, error)
 		// 无 ttl ，跳过
 		download = false
 	}
-	if download == false && err == nil && (refreshTime == 0 || lastUpdate.Add(refreshTime).After(now)) {
+	if download == false && (refreshTime == 0 || lastUpdate.Add(refreshTime).After(now)) {
 		// 当前缓存正常，跳过刷新
 		download = false
 	} else {
 		zap.L().Debug("文件需要刷新", zap.String("child", childPath))
 		download = true
 	}
-	if download || err != nil {
+	if download {
 		lock.AsLocker()
 		return t.download(childPath, func() {
 			lock.Close()
