@@ -8,14 +8,12 @@ import (
 )
 
 func TestReplace(t *testing.T) {
-	assert.Equal(t, "efghdeefgh", testLocal("abcdeabc", "abc", "efgh"))
+	testLocal(t, "abcdeabc", "abc", "efgh")
 }
 
-func testLocal(src, old, new string) string {
+func testLocal(t *testing.T, src, old, new string) {
 	reader := io.NopCloser(strings.NewReader(src))
 	all, err := io.ReadAll(NewKMPReplaceReader(reader, []byte(old), []byte(new)))
-	if err != nil {
-		return ""
-	}
-	return string(all)
+	assert.NoError(t, err)
+	assert.Equal(t, strings.ReplaceAll(src, old, new), string(all))
 }

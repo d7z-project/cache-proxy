@@ -77,7 +77,7 @@ func (receiver *ResponseWrapper) Close() error {
 	return err
 }
 
-func OpenRequest(client *HttpClientWrapper, url string, errorAccept bool) (*ResponseWrapper, error) {
+func (client *HttpClientWrapper) OpenRequest(url string, errorAccept bool) (*ResponseWrapper, error) {
 	request, _ := http.NewRequest("GET", url, nil)
 	request.Header.Set("User-Agent", client.UserAgent)
 	resp, err := client.Do(request)

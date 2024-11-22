@@ -179,7 +179,7 @@ func (t *Target) openRemote(path string, errorAccept bool) (*utils.ResponseWrapp
 	var resp *utils.ResponseWrapper
 	var err error
 	for _, url := range t.urls {
-		resp, err = utils.OpenRequest(t.httpClient, fmt.Sprintf("%s/%s", url, path), errorAccept)
+		resp, err = t.httpClient.OpenRequest(fmt.Sprintf("%s/%s", url, path), errorAccept)
 		if err != nil {
 			resp = nil
 			zap.L().Debug("请求失败", zap.String("url", url), zap.Error(err))

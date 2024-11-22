@@ -10,7 +10,6 @@ type Config struct {
 	Caches    map[string]ConfigCache `yaml:"caches"`  // 缓存配置
 	Gc        ConfigGc               `yaml:"gc"`      // 缓存重建时间
 	ErrorHtml string                 `yaml:"page"`    // 错误页面
-	PprofBind string                 `yaml:"pprof"`   // 调试绑定
 }
 
 type ConfigGc struct {

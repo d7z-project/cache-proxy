@@ -46,7 +46,9 @@ func mainExit() error {
 		}
 	}
 	worker, err := services.NewWorker(cfg.Backend, cfg.Gc.Meta, cfg.Gc.Blob)
-
+	if err != nil {
+		return err
+	}
 	if cfg.ErrorHtml != "" {
 		file, err := os.ReadFile(cfg.ErrorHtml)
 		if err != nil {
@@ -57,9 +59,6 @@ func mainExit() error {
 			return err
 		}
 		worker.SetHtmlPage(parse)
-	}
-	if err != nil {
-		return err
 	}
 	for name, cache := range cfg.Caches {
 		log.Printf("添加反向代理路径 %s[%s]", name, strings.Join(cache.URLs, ","))
@@ -74,8 +73,7 @@ func mainExit() error {
 				return errors.Wrapf(err, "处理 %s 失败.", name)
 			}
 		}
-		transport := cache.Transport
-		if transport != nil {
+		if transport := cache.Transport; transport != nil {
 			client := utils.DefaultHttpClientWrapper()
 			if transport.Proxy != "" {
 				proxyUrl, err := url.Parse(transport.Proxy)
@@ -103,12 +101,6 @@ func mainExit() error {
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	if cfg.PprofBind != "" {
-		go func() {
-			log.Printf("开启 pprof ，请访问 %s", cfg.PprofBind)
-			log.Println(http.ListenAndServe(cfg.PprofBind, nil))
-		}()
-	}
 	go func() {
 		var err error
 		sig := <-sigs
