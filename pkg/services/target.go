@@ -86,8 +86,8 @@ func (t *Target) SetHttpClient(client *utils.HttpClientWrapper) {
 	t.httpClient = client
 }
 
-func (t *Target) forward(context context.Context, childPath string) (*utils.ResponseWrapper, error) {
-	res, err := t.fetchResource(context, childPath)
+func (t *Target) forward(ctx context.Context, childPath string) (*utils.ResponseWrapper, error) {
+	res, err := t.fetchResource(ctx, childPath)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +175,7 @@ func (t *Target) openObject(path *blobfs.PullContent, closeHook func()) (*utils.
 func (t *Target) openBlob(path string, closeHook func()) (*utils.ResponseWrapper, error) {
 	all, err := t.storage.Pull(path)
 	if err != nil {
+		closeHook()
 		return nil, err
 	}
 	return t.openObject(all, closeHook)

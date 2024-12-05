@@ -10,6 +10,12 @@ type Config struct {
 	Caches    map[string]ConfigCache `yaml:"caches"`  // 缓存配置
 	Gc        ConfigGc               `yaml:"gc"`      // 缓存重建时间
 	ErrorHtml string                 `yaml:"page"`    // 错误页面
+	Monitor   ConfigPrometheus       `yaml:"monitor"` // 监控配置
+}
+
+type ConfigPrometheus struct {
+	Bind string `yaml:"bind"`
+	Path string `yaml:"path"`
 }
 
 type ConfigGc struct {

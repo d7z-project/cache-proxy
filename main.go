@@ -15,6 +15,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"code.d7z.net/d7z-project/cache-proxy/pkg/utils"
 
 	"code.d7z.net/d7z-project/cache-proxy/pkg/models"
@@ -36,6 +38,10 @@ func mainExit() error {
 		Gc: models.ConfigGc{
 			Meta: 10 * time.Second,
 			Blob: 24 * time.Hour,
+		},
+		Monitor: models.ConfigPrometheus{
+			Bind: "127.0.0.1:8911",
+			Path: "/metrics",
 		},
 	}
 	if cfgB, err := os.ReadFile(conf); err != nil {
@@ -97,10 +103,20 @@ func mainExit() error {
 		}
 	}
 	server := &http.Server{Addr: cfg.Bind, Handler: worker}
+	monitorHandler := http.NewServeMux()
+	monitorHandler.Handle(cfg.Monitor.Path, promhttp.Handler())
+	monitorServer := &http.Server{Addr: cfg.Monitor.Bind, Handler: monitorHandler}
 	log.Printf("服务器已启动，请访问 http://%s", cfg.Bind)
 	sigs := make(chan os.Signal, 1)
 	done := make(chan bool, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		log.Printf("平台监控已启用.")
+		err = monitorServer.ListenAndServe()
+		if err != nil {
+			log.Printf("monitor http server listen err: %v", err)
+		}
+	}()
 	go func() {
 		var err error
 		sig := <-sigs
@@ -112,6 +128,7 @@ func mainExit() error {
 		if err = server.Shutdown(context.Background()); err != nil {
 			log.Println(err)
 		}
+		_ = server.Shutdown(context.Background())
 		done <- true
 	}()
 	err = server.ListenAndServe()
