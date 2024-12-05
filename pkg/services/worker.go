@@ -5,13 +5,14 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"text/template"
 	"time"
+
+	"code.d7z.net/d7z-team/blobfs"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -23,7 +24,7 @@ var data []byte
 type Worker struct {
 	baseDir       string
 	locker        sync.RWMutex
-	blobs         *Blobs
+	blobs         *blobfs.FSBlob
 	targets       map[string]*Target
 	sortedTargets []string
 	metaTracker   *time.Ticker
@@ -48,7 +49,7 @@ func NewWorker(baseDir string, metaGc time.Duration, blobGc time.Duration) (*Wor
 		targets:     make(map[string]*Target),
 		html:        tmpl,
 	}
-	w.blobs, err = NewBlobs(filepath.Join(baseDir, "blobs"))
+	w.blobs, err = blobfs.BlobFS(baseDir)
 	if err != nil {
 		w.metaTracker.Stop()
 		w.blobTracker.Stop()
@@ -77,15 +78,7 @@ func (w *Worker) Bind(name string, target *Target) error {
 	if w.targets[key] != nil {
 		return errors.New("target already exists")
 	}
-	if target.meta != nil || target.blobs != nil {
-		return errors.New("cannot bind to a non-empty meta")
-	}
-	var err error
-	target.blobs = w.blobs
-	target.meta, err = NewFileMeta(filepath.Join(w.baseDir, "meta", name))
-	if err != nil {
-		return err
-	}
+	target.storage = w.blobs.Child(name)
 	w.targets[key] = target
 	w.sortedTargets = append(w.sortedTargets, key)
 	slices.Sort(w.sortedTargets)
@@ -117,7 +110,7 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		if strings.HasPrefix(req.RequestURI, target) {
 			path := req.RequestURI[len(target):]
 			zap.L().Debug("转发到目标", zap.String("target", target), zap.String("path", path))
-			forward, err := w.targets[target].forward(path)
+			forward, err := w.targets[target].forward(req.Context(), path)
 			if err != nil {
 				resp.Header().Add("Content-Type", "text/html; charset=utf-8")
 				resp.WriteHeader(http.StatusNotFound)
@@ -170,7 +163,7 @@ func (w *Worker) Close() error {
 }
 
 func (w *Worker) BlobRefresh() {
-	err := w.blobs.Gc()
+	err := w.blobs.BlobGC()
 	if err != nil {
 		zap.L().Warn("blob gc 失败", zap.Error(err))
 	}

@@ -1,94 +1,23 @@
 bind: 127.0.0.1:18080
 backend: build/tests
-pprof: 127.0.0.1:6000
 gc:
   meta: 10s
   blob: 20s
 caches:
-  archlinux:
-    urls:
-      - https://mirrors.ustc.edu.cn/archlinux
-      - https://mirror.sjtu.edu.cn/archlinux
-    rules:
-      - regex: ".*\\.db$"
-        ttl: "12h"
-        refresh: 1m
-      - regex: ".*\\.zst$"
-        ttl: "360h"
-        refresh: 12h
-      - regex: ".*\\.zst\\.sig$"
-        ttl: "360h"
-        refresh: 12h
-  archlinuxarm:
-    urls:
-      - https://mirrors.ustc.edu.cn/archlinuxarm
-      - https://mirror.sjtu.edu.cn/archlinuxarm
-    rules:
-      - regex: ".*\\.db$"
-        ttl: "12h"
-        refresh: 1m
-      - regex: ".*\\.xz$"
-        ttl: "360h"
-        refresh: 12h
-      - regex: ".*\\.xz\\.sig$"
-        ttl: "360h"
-        refresh: 12h
   rocky:
     urls:
       - https://mirrors.ustc.edu.cn/rocky
       - https://mirror.sjtu.edu.cn/rocky
     rules:
       - regex: ".*\\.(db|xml|gz|bz2)$"
-        ttl: "24h"
+        ttl: "20s"
         refresh: 10s
-      - regex: ".*\\.rpm$"
+      - regex: ".*\\.(rpm|iso)$"
         ttl: "360h"
-        refresh: 12h
-  epel:
-    urls:
-      - https://mirrors.ustc.edu.cn/epel
-      - https://mirror.sjtu.edu.cn/fedora/epel
-    rules:
-      - regex: ".*\\.(db|xml|gz|bz2)$"
-        ttl: "24h"
         refresh: 10s
-      - regex: ".*\\.rpm$"
-        ttl: "360h"
-        refresh: 12h
-  maven/google/android:
-    urls:
-      - https://dl.google.com/dl/android/maven2
-    rules:
-      - regex: ".*\\.(jar|pom|xml)$"
-        ttl: "1440h"
-        refresh: "48h"
-      - regex: ".*"
-        ttl: "12h"
-        refresh: "1m"
-
-  maven/apache:
-    urls:
-      - https://repo.maven.apache.org/maven2
-    rules:
-      - regex: ".*\\.(jar|pom|xml)$"
-        ttl: "1440h"
-        refresh: "48h"
-      - regex: ".*"
-        ttl: "12h"
-        refresh: "1m"
-
-  maven/gradle/plugins:
-    urls:
-      - https://plugins.gradle.org/m2
-    rules:
-      - regex: ".*\\.(jar|pom|xml)$"
-        ttl: "1440h"
-        refresh: "48h"
-      - regex: ".*"
-        ttl: "12h"
-        refresh: "1m"
   npm:
     proxy: http://10.0.3.2:8889
+    timeout: 1s
     urls:
       - https://registry.npmjs.org
     rules:

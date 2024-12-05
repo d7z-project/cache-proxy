@@ -1,14 +1,16 @@
 package services
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"code.d7z.net/d7z-team/blobfs"
 
 	"code.d7z.net/d7z-project/cache-proxy/pkg/utils"
 
@@ -17,12 +19,11 @@ import (
 )
 
 type Target struct {
-	name string
-	urls []string  // 下载配置
-	meta *FileMeta // 文件摘要
-
-	blobs  *Blobs // 文件归档信息
+	name   string
+	urls   []string // 下载配置
 	locker *utils.RWLockGroup
+
+	storage blobfs.Objects
 
 	rules    []*TargetRule
 	replaces []*TargetReplace
@@ -85,8 +86,8 @@ func (t *Target) SetHttpClient(client *utils.HttpClientWrapper) {
 	t.httpClient = client
 }
 
-func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
-	res, err := t.fetchResource(childPath)
+func (t *Target) forward(context context.Context, childPath string) (*utils.ResponseWrapper, error) {
+	res, err := t.fetchResource(context, childPath)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +102,7 @@ func (t *Target) forward(childPath string) (*utils.ResponseWrapper, error) {
 	return res, nil
 }
 
-func (t *Target) fetchResource(childPath string) (*utils.ResponseWrapper, error) {
+func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.ResponseWrapper, error) {
 	t.wait.Add(1)
 	defer t.wait.Done()
 	var cacheTime time.Duration = -1
@@ -115,7 +116,7 @@ func (t *Target) fetchResource(childPath string) (*utils.ResponseWrapper, error)
 	}
 	if cacheTime == -1 {
 		// direct
-		remote, err := t.openRemote(childPath, true)
+		remote, err := t.openRemote(ctx, childPath, true)
 		if remote != nil {
 			remote.Headers["Cache-Control"] = "no-cache"
 			remote.Headers["X-Cache"] = "MISS"
@@ -125,26 +126,29 @@ func (t *Target) fetchResource(childPath string) (*utils.ResponseWrapper, error)
 	pathLocker := t.locker.Open(childPath)
 	lock := pathLocker.Lock(true)
 	download := true
-	lastUpdate, err := t.meta.GetLastUpdate(childPath)
+	blob, err := t.storage.Pull(childPath)
 	now := time.Now()
-	if err == nil && (cacheTime == 0 || lastUpdate.Add(cacheTime).After(now)) {
+	if err == nil && (cacheTime == 0 || blob.CreateAt.Add(cacheTime).After(now)) {
 		// 无 ttl ，跳过
 		download = false
 	}
-	if download == false && (refreshTime == 0 || lastUpdate.Add(refreshTime).After(now)) {
+	if download == false && (refreshTime == 0 || blob.CreateAt.Add(refreshTime).After(now)) {
 		// 当前缓存正常，跳过刷新
 		download = false
 	} else {
 		zap.L().Debug("文件需要刷新", zap.String("child", childPath))
 		download = true
+		if blob != nil {
+			_ = blob.Close()
+		}
 	}
 	if download {
 		lock.AsLocker()
-		return t.download(childPath, func() {
+		return t.download(ctx, childPath, func() {
 			lock.Close()
 		})
 	} else {
-		return t.openBlob(childPath, lock.Close)
+		return t.openObject(blob, lock.Close)
 	}
 }
 
@@ -153,33 +157,34 @@ func (t *Target) Close() error {
 	return nil
 }
 
-func (t *Target) openBlob(path string, closeHook func()) (*utils.ResponseWrapper, error) {
-	all, err := t.meta.GetMeta(path)
-	if err != nil {
-		return nil, err
-	}
-	body, err := t.blobs.Get(all["blob"])
-	if err != nil {
-		return nil, err
-	}
+func (t *Target) openObject(path *blobfs.PullContent, closeHook func()) (*utils.ResponseWrapper, error) {
 	return &utils.ResponseWrapper{
 		StatusCode: http.StatusOK,
 		Headers: map[string]string{
-			"Last-Modified":  all["last-modified"],
+			"Last-Modified":  path.Options["last-modified"],
 			"X-Cache":        "HIT",
-			"Content-Length": all["length"],
-			"Content-Type":   all["content-type"],
+			"X-Cache-Fetch":  path.CreateAt.Format(http.TimeFormat),
+			"Content-Length": path.Options["length"],
+			"Content-Type":   path.Options["content-type"],
 		},
-		Body:   body,
+		Body:   path,
 		Closes: closeHook,
 	}, nil
 }
 
-func (t *Target) openRemote(path string, errorAccept bool) (*utils.ResponseWrapper, error) {
+func (t *Target) openBlob(path string, closeHook func()) (*utils.ResponseWrapper, error) {
+	all, err := t.storage.Pull(path)
+	if err != nil {
+		return nil, err
+	}
+	return t.openObject(all, closeHook)
+}
+
+func (t *Target) openRemote(ctx context.Context, path string, errorAccept bool) (*utils.ResponseWrapper, error) {
 	var resp *utils.ResponseWrapper
 	var err error
 	for _, url := range t.urls {
-		resp, err = t.httpClient.OpenRequest(fmt.Sprintf("%s/%s", url, path), errorAccept)
+		resp, err = t.httpClient.OpenRequestWithContext(ctx, fmt.Sprintf("%s/%s", url, path), errorAccept)
 		if err != nil {
 			resp = nil
 			zap.L().Debug("请求失败", zap.String("url", url), zap.Error(err))
@@ -190,16 +195,13 @@ func (t *Target) openRemote(path string, errorAccept bool) (*utils.ResponseWrapp
 	return resp, err
 }
 
-func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrapper, error) {
-	resp, respErr := t.openRemote(path, false)
+func (t *Target) download(ctx context.Context, path string, finishHook func()) (*utils.ResponseWrapper, error) {
+	resp, respErr := t.openRemote(ctx, path, false)
 	if respErr != nil {
-		if t.meta.Exists(path) {
-			// 回退到本地缓存
-			return t.openBlob(path, finishHook)
-		} else {
-			finishHook()
-			return nil, errors.Wrapf(respErr, "文件下载失败")
+		if resp != nil {
+			_ = resp.Close()
 		}
+		return t.openBlob(path, finishHook)
 	}
 	lastModified, _ := resp.Headers["Last-Modified"]
 	contentType, _ := resp.Headers["Content-Type"]
@@ -212,56 +214,18 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	get, err := t.meta.Get(path, "last-modified")
-	if err == nil && get == lastModified {
+	pull, err := t.storage.Pull(path)
+	if err == nil && pull.Options["last-modified"] == lastModified {
 		// 自上次以来文件未更新
-		_ = resp.Close()
-		_ = t.meta.Refresh(path)
+		_ = pull.Close()
+		_ = t.storage.Refresh(path)
 		return t.openBlob(path, finishHook)
+	} else if err == nil {
+		_ = pull.Close()
 	}
-	pointer := fmt.Sprintf("%s@%s", t.name, path)
-	if lastBlobId, err := t.meta.Get(path, "blob"); err == nil {
-		// 移除旧文件指针
-		if err = t.blobs.DelPointer(lastBlobId, pointer); err != nil {
-			return nil, err
-		}
-	}
-	pipeBlob, writerBlob := io.Pipe()
-	pipeSync, writerSync := io.Pipe()
-	go func() {
-		defer finishHook()
-		defer writerBlob.Close()
-		defer writerSync.Close()
-		defer resp.Body.Close()
-		_, err := io.Copy(io.MultiWriter(writerBlob, writerSync), resp.Body)
-		if err != nil {
-			_ = writerBlob.CloseWithError(err)
-			_ = writerSync.CloseWithError(err)
-			zap.L().Debug("内容缓存失败", zap.String("path", path), zap.Error(err))
-			return
-		}
-		zap.L().Debug("结束内容缓存", zap.String("path", path))
-	}()
-	go func() {
-		defer pipeBlob.Close()
-		token, err := t.blobs.Update(pointer, pipeBlob)
-		_ = resp.Body.Close()
-		if err != nil {
-			zap.L().Debug("保存内容错误", zap.String("path", path), zap.Error(err))
-			return
-		}
-		if err = t.meta.Put(path, map[string]string{
-			"blob":          token,
-			"last-modified": lastModified,
-			"length":        length,
-			"content-type":  contentType,
-		}, true); err != nil {
-			_ = resp.Body.Close()
-			zap.L().Debug("推送配置错误", zap.String("path", path), zap.Error(err))
-			return
-		}
-	}()
+
 	return &utils.ResponseWrapper{
+		Closes:     finishHook,
 		StatusCode: http.StatusOK,
 		Headers: map[string]string{
 			"Last-Modified":  lastModified,
@@ -269,32 +233,20 @@ func (t *Target) download(path string, finishHook func()) (*utils.ResponseWrappe
 			"Content-Length": length,
 			"Content-Type":   contentType,
 		},
-		Body: pipeSync,
+		Body: t.storage.Transparent(path, resp.Body, map[string]string{
+			"last-modified": lastModified,
+			"length":        length,
+			"content-type":  contentType,
+		}),
 	}, nil
 }
 
 func (t *Target) Gc() error {
 	zap.L().Debug("执行 Meta GC", zap.String("name", t.name))
-	result, err := t.meta.Gc(func(s string) time.Duration {
-		for _, rule := range t.rules {
-			if rule.regex.MatchString(s) {
-				return rule.cache
-			}
+	for _, rule := range t.rules {
+		if err := t.storage.Remove("", rule.regex, rule.cache); err != nil {
+			return err
 		}
-		return -1
-	})
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for path, m := range result {
-		zap.L().Debug("为 blob 删除索引", zap.String("path", path), zap.String("blob", m["blob"]))
-		if err = t.blobs.DelPointer(m["blob"], fmt.Sprintf("%s@%s", t.name, path)); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) != 0 {
-		return errors.Errorf("%v", err)
 	}
 	return nil
 }
