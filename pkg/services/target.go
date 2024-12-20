@@ -3,12 +3,16 @@ package services
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/icholy/replace"
+	"golang.org/x/text/transform"
 
 	"code.d7z.net/d7z-team/blobfs"
 
@@ -91,12 +95,19 @@ func (t *Target) forward(ctx context.Context, childPath string) (*utils.Response
 	if err != nil {
 		return nil, err
 	}
+	tss := make([]transform.Transformer, 0)
 	// post: replace
-	for _, replace := range t.replaces {
-		if replace.regex.MatchString(childPath) {
+	for _, replaceRule := range t.replaces {
+		if replaceRule.regex.MatchString(childPath) {
 			zap.L().Debug("后处理替换内容", zap.String("childPath", childPath))
-			delete(res.Headers, "Content-Length")
-			res.Body = utils.NewKMPReplaceReader(res.Body, replace.src, replace.dest)
+			tss = append(tss, replace.Bytes(replaceRule.src, replaceRule.dest))
+		}
+	}
+	if len(tss) != 0 {
+		delete(res.Headers, "Content-Length")
+		res.Body = &ReadCloserWrapper{
+			r: replace.Chain(res.Body, tss...),
+			c: res.Body,
 		}
 	}
 	return res, nil
@@ -262,4 +273,17 @@ type TargetReplace struct {
 	regex *regexp.Regexp
 	src   []byte
 	dest  []byte
+}
+
+type ReadCloserWrapper struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (r *ReadCloserWrapper) Read(p []byte) (int, error) {
+	return r.r.Read(p)
+}
+
+func (r *ReadCloserWrapper) Close() error {
+	return r.c.Close()
 }

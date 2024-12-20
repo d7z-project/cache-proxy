@@ -16,7 +16,8 @@ caches:
         ttl: "360h"
         refresh: 10s
   npm:
-    proxy: http://10.0.3.2:8889
+    transport:
+      proxy: http://10.0.3.2:8889
     timeout: 1s
     urls:
       - https://registry.npmjs.org
@@ -27,9 +28,6 @@ caches:
       - regex: ".*package\\.json$"
         ttl: "1440h"
         refresh: "12h"
-      - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
-        ttl: "1440h"
-        refresh: "1m"
     replaces:
       - regex: "^[A-Za-z0-9-_@]*(/[A-Za-z0-9-_@]*)*$"
         old: https://registry.npmjs.org
