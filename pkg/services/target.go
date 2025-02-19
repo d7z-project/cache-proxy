@@ -91,6 +91,8 @@ func (t *Target) SetHttpClient(client *utils.HttpClientWrapper) {
 }
 
 func (t *Target) forward(ctx context.Context, childPath string) (*utils.ResponseWrapper, error) {
+	t.wait.Add(1)
+	defer t.wait.Done()
 	res, err := t.fetchResource(ctx, childPath)
 	if err != nil {
 		return nil, err
@@ -114,8 +116,6 @@ func (t *Target) forward(ctx context.Context, childPath string) (*utils.Response
 }
 
 func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.ResponseWrapper, error) {
-	t.wait.Add(1)
-	defer t.wait.Done()
 	var cacheTime time.Duration = -1
 	var refreshTime time.Duration = -1
 	for _, rule := range t.rules {
@@ -155,9 +155,7 @@ func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.Re
 	}
 	if download {
 		lock.AsLocker()
-		return t.download(ctx, childPath, func() {
-			lock.Close()
-		})
+		return t.download(ctx, childPath, lock.Close)
 	} else {
 		return t.openObject(blob, lock.Close)
 	}
