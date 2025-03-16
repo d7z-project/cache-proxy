@@ -228,7 +228,7 @@ func (t *Target) download(ctx context.Context, path string, finishHook func()) (
 	if err == nil && pull.Options["last-modified"] == lastModified {
 		// 自上次以来文件未更新
 		_ = pull.Close()
-		_ = t.storage.Refresh(path)
+		_ = t.storage.Cleanup(path)
 		return t.openBlob(path, finishHook)
 	} else if err == nil {
 		_ = pull.Close()

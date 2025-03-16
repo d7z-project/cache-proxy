@@ -27,8 +27,8 @@ type Worker struct {
 	blobs         *blobfs.FSBlob
 	targets       map[string]*Target
 	sortedTargets []string
-	metaTracker   *time.Ticker
-	blobTracker   *time.Ticker
+	metaTicker    *time.Ticker
+	blobTicker    *time.Ticker
 	closed        atomic.Bool
 
 	html *template.Template
@@ -42,28 +42,28 @@ func NewWorker(baseDir string, metaGc time.Duration, blobGc time.Duration) (*Wor
 	tmpl, _ := template.New("memory").Parse(string(data))
 	var err error
 	w := &Worker{
-		baseDir:     baseDir,
-		metaTracker: time.NewTicker(metaGc),
-		blobTracker: time.NewTicker(blobGc),
-		locker:      sync.RWMutex{},
-		targets:     make(map[string]*Target),
-		html:        tmpl,
+		baseDir:    baseDir,
+		metaTicker: time.NewTicker(metaGc),
+		blobTicker: time.NewTicker(blobGc),
+		locker:     sync.RWMutex{},
+		targets:    make(map[string]*Target),
+		html:       tmpl,
 	}
 	w.blobs, err = blobfs.BlobFS(baseDir)
 	if err != nil {
-		w.metaTracker.Stop()
-		w.blobTracker.Stop()
+		w.metaTicker.Stop()
+		w.blobTicker.Stop()
 		return nil, err
 	}
 	go func(t *Worker) {
 		for {
-			<-t.metaTracker.C
+			<-t.metaTicker.C
 			w.MetaRefresh()
 		}
 	}(w)
 	go func(t *Worker) {
 		for {
-			<-t.blobTracker.C
+			<-t.blobTicker.C
 			w.BlobRefresh()
 		}
 	}(w)
@@ -150,8 +150,8 @@ func (w *Worker) Close() error {
 	w.closed.Swap(true)
 	w.locker.RLock()
 	defer w.locker.RUnlock()
-	w.metaTracker.Stop()
-	w.blobTracker.Stop()
+	w.metaTicker.Stop()
+	w.blobTicker.Stop()
 
 	for name, target := range w.targets {
 		log.Printf("销毁代理目标 %s", name)
