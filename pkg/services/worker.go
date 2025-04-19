@@ -12,7 +12,7 @@ import (
 	"text/template"
 	"time"
 
-	"code.d7z.net/d7z-team/blobfs"
+	"gopkg.d7z.net/blobfs"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"

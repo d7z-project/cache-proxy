@@ -17,10 +17,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"code.d7z.net/d7z-project/cache-proxy/pkg/utils"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 
-	"code.d7z.net/d7z-project/cache-proxy/pkg/models"
-	"code.d7z.net/d7z-project/cache-proxy/pkg/services"
+	"gopkg.d7z.net/cache-proxy/pkg/models"
+	"gopkg.d7z.net/cache-proxy/pkg/services"
 
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"

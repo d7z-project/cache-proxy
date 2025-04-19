@@ -14,9 +14,9 @@ import (
 	"github.com/icholy/replace"
 	"golang.org/x/text/transform"
 
-	"code.d7z.net/d7z-team/blobfs"
+	"gopkg.d7z.net/blobfs"
 
-	"code.d7z.net/d7z-project/cache-proxy/pkg/utils"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
