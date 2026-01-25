@@ -23,17 +23,25 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/services"
 
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
 var conf = ""
+var debug = false
 
 func init() {
 	flag.StringVar(&conf, "conf", "config.yaml", "config file")
+	flag.BoolVar(&debug, "debug", false, "debug mode")
+	flag.Parse()
 }
 
 func mainExit() error {
-	flag.Parse()
+	if debug {
+		if logger, err := zap.NewDevelopment(); err == nil {
+			zap.ReplaceGlobals(logger)
+		}
+	}
 	cfg := &models.Config{
 		Gc: models.ConfigGc{
 			Meta: 10 * time.Second,
@@ -61,7 +69,7 @@ func mainExit() error {
 			return err
 		}
 		parse, err := template.New(cfg.ErrorHtml).Parse(string(file))
-		if err == nil {
+		if err != nil {
 			return err
 		}
 		worker.SetHtmlPage(parse)

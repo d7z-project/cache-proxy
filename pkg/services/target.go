@@ -134,31 +134,51 @@ func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.Re
 		}
 		return remote, err
 	}
-	pathLocker := t.locker.Open(childPath)
-	lock := pathLocker.Lock(true)
-	download := true
+
+	mu := t.locker.Get(childPath)
+	mu.RLock()
+
 	blob, err := t.storage.Pull(childPath)
 	now := time.Now()
+
+	download := true
 	if err == nil && (cacheTime == 0 || blob.CreateAt.Add(cacheTime).After(now)) {
-		// 无 ttl ，跳过
+		// No ttl, skip
 		download = false
 	}
-	if download == false && (refreshTime == 0 || blob.CreateAt.Add(refreshTime).After(now)) {
-		// 当前缓存正常，跳过刷新
+	if !download && (refreshTime == 0 || blob.CreateAt.Add(refreshTime).After(now)) {
+		// Valid cache, skip refresh
+		return t.openObject(blob, mu.RUnlock)
+	}
+
+	// Needs download or refresh
+	if blob != nil {
+		_ = blob.Close()
+	}
+	mu.RUnlock()
+
+	// Upgrade lock
+	mu.Lock()
+
+	// Double check
+	blob, err = t.storage.Pull(childPath)
+	download = true
+	if err == nil && (cacheTime == 0 || blob.CreateAt.Add(cacheTime).After(now)) {
 		download = false
-	} else {
-		zap.L().Debug("文件需要刷新", zap.String("child", childPath))
-		download = true
-		if blob != nil {
-			_ = blob.Close()
-		}
 	}
-	if download {
-		lock.AsLocker()
-		return t.download(ctx, childPath, lock.Close)
-	} else {
-		return t.openObject(blob, lock.Close)
+	if !download && (refreshTime == 0 || blob.CreateAt.Add(refreshTime).After(now)) {
+		// Valid cache found after acquiring write lock
+		mu.Unlock()
+		mu.RLock()
+		return t.openObject(blob, mu.RUnlock)
 	}
+
+	if blob != nil {
+		_ = blob.Close()
+	}
+
+	zap.L().Debug("文件需要刷新", zap.String("child", childPath))
+	return t.download(ctx, childPath, mu.Unlock)
 }
 
 func (t *Target) Close() error {

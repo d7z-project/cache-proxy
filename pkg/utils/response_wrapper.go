@@ -64,8 +64,11 @@ func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.Respons
 		return nil
 	} else {
 		resp.WriteHeader(receiver.StatusCode)
-		_, err := io.Copy(resp, receiver.Body)
-		return err
+		if req.Method != http.MethodHead {
+			_, err := io.Copy(resp, receiver.Body)
+			return err
+		}
+		return nil
 	}
 }
 

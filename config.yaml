@@ -18,7 +18,7 @@ caches:
   npm:
     transport:
       proxy: http://10.0.3.2:8889
-    timeout: 1s
+      timeout: 1s
     urls:
       - https://registry.npmjs.org
     rules:
