@@ -1,4 +1,4 @@
-package services
+package utils
 
 import (
 	"os"
@@ -15,7 +15,7 @@ func loggerSetup() {
 	level := os.Getenv("LOG_LEVEL")
 	logLevel, err := zapcore.ParseLevel(level)
 	if level == "" || err != nil {
-		logLevel = zapcore.FatalLevel
+		logLevel = zapcore.InfoLevel
 	}
 	var logger *zap.Logger
 	if os.Getenv("DEBUG") == "true" {

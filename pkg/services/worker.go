@@ -114,12 +114,14 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 			if err != nil {
 				resp.Header().Add("Content-Type", "text/html; charset=utf-8")
 				resp.WriteHeader(http.StatusNotFound)
-				_ = w.html.Execute(resp, map[string]any{
+				if err := w.html.Execute(resp, map[string]any{
 					"code":    http.StatusNotFound,
 					"error":   err,
 					"path":    req.RequestURI,
 					"request": req,
-				})
+				}); err != nil {
+					zap.L().Error("template execute error", zap.Error(err))
+				}
 				zap.L().Debug("target error", zap.String("target", target), zap.Error(err))
 				return
 			}
@@ -130,19 +132,23 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	resp.Header().Add("Content-Type", "text/html; charset=utf-8")
 	if req.RequestURI == "/" {
 		resp.WriteHeader(http.StatusOK)
-		_ = w.html.Execute(resp, map[string]any{
+		if err := w.html.Execute(resp, map[string]any{
 			"code":    http.StatusOK,
 			"path":    req.RequestURI,
 			"request": req,
 			"routes":  w.sortedTargets,
-		})
+		}); err != nil {
+			zap.L().Error("template execute error", zap.Error(err))
+		}
 	} else {
 		resp.WriteHeader(http.StatusNotFound)
-		_ = w.html.Execute(resp, map[string]any{
+		if err := w.html.Execute(resp, map[string]any{
 			"code":    http.StatusNotFound,
 			"path":    req.RequestURI,
 			"request": req,
-		})
+		}); err != nil {
+			zap.L().Error("template execute error", zap.Error(err))
+		}
 	}
 }
 

@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -107,10 +106,7 @@ func (t *Target) forward(ctx context.Context, childPath string) (*utils.Response
 	}
 	if len(tss) != 0 {
 		delete(res.Headers, "Content-Length")
-		res.Body = &ReadCloserWrapper{
-			r: replace.Chain(res.Body, tss...),
-			c: res.Body,
-		}
+		res.Body = utils.NewReadCloserWrapper(replace.Chain(res.Body, tss...), res.Body)
 	}
 	return res, nil
 }
@@ -247,6 +243,7 @@ func (t *Target) download(ctx context.Context, path string, finishHook func()) (
 	pull, err := t.storage.Pull(path)
 	if err == nil && pull.Options["last-modified"] == lastModified {
 		// 自上次以来文件未更新
+		_ = resp.Close()
 		_ = pull.Close()
 		_ = t.storage.Cleanup(path)
 		return t.openBlob(path, finishHook)
@@ -291,17 +288,4 @@ type TargetReplace struct {
 	regex *regexp.Regexp
 	src   []byte
 	dest  []byte
-}
-
-type ReadCloserWrapper struct {
-	r io.Reader
-	c io.Closer
-}
-
-func (r *ReadCloserWrapper) Read(p []byte) (int, error) {
-	return r.r.Read(p)
-}
-
-func (r *ReadCloserWrapper) Close() error {
-	return r.c.Close()
 }
