@@ -180,7 +180,7 @@ func (t *Target) fetchResource(ctx context.Context, childPath string, headers ma
 	}
 
 	zap.L().Debug("文件需要刷新", zap.String("child", childPath))
-	return t.download(ctx, childPath, mu.Unlock)
+	return t.download(ctx, childPath, headers, mu.Unlock)
 }
 
 func (t *Target) Close() error {
@@ -227,8 +227,8 @@ func (t *Target) openRemote(ctx context.Context, path string, errorAccept bool, 
 	return resp, err
 }
 
-func (t *Target) download(ctx context.Context, path string, finishHook func()) (*utils.ResponseWrapper, error) {
-	resp, respErr := t.openRemote(ctx, path, false, nil)
+func (t *Target) download(ctx context.Context, path string, headers map[string]string, finishHook func()) (*utils.ResponseWrapper, error) {
+	resp, respErr := t.openRemote(ctx, path, false, headers)
 	if respErr != nil || resp == nil {
 		if resp != nil {
 			_ = resp.Close()

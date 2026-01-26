@@ -31,9 +31,10 @@ type ConfigCache struct {
 }
 
 type ConfigTransport struct {
-	Proxy     string        `yaml:"proxy"`
-	UserAgent string        `yaml:"ua"`
-	Timeout   time.Duration `yaml:"timeout"`
+	Proxy     string            `yaml:"proxy"`
+	UserAgent string            `yaml:"ua"`
+	Timeout   time.Duration     `yaml:"timeout"`
+	Headers   map[string]string `yaml:"headers"`
 }
 
 type ConfigCacheRule struct {

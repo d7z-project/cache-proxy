@@ -25,3 +25,4 @@ go.work
 *.iml
 build
 cache-proxy
+config.local.yaml

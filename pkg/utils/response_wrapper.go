@@ -22,6 +22,7 @@ type ResponseWrapper struct {
 type HttpClientWrapper struct {
 	*http.Client
 	UserAgent string
+	Headers   map[string]string
 }
 
 func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -43,6 +44,7 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 			},
 		},
 		UserAgent: "curl/8.10.0",
+		Headers:   make(map[string]string),
 	}
 }
 
@@ -84,6 +86,9 @@ func (receiver *ResponseWrapper) Close() error {
 func (client *HttpClientWrapper) OpenRequestWithContext(ctx context.Context, url string, errorAccept bool, headers map[string]string) (*ResponseWrapper, error) {
 	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	request.Header.Set("User-Agent", client.UserAgent)
+	for k, v := range client.Headers {
+		request.Header.Set(k, v)
+	}
 	for k, v := range headers {
 		request.Header.Set(k, v)
 	}

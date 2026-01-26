@@ -96,6 +96,9 @@ func mainExit() error {
 			if transport.UserAgent != "" {
 				client.UserAgent = transport.UserAgent
 			}
+			if transport.Headers != nil {
+				client.Headers = transport.Headers
+			}
 			target.SetHttpClient(client)
 		}
 		if err := worker.Bind(name, target); err != nil {
