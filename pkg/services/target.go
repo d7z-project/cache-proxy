@@ -53,6 +53,11 @@ func NewTarget(name string, urls ...string) *Target {
 }
 
 func (t *Target) AddRule(regex string, cache, refresh time.Duration) error {
+	for _, rule := range t.rules {
+		if rule.raw == regex {
+			return nil
+		}
+	}
 	compile, err := regexp.Compile(regex)
 	if err != nil {
 		return err
@@ -63,6 +68,7 @@ func (t *Target) AddRule(regex string, cache, refresh time.Duration) error {
 	}
 	t.rules = append(t.rules, &TargetRule{
 		regex:   compile,
+		raw:     regex,
 		cache:   cache,
 		refresh: refresh,
 	})
@@ -286,6 +292,7 @@ func (t *Target) Gc() error {
 
 type TargetRule struct {
 	regex   *regexp.Regexp // 正则匹配
+	raw     string         // 原始正则
 	cache   time.Duration  // 缓存时间
 	refresh time.Duration  // 刷新时间，缓存未过期时可用 (需要支持 head 请求查询状态)
 }

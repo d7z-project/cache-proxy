@@ -8,9 +8,14 @@ type Config struct {
 	Bind      string                 `yaml:"bind"`    // 绑定地址
 	Backend   string                 `yaml:"backend"` // 存储位置
 	Caches    map[string]ConfigCache `yaml:"caches"`  // 缓存配置
+	Rules     map[string]ConfigRule  `yaml:"rules"`   // 缓存策略定义
 	Gc        ConfigGc               `yaml:"gc"`      // 缓存重建时间
 	ErrorHtml string                 `yaml:"page"`    // 错误页面
 	Monitor   ConfigPrometheus       `yaml:"monitor"` // 监控配置
+}
+
+type ConfigRule struct {
+	Rules []ConfigCacheRule `yaml:"rules"`
 }
 
 type ConfigPrometheus struct {
@@ -24,10 +29,11 @@ type ConfigGc struct {
 }
 
 type ConfigCache struct {
-	URLs      []string          `yaml:"urls"`                // 缓存后端地址
-	Rules     []ConfigCacheRule `yaml:"rules"`               // 缓存策略, 如果没有命中则跳过缓存
-	Replaces  []ConfigReplace   `yaml:"replaces"`            // 替换策略
-	Transport *ConfigTransport  `yaml:"transport,omitempty"` // 配置请求细节
+	URLs         []string          `yaml:"urls"`                // 缓存后端地址
+	RulesInclude []string          `yaml:"rules_include"`       // 引用缓存策略
+	Rules        []ConfigCacheRule `yaml:"rules"`               // 缓存策略, 如果没有命中则跳过缓存
+	Replaces     []ConfigReplace   `yaml:"replaces"`            // 替换策略
+	Transport    *ConfigTransport  `yaml:"transport,omitempty"` // 配置请求细节
 }
 
 type ConfigTransport struct {

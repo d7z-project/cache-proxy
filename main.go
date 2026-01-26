@@ -74,6 +74,17 @@ func mainExit() error {
 				return errors.Wrapf(err, "处理 %s 失败.", name)
 			}
 		}
+		for _, include := range cache.RulesInclude {
+			if ruleSet, ok := cfg.Rules[include]; ok {
+				for _, rule := range ruleSet.Rules {
+					if err = target.AddRule(rule.Regex, rule.Ttl, rule.Refresh); err != nil {
+						return errors.Wrapf(err, "处理 %s (引用规则 %s) 失败.", name, include)
+					}
+				}
+			} else {
+				return errors.Errorf("引用规则 %s 未定义", include)
+			}
+		}
 		for _, replace := range cache.Replaces {
 			if err = target.AddReplace(replace.Regex, replace.Old, replace.New); err != nil {
 				return errors.Wrapf(err, "处理 %s 失败.", name)

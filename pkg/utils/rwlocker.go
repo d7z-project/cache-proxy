@@ -1,9 +1,14 @@
 package utils
 
-import "sync"
+import (
+	"hash/fnv"
+	"sync"
+)
+
+const shardCount = 4096
 
 type RWLockGroup struct {
-	group sync.Map
+	locks [shardCount]sync.RWMutex
 }
 
 func NewRWLockGroup() *RWLockGroup {
@@ -11,6 +16,7 @@ func NewRWLockGroup() *RWLockGroup {
 }
 
 func (g *RWLockGroup) Get(key string) *sync.RWMutex {
-	actual, _ := g.group.LoadOrStore(key, &sync.RWMutex{})
-	return actual.(*sync.RWMutex)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return &g.locks[h.Sum32()%shardCount]
 }

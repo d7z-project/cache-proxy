@@ -39,8 +39,10 @@ func NewWorker(baseDir string, metaGc time.Duration, blobGc time.Duration) (*Wor
 		return nil, err
 	}
 
-	tmpl, _ := template.New("memory").Parse(string(data))
-	var err error
+	tmpl, err := template.New("memory").Parse(string(data))
+	if err != nil {
+		return nil, err
+	}
 	w := &Worker{
 		baseDir:    baseDir,
 		metaTicker: time.NewTicker(metaGc),
