@@ -1,28 +1,209 @@
-{{- if eq .code 200  }}
-<html lang="">
+<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-<title>欢迎使用反向代理服务</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{if eq .code 200}}欢迎使用 Cache Proxy{{else}}404 - 资源未找到{{end}}</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f8fafc;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --card-bg: #ffffff;
+            --border: #e2e8f0;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            line-height: 1.5;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        nav {
+            background: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 1.5rem;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        .nav-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: var(--text-main);
+            text-decoration: none;
+        }
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: var(--primary);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);
+        }
+        main {
+            flex-grow: 1;
+            padding: 2.5rem 1.5rem;
+        }
+        .hero {
+            margin-bottom: 2.5rem;
+        }
+        .hero h1 { font-size: 2.25rem; margin-bottom: 0.5rem; letter-spacing: -0.025em; }
+        .hero p { color: var(--text-muted); font-size: 1.125rem; }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1.5rem;
+        }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .card:hover {
+            border-color: var(--primary);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+        .card-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        .card-icon {
+            padding: 0.5rem;
+            background: #eff6ff;
+            border-radius: 0.5rem;
+            color: var(--primary);
+        }
+        .card:hover .card-icon {
+            background: var(--primary);
+            color: white;
+        }
+        .error-box {
+            text-align: center;
+            padding: 5rem 1rem;
+        }
+        .error-icon {
+            width: 64px;
+            height: 64px;
+            background: #fef2f2;
+            color: #ef4444;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.5rem;
+        }
+        .error-code { font-size: 4rem; font-weight: 900; margin-bottom: 0.5rem; }
+        .btn {
+            display: inline-block;
+            background: var(--text-main);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            text-decoration: none;
+            font-weight: 600;
+            margin-top: 2rem;
+        }
+        footer {
+            padding: 2.5rem 1.5rem;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+        code {
+            background: #f1f5f9;
+            color: #e11d48;
+            padding: 0.2rem 0.4rem;
+            border-radius: 0.25rem;
+            font-family: monospace;
+        }
+    </style>
 </head>
 <body>
-<h1 align="center">欢迎使用反向代理服务</h1>
-<hr>
-<ul>
-{{range $i,$v:=.routes}}
-<li>{{ $v }}</li>
-{{- end}}
-</ul>
+    <nav>
+        <div class="container nav-content">
+            <a href="/" class="logo">
+                <div class="logo-icon">
+                    <svg width="20" height="20" fill="none" stroke="white" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                </div>
+                <span>Cache Proxy</span>
+            </a>
+            <div style="font-size: 0.875rem; color: var(--text-muted)">{{.request.Host}}</div>
+        </div>
+    </nav>
+
+    <main class="container">
+        {{if eq .code 200}}
+        <div class="hero">
+            <h1>服务已就绪</h1>
+            <p>当前活跃的反向代理路由：</p>
+        </div>
+        <div class="grid">
+            {{range $i,$v:=.routes}}
+            <a href="{{$v}}" class="card">
+                <div class="card-info">
+                    <div class="card-icon">
+                        <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+                    </div>
+                    <span style="font-weight: 600;">{{$v}}</span>
+                </div>
+                <svg width="20" height="20" fill="none" stroke="#cbd5e1" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+            </a>
+            {{else}}
+            <div style="grid-column: 1/-1; text-align: center; padding: 4rem; color: var(--text-muted); border: 2px dashed var(--border); border-radius: 1.5rem;">
+                暂无活跃路由配置
+            </div>
+            {{end}}
+        </div>
+        {{else if eq .code 404}}
+        <div class="error-box">
+            <div class="error-icon">
+                <svg width="32" height="32" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 9.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0zM12 14v4m0 0l-2-2m2 2l2-2"></path></svg>
+            </div>
+            <div class="error-code">404</div>
+            <h2 style="font-size: 1.5rem; margin-bottom: 1rem;">资源不存在</h2>
+            <p style="color: var(--text-muted)">路径 <code>{{.path}}</code> 未找到或未配置代理</p>
+            <a href="/" class="btn">返回首页</a>
+        </div>
+        {{end}}
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>Powered by <strong>Cache Proxy</strong> &middot; {{.request.Proto}}</p>
+        </div>
+    </footer>
 </body>
 </html>
-{{- end }}
-{{- if eq .code 404 }}
-<html lang="">
-<head>
-<title>文件不存在</title>
-</head>
-<body>
-<h1 align="center">文件不存在</h1>
-<hr>
-<p>文件 {{ .path }} 不存在</p>
-</body>
-</html>
-{{- end}}

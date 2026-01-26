@@ -223,7 +223,7 @@ func (t *Target) openRemote(ctx context.Context, path string, errorAccept bool) 
 
 func (t *Target) download(ctx context.Context, path string, finishHook func()) (*utils.ResponseWrapper, error) {
 	resp, respErr := t.openRemote(ctx, path, false)
-	if respErr != nil {
+	if respErr != nil || resp == nil {
 		if resp != nil {
 			_ = resp.Close()
 		}
