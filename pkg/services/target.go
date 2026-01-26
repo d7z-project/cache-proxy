@@ -89,10 +89,10 @@ func (t *Target) SetHttpClient(client *utils.HttpClientWrapper) {
 	t.httpClient = client
 }
 
-func (t *Target) forward(ctx context.Context, childPath string) (*utils.ResponseWrapper, error) {
+func (t *Target) forward(ctx context.Context, childPath string, headers map[string]string) (*utils.ResponseWrapper, error) {
 	t.wait.Add(1)
 	defer t.wait.Done()
-	res, err := t.fetchResource(ctx, childPath)
+	res, err := t.fetchResource(ctx, childPath, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func (t *Target) forward(ctx context.Context, childPath string) (*utils.Response
 	return res, nil
 }
 
-func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.ResponseWrapper, error) {
+func (t *Target) fetchResource(ctx context.Context, childPath string, headers map[string]string) (*utils.ResponseWrapper, error) {
 	var cacheTime time.Duration = -1
 	var refreshTime time.Duration = -1
 	for _, rule := range t.rules {
@@ -123,7 +123,7 @@ func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.Re
 	}
 	if cacheTime == -1 {
 		// direct
-		remote, err := t.openRemote(ctx, childPath, true)
+		remote, err := t.openRemote(ctx, childPath, true, headers)
 		if remote != nil {
 			remote.Headers["Cache-Control"] = "no-cache"
 			remote.Headers["X-Cache"] = "MISS"
@@ -152,6 +152,12 @@ func (t *Target) fetchResource(ctx context.Context, childPath string) (*utils.Re
 		_ = blob.Close()
 	}
 	mu.RUnlock()
+
+	// Direct proxy for Range request if not cached
+	if _, ok := headers["Range"]; ok {
+		zap.L().Debug("Range 请求且无缓存，直接转发", zap.String("child", childPath))
+		return t.openRemote(ctx, childPath, true, headers)
+	}
 
 	// Upgrade lock
 	mu.Lock()
@@ -206,11 +212,11 @@ func (t *Target) openBlob(path string, closeHook func()) (*utils.ResponseWrapper
 	return t.openObject(all, closeHook)
 }
 
-func (t *Target) openRemote(ctx context.Context, path string, errorAccept bool) (*utils.ResponseWrapper, error) {
+func (t *Target) openRemote(ctx context.Context, path string, errorAccept bool, headers map[string]string) (*utils.ResponseWrapper, error) {
 	var resp *utils.ResponseWrapper
 	var err error
 	for _, url := range t.urls {
-		resp, err = t.httpClient.OpenRequestWithContext(ctx, fmt.Sprintf("%s/%s", url, path), errorAccept)
+		resp, err = t.httpClient.OpenRequestWithContext(ctx, fmt.Sprintf("%s/%s", url, path), errorAccept, headers)
 		if err != nil {
 			resp = nil
 			zap.L().Debug("请求失败", zap.String("url", url), zap.Error(err))
@@ -222,7 +228,7 @@ func (t *Target) openRemote(ctx context.Context, path string, errorAccept bool) 
 }
 
 func (t *Target) download(ctx context.Context, path string, finishHook func()) (*utils.ResponseWrapper, error) {
-	resp, respErr := t.openRemote(ctx, path, false)
+	resp, respErr := t.openRemote(ctx, path, false, nil)
 	if respErr != nil || resp == nil {
 		if resp != nil {
 			_ = resp.Close()

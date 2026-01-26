@@ -76,13 +76,17 @@ func (receiver *ResponseWrapper) Close() error {
 	err := receiver.Body.Close()
 	if receiver.Closes != nil {
 		receiver.Closes()
+		receiver.Closes = nil
 	}
 	return err
 }
 
-func (client *HttpClientWrapper) OpenRequestWithContext(ctx context.Context, url string, errorAccept bool) (*ResponseWrapper, error) {
+func (client *HttpClientWrapper) OpenRequestWithContext(ctx context.Context, url string, errorAccept bool, headers map[string]string) (*ResponseWrapper, error) {
 	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	request.Header.Set("User-Agent", client.UserAgent)
+	for k, v := range headers {
+		request.Header.Set(k, v)
+	}
 	resp, err := client.Do(request)
 	if err != nil && resp == nil {
 		return nil, err
@@ -104,5 +108,7 @@ func (client *HttpClientWrapper) OpenRequestWithContext(ctx context.Context, url
 	copyHeader("Content-Type")
 	copyHeader("Content-Length")
 	copyHeader("Last-Modified")
+	copyHeader("Content-Range")
+	copyHeader("Accept-Ranges")
 	return result, nil
 }

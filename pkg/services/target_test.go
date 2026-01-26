@@ -41,8 +41,8 @@ func TestNilDereferenceFix(t *testing.T) {
 	// Call forward. This calls fetchResource -> download.
 	// We expect it NOT to panic.
 	// It should return an error because the file is not in storage and cannot be downloaded (no remote).
-	res, err := target.forward(context.Background(), "test-file")
-	
+	res, err := target.forward(context.Background(), "test-file", nil)
+
 	if err == nil {
 		// If err is nil, res should probably not be nil, or it might be openBlob success (if file existed?)
 		// Here file doesn't exist. openBlob should return error.

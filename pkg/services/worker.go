@@ -110,7 +110,11 @@ func (w *Worker) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		if strings.HasPrefix(req.RequestURI, target) {
 			path := req.RequestURI[len(target):]
 			zap.L().Debug("转发到目标", zap.String("target", target), zap.String("path", path))
-			forward, err := w.targets[target].forward(req.Context(), path)
+			headers := map[string]string{}
+			if rangeHeader := req.Header.Get("Range"); rangeHeader != "" {
+				headers["Range"] = rangeHeader
+			}
+			forward, err := w.targets[target].forward(req.Context(), path, headers)
 			if err != nil {
 				resp.Header().Add("Content-Type", "text/html; charset=utf-8")
 				resp.WriteHeader(http.StatusNotFound)
