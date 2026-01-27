@@ -103,13 +103,16 @@ func (t *Target) forward(ctx context.Context, childPath string, headers map[stri
 		return nil, err
 	}
 	tss := make([]transform.Transformer, 0)
-	// post: replace
-	for _, replaceRule := range t.replaces {
-		if replaceRule.regex.MatchString(childPath) {
-			zap.L().Debug("后处理替换内容", zap.String("childPath", childPath))
-			tss = append(tss, replace.Bytes(replaceRule.src, replaceRule.dest))
+	if _, ok := headers["Range"]; !ok {
+		// post: replace, 只有在非 Range 的情况下才后处理
+		for _, replaceRule := range t.replaces {
+			if replaceRule.regex.MatchString(childPath) {
+				zap.L().Debug("后处理替换内容", zap.String("childPath", childPath))
+				tss = append(tss, replace.Bytes(replaceRule.src, replaceRule.dest))
+			}
 		}
 	}
+
 	if len(tss) != 0 {
 		delete(res.Headers, "Content-Length")
 		res.Body = utils.NewReadCloserWrapper(replace.Chain(res.Body, tss...), res.Body)

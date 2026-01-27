@@ -1,3 +1,4 @@
+GOPATH := $(shell go env GOPATH)
 
 cache-proxy: $(shell find . -type f -name "*.go") go.mod go.sum
 	@CGO_ENABLED=0 go build -v -o $@
