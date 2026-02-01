@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-const shardCount = 4096
+const shardCount = 65536
 
 type RWLockGroup struct {
 	locks [shardCount]sync.RWMutex
