@@ -1,37 +1,34 @@
 package utils
 
 import (
+	"log/slog"
 	"os"
-
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"strings"
 )
 
 func init() {
-	loggerSetup()
+	setupLogger()
 }
 
-func loggerSetup() {
-	level := os.Getenv("LOG_LEVEL")
-	logLevel, err := zapcore.ParseLevel(level)
-	if level == "" || err != nil {
-		logLevel = zapcore.InfoLevel
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
 	}
-	var logger *zap.Logger
+	if os.Getenv("DEBUG") == "true" && os.Getenv("LOG_LEVEL") == "" {
+		level = slog.LevelDebug
+	}
+
+	options := &slog.HandlerOptions{Level: level}
 	if os.Getenv("DEBUG") == "true" {
-		config := zap.NewDevelopmentConfig()
-		if level == "" {
-			config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
-		} else {
-			config.Level = zap.NewAtomicLevelAt(logLevel)
-		}
-		logger, _ = config.Build()
-		logger.Debug("当前为调试模式,请注意敏感信息泄漏")
-	} else {
-		config := zap.NewProductionConfig()
-		config.Level = zap.NewAtomicLevelAt(logLevel)
-		logger, _ = config.Build()
-		logger.Debug("当前为生产模式")
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, options)))
+		slog.Debug("当前为调试模式,请注意敏感信息泄漏")
+		return
 	}
-	zap.ReplaceGlobals(logger)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, options)))
 }

@@ -1,0 +1,20 @@
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">CP</div>
+      <div>
+        <h1>Cache Proxy</h1>
+        <p>多模式缓存反代</p>
+      </div>
+    </div>
+    <nav>
+      <a routerLink="/dashboard" routerLinkActive="active">概览</a>
+      <a routerLink="/instances" routerLinkActive="active">实例</a>
+      <a routerLink="/storage" routerLinkActive="active">存储</a>
+      <a routerLink="/settings" routerLinkActive="active">设置</a>
+    </nav>
+  </aside>
+  <main class="content">
+    <router-outlet />
+  </main>
+</div>

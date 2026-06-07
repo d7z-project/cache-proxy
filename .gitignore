@@ -26,3 +26,5 @@ go.work
 build
 cache-proxy
 config.local.yaml
+web/node_modules/
+web/.angular/

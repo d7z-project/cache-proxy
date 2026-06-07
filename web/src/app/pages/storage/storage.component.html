@@ -1,0 +1,36 @@
+<section class="page">
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">存储</p>
+      <h2>存储状态</h2>
+    </div>
+    <div class="actions">
+      <button type="button" (click)="refresh()">刷新</button>
+      <button type="button" class="primary" (click)="runGc()">运行 GC</button>
+    </div>
+  </header>
+
+  <p class="message" *ngIf="message">{{ message }}</p>
+
+  <div class="grid-2">
+    <article class="card block" *ngIf="stats$ | async as stats">
+      <h3>当前状态</h3>
+      <dl class="kv-list">
+        <div *ngFor="let item of stats | keyvalue">
+          <dt>{{ labelText(item.key) }}</dt>
+          <dd>{{ valueText(item.value) }}</dd>
+        </div>
+      </dl>
+    </article>
+    <article class="card block">
+      <h3>最近 GC</h3>
+      <dl class="kv-list" *ngIf="gcResult; else noGc">
+        <div *ngFor="let item of gcResult | keyvalue">
+          <dt>{{ labelText(item.key) }}</dt>
+          <dd>{{ valueText(item.value) }}</dd>
+        </div>
+      </dl>
+      <ng-template #noGc><p class="hint">运行清理后显示结果。</p></ng-template>
+    </article>
+  </div>
+</section>

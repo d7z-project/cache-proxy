@@ -4,161 +4,72 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
-	"net/http"
-	_ "net/http/pprof"
-	"net/url"
+	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"text/template"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
-
-	"gopkg.d7z.net/cache-proxy/pkg/models"
-	"gopkg.d7z.net/cache-proxy/pkg/services"
-
-	"github.com/pkg/errors"
-	"gopkg.in/yaml.v3"
+	"gopkg.d7z.net/cache-proxy/pkg/server"
 )
 
-var conf = ""
-
-func init() {
-	flag.StringVar(&conf, "conf", "config.yaml", "config file")
-	flag.Parse()
-}
-
-func mainExit() error {
-	cfg := &models.Config{
-		Gc: models.ConfigGc{
-			Meta: 10 * time.Second,
-			Blob: 24 * time.Hour,
-		},
-		Monitor: models.ConfigPrometheus{
-			Bind: "127.0.0.1:8911",
-			Path: "/metrics",
-		},
-	}
-	if cfgB, err := os.ReadFile(conf); err != nil {
-		return errors.Wrapf(err, "配置文件不存在 %s", conf)
-	} else {
-		if err := yaml.Unmarshal(cfgB, cfg); err != nil {
-			return errors.Wrapf(err, "配置解析失败")
-		}
-	}
-	worker, err := services.NewWorker(cfg.Backend, cfg.Gc.Meta, cfg.Gc.Blob)
-	if err != nil {
-		return err
-	}
-	if cfg.ErrorHtml != "" {
-		file, err := os.ReadFile(cfg.ErrorHtml)
-		if err != nil {
-			return err
-		}
-		parse, err := template.New(cfg.ErrorHtml).Parse(string(file))
-		if err != nil {
-			return err
-		}
-		worker.SetHtmlPage(parse)
-	}
-	for name, cache := range cfg.Caches {
-		log.Printf("添加反向代理路径 %s[%s]", name, strings.Join(cache.URLs, ","))
-		target := services.NewTarget(name, cache.URLs...)
-		for _, rule := range cache.Rules {
-			if err = target.AddRule(rule.Regex, rule.Ttl, rule.Refresh); err != nil {
-				return errors.Wrapf(err, "处理 %s 失败.", name)
-			}
-		}
-		for _, include := range cache.RulesInclude {
-			if ruleSet, ok := cfg.Rules[include]; ok {
-				for _, rule := range ruleSet.Rules {
-					if err = target.AddRule(rule.Regex, rule.Ttl, rule.Refresh); err != nil {
-						return errors.Wrapf(err, "处理 %s (引用规则 %s) 失败.", name, include)
-					}
-				}
-			} else {
-				return errors.Errorf("引用规则 %s 未定义", include)
-			}
-		}
-		for _, replace := range cache.Replaces {
-			if err = target.AddReplace(replace.Regex, replace.Old, replace.New); err != nil {
-				return errors.Wrapf(err, "处理 %s 失败.", name)
-			}
-		}
-		if transport := cache.Transport; transport != nil {
-			client := utils.DefaultHttpClientWrapper()
-			if transport.Proxy != "" {
-				proxyUrl, err := url.Parse(transport.Proxy)
-				if err != nil {
-					return errors.Wrapf(err, "处理 %s 失败.", name)
-				}
-				client.Transport = &http.Transport{
-					Proxy: http.ProxyURL(proxyUrl),
-				}
-			}
-			if transport.Timeout > 0 {
-				client.Transport.(*http.Transport).DialContext = utils.DefaultDialContext(transport.Timeout)
-			}
-			if transport.UserAgent != "" {
-				client.UserAgent = transport.UserAgent
-			}
-			if transport.Headers != nil {
-				client.Headers = transport.Headers
-			}
-			target.SetHttpClient(client)
-		}
-		if err := worker.Bind(name, target); err != nil {
-			return errors.Wrapf(err, "处理 %s 失败.", name)
-		}
-	}
-	server := &http.Server{Addr: cfg.Bind, Handler: worker}
-	monitorHandler := http.NewServeMux()
-	monitorHandler.Handle(cfg.Monitor.Path, promhttp.Handler())
-	monitorServer := &http.Server{Addr: cfg.Monitor.Bind, Handler: monitorHandler}
-	log.Printf("服务器已启动，请访问 http://%s", cfg.Bind)
-	sigs := make(chan os.Signal, 1)
-	done := make(chan bool, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		log.Printf("平台监控已启用.")
-		err = monitorServer.ListenAndServe()
-		if err != nil {
-			log.Printf("monitor http server listen err: %v", err)
-		}
-	}()
-	go func() {
-		var err error
-		sig := <-sigs
-		log.Printf("停止反向代理工作区 [sig:%d]", sig)
-		if err = worker.Close(); err != nil {
-			log.Println(err)
-		}
-		log.Printf("停止反向代理服务")
-		if err = server.Shutdown(context.Background()); err != nil {
-			log.Println(err)
-		}
-		_ = server.Shutdown(context.Background())
-		done <- true
-	}()
-	err = server.ListenAndServe()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		sigs <- syscall.SIGTERM
-	}
-	<-done
-	if !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
-}
-
 func main() {
-	if err := mainExit(); err != nil {
+	defaults := server.DefaultOptions()
+	backend := flag.String("backend", envString("CACHE_PROXY_BACKEND", defaults.Backend), "blobfs backend directory")
+	admin := flag.String("admin", envString("CACHE_PROXY_ADMIN", defaults.AdminBind), "admin web/API bind address")
+	proxyBind := flag.String("proxy-bind", envString("CACHE_PROXY_PROXY_BIND", defaults.ProxyBind), "path proxy bind address")
+	metricsBind := flag.String("metrics-bind", envString("CACHE_PROXY_METRICS_BIND", defaults.MetricsBind), "metrics bind address, empty disables metrics")
+	metricsPath := flag.String("metrics-path", envString("CACHE_PROXY_METRICS_PATH", defaults.MetricsPath), "metrics HTTP path")
+	gcInterval := flag.Duration("gc-interval", envDuration("CACHE_PROXY_GC_INTERVAL", defaults.GCInterval), "blobfs GC interval")
+	flag.Parse()
+
+	ctx := context.Background()
+	runtime, err := server.OpenWithOptions(ctx, server.Options{
+		Backend:     *backend,
+		AdminBind:   *admin,
+		ProxyBind:   *proxyBind,
+		MetricsBind: *metricsBind,
+		MetricsPath: *metricsPath,
+		GCInterval:  *gcInterval,
+	})
+	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if err := runtime.Start(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	slog.Info("cache proxy started", "admin", *admin, "proxy", *proxyBind, "backend", *backend, "metrics", *metricsBind, "gc_interval", gcInterval.String())
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	<-sigs
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runtime.Close(shutdownCtx); err != nil {
+		slog.Error("shutdown failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+func envString(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "invalid %s duration %q: %v\n", name, value, err)
+		os.Exit(2)
+	}
+	return parsed
 }

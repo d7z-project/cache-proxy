@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestLocker(t *testing.T) {
+func TestRWLockGroupReturnsConsistentLocks(t *testing.T) {
 	group := NewRWLockGroup()
 	l1 := group.Get("/test")
 	l2 := group.Get("/test")

@@ -1,0 +1,177 @@
+<section class="page">
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">实例</p>
+      <h2>代理实例</h2>
+    </div>
+    <div class="actions">
+      <button type="button" (click)="newInstance(ProxyMode.File)">新增文件代理</button>
+      <button type="button" class="primary" (click)="newInstance(ProxyMode.Oci)">新增镜像代理</button>
+      <button type="button" class="primary" (click)="newInstance(ProxyMode.Npm)">新增 npm</button>
+      <button type="button" (click)="exportAll()" [disabled]="!snapshot">导出全部</button>
+    </div>
+  </header>
+
+  <p class="message" *ngIf="message">{{ message }}</p>
+  <div class="error-panel" *ngIf="errors.length > 0">
+    <strong>待调整项</strong>
+    <ul>
+      <li *ngFor="let error of errors">{{ error }}</li>
+    </ul>
+  </div>
+  <p class="message" *ngIf="loading">正在加载配置...</p>
+
+  <div class="two-column" *ngIf="snapshot">
+    <aside class="card list">
+      <div class="list-header">
+        <strong>{{ instanceEntries.length }} 个实例</strong>
+        <span>选择实例后编辑</span>
+      </div>
+      <button type="button" *ngFor="let item of instanceEntries" (click)="select(item.name)" [class.active]="item.name === selectedName">
+        <strong>{{ item.name }}</strong>
+        <span>{{ item.config.mode }} · {{ item.config.listen.path || item.config.listen.bind }}</span>
+      </button>
+      <p class="empty" *ngIf="instanceEntries.length === 0">从右上角创建第一个实例。</p>
+    </aside>
+
+    <form class="card form" *ngIf="draft" (ngSubmit)="save()">
+      <section class="form-section">
+        <h3>基础信息</h3>
+        <div class="grid-2 compact">
+          <label>实例名称<input name="name" [(ngModel)]="draftName" placeholder="rocky"></label>
+          <label>代理模式
+            <select name="mode" [(ngModel)]="draft.mode" (ngModelChange)="changeMode($event)" [disabled]="!creating">
+              <option *ngFor="let mode of proxyModes" [ngValue]="mode.value">{{ mode.label }}</option>
+            </select>
+            <span class="hint" *ngIf="!creating">模式在创建时确定。</span>
+          </label>
+        </div>
+        <div class="grid-2 compact">
+          <label>监听方式
+            <select name="listenKind" [(ngModel)]="listenKind">
+              <option *ngFor="let kind of availableListenKinds" [ngValue]="kind.value">{{ kind.label }}</option>
+            </select>
+            <span class="hint" *ngIf="draft.mode === ProxyMode.Oci">镜像代理使用独立端口。</span>
+            <span class="hint" *ngIf="draft.mode !== ProxyMode.Oci">监听方式和地址可动态修改，保存后立即生效。</span>
+          </label>
+          <label *ngIf="listenKind === ListenKind.Path">路径前缀<input name="listenPath" [(ngModel)]="draft.listen.path" placeholder="/files"></label>
+          <label *ngIf="listenKind === ListenKind.Bind">监听地址<input name="listenBind" [(ngModel)]="draft.listen.bind" placeholder="127.0.0.1:5000"></label>
+        </div>
+        <label>上游地址<textarea class="small" name="upstreams" [(ngModel)]="upstreamText" placeholder="每行一个 HTTP/HTTPS 上游"></textarea></label>
+        <p class="hint" *ngIf="draft.mode === ProxyMode.Oci">镜像代理使用一个上游地址。</p>
+        <p class="hint" *ngIf="draft.mode === ProxyMode.Npm">npm 代理使用一个 registry 上游。</p>
+        <label>缓存保留时间<input name="expireAfter" [(ngModel)]="draft.expireAfter" placeholder="例如 720h"></label>
+        <label>快速命中时间<input name="cacheFreshFor" [(ngModel)]="draft.cache.freshFor" placeholder="例如 30s"></label>
+        <label>同对象忙碌策略
+          <select name="cacheBusyPolicy" [(ngModel)]="draft.cache.busyPolicy">
+            <option *ngFor="let policy of busyPolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+          </select>
+        </label>
+        <p class="hint">快速命中时间内直接使用缓存；之后按缓存策略校验或更新。</p>
+        <p class="hint">忙碌策略控制同一资源并发刷新时的响应方式。</p>
+      </section>
+
+      <section class="form-section" *ngIf="draft.mode === ProxyMode.File">
+        <h3>文件缓存策略</h3>
+        <p class="hint">按路径规则选择缓存策略。</p>
+        <label>默认策略
+          <select name="fileDefaultPolicy" [(ngModel)]="draft.cache.defaultPolicy">
+            <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+          </select>
+        </label>
+        <div class="row header-row" *ngFor="let rule of draft.cache.rules; let i = index">
+          <input [name]="'ruleMatch' + i" [(ngModel)]="rule.match" placeholder="**/*.rpm">
+          <select [name]="'rulePolicy' + i" [(ngModel)]="rule.policy">
+            <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+          </select>
+          <button type="button" (click)="removeRule(i)">删除</button>
+        </div>
+        <button type="button" (click)="addRule()">添加路径规则</button>
+      </section>
+
+      <section class="form-section" *ngIf="draft.mode === ProxyMode.Oci && draft.oci">
+        <h3>OCI 缓存策略</h3>
+        <p class="hint">按镜像资源类型选择缓存策略。</p>
+        <div class="grid-3 compact">
+          <label>Blob 策略
+            <select name="blobPolicy" [(ngModel)]="draft.oci.blobPolicy">
+              <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+            </select>
+          </label>
+          <label>Manifest 策略
+            <select name="manifestPolicy" [(ngModel)]="draft.oci.manifestPolicy">
+              <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+            </select>
+          </label>
+          <label>Tag 列表策略
+            <select name="tagPolicy" [(ngModel)]="draft.oci.tagPolicy">
+              <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+            </select>
+          </label>
+        </div>
+        <h4>上游鉴权</h4>
+        <div class="grid-3 compact" *ngIf="draft.oci.auth">
+          <label>鉴权方式
+            <select name="ociAuthType" [(ngModel)]="draft.oci.auth.type">
+              <option *ngFor="let option of ociAuthOptions" [ngValue]="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label *ngIf="draft.oci.auth.type === OciAuthType.Basic">用户名<input name="ociAuthUsername" [(ngModel)]="draft.oci.auth.username" autocomplete="off"></label>
+          <label *ngIf="draft.oci.auth.type === OciAuthType.Basic">密码<input name="ociAuthPassword" [(ngModel)]="draft.oci.auth.password" type="password" autocomplete="off"></label>
+          <label *ngIf="draft.oci.auth.type === OciAuthType.Bearer">访问令牌<input name="ociAuthToken" [(ngModel)]="draft.oci.auth.token" type="password" autocomplete="off"></label>
+        </div>
+      </section>
+
+      <section class="form-section" *ngIf="draft.mode === ProxyMode.Npm && draft.npm">
+        <h3>npm 缓存策略</h3>
+        <p class="hint">包信息和下载文件可分别设置缓存策略。</p>
+        <div class="grid-2 compact">
+          <label>包信息策略
+            <select name="npmMetadataPolicy" [(ngModel)]="draft.npm.metadataPolicy">
+              <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+            </select>
+          </label>
+          <label>下载文件策略
+            <select name="npmTarballPolicy" [(ngModel)]="draft.npm.tarballPolicy">
+              <option *ngFor="let policy of cachePolicies" [ngValue]="policy.value">{{ policy.label }}</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="form-section">
+        <h3>上游连接</h3>
+        <div class="grid-3 compact">
+          <label>上游代理<input name="proxy" [(ngModel)]="draft.transport!.proxy" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"></label>
+          <label>User-Agent<input name="ua" [(ngModel)]="draft.transport!.ua" placeholder="cache-proxy"></label>
+          <label>连接超时<input name="timeout" [(ngModel)]="draft.transport!.timeout" placeholder="3s"></label>
+        </div>
+        <p class="hint">用于当前实例访问上游。</p>
+        <label *ngIf="draft.mode === ProxyMode.File">透传请求头<textarea class="small" name="passHeaders" [(ngModel)]="passHeaderText" placeholder="每行一个名称，例如 Accept"></textarea></label>
+        <p class="hint" *ngIf="draft.mode === ProxyMode.File">仅透传列表中的请求头。</p>
+      </section>
+
+      <div class="actions sticky-actions">
+        <button class="primary" type="submit">保存配置</button>
+        <button type="button" (click)="exportSelected()" [disabled]="!selectedName">导出实例</button>
+        <button type="button" class="danger" (click)="deleteSelected()" [disabled]="!selectedName">删除实例</button>
+      </div>
+    </form>
+
+    <article class="card block" *ngIf="!draft">
+      <h3>选择或新增实例</h3>
+      <p class="hint">选择左侧实例后编辑对应配置。</p>
+    </article>
+  </div>
+
+  <article class="card form" *ngIf="snapshot">
+    <section class="form-section">
+      <h3>导入实例</h3>
+      <textarea name="importText" [(ngModel)]="importText" placeholder="粘贴导出的实例配置"></textarea>
+      <label class="inline-check"><input type="checkbox" name="importReplace" [(ngModel)]="importReplace"> 覆盖同名实例</label>
+      <div class="actions sticky-actions">
+        <button type="button" class="primary" (click)="importInstances()" [disabled]="!importText.trim()">导入实例</button>
+      </div>
+    </section>
+  </article>
+</section>
