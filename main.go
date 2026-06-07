@@ -13,6 +13,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/server"
 )
 
+var DefaultShutdownTimeout = "10s"
+
 func main() {
 	defaults := server.DefaultOptions()
 	backend := flag.String("backend", envString("CACHE_PROXY_BACKEND", defaults.Backend), "blobfs backend directory")
@@ -38,7 +40,7 @@ func main() {
 	}
 	if err := runtime.Start(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout())
 		if closeErr := runtime.Close(shutdownCtx); closeErr != nil {
 			slog.Error("shutdown after start failure failed", "err", closeErr)
 		}
@@ -51,7 +53,7 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout())
 	defer cancel()
 	if err := runtime.Close(shutdownCtx); err != nil {
 		slog.Error("shutdown failed", "err", err)
@@ -77,4 +79,12 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 		os.Exit(2)
 	}
 	return parsed
+}
+
+func defaultShutdownTimeout() time.Duration {
+	duration, err := time.ParseDuration(DefaultShutdownTimeout)
+	if err != nil {
+		panic(fmt.Sprintf("invalid DefaultShutdownTimeout %q: %v", DefaultShutdownTimeout, err))
+	}
+	return duration
 }

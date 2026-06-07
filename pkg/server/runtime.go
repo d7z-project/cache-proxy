@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,16 @@ import (
 const (
 	systemTenant = "_system"
 	configPath   = "config.yaml"
+)
+
+var (
+	DefaultBackend        = "/tmp/cache-proxy"
+	DefaultAdminBind      = "127.0.0.1:18080"
+	DefaultProxyBind      = "127.0.0.1:18081"
+	DefaultMetricsBind    = "127.0.0.1:8911"
+	DefaultMetricsPath    = "/metrics"
+	DefaultGCInterval     = "24h"
+	DefaultConfigMaxBytes = "1048576"
 )
 
 type Runtime struct {
@@ -95,13 +106,29 @@ type Options struct {
 
 func DefaultOptions() Options {
 	return Options{
-		Backend:     "/tmp/cache-proxy",
-		AdminBind:   "127.0.0.1:18080",
-		ProxyBind:   "127.0.0.1:18081",
-		MetricsBind: "127.0.0.1:8911",
-		MetricsPath: "/metrics",
-		GCInterval:  24 * time.Hour,
+		Backend:     DefaultBackend,
+		AdminBind:   DefaultAdminBind,
+		ProxyBind:   DefaultProxyBind,
+		MetricsBind: DefaultMetricsBind,
+		MetricsPath: DefaultMetricsPath,
+		GCInterval:  mustDefaultDuration("DefaultGCInterval", DefaultGCInterval),
 	}
+}
+
+func mustDefaultDuration(name, value string) time.Duration {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		panic(fmt.Sprintf("invalid %s %q: %v", name, value, err))
+	}
+	return duration
+}
+
+func defaultConfigMaxBytes() int {
+	value, err := strconv.Atoi(DefaultConfigMaxBytes)
+	if err != nil || value <= 0 {
+		panic(fmt.Sprintf("invalid DefaultConfigMaxBytes %q", DefaultConfigMaxBytes))
+	}
+	return value
 }
 
 func Open(ctx context.Context, backend, adminBind string) (*Runtime, error) {
@@ -119,13 +146,13 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 		return nil, errors.New("admin bind is empty")
 	}
 	if options.ProxyBind == "" {
-		options.ProxyBind = DefaultOptions().ProxyBind
+		options.ProxyBind = DefaultProxyBind
 	}
 	if options.MetricsPath == "" {
-		options.MetricsPath = "/metrics"
+		options.MetricsPath = DefaultMetricsPath
 	}
 	if options.GCInterval <= 0 {
-		options.GCInterval = 24 * time.Hour
+		options.GCInterval = mustDefaultDuration("DefaultGCInterval", DefaultGCInterval)
 	}
 	if err := os.MkdirAll(options.Backend, 0o755); err != nil {
 		return nil, err
@@ -281,7 +308,7 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 		closePreparedServers(newBindServers)
 		return nil, err
 	}
-	if len(data) > 1<<20 {
+	if len(data) > defaultConfigMaxBytes() {
 		closePreparedServers(newBindServers)
 		return nil, errors.New("config is too large")
 	}
@@ -601,11 +628,12 @@ func readConfigObject(ctx context.Context, store *blobfs.Store) ([]byte, uint64,
 	}
 	defer reader.Close()
 	info := reader.Info()
-	data, err := io.ReadAll(io.LimitReader(reader, 1<<20+1))
+	maxBytes := defaultConfigMaxBytes()
+	data, err := io.ReadAll(io.LimitReader(reader, int64(maxBytes)+1))
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(data) > 1<<20 {
+	if len(data) > maxBytes {
 		return nil, 0, errors.New("config is too large")
 	}
 	return data, info.Generation, nil
@@ -622,8 +650,8 @@ func parseConfig(data []byte) (*config.Config, error) {
 func DefaultConfig() *config.Config {
 	return &config.Config{
 		Version: 1,
-		Server:  config.ServerConfig{Metrics: config.MetricsConfig{Bind: "127.0.0.1:8911", Path: "/metrics"}},
-		Storage: config.StorageConfig{GC: config.GCConfig{Blob: config.Duration(24 * time.Hour)}},
+		Server:  config.ServerConfig{Metrics: config.MetricsConfig{Bind: DefaultMetricsBind, Path: DefaultMetricsPath}},
+		Storage: config.StorageConfig{GC: config.GCConfig{Blob: config.Duration(mustDefaultDuration("DefaultGCInterval", DefaultGCInterval))}},
 		Instances: map[string]config.InstanceConfig{"example-files": {
 			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
 			Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass, Rules: []config.CacheRule{{Match: "**/*.iso", Policy: config.PolicyImmutable}, {Match: "**/repodata/**", Policy: config.PolicyRevalidate}}},
@@ -652,10 +680,10 @@ func validateConfig(cfg *config.Config, adminBind, proxyBind, metricsBind string
 		cfg.Version = 1
 	}
 	if cfg.Storage.GC.Blob <= 0 {
-		cfg.Storage.GC.Blob = config.Duration(24 * time.Hour)
+		cfg.Storage.GC.Blob = config.Duration(mustDefaultDuration("DefaultGCInterval", DefaultGCInterval))
 	}
 	if cfg.Server.Metrics.Path == "" {
-		cfg.Server.Metrics.Path = "/metrics"
+		cfg.Server.Metrics.Path = DefaultMetricsPath
 	}
 	listens := map[string]string{}
 	addListen := func(addr, owner string) error {

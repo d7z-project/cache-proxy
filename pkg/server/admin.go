@@ -38,7 +38,7 @@ func (r *Runtime) configAPI(resp http.ResponseWriter, req *http.Request) {
 		writeJSON(resp, snapshot, err)
 	case http.MethodPut:
 		var input configUpdateRequest
-		if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, 1<<20)).Decode(&input); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, int64(defaultConfigMaxBytes()))).Decode(&input); err != nil {
 			writeError(resp, http.StatusBadRequest, err)
 			return
 		}
@@ -64,7 +64,7 @@ func (r *Runtime) validateAPI(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var cfg config.Config
-	if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, 1<<20)).Decode(&cfg); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, int64(defaultConfigMaxBytes()))).Decode(&cfg); err != nil {
 		writeError(resp, http.StatusBadRequest, err)
 		return
 	}
@@ -142,7 +142,7 @@ func (r *Runtime) instancesImportAPI(resp http.ResponseWriter, req *http.Request
 		return
 	}
 	var input instancesImportRequest
-	if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, 1<<20)).Decode(&input); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, int64(defaultConfigMaxBytes()))).Decode(&input); err != nil {
 		writeError(resp, http.StatusBadRequest, err)
 		return
 	}
