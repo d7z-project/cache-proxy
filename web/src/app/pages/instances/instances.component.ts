@@ -57,6 +57,10 @@ export class InstancesComponent implements OnInit {
     return this.listenKinds;
   }
 
+  modeLabel(mode: ProxyMode | string): string {
+    return this.proxyModes.find((option) => option.value === mode)?.label ?? mode;
+  }
+
   load(): void {
     this.loading = true;
     forkJoin({ snapshot: this.api.config(), runtime: this.api.runtime() }).subscribe({
@@ -251,6 +255,7 @@ export class InstancesComponent implements OnInit {
         mode,
         listen: { bind: '127.0.0.1:5000' },
         upstreams: ['https://registry-1.docker.io'],
+        expireAfter: '720h',
         cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
         oci: { blobPolicy: CachePolicy.Immutable, manifestPolicy: CachePolicy.Revalidate, tagPolicy: CachePolicy.Revalidate, auth: { type: OciAuthType.None } },
         transport: {}
@@ -261,6 +266,7 @@ export class InstancesComponent implements OnInit {
         mode,
         listen: { path: '/npm' },
         upstreams: ['https://registry.npmjs.org'],
+        expireAfter: '720h',
         cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
         npm: { metadataPolicy: CachePolicy.Revalidate, tarballPolicy: CachePolicy.Immutable },
         transport: {}
@@ -270,6 +276,7 @@ export class InstancesComponent implements OnInit {
       mode,
       listen: { path: '/files' },
       upstreams: ['https://example.com'],
+      expireAfter: '720h',
       cache: { defaultPolicy: CachePolicy.Bypass, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: structuredClone(FILE_DEFAULT_RULES) },
       passHeaders: ['Accept', 'Accept-Language'],
       transport: {}

@@ -45,6 +45,7 @@ var (
 	DefaultMetricsBind    = "127.0.0.1:8911"
 	DefaultMetricsPath    = "/metrics"
 	DefaultGCInterval     = "24h"
+	DefaultExpireAfter    = "720h"
 	DefaultConfigMaxBytes = "1048576"
 )
 
@@ -654,7 +655,8 @@ func DefaultConfig() *config.Config {
 		Storage: config.StorageConfig{GC: config.GCConfig{Blob: config.Duration(mustDefaultDuration("DefaultGCInterval", DefaultGCInterval))}},
 		Instances: map[string]config.InstanceConfig{"example-files": {
 			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
-			Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass, Rules: []config.CacheRule{{Match: "**/*.iso", Policy: config.PolicyImmutable}, {Match: "**/repodata/**", Policy: config.PolicyRevalidate}}},
+			ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter)),
+			Cache:       config.CacheConfig{DefaultPolicy: config.PolicyBypass, Rules: []config.CacheRule{{Match: "**/*.iso", Policy: config.PolicyImmutable}, {Match: "**/repodata/**", Policy: config.PolicyRevalidate}}},
 		}},
 	}
 }
@@ -709,6 +711,9 @@ func validateConfig(cfg *config.Config, adminBind, proxyBind, metricsBind string
 	}
 	paths := map[string]string{}
 	for instanceName, inst := range cfg.Instances {
+		if inst.ExpireAfter <= 0 {
+			inst.ExpireAfter = config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))
+		}
 		if instanceName == "" || strings.ContainsAny(instanceName, `/\`) || instanceName == "." || instanceName == ".." {
 			return fmt.Errorf("invalid instance name %q", instanceName)
 		}
@@ -774,6 +779,7 @@ func validateConfig(cfg *config.Config, adminBind, proxyBind, metricsBind string
 		if err := validateNPM(inst); err != nil {
 			return fmt.Errorf("instance %s: %w", instanceName, err)
 		}
+		cfg.Instances[instanceName] = inst
 	}
 	return nil
 }
