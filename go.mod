@@ -7,6 +7,7 @@ require (
 	github.com/google/go-containerregistry v0.21.6
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/sync v0.20.0
 	gopkg.d7z.net/blobfs v0.0.0-20260607135345-55d48762a5fb
 	gopkg.in/yaml.v3 v3.0.1
 )

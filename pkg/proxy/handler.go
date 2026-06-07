@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -50,6 +51,7 @@ type Handler struct {
 
 	ociTokenMu sync.Mutex
 	ociTokens  map[string]ociToken
+	ociGroup   singleflight.Group
 }
 
 type remoteOptions struct {
@@ -531,15 +533,50 @@ func (h *Handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 	key := challenge.realm + "\x00" + challenge.params["service"] + "\x00" + challenge.params["scope"]
 	now := time.Now()
 	h.ociTokenMu.Lock()
+	h.cleanupExpiredOCITokens(now)
 	if cached := h.ociTokens[key]; cached.value != "" && now.Before(cached.expire) {
 		h.ociTokenMu.Unlock()
 		return cached.value, nil
 	}
 	h.ociTokenMu.Unlock()
 
+	value, err, _ := h.ociGroup.Do(key, func() (any, error) {
+		now := time.Now()
+		h.ociTokenMu.Lock()
+		h.cleanupExpiredOCITokens(now)
+		if cached := h.ociTokens[key]; cached.value != "" && now.Before(cached.expire) {
+			h.ociTokenMu.Unlock()
+			return cached.value, nil
+		}
+		h.ociTokenMu.Unlock()
+
+		token, expire, err := h.fetchOCIBearerToken(ctx, challenge, now)
+		if err != nil {
+			return "", err
+		}
+		h.ociTokenMu.Lock()
+		h.ociTokens[key] = ociToken{value: token, expire: expire}
+		h.ociTokenMu.Unlock()
+		return token, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
+}
+
+func (h *Handler) cleanupExpiredOCITokens(now time.Time) {
+	for key, token := range h.ociTokens {
+		if token.value == "" || !now.Before(token.expire) {
+			delete(h.ociTokens, key)
+		}
+	}
+}
+
+func (h *Handler) fetchOCIBearerToken(ctx context.Context, challenge ociChallenge, now time.Time) (string, time.Time, error) {
 	tokenURL, err := url.Parse(challenge.realm)
 	if err != nil || tokenURL.Scheme == "" || tokenURL.Host == "" {
-		return "", fmt.Errorf("invalid OCI token realm %q", challenge.realm)
+		return "", time.Time{}, fmt.Errorf("invalid OCI token realm %q", challenge.realm)
 	}
 	query := tokenURL.Query()
 	for _, name := range []string{"service", "scope"} {
@@ -550,7 +587,7 @@ func (h *Handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 	tokenURL.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL.String(), nil)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	request.Header.Set("User-Agent", h.client.UserAgent)
 	if basic := h.ociBasicAuthorization(); basic != "" {
@@ -558,11 +595,11 @@ func (h *Handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 	}
 	response, err := h.client.Do(request)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OCI token request failed with %d", response.StatusCode)
+		return "", time.Time{}, fmt.Errorf("OCI token request failed with %d", response.StatusCode)
 	}
 	var payload struct {
 		Token       string `json:"token"`
@@ -571,14 +608,14 @@ func (h *Handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 		IssuedAt    string `json:"issued_at"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := payload.Token
 	if token == "" {
 		token = payload.AccessToken
 	}
 	if token == "" {
-		return "", errors.New("OCI token response is empty")
+		return "", time.Time{}, errors.New("OCI token response is empty")
 	}
 	issuedAt := now
 	if payload.IssuedAt != "" {
@@ -594,10 +631,7 @@ func (h *Handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 	if ttl > time.Minute {
 		expire = expire.Add(-30 * time.Second)
 	}
-	h.ociTokenMu.Lock()
-	h.ociTokens[key] = ociToken{value: token, expire: expire}
-	h.ociTokenMu.Unlock()
-	return token, nil
+	return token, expire, nil
 }
 
 func redactedURL(rawURL string) string {

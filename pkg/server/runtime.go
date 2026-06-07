@@ -73,6 +73,11 @@ type serverState struct {
 	bindHandlers map[string]*proxy.Handler
 }
 
+type preparedServer struct {
+	server   *http.Server
+	listener net.Listener
+}
+
 type ConfigSnapshot struct {
 	Generation uint64         `json:"generation"`
 	Config     *config.Config `json:"config"`
@@ -273,20 +278,20 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		shutdownServersWithTimeout(newBindServers)
+		closePreparedServers(newBindServers)
 		return nil, err
 	}
 	if len(data) > 1<<20 {
-		shutdownServersWithTimeout(newBindServers)
+		closePreparedServers(newBindServers)
 		return nil, errors.New("config is too large")
 	}
 	if _, err = r.store.Put(ctx, systemTenant, configPath, bytes.NewReader(data), map[string]string{"type": "config", "updated-at": time.Now().UTC().Format(time.RFC3339)}); err != nil {
-		shutdownServersWithTimeout(newBindServers)
+		closePreparedServers(newBindServers)
 		return nil, err
 	}
 	next, generation, err := loadConfig(ctx, r.store)
 	if err != nil {
-		shutdownServersWithTimeout(newBindServers)
+		closePreparedServers(newBindServers)
 		return nil, err
 	}
 	r.mu.Lock()
@@ -301,9 +306,10 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 		if r.activeBindServers == nil {
 			r.activeBindServers = map[string]*http.Server{}
 		}
-		for addr, srv := range newBindServers {
-			r.activeServers[addr] = srv
-			r.activeBindServers[addr] = srv
+		for addr, prepared := range newBindServers {
+			prepared.start()
+			r.activeServers[addr] = prepared.server
+			r.activeBindServers[addr] = prepared.server
 		}
 		for _, srv := range removedBindServers {
 			delete(r.activeServers, srv.Addr)
@@ -394,7 +400,15 @@ func (r *Runtime) serveBind(addr string, resp http.ResponseWriter, req *http.Req
 	handler.ServeHTTP(resp, req)
 }
 
-func (r *Runtime) prepareBindServers(state *serverState) (map[string]*http.Server, []*http.Server, error) {
+func (p preparedServer) start() {
+	go func() {
+		if err := p.server.Serve(p.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server stopped with error", "addr", p.server.Addr, "err", err)
+		}
+	}()
+}
+
+func (r *Runtime) prepareBindServers(state *serverState) (map[string]preparedServer, []*http.Server, error) {
 	r.mu.RLock()
 	started := r.started
 	activeBindServers := map[string]*http.Server{}
@@ -405,19 +419,20 @@ func (r *Runtime) prepareBindServers(state *serverState) (map[string]*http.Serve
 	if !started {
 		return nil, nil, nil
 	}
-	newServers := map[string]*http.Server{}
+	newServers := map[string]preparedServer{}
 	for addr := range state.bindHandlers {
 		if activeBindServers[addr] != nil {
 			continue
 		}
-		server, err := startServer(addr, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-			r.serveBind(addr, resp, req)
-		}))
+		listener, err := net.Listen("tcp", addr)
 		if err != nil {
-			shutdownServersWithTimeout(newServers)
-			return nil, nil, err
+			closePreparedServers(newServers)
+			return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
 		}
-		newServers[addr] = server
+		server := &http.Server{Addr: addr, Handler: http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+			r.serveBind(addr, resp, req)
+		})}
+		newServers[addr] = preparedServer{server: server, listener: listener}
 	}
 	removedServers := []*http.Server{}
 	for addr, srv := range activeBindServers {
@@ -428,30 +443,10 @@ func (r *Runtime) prepareBindServers(state *serverState) (map[string]*http.Serve
 	return newServers, removedServers, nil
 }
 
-func startServer(addr string, handler http.Handler) (*http.Server, error) {
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", addr, err)
+func closePreparedServers(servers map[string]preparedServer) {
+	for _, prepared := range servers {
+		_ = prepared.listener.Close()
 	}
-	server := &http.Server{Addr: addr, Handler: handler}
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server stopped with error", "addr", server.Addr, "err", err)
-		}
-	}()
-	return server, nil
-}
-
-func shutdownServers(ctx context.Context, servers map[string]*http.Server) {
-	for _, srv := range servers {
-		_ = srv.Shutdown(ctx)
-	}
-}
-
-func shutdownServersWithTimeout(servers map[string]*http.Server) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	shutdownServers(ctx, servers)
 }
 
 func shutdownServerList(ctx context.Context, servers []*http.Server) {

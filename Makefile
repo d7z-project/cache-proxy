@@ -1,5 +1,3 @@
-GOPATH := $(shell go env GOPATH)
-
 WEB_DIST := web/dist/cache-proxy-web/browser/index.html
 
 cache-proxy: $(WEB_DIST) $(shell find . -type f -name "*.go") go.mod go.sum
@@ -15,5 +13,4 @@ test: $(WEB_DIST)
 	@go test ./...
 
 fmt:
-	@(test -f "$(GOPATH)/bin/gofumpt" || go install golang.org/x/tools/cmd/goimports@latest) && \
-	"$(GOPATH)/bin/gofumpt" -l -w . && go mod tidy
+	@gofmt -w $(shell find . -type f -name "*.go" -not -path "./web/dist/*") && go mod tidy
