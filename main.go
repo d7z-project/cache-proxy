@@ -38,6 +38,11 @@ func main() {
 	}
 	if err := runtime.Start(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if closeErr := runtime.Close(shutdownCtx); closeErr != nil {
+			slog.Error("shutdown after start failure failed", "err", closeErr)
+		}
+		cancel()
 		os.Exit(1)
 	}
 	slog.Info("cache proxy started", "admin", *admin, "proxy", *proxyBind, "backend", *backend, "metrics", *metricsBind, "gc_interval", gcInterval.String())

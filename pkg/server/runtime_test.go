@@ -863,6 +863,9 @@ func mustJSON(t *testing.T, value any) string {
 
 func closeRuntime(t *testing.T, rt *Runtime) {
 	t.Helper()
+	if rt == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, rt.Close(ctx))
