@@ -1,67 +1,84 @@
-<section class="page" *ngIf="data$ | async as data">
+<section class="page">
   <header class="page-header">
     <div>
       <p class="eyebrow">概览</p>
       <h2>运行状态</h2>
     </div>
+    <div class="actions">
+      <button type="button" (click)="refresh()">刷新</button>
+    </div>
   </header>
-  <div class="stats-grid">
-    <article class="card"><span>配置版本</span><strong>{{ data.runtime.generation }}</strong></article>
-    <article class="card"><span>实例数量</span><strong>{{ data.runtime.instances }}</strong></article>
-    <article class="card"><span>总请求</span><strong>{{ data.metrics.total.requests }}</strong></article>
-    <article class="card"><span>服务异常</span><strong>{{ data.metrics.total.errors }}</strong></article>
-    <article class="card"><span>上游请求</span><strong>{{ data.metrics.total.upstreamRequests }}</strong></article>
-    <article class="card"><span>响应流量</span><strong>{{ formatBytes(data.metrics.total.responseBytes) }}</strong></article>
-    <article class="card"><span>活跃下载</span><strong>{{ data.metrics.total.activeDownloads }}</strong></article>
-    <article class="card"><span>监控端口</span><strong>{{ data.runtime.metricsBind || '未启用' }}</strong></article>
+
+  <div *ngIf="data$ | async as data; else loadingBlock">
+    <div class="stats-grid">
+      <article class="card"><span>配置版本</span><strong>{{ data.runtime.generation }}</strong></article>
+      <article class="card"><span>实例数量</span><strong>{{ data.runtime.instances }}</strong></article>
+      <article class="card"><span>总请求</span><strong>{{ data.metrics.total.requests }}</strong></article>
+      <article class="card"><span>服务异常</span><strong>{{ data.metrics.total.errors }}</strong></article>
+      <article class="card"><span>上游请求</span><strong>{{ data.metrics.total.upstreamRequests }}</strong></article>
+      <article class="card"><span>响应流量</span><strong>{{ formatBytes(data.metrics.total.responseBytes) }}</strong></article>
+      <article class="card"><span>活跃下载</span><strong>{{ data.metrics.total.activeDownloads }}</strong></article>
+      <article class="card"><span>监听地址</span><strong>{{ data.runtime.bind }}</strong></article>
+    </div>
+
+    <div class="grid-2">
+      <article class="card block">
+        <h3>缓存命中分布</h3>
+        <ng-container *ngIf="sliceList(data.metrics.total.cache) as slices">
+          <div class="chart-list" *ngIf="slices.length > 0; else noCacheStats">
+            <div class="chart-row" *ngFor="let s of slices">
+              <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
+              <div class="chart-track"><div class="chart-bar cache" [style.width.%]="s.percent"></div></div>
+              <span class="chart-percent">{{ s.percent }}%</span>
+            </div>
+          </div>
+        </ng-container>
+        <ng-template #noCacheStats><p class="hint">等待缓存请求数据。</p></ng-template>
+      </article>
+      <article class="card block">
+        <h3>上游状态分布</h3>
+        <ng-container *ngIf="sliceList(data.metrics.total.upstreamStatus) as slices">
+          <div class="chart-list" *ngIf="slices.length > 0; else noUpstreamStats">
+            <div class="chart-row" *ngFor="let s of slices">
+              <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
+              <div class="chart-track"><div class="chart-bar upstream" [style.width.%]="s.percent"></div></div>
+              <span class="chart-percent">{{ s.percent }}%</span>
+            </div>
+          </div>
+        </ng-container>
+        <ng-template #noUpstreamStats><p class="hint">等待上游请求数据。</p></ng-template>
+        <p class="hint">采集地址：{{ data.runtime.bind }}{{ data.runtime.metricsPath }}</p>
+      </article>
+    </div>
+
+    <div class="card block">
+      <h3>实例摘要</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>名称</th><th>模式</th><th>入口</th><th>请求</th><th>缓存</th><th>上游</th><th>流量</th><th>下载</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let item of data.instances">
+            <td>{{ item.name }}</td>
+            <td><span class="badge">{{ modeLabel(item.mode) }}</span></td>
+            <td class="truncate">{{ item.path || item.bind }}</td>
+            <td>
+              <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>
+              <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>
+            </td>
+            <td>{{ cacheText(getMetrics(data.metrics.instances, item.name)) }}</td>
+            <td>{{ upstreamText(getMetrics(data.metrics.instances, item.name)) }}</td>
+            <td>{{ formatBytes(getMetrics(data.metrics.instances, item.name).responseBytes) }}</td>
+            <td>{{ getMetrics(data.metrics.instances, item.name).activeDownloads }}</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
   </div>
 
-  <div class="grid-2">
-    <article class="card block">
-      <h3>缓存命中分布</h3>
-      <div class="chart-list" *ngIf="cacheSlices(data.metrics.total).length > 0; else noCacheStats">
-        <div class="chart-row" *ngFor="let slice of cacheSlices(data.metrics.total)">
-          <div class="chart-label"><span>{{ slice.label }}</span><strong>{{ slice.value }}</strong></div>
-          <div class="chart-track"><div class="chart-bar cache" [style.width.%]="slice.percent"></div></div>
-          <span class="chart-percent">{{ slice.percent }}%</span>
-        </div>
-      </div>
-      <ng-template #noCacheStats><p class="hint">等待缓存请求数据。</p></ng-template>
-    </article>
-    <article class="card block">
-      <h3>上游状态分布</h3>
-      <div class="chart-list" *ngIf="upstreamSlices(data.metrics.total).length > 0; else noUpstreamStats">
-        <div class="chart-row" *ngFor="let slice of upstreamSlices(data.metrics.total)">
-          <div class="chart-label"><span>{{ slice.label }}</span><strong>{{ slice.value }}</strong></div>
-          <div class="chart-track"><div class="chart-bar upstream" [style.width.%]="slice.percent"></div></div>
-          <span class="chart-percent">{{ slice.percent }}%</span>
-        </div>
-      </div>
-      <ng-template #noUpstreamStats><p class="hint">等待上游请求数据。</p></ng-template>
-      <p class="hint">采集地址：{{ data.runtime.metricsBind || '未启用' }}{{ data.runtime.metricsPath }}</p>
-    </article>
-  </div>
-
-  <div class="card block">
-    <h3>实例摘要</h3>
-    <table>
-      <thead><tr><th>名称</th><th>模式</th><th>入口</th><th>请求</th><th>缓存</th><th>上游</th><th>流量</th><th>下载</th></tr></thead>
-      <tbody>
-        <tr *ngFor="let item of data.instances">
-          @let metrics = instanceMetrics(data.metrics.instances, item.name);
-          <td>{{ item.name }}</td>
-          <td><span class="badge">{{ item.mode }}</span></td>
-          <td>{{ item.path || item.bind }}</td>
-          <td>
-            <strong>{{ metrics.requests }}</strong>
-            <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>
-          </td>
-          <td>{{ cacheText(metrics) }}</td>
-          <td>{{ upstreamText(metrics) }}</td>
-          <td>{{ formatBytes(metrics.responseBytes) }}</td>
-          <td>{{ metrics.activeDownloads }}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+  <ng-template #loadingBlock>
+    <div class="stats-grid"><article class="card skeleton" *ngFor="let _ of [0,1,2,3]"></article></div>
+    <div class="card block skeleton"></div>
+    <div class="card block skeleton"></div>
+  </ng-template>
 </section>

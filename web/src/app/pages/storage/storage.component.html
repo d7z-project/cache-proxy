@@ -6,11 +6,11 @@
     </div>
     <div class="actions">
       <button type="button" (click)="refresh()">刷新</button>
-      <button type="button" class="primary" (click)="runGc()">运行 GC</button>
+      <button type="button" class="primary" (click)="runGc()" [disabled]="gcRunning">
+        {{ gcRunning ? '清理中...' : '运行 GC' }}
+      </button>
     </div>
   </header>
-
-  <p class="message" *ngIf="message">{{ message }}</p>
 
   <div class="grid-2">
     <article class="card block" *ngIf="stats$ | async as stats">

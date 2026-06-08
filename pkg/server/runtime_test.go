@@ -22,6 +22,17 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
 )
 
+func defaultTestOptions() Options {
+	return Options{
+		Backend:      "/tmp/cache-proxy-test",
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		Password:     "",
+		MetricsToken: "",
+	}
+}
+
 func TestRuntimeStoresConfigInBlobFS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -56,7 +67,7 @@ func TestFileProxyCachesImmutableAndRevalidatesMutableObjects(t *testing.T) {
 		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass, Rules: []config.CacheRule{{Match: "**/*.bin", Policy: config.PolicyImmutable}, {Match: "**/*.json", Policy: config.PolicyRevalidate}}},
 	}})
 	defer closeRuntime(t, rt)
-	handler := proxyHandler(rt)
+	handler := rt.mainHandler
 	require.Equal(t, "file-1", requestBody(t, handler, http.MethodGet, "/files/a.bin", ""))
 	require.Equal(t, "file-1", requestBody(t, handler, http.MethodGet, "/files/a.bin", ""))
 	require.Equal(t, int32(1), atomic.LoadInt32(&getCount))
@@ -74,13 +85,11 @@ func TestPathProxyExactPrefixRoutesToIndexObject(t *testing.T) {
 	}))
 	defer upstream.Close()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"files": {
-		Mode:      config.ModeFile,
-		Listen:    config.ListenConfig{Path: "/files"},
-		Upstreams: []string{upstream.URL},
-		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{upstream.URL},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "index", requestBody(t, proxyHandler(rt), http.MethodGet, "/files", ""))
+	require.Equal(t, "index", requestBody(t, rt.mainHandler, http.MethodGet, "/files", ""))
 }
 
 func TestPathProxyUsesSeparateBindAndListsMountedPaths(t *testing.T) {
@@ -91,22 +100,16 @@ func TestPathProxyUsesSeparateBindAndListsMountedPaths(t *testing.T) {
 	}))
 	defer upstream.Close()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"files": {
-		Mode:      config.ModeFile,
-		Listen:    config.ListenConfig{Path: "/files"},
-		Upstreams: []string{upstream.URL},
-		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{upstream.URL},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
 	}})
 	defer closeRuntime(t, rt)
 
-	adminRec := httptest.NewRecorder()
-	rt.servers[0].Handler.ServeHTTP(adminRec, httptest.NewRequest(http.MethodGet, "/files/a.txt", nil).WithContext(ctx))
-	require.NotContains(t, adminRec.Body.String(), "proxied")
+	rec := httptest.NewRecorder()
+	rt.mainHandler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
+	require.Equal(t, http.StatusOK, rec.Code)
 
-	indexRec := httptest.NewRecorder()
-	proxyHandler(rt).ServeHTTP(indexRec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
-	require.Equal(t, http.StatusOK, indexRec.Code)
-	require.Contains(t, indexRec.Body.String(), "/files")
-	require.Equal(t, "proxied", requestBody(t, proxyHandler(rt), http.MethodGet, "/files/a.txt", ""))
+	require.Equal(t, "proxied", requestBody(t, rt.mainHandler, http.MethodGet, "/files/a.txt", ""))
 }
 
 func TestRevalidateCacheFreshWindowSkipsUpstreamHead(t *testing.T) {
@@ -131,7 +134,7 @@ func TestRevalidateCacheFreshWindowSkipsUpstreamHead(t *testing.T) {
 		Cache: config.CacheConfig{DefaultPolicy: config.PolicyRevalidate, FreshFor: config.Duration(100 * time.Millisecond)},
 	}})
 	defer closeRuntime(t, rt)
-	handler := proxyHandler(rt)
+	handler := rt.mainHandler
 	require.Equal(t, "fresh-1", requestBody(t, handler, http.MethodGet, "/files/a.txt", ""))
 	atomic.StoreInt32(&version, 2)
 	require.Equal(t, "fresh-1", requestBody(t, handler, http.MethodGet, "/files/a.txt", ""))
@@ -172,7 +175,7 @@ func TestConcurrentMissBypassesWhenSameObjectIsDownloading(t *testing.T) {
 		Cache: config.CacheConfig{DefaultPolicy: config.PolicyRevalidate, FreshFor: config.Duration(time.Minute)},
 	}})
 	defer closeRuntime(t, rt)
-	handler := proxyHandler(rt)
+	handler := rt.mainHandler
 	firstDone := make(chan string, 1)
 	go func() {
 		firstDone <- requestBody(t, handler, http.MethodGet, "/files/slow.txt", "")
@@ -224,7 +227,7 @@ func TestConcurrentRefreshBypassesInsteadOfServingStaleCache(t *testing.T) {
 		Cache: config.CacheConfig{DefaultPolicy: config.PolicyRevalidate},
 	}})
 	defer closeRuntime(t, rt)
-	handler := proxyHandler(rt)
+	handler := rt.mainHandler
 	require.Equal(t, "value-1", requestBody(t, handler, http.MethodGet, "/files/current.txt", ""))
 	atomic.StoreInt32(&version, 2)
 	firstDone := make(chan string, 1)
@@ -276,7 +279,7 @@ func TestConcurrentRefreshCanServeStaleCacheWhenConfigured(t *testing.T) {
 		Cache: config.CacheConfig{DefaultPolicy: config.PolicyRevalidate, BusyPolicy: config.BusyPolicyStale},
 	}})
 	defer closeRuntime(t, rt)
-	handler := proxyHandler(rt)
+	handler := rt.mainHandler
 	require.Equal(t, "value-1", requestBody(t, handler, http.MethodGet, "/files/current.txt", ""))
 	atomic.StoreInt32(&version, 2)
 	firstDone := make(chan string, 1)
@@ -311,9 +314,11 @@ func TestOCIProxyCachesBlobByDigest(t *testing.T) {
 		_, _ = w.Write([]byte("layer"))
 	}))
 	defer upstream.Close()
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5000"}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{BlobPolicy: config.PolicyImmutable}}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{BlobPolicy: config.PolicyImmutable}}})
 	defer closeRuntime(t, rt)
+	rt.mu.RLock()
 	handler := rt.handlers[0]
+	rt.mu.RUnlock()
 	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
 	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
 	require.Equal(t, int32(1), atomic.LoadInt32(&getCount))
@@ -344,15 +349,18 @@ func TestOCIProxyHandlesBearerChallengeAndTokenExpiry(t *testing.T) {
 	}))
 	defer upstream.Close()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
-		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5000"}, Upstreams: []string{upstream.URL},
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
 		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "ok", requestBody(t, rt.handlers[0], http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
-	require.Equal(t, "ok", requestBody(t, rt.handlers[0], http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
+	rt.mu.RLock()
+	handler := rt.handlers[0]
+	rt.mu.RUnlock()
+	require.Equal(t, "ok", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
+	require.Equal(t, "ok", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
 	require.Equal(t, int32(1), atomic.LoadInt32(&tokenRequests))
 	time.Sleep(1100 * time.Millisecond)
-	require.Equal(t, "ok", requestBody(t, rt.handlers[0], http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
+	require.Equal(t, "ok", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
 	require.Equal(t, int32(2), atomic.LoadInt32(&tokenRequests))
 	stats := rt.stats.Snapshot()
 	require.Equal(t, uint64(1), stats.Instances["oci"].UpstreamStatus["200"])
@@ -371,12 +379,15 @@ func TestOCIProxySetsManifestAcceptHeader(t *testing.T) {
 		_, _ = w.Write([]byte("{}"))
 	}))
 	defer upstream.Close()
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5000"}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{ManifestPolicy: config.PolicyBypass}}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{ManifestPolicy: config.PolicyBypass}}})
 	defer closeRuntime(t, rt)
+	rt.mu.RLock()
+	handler := rt.handlers[0]
+	rt.mu.RUnlock()
 	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
 	req.Header.Set("Accept", "application/x-client-should-not-pass-through")
 	rec := httptest.NewRecorder()
-	rt.handlers[0].ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
@@ -399,7 +410,7 @@ func TestFileProxyPassesConfiguredRequestHeaders(t *testing.T) {
 	req.Header.Set("Accept-Language", "zh-CN")
 	req.Header.Set("Authorization", "Bearer client-token")
 	rec := httptest.NewRecorder()
-	proxyHandler(rt).ServeHTTP(rec, req)
+	rt.mainHandler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
@@ -421,7 +432,7 @@ func TestInstanceUsesConfiguredUpstreamProxy(t *testing.T) {
 		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyBypass},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "proxied", requestBody(t, proxyHandler(rt), http.MethodGet, "/files/a.txt", ""))
+	require.Equal(t, "proxied", requestBody(t, rt.mainHandler, http.MethodGet, "/files/a.txt", ""))
 	require.Equal(t, int32(1), atomic.LoadInt32(&proxyRequests))
 
 	cfg := DefaultConfig()
@@ -445,11 +456,14 @@ func TestOCIProxyUsesConfiguredBasicAuthAndSingleUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
-		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5000"}, Upstreams: []string{upstream.URL},
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
 		OCI: &config.OCIConfig{BlobPolicy: config.PolicyImmutable, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "layer", requestBody(t, rt.handlers[0], http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
+	rt.mu.RLock()
+	handler := rt.handlers[0]
+	rt.mu.RUnlock()
+	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
 
 	cfg := DefaultConfig()
 	cfg.Instances = map[string]config.InstanceConfig{"bad": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5001"}, Upstreams: []string{"https://a.example", "https://b.example"}, OCI: &config.OCIConfig{}}}
@@ -489,11 +503,11 @@ func TestNPMProxyRewritesTarballURLsAndCachesTarballs(t *testing.T) {
 	}})
 	defer closeRuntime(t, rt)
 
-	body := requestBody(t, proxyHandler(rt), http.MethodGet, "/npm/left-pad", "")
+	body := requestBody(t, rt.mainHandler, http.MethodGet, "/npm/left-pad", "")
 	require.Contains(t, body, `"tarball":"http://example.com/npm/left-pad/-/left-pad-1.0.0.tgz"`)
 	require.Contains(t, body, `"homepage":"https://registry.npmjs.org/not-a-tarball"`)
-	require.Equal(t, "tarball", requestBody(t, proxyHandler(rt), http.MethodGet, "/npm/left-pad/-/left-pad-1.0.0.tgz", ""))
-	require.Equal(t, "tarball", requestBody(t, proxyHandler(rt), http.MethodGet, "/npm/left-pad/-/left-pad-1.0.0.tgz", ""))
+	require.Equal(t, "tarball", requestBody(t, rt.mainHandler, http.MethodGet, "/npm/left-pad/-/left-pad-1.0.0.tgz", ""))
+	require.Equal(t, "tarball", requestBody(t, rt.mainHandler, http.MethodGet, "/npm/left-pad/-/left-pad-1.0.0.tgz", ""))
 	require.Equal(t, int32(1), atomic.LoadInt32(&tarballGets))
 
 	cfg := DefaultConfig()
@@ -517,9 +531,9 @@ func TestInstanceExpireAfterRefetchesOnAccess(t *testing.T) {
 		Cache:       config.CacheConfig{DefaultPolicy: config.PolicyImmutable},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "value-1", requestBody(t, proxyHandler(rt), http.MethodGet, "/files/a.bin", ""))
+	require.Equal(t, "value-1", requestBody(t, rt.mainHandler, http.MethodGet, "/files/a.bin", ""))
 	time.Sleep(20 * time.Millisecond)
-	require.Equal(t, "value-2", requestBody(t, proxyHandler(rt), http.MethodGet, "/files/a.bin", ""))
+	require.Equal(t, "value-2", requestBody(t, rt.mainHandler, http.MethodGet, "/files/a.bin", ""))
 }
 
 func TestAdminConfigAPIExposesCurrentGeneration(t *testing.T) {
@@ -528,8 +542,8 @@ func TestAdminConfigAPIExposesCurrentGeneration(t *testing.T) {
 	rt := newTestRuntime(t, ctx, nil)
 	defer closeRuntime(t, rt)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/-/api/config", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "generation")
 	require.Contains(t, rec.Body.String(), `"blob":"24h0m0s"`)
@@ -546,8 +560,8 @@ func TestAdminValidateAPIReportsRuntimeConfigErrors(t *testing.T) {
 	}
 	body := strings.NewReader(mustJSON(t, cfg))
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/config/validate", body).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodPost, "/-/api/config/validate", body).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "independent listen bind")
 }
@@ -564,8 +578,8 @@ func TestInstancesImportExportAPIHandlesSuccessAndConflicts(t *testing.T) {
 	defer closeRuntime(t, rt)
 
 	exportRec := httptest.NewRecorder()
-	exportReq := httptest.NewRequest(http.MethodGet, "/api/instances/export?name=files", nil).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(exportRec, exportReq)
+	exportReq := httptest.NewRequest(http.MethodGet, "/-/api/instances/export?name=files", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(exportRec, exportReq)
 	require.Equal(t, http.StatusOK, exportRec.Code)
 	var exported instancesExportResponse
 	require.NoError(t, json.NewDecoder(exportRec.Body).Decode(&exported))
@@ -578,20 +592,20 @@ func TestInstancesImportExportAPIHandlesSuccessAndConflicts(t *testing.T) {
 		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyBypass},
 	}}}))
 	importRec := httptest.NewRecorder()
-	importReq := httptest.NewRequest(http.MethodPost, "/api/instances/import", importBody).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(importRec, importReq)
+	importReq := httptest.NewRequest(http.MethodPost, "/-/api/instances/import", importBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(importRec, importReq)
 	require.Equal(t, http.StatusOK, importRec.Code)
 
 	conflictBody := strings.NewReader(mustJSON(t, instancesImportRequest{Generation: rt.generation, Instances: exported.Instances}))
 	conflictRec := httptest.NewRecorder()
-	conflictReq := httptest.NewRequest(http.MethodPost, "/api/instances/import", conflictBody).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(conflictRec, conflictReq)
+	conflictReq := httptest.NewRequest(http.MethodPost, "/-/api/instances/import", conflictBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(conflictRec, conflictReq)
 	require.Equal(t, http.StatusConflict, conflictRec.Code)
 
 	emptyBody := strings.NewReader(`{"generation":` + strconv.FormatUint(rt.generation, 10) + `,"instances":{}}`)
 	emptyRec := httptest.NewRecorder()
-	emptyReq := httptest.NewRequest(http.MethodPost, "/api/instances/import", emptyBody).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(emptyRec, emptyReq)
+	emptyReq := httptest.NewRequest(http.MethodPost, "/-/api/instances/import", emptyBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(emptyRec, emptyReq)
 	require.Equal(t, http.StatusBadRequest, emptyRec.Code)
 }
 
@@ -611,11 +625,11 @@ func TestMetricsStatsAPIRecordsProxyRequests(t *testing.T) {
 		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyBypass},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "metrics", requestBody(t, proxyHandler(rt), http.MethodGet, "/files/a.txt", ""))
+	require.Equal(t, "metrics", requestBody(t, rt.mainHandler, http.MethodGet, "/files/a.txt", ""))
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/metrics/stats", nil).WithContext(ctx)
-	rt.servers[0].Handler.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/-/api/metrics/stats", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var stats proxy.StatsSnapshot
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&stats))
@@ -635,25 +649,29 @@ func TestPrometheusMetricsExposeBlobFSStats(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer upstream.Close()
-	rt := newTestRuntimeWithOptions(t, ctx, Options{Backend: t.TempDir(), AdminBind: "127.0.0.1:0", MetricsBind: freeLocalAddr(t), MetricsPath: "/metrics", GCInterval: time.Hour}, map[string]config.InstanceConfig{"files": {
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:      t.TempDir(),
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		MetricsToken: "",
+	}, map[string]config.InstanceConfig{"files": {
 		Mode:      config.ModeFile,
 		Listen:    config.ListenConfig{Path: "/files"},
 		Upstreams: []string{upstream.URL},
 		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyImmutable},
 	}})
 	defer closeRuntime(t, rt)
-	require.Equal(t, "blobfs", requestBody(t, proxyHandler(rt), http.MethodGet, "/files/blobfs.txt", ""))
+	require.Equal(t, "blobfs", requestBody(t, rt.mainHandler, http.MethodGet, "/files/blobfs.txt", ""))
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil).WithContext(ctx)
-	metricsHandler(rt).ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/-/metrics", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	body := rec.Body.String()
 	require.Contains(t, body, "cache_proxy_blobfs_objects")
 	require.Contains(t, body, "cache_proxy_blobfs_bytes")
 	require.Contains(t, body, "cache_proxy_blobfs_chunks")
-	require.Contains(t, body, "cache_proxy_blobfs_gc_last_background_error 0")
-	require.NotContains(t, body, "cache_proxy_blobfs_gc_last_background_error{")
 	require.Contains(t, body, "cache_proxy_requests_total")
 }
 
@@ -663,7 +681,11 @@ func TestStartReturnsPortBindingError(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer listener.Close()
-	rt := newTestRuntimeWithOptions(t, ctx, Options{Backend: t.TempDir(), AdminBind: listener.Addr().String(), MetricsBind: "", MetricsPath: "/metrics", GCInterval: time.Hour}, nil)
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:    t.TempDir(),
+		Bind:       listener.Addr().String(),
+		GCInterval: time.Hour,
+	}, nil)
 	defer closeRuntime(t, rt)
 	require.ErrorContains(t, rt.Start(), "listen")
 }
@@ -681,7 +703,7 @@ func TestInstanceBindCanChangeDynamically(t *testing.T) {
 
 	firstBind := freeLocalAddr(t)
 	cfg := DefaultConfig()
-	cfg.Server.Metrics.Bind = ""
+	cfg.Server.Metrics.Path = ""
 	cfg.Instances = map[string]config.InstanceConfig{"files": {Mode: config.ModeFile, Listen: config.ListenConfig{Bind: firstBind}, Upstreams: []string{upstream.URL}, Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass}}}
 	snapshot, err := rt.UpdateConfig(ctx, rt.generation, cfg)
 	require.NoError(t, err)
@@ -711,7 +733,6 @@ func TestUpdateConfigPreservesStartupOnlyFields(t *testing.T) {
 	require.NoError(t, err)
 	next := structuredCloneConfig(snapshot.Config)
 	next.Version = 99
-	next.Server.Metrics.Bind = "127.0.0.1:9999"
 	next.Server.Metrics.Path = "/changed"
 	next.Storage.GC.Blob = config.Duration(time.Minute)
 	updated, err := rt.UpdateConfig(ctx, snapshot.Generation, next)
@@ -719,6 +740,147 @@ func TestUpdateConfigPreservesStartupOnlyFields(t *testing.T) {
 	require.Equal(t, snapshot.Config.Version, updated.Config.Version)
 	require.Equal(t, snapshot.Config.Server, updated.Config.Server)
 	require.Equal(t, snapshot.Config.Storage, updated.Config.Storage)
+}
+
+func TestAdminLoginAndSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:      t.TempDir(),
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		Password:     "test-secret",
+		MetricsToken: "",
+	}, nil)
+	defer closeRuntime(t, rt)
+
+	// without auth: API returns 401
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/-/api/config", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// login with wrong password
+	loginBody := strings.NewReader(`{"password":"wrong"}`)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/-/api/login", loginBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// login with correct password
+	loginBody = strings.NewReader(`{"password":"test-secret"}`)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/-/api/login", loginBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	cookies := rec.Result().Cookies()
+	require.Len(t, cookies, 1)
+	require.Equal(t, "cache-proxy-session", cookies[0].Name)
+	require.True(t, cookies[0].HttpOnly)
+
+	// use session cookie to access protected API
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/api/config", nil).WithContext(ctx)
+	req.AddCookie(cookies[0])
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// logout
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/-/api/logout", nil).WithContext(ctx)
+	req.AddCookie(cookies[0])
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	clearCookie := rec.Result().Cookies()
+	require.Len(t, clearCookie, 1)
+	require.Equal(t, -1, clearCookie[0].MaxAge)
+}
+
+func TestMetricsTokenAuth(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:      t.TempDir(),
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		MetricsToken: "my-metrics-token",
+	}, nil)
+	defer closeRuntime(t, rt)
+
+	// without token: 401
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/-/metrics", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Contains(t, rec.Header().Get("WWW-Authenticate"), "Bearer")
+
+	// with correct token: 200
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/metrics", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer my-metrics-token")
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// with wrong token: 401
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/metrics", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestPublicInstancesAPIVisibleWithoutAuth(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:      t.TempDir(),
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		Password:     "test-secret",
+		MetricsToken: "my-metrics-token",
+	}, map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+	}})
+	defer closeRuntime(t, rt)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/-/api/public/instances", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var items []struct {
+		Name string `json:"name"`
+		Mode string `json:"mode"`
+		Path string `json:"path,omitempty"`
+		Bind string `json:"bind,omitempty"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&items))
+	require.Len(t, items, 1)
+	require.Equal(t, "files", items[0].Name)
+	require.Equal(t, "/files", items[0].Path)
+}
+
+func TestSPAServesWithoutAuth(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:      t.TempDir(),
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		Password:     "test-secret",
+		MetricsToken: "",
+	}, nil)
+	defer closeRuntime(t, rt)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	// SPA serves index.html even without auth
+	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestConcurrentProxyRequestsDoNotDeadlock(t *testing.T) {
@@ -754,7 +916,7 @@ func TestConcurrentProxyRequestsDoNotDeadlock(t *testing.T) {
 				if i%5 == 0 {
 					rangeHeader = "bytes=0-2"
 				}
-				_ = requestBody(t, proxyHandler(rt), http.MethodGet, "/files/chaos.txt", rangeHeader)
+				_ = requestBody(t, rt.mainHandler, http.MethodGet, "/files/chaos.txt", rangeHeader)
 			}
 		}(workerID)
 	}
@@ -789,24 +951,6 @@ func requestBody(t *testing.T, handler http.Handler, method, target, rangeHeader
 	return string(body)
 }
 
-func proxyHandler(rt *Runtime) http.Handler {
-	for _, server := range rt.servers {
-		if server.Addr == rt.proxyBind {
-			return server.Handler
-		}
-	}
-	return nil
-}
-
-func metricsHandler(rt *Runtime) http.Handler {
-	for _, server := range rt.servers {
-		if server.Addr == rt.metricsBind {
-			return server.Handler
-		}
-	}
-	return nil
-}
-
 func httpBody(t *testing.T, rawURL string) string {
 	t.Helper()
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -831,21 +975,25 @@ func newTestRuntime(t *testing.T, ctx context.Context, instances map[string]conf
 	t.Helper()
 	dir, err := os.MkdirTemp("", "cache-proxy-runtime-*")
 	require.NoError(t, err)
-	rt := newTestRuntimeWithOptions(t, ctx, Options{Backend: dir, AdminBind: "127.0.0.1:0", MetricsBind: "", MetricsPath: "/metrics", GCInterval: time.Hour}, instances)
+	rt := newTestRuntimeWithOptions(t, ctx, Options{
+		Backend:      dir,
+		Bind:         "127.0.0.1:0",
+		MetricsPath:  "/-/metrics",
+		GCInterval:   time.Hour,
+		Password:     "",
+		MetricsToken: "",
+	}, instances)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return rt
 }
 
 func newTestRuntimeWithOptions(t *testing.T, ctx context.Context, options Options, instances map[string]config.InstanceConfig) *Runtime {
 	t.Helper()
-	if options.ProxyBind == "" {
-		options.ProxyBind = freeLocalAddr(t)
-	}
 	rt, err := OpenWithOptions(ctx, options)
 	require.NoError(t, err)
 	if instances != nil {
 		cfg := DefaultConfig()
-		cfg.Server.Metrics.Bind = ""
+		cfg.Server.Metrics.Path = ""
 		cfg.Instances = instances
 		snapshot, err := rt.UpdateConfig(ctx, rt.generation, cfg)
 		require.NoError(t, err)
@@ -869,4 +1017,79 @@ func closeRuntime(t *testing.T, rt *Runtime) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, rt.Close(ctx))
+}
+
+func TestLoginRateLimiterBlocksAfterMaxAttempts(t *testing.T) {
+	limiter := newLoginRateLimiter()
+	for i := 0; i < 5; i++ {
+		require.True(t, limiter.allow("10.0.0.1"), "attempt %d should be allowed", i+1)
+	}
+	require.False(t, limiter.allow("10.0.0.1"), "6th attempt should be blocked")
+}
+
+func TestLoginRateLimiterCleansExpiredIPs(t *testing.T) {
+	limiter := &loginRateLimiter{attempts: map[string][]time.Time{
+		"10.0.0.1": {time.Now().Add(-2 * time.Minute)},
+		"10.0.0.2": {time.Now().Add(-10 * time.Second), time.Now().Add(-5 * time.Second)},
+	}}
+	require.True(t, limiter.allow("10.0.0.1"))
+	require.Len(t, limiter.attempts["10.0.0.1"], 1)
+	require.True(t, limiter.allow("10.0.0.2"))
+	require.Len(t, limiter.attempts["10.0.0.2"], 3)
+}
+
+func TestImportRejectsMaskedCredentialsForNewInstance(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, nil)
+	defer closeRuntime(t, rt)
+
+	importBody := strings.NewReader(mustJSON(t, instancesImportRequest{
+		Generation: rt.generation,
+		Instances: map[string]config.InstanceConfig{"new-oci": {
+			Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
+			OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "***"}},
+		}},
+	}))
+	importRec := httptest.NewRecorder()
+	importReq := httptest.NewRequest(http.MethodPost, "/-/api/instances/import", importBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(importRec, importReq)
+	require.Equal(t, http.StatusBadRequest, importRec.Code)
+	require.Contains(t, importRec.Body.String(), "masked credentials")
+}
+
+func TestImportAllowsMaskedCredentialsForExistingInstance(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "real-password"}},
+	}})
+	defer closeRuntime(t, rt)
+
+	exportRec := httptest.NewRecorder()
+	exportReq := httptest.NewRequest(http.MethodGet, "/-/api/instances/export?name=oci", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(exportRec, exportReq)
+	require.Equal(t, http.StatusOK, exportRec.Code)
+	var exported instancesExportResponse
+	require.NoError(t, json.NewDecoder(exportRec.Body).Decode(&exported))
+	require.Equal(t, "***", exported.Instances["oci"].OCI.Auth.Password)
+
+	importBody := strings.NewReader(mustJSON(t, instancesImportRequest{
+		Generation: rt.generation,
+		Replace:    true,
+		Instances:  exported.Instances,
+	}))
+	importRec := httptest.NewRecorder()
+	importReq := httptest.NewRequest(http.MethodPost, "/-/api/instances/import", importBody).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(importRec, importReq)
+	require.Equal(t, http.StatusOK, importRec.Code)
+
+	rt.mu.RLock()
+	require.Equal(t, "real-password", rt.config.Instances["oci"].OCI.Auth.Password)
+	rt.mu.RUnlock()
 }

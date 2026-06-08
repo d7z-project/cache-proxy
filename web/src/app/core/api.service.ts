@@ -6,49 +6,54 @@ import { AppConfig, ConfigSnapshot, InstanceSummary, InstancesExport, MetricsSta
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private readonly http = inject(HttpClient);
+  private readonly base = '/-/api';
+
+  publicInstances(): Observable<InstanceSummary[]> {
+    return this.http.get<InstanceSummary[]>(`${this.base}/public/instances`);
+  }
 
   runtime(): Observable<RuntimeInfo> {
-    return this.http.get<RuntimeInfo>('/api/runtime');
+    return this.http.get<RuntimeInfo>(`${this.base}/runtime`, { withCredentials: true });
   }
 
   metricsStats(): Observable<MetricsStats> {
-    return this.http.get<MetricsStats>('/api/metrics/stats');
+    return this.http.get<MetricsStats>(`${this.base}/metrics/stats`, { withCredentials: true });
   }
 
   instances(): Observable<InstanceSummary[]> {
-    return this.http.get<InstanceSummary[]>('/api/instances');
+    return this.http.get<InstanceSummary[]>(`${this.base}/instances`, { withCredentials: true });
   }
 
   exportInstances(name?: string): Observable<InstancesExport> {
     const suffix = name ? `?name=${encodeURIComponent(name)}` : '';
-    return this.http.get<InstancesExport>(`/api/instances/export${suffix}`);
+    return this.http.get<InstancesExport>(`${this.base}/instances/export${suffix}`, { withCredentials: true });
   }
 
   importInstances(generation: number, instances: Record<string, unknown>, replace: boolean): Observable<ConfigSnapshot> {
-    return this.http.post<ConfigSnapshot>('/api/instances/import', { generation, instances, replace });
+    return this.http.post<ConfigSnapshot>(`${this.base}/instances/import`, { generation, instances, replace }, { withCredentials: true });
   }
 
   config(): Observable<ConfigSnapshot> {
-    return this.http.get<ConfigSnapshot>('/api/config');
+    return this.http.get<ConfigSnapshot>(`${this.base}/config`, { withCredentials: true });
   }
 
   saveConfig(generation: number, config: AppConfig): Observable<ConfigSnapshot> {
-    return this.http.put<ConfigSnapshot>('/api/config', { generation, config });
+    return this.http.put<ConfigSnapshot>(`${this.base}/config`, { generation, config }, { withCredentials: true });
   }
 
   validateConfig(config: AppConfig): Observable<{ valid: boolean }> {
-    return this.http.post<{ valid: boolean }>('/api/config/validate', config);
+    return this.http.post<{ valid: boolean }>(`${this.base}/config/validate`, config, { withCredentials: true });
   }
 
   resetConfig(): Observable<ConfigSnapshot> {
-    return this.http.post<ConfigSnapshot>('/api/config/reset', {});
+    return this.http.post<ConfigSnapshot>(`${this.base}/config/reset`, {}, { withCredentials: true });
   }
 
   storageStats(): Observable<StorageStats> {
-    return this.http.get<StorageStats>('/api/storage/stats');
+    return this.http.get<StorageStats>(`${this.base}/storage/stats`, { withCredentials: true });
   }
 
   runGc(): Observable<StorageStats> {
-    return this.http.post<StorageStats>('/api/storage/gc', {});
+    return this.http.post<StorageStats>(`${this.base}/storage/gc`, {}, { withCredentials: true });
   }
 }

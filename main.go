@@ -16,23 +16,22 @@ import (
 var DefaultShutdownTimeout = "10s"
 
 func main() {
-	defaults := server.DefaultOptions()
-	backend := flag.String("backend", envString("CACHE_PROXY_BACKEND", defaults.Backend), "blobfs backend directory")
-	admin := flag.String("admin", envString("CACHE_PROXY_ADMIN", defaults.AdminBind), "admin web/API bind address")
-	proxyBind := flag.String("proxy-bind", envString("CACHE_PROXY_PROXY_BIND", defaults.ProxyBind), "path proxy bind address")
-	metricsBind := flag.String("metrics-bind", envString("CACHE_PROXY_METRICS_BIND", defaults.MetricsBind), "metrics bind address, empty disables metrics")
-	metricsPath := flag.String("metrics-path", envString("CACHE_PROXY_METRICS_PATH", defaults.MetricsPath), "metrics HTTP path")
-	gcInterval := flag.Duration("gc-interval", envDuration("CACHE_PROXY_GC_INTERVAL", defaults.GCInterval), "blobfs GC interval")
+	opts := server.DefaultOptions()
+	bind := flag.String("bind", envString("CACHE_PROXY_BIND", opts.Bind), "主监听地址")
+	backend := flag.String("backend", envString("CACHE_PROXY_BACKEND", opts.Backend), "blobfs 存储目录")
+	pass := flag.String("pass", envString("CACHE_PROXY_PASS", opts.Password), "管理员密码，空=关闭鉴权")
+	metricsToken := flag.String("metrics-token", envString("CACHE_PROXY_METRICS_TOKEN", opts.MetricsToken), "Metrics Bearer token")
+	metricsPath := flag.String("metrics-path", envString("CACHE_PROXY_METRICS_PATH", opts.MetricsPath), "Metrics HTTP 路径")
+	gcInterval := flag.Duration("gc-interval", envDuration("CACHE_PROXY_GC_INTERVAL", opts.GCInterval), "blobfs GC 间隔")
 	flag.Parse()
 
-	ctx := context.Background()
-	runtime, err := server.OpenWithOptions(ctx, server.Options{
-		Backend:     *backend,
-		AdminBind:   *admin,
-		ProxyBind:   *proxyBind,
-		MetricsBind: *metricsBind,
-		MetricsPath: *metricsPath,
-		GCInterval:  *gcInterval,
+	runtime, err := server.OpenWithOptions(context.Background(), server.Options{
+		Backend:      *backend,
+		Bind:         *bind,
+		Password:     *pass,
+		MetricsToken: *metricsToken,
+		MetricsPath:  *metricsPath,
+		GCInterval:   *gcInterval,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
@@ -47,7 +46,7 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
-	slog.Info("cache proxy started", "admin", *admin, "proxy", *proxyBind, "backend", *backend, "metrics", *metricsBind, "gc_interval", gcInterval.String())
+	slog.Info("cache proxy started", "bind", *bind, "backend", *backend, "metrics_path", *metricsPath, "gc_interval", gcInterval.String())
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)

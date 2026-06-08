@@ -1,0 +1,17 @@
+<section class="page login-page">
+  <form class="card login-form" (ngSubmit)="submit()" novalidate>
+    <h1>Cache Proxy</h1>
+    <p class="hint">请输入管理密码以继续。</p>
+    <label>
+      管理密码
+      <input type="password" name="password" [(ngModel)]="password" autofocus autocomplete="current-password" placeholder="请输入密码">
+    </label>
+    <p class="message" *ngIf="error">{{ error }}</p>
+    <button type="submit" class="primary" [disabled]="loading || !password.trim()">
+      {{ loading ? '登录中...' : '登录' }}
+    </button>
+    <p class="hint">
+      <a routerLink="/">返回实例列表</a>
+    </p>
+  </form>
+</section>

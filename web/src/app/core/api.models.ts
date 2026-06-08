@@ -27,15 +27,14 @@ export enum OciAuthType {
 }
 
 export interface RuntimeInfo {
-  adminBind: string;
-  proxyBind: string;
+  bind: string;
   backend: string;
-  metricsBind: string;
+  authEnabled: boolean;
   metricsPath: string;
   gcInterval: string;
   generation: number;
   instances: number;
-  servers: number;
+  handlers: number;
   requests: number;
   errors: number;
   upstreams: number;
@@ -66,7 +65,6 @@ export interface ServerConfig {
 }
 
 export interface MetricsConfig {
-  bind: string;
   path: string;
 }
 

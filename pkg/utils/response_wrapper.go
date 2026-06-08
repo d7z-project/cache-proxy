@@ -32,6 +32,7 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 			Transport: &http.Transport{
 				DialContext: DefaultDialContext(3 * time.Second),
 			},
+			Timeout: 30 * time.Second,
 		},
 		UserAgent: "curl/8.10.0",
 	}

@@ -1,0 +1,33 @@
+<section class="page">
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">Cache Proxy</p>
+      <h2>可用代理实例</h2>
+      <p class="hint">以下代理路径可直接访问，登录后可管理实例配置。</p>
+    </div>
+    <div class="actions" *ngIf="(authEnabled$ | async) && (isAuth$ | async) === false">
+      <a routerLink="/login" class="button-link">登录管理</a>
+    </div>
+  </header>
+
+  <p class="message" *ngIf="error">{{ error }}</p>
+
+  <ng-container *ngIf="instances$ | async as instances; else loadingSkeleton">
+    <p class="message" *ngIf="instances.length === 0 && !error">没有配置任何代理实例。</p>
+    <div class="instance-grid" *ngIf="instances.length > 0">
+      <article class="card block" *ngFor="let item of instances">
+        <div class="instance-card-header">
+          <strong>{{ item.name }}</strong>
+          <span class="badge">{{ modeLabel(item.mode) }}</span>
+        </div>
+        <p class="hint">{{ item.path || item.bind }}</p>
+      </article>
+    </div>
+  </ng-container>
+
+  <ng-template #loadingSkeleton>
+    <div class="instance-grid">
+      <article class="card block skeleton" *ngFor="let _ of [0,1,2]"></article>
+    </div>
+  </ng-template>
+</section>

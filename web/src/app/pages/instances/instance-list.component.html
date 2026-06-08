@@ -1,0 +1,61 @@
+<section class="page">
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">实例</p>
+      <h2>代理实例</h2>
+      <p class="hint">管理监听入口、上游连接和缓存策略。</p>
+    </div>
+    <div class="actions">
+      <div class="dropdown">
+        <button type="button" class="primary" (click)="toggleDropdown()">新增实例 ▾</button>
+        <div class="dropdown-menu" *ngIf="dropdownOpen">
+          <button type="button" (click)="startCreate('file')">文件代理</button>
+          <button type="button" (click)="startCreate('oci')">容器镜像代理</button>
+          <button type="button" (click)="startCreate('npm')">npm 包代理</button>
+        </div>
+      </div>
+      <button type="button" (click)="openImportExport()">导入导出</button>
+    </div>
+  </header>
+
+  <p *ngIf="loading">正在加载实例配置...</p>
+
+  <div class="instance-grid" *ngIf="!loading">
+    <article class="card block" *ngFor="let item of instances">
+      <div class="instance-card-header">
+        <strong>{{ item.name }}</strong>
+        <span class="badge">{{ modeLabel(item.config.mode) }}</span>
+      </div>
+      <p class="hint">{{ item.config.listen.path || item.config.listen.bind }}</p>
+      <div class="actions card-actions">
+        <button type="button" (click)="startEdit(item.name)">编辑</button>
+        <button type="button" (click)="copyInstance(item.name)">复制</button>
+        <button type="button" class="danger" (click)="promptDelete(item.name)">删除</button>
+      </div>
+    </article>
+    <p class="empty" *ngIf="instances.length === 0">还没有实例，点击上方按钮创建。</p>
+  </div>
+
+  <!-- Import/Export Modal -->
+  <div class="modal-backdrop" *ngIf="showImportExport" (click)="showImportExport = false">
+    <div class="modal-card card" (click)="$event.stopPropagation()" style="max-width: 600px">
+      <h3>导入导出</h3>
+      <p class="hint">用于迁移实例配置。</p>
+      <div class="ie-grid" style="margin-top: 1rem">
+        <div class="actions vertical-actions">
+          <button type="button" (click)="exportInstances()">导出全部实例</button>
+          <p class="hint" style="margin-top: 0.25rem">下载为 JSON 文件。</p>
+        </div>
+        <div>
+          <textarea class="small" name="importText" [(ngModel)]="importText" placeholder="粘贴导出的实例配置"></textarea>
+          <label class="inline-check" style="margin-top: 0.5rem">
+            <input type="checkbox" name="importReplace" [(ngModel)]="importReplace"> 覆盖同名实例
+          </label>
+          <button type="button" class="primary" style="margin-top: 0.5rem; width:100%" (click)="importInstances()" [disabled]="!importText.trim() || saving">
+            {{ saving ? '导入中...' : '导入实例' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

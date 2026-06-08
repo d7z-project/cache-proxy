@@ -3,14 +3,12 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"net/http"
 	"strings"
 
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/web"
 )
 
 type configUpdateRequest struct {
@@ -35,6 +33,9 @@ func (r *Runtime) configAPI(resp http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodGet:
 		snapshot, err := r.Snapshot(req.Context())
+		if snapshot != nil {
+			snapshot.Config = snapshot.Config.Redacted()
+		}
 		writeJSON(resp, snapshot, err)
 	case http.MethodPut:
 		var input configUpdateRequest
@@ -51,6 +52,9 @@ func (r *Runtime) configAPI(resp http.ResponseWriter, req *http.Request) {
 			}
 			writeError(resp, http.StatusBadRequest, err)
 			return
+		}
+		if snapshot != nil {
+			snapshot.Config = snapshot.Config.Redacted()
 		}
 		writeJSON(resp, snapshot, nil)
 	default:
@@ -88,26 +92,39 @@ func (r *Runtime) resetAPI(resp http.ResponseWriter, req *http.Request) {
 	writeJSON(resp, snapshot, err)
 }
 
+type instanceSummary struct {
+	Name string `json:"name"`
+	Mode string `json:"mode"`
+	Path string `json:"path,omitempty"`
+	Bind string `json:"bind,omitempty"`
+}
+
+func (r *Runtime) listInstanceSummaries() []instanceSummary {
+	r.mu.RLock()
+	instances := r.config.Instances
+	r.mu.RUnlock()
+	result := make([]instanceSummary, 0, len(instances))
+	for _, name := range sortedInstanceNames(instances) {
+		cfg := instances[name]
+		result = append(result, instanceSummary{Name: name, Mode: cfg.Mode, Path: cfg.Listen.Path, Bind: cfg.Listen.Bind})
+	}
+	return result
+}
+
+func (r *Runtime) publicInstancesAPI(resp http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		resp.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(resp, r.listInstanceSummaries(), nil)
+}
+
 func (r *Runtime) instancesAPI(resp http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		resp.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	type item struct {
-		Name string `json:"name"`
-		Mode string `json:"mode"`
-		Path string `json:"path,omitempty"`
-		Bind string `json:"bind,omitempty"`
-	}
-	r.mu.RLock()
-	instances := r.config.Instances
-	items := []item{}
-	for _, name := range sortedInstanceNames(instances) {
-		cfg := instances[name]
-		items = append(items, item{Name: name, Mode: cfg.Mode, Path: cfg.Listen.Path, Bind: cfg.Listen.Bind})
-	}
-	r.mu.RUnlock()
-	writeJSON(resp, items, nil)
+	writeJSON(resp, r.listInstanceSummaries(), nil)
 }
 
 func (r *Runtime) instancesExportAPI(resp http.ResponseWriter, req *http.Request) {
@@ -126,10 +143,10 @@ func (r *Runtime) instancesExportAPI(resp http.ResponseWriter, req *http.Request
 			writeError(resp, http.StatusNotFound, errors.New("instance not found"))
 			return
 		}
-		result[name] = instance
+		result[name] = instance.Redacted()
 	} else {
 		for _, instanceName := range sortedInstanceNames(r.config.Instances) {
-			result[instanceName] = r.config.Instances[instanceName]
+			result[instanceName] = r.config.Instances[instanceName].Redacted()
 		}
 	}
 	r.mu.RUnlock()
@@ -164,8 +181,14 @@ func (r *Runtime) instancesImportAPI(resp http.ResponseWriter, req *http.Request
 		return
 	}
 	for name, instance := range instances {
-		if _, exists := next.Instances[name]; exists && !input.Replace {
-			writeError(resp, http.StatusConflict, errors.New("instance already exists: "+name))
+		if _, exists := next.Instances[name]; exists {
+			if !input.Replace {
+				writeError(resp, http.StatusConflict, errors.New("instance already exists: "+name))
+				return
+			}
+		} else if instance.OCI != nil && instance.OCI.Auth != nil &&
+			(instance.OCI.Auth.Password == "***" || instance.OCI.Auth.Token == "***") {
+			writeError(resp, http.StatusBadRequest, errors.New("new instance "+name+" contains masked credentials"))
 			return
 		}
 		next.Instances[name] = instance
@@ -192,18 +215,17 @@ func (r *Runtime) runtimeAPI(resp http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	generation := r.generation
 	instanceCount := len(r.config.Instances)
-	serverCount := len(r.servers)
+	handlerCount := len(r.handlers)
 	r.mu.RUnlock()
 	writeJSON(resp, map[string]any{
-		"adminBind":   r.adminBind,
-		"proxyBind":   r.proxyBind,
+		"bind":        r.bind,
 		"backend":     r.backend,
-		"metricsBind": r.metricsBind,
+		"authEnabled": r.password != "",
 		"metricsPath": r.metricsPath,
 		"gcInterval":  r.gcInterval.String(),
 		"generation":  generation,
 		"instances":   instanceCount,
-		"servers":     serverCount,
+		"handlers":    handlerCount,
 		"requests":    stats.Total.Requests,
 		"errors":      stats.Total.Errors,
 		"upstreams":   stats.Total.UpstreamRequests,
@@ -234,20 +256,6 @@ func (r *Runtime) storageGCAPI(resp http.ResponseWriter, req *http.Request) {
 	}
 	result, err := r.store.RunGC(req.Context(), blobfs.GCOptions{Compact: true})
 	writeJSON(resp, result, err)
-}
-
-func (r *Runtime) webUI(resp http.ResponseWriter, req *http.Request) {
-	assets := web.Assets()
-	filePath := strings.TrimPrefix(req.URL.Path, "/")
-	if filePath == "" {
-		filePath = "index.html"
-	}
-	if stat, err := fs.Stat(assets, filePath); err == nil && !stat.IsDir() {
-		http.FileServerFS(assets).ServeHTTP(resp, req)
-		return
-	}
-	req.URL.Path = "/index.html"
-	http.FileServerFS(assets).ServeHTTP(resp, req)
 }
 
 func writeJSON(resp http.ResponseWriter, value any, err error) {

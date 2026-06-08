@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +31,7 @@ import (
 	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	npmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
 	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	"gopkg.d7z.net/cache-proxy/web"
 )
 
 const (
@@ -40,47 +41,46 @@ const (
 
 var (
 	DefaultBackend        = "/tmp/cache-proxy"
-	DefaultAdminBind      = "127.0.0.1:18080"
-	DefaultProxyBind      = "127.0.0.1:18081"
-	DefaultMetricsBind    = "127.0.0.1:8911"
-	DefaultMetricsPath    = "/metrics"
+	DefaultBind           = "127.0.0.1:18080"
+	DefaultMetricsPath    = "/-/metrics"
 	DefaultGCInterval     = "24h"
 	DefaultExpireAfter    = "720h"
 	DefaultConfigMaxBytes = "1048576"
 )
 
 type Runtime struct {
-	adminBind   string
-	proxyBind   string
-	backend     string
-	metricsBind string
-	metricsPath string
-	gcInterval  time.Duration
-	store       *blobfs.Store
-	stats       *proxy.Stats
-	metrics     *prometheus.Registry
-	config      *config.Config
-	generation  uint64
-	mu          sync.RWMutex
+	bind         string
+	backend      string
+	password     string
+	metricsToken string
+	metricsPath  string
+	gcInterval   time.Duration
+	store        *blobfs.Store
+	stats        *proxy.Stats
+	metricsReg   *prometheus.Registry
+	config       *config.Config
+	generation   uint64
+	mu           sync.RWMutex
 
-	servers      []*http.Server
-	handlers     []*proxy.Handler
 	apiMux       *http.ServeMux
+	mainHandler  http.Handler
+	handlers     []*proxy.Handler
 	pathHandlers map[string]*proxy.Handler
 	bindHandlers map[string]*proxy.Handler
 
-	activeServers     map[string]*http.Server
-	activeBindServers map[string]*http.Server
-	started           bool
-	closed            atomic.Bool
-	gcStop            chan struct{}
-	gcDone            chan struct{}
+	mainListener net.Listener
+	mainSrv      *http.Server
+	bindServers  []*http.Server
+
+	loginLimiter *loginRateLimiter
+	started      bool
+	closed       atomic.Bool
+	gcStop       chan struct{}
+	gcDone       chan struct{}
 }
 
 type serverState struct {
-	servers      []*http.Server
 	handlers     []*proxy.Handler
-	apiMux       *http.ServeMux
 	pathHandlers map[string]*proxy.Handler
 	bindHandlers map[string]*proxy.Handler
 }
@@ -97,22 +97,22 @@ type ConfigSnapshot struct {
 }
 
 type Options struct {
-	Backend     string
-	AdminBind   string
-	ProxyBind   string
-	MetricsBind string
-	MetricsPath string
-	GCInterval  time.Duration
+	Backend      string
+	Bind         string
+	Password     string
+	MetricsToken string
+	MetricsPath  string
+	GCInterval   time.Duration
 }
 
 func DefaultOptions() Options {
 	return Options{
-		Backend:     DefaultBackend,
-		AdminBind:   DefaultAdminBind,
-		ProxyBind:   DefaultProxyBind,
-		MetricsBind: DefaultMetricsBind,
-		MetricsPath: DefaultMetricsPath,
-		GCInterval:  mustDefaultDuration("DefaultGCInterval", DefaultGCInterval),
+		Backend:      DefaultBackend,
+		Bind:         DefaultBind,
+		Password:     "",
+		MetricsToken: "",
+		MetricsPath:  DefaultMetricsPath,
+		GCInterval:   mustDefaultDuration("DefaultGCInterval", DefaultGCInterval),
 	}
 }
 
@@ -132,22 +132,12 @@ func defaultConfigMaxBytes() int {
 	return value
 }
 
-func Open(ctx context.Context, backend, adminBind string) (*Runtime, error) {
-	options := DefaultOptions()
-	options.Backend = backend
-	options.AdminBind = adminBind
-	return OpenWithOptions(ctx, options)
-}
-
 func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 	if options.Backend == "" {
 		return nil, errors.New("backend is empty")
 	}
-	if options.AdminBind == "" {
-		return nil, errors.New("admin bind is empty")
-	}
-	if options.ProxyBind == "" {
-		options.ProxyBind = DefaultProxyBind
+	if options.Bind == "" {
+		options.Bind = DefaultBind
 	}
 	if options.MetricsPath == "" {
 		options.MetricsPath = DefaultMetricsPath
@@ -167,26 +157,29 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	metricsReg := prometheus.NewRegistry()
+	metricsReg.MustRegister(newBlobfsCollector(store))
 	runtime := &Runtime{
-		adminBind:   options.AdminBind,
-		proxyBind:   options.ProxyBind,
-		backend:     options.Backend,
-		metricsBind: options.MetricsBind,
-		metricsPath: options.MetricsPath,
-		gcInterval:  options.GCInterval,
-		store:       store,
-		stats:       proxy.NewStats(),
-		metrics:     prometheus.NewRegistry(),
-		config:      cfg,
-		generation:  generation,
-		gcStop:      make(chan struct{}),
-		gcDone:      make(chan struct{}),
+		bind:         options.Bind,
+		backend:      options.Backend,
+		password:     options.Password,
+		metricsToken: options.MetricsToken,
+		metricsPath:  options.MetricsPath,
+		gcInterval:   options.GCInterval,
+		store:        store,
+		stats:        proxy.NewStats(),
+		metricsReg:   metricsReg,
+		config:       cfg,
+		generation:   generation,
+		loginLimiter: newLoginRateLimiter(),
+		gcStop:       make(chan struct{}),
+		gcDone:       make(chan struct{}),
 	}
-	runtime.metrics.MustRegister(newBlobfsCollector(store))
-	if err := runtime.buildServers(); err != nil {
+	if err := runtime.buildMainHandler(cfg); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
+	runtime.mainSrv = &http.Server{Addr: runtime.bind, Handler: runtime.mainHandler}
 	go runtime.gcLoop(options.GCInterval)
 	return runtime, nil
 }
@@ -199,50 +192,58 @@ func (r *Runtime) Start() error {
 	}
 	r.mu.RUnlock()
 
-	listeners := make([]net.Listener, 0, len(r.servers))
+	mainLn, err := net.Listen("tcp", r.bind)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", r.bind, err)
+	}
+
+	bindServers := []*http.Server{}
+	bindListeners := []net.Listener{}
 	r.mu.RLock()
-	servers := append([]*http.Server(nil), r.servers...)
-	bindHandlers := map[string]*proxy.Handler{}
-	for addr, handler := range r.bindHandlers {
-		bindHandlers[addr] = handler
+	for addr := range r.bindHandlers {
+		bindServers = append(bindServers, &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			r.serveBind(addr, w, req)
+		})})
 	}
 	r.mu.RUnlock()
-	for _, srv := range servers {
-		listener, err := net.Listen("tcp", srv.Addr)
-		if err != nil {
-			for _, opened := range listeners {
+	for _, srv := range bindServers {
+		ln, listenErr := net.Listen("tcp", srv.Addr)
+		if listenErr != nil {
+			_ = mainLn.Close()
+			for _, opened := range bindListeners {
 				_ = opened.Close()
 			}
-			return fmt.Errorf("listen %s: %w", srv.Addr, err)
+			return fmt.Errorf("listen %s: %w", srv.Addr, listenErr)
 		}
-		listeners = append(listeners, listener)
+		bindListeners = append(bindListeners, ln)
 	}
-	activeServers := map[string]*http.Server{}
-	activeBindServers := map[string]*http.Server{}
-	for i, srv := range servers {
-		listener := listeners[i]
-		activeServers[srv.Addr] = srv
-		if _, ok := bindHandlers[srv.Addr]; ok {
-			activeBindServers[srv.Addr] = srv
-		}
-		go func(server *http.Server) {
-			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("server stopped with error", "addr", server.Addr, "err", err)
-			}
-		}(srv)
-	}
+
 	r.mu.Lock()
 	if r.started {
 		r.mu.Unlock()
-		for _, listener := range listeners {
-			_ = listener.Close()
+		_ = mainLn.Close()
+		for _, ln := range bindListeners {
+			_ = ln.Close()
 		}
 		return nil
 	}
-	r.activeServers = activeServers
-	r.activeBindServers = activeBindServers
+	r.mainListener = mainLn
+	r.bindServers = bindServers
 	r.started = true
 	r.mu.Unlock()
+
+	go func() {
+		if err := r.mainSrv.Serve(mainLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("main server error", "addr", r.bind, "err", err)
+		}
+	}()
+	for i, srv := range bindServers {
+		go func(server *http.Server, ln net.Listener) {
+			if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("bind server error", "addr", server.Addr, "err", err)
+			}
+		}(srv, bindListeners[i])
+	}
 	return nil
 }
 
@@ -252,19 +253,16 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 	close(r.gcStop)
 	<-r.gcDone
+
 	var joined error
 	r.mu.RLock()
-	activeServers := make([]*http.Server, 0, len(r.activeServers))
+	mainSrv := r.mainSrv
+	bindServers := append([]*http.Server(nil), r.bindServers...)
 	handlers := append([]*proxy.Handler(nil), r.handlers...)
-	if len(r.activeServers) > 0 {
-		for _, srv := range r.activeServers {
-			activeServers = append(activeServers, srv)
-		}
-	} else {
-		activeServers = append(activeServers, r.servers...)
-	}
 	r.mu.RUnlock()
-	for _, srv := range activeServers {
+
+	joined = errors.Join(joined, mainSrv.Shutdown(ctx))
+	for _, srv := range bindServers {
 		joined = errors.Join(joined, srv.Shutdown(ctx))
 	}
 	for _, handler := range handlers {
@@ -293,9 +291,7 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 		return nil, conflictError("config generation changed")
 	}
 	r.preserveStartupOnlyConfig(cfg)
-	if err := r.validateConfig(cfg); err != nil {
-		return nil, err
-	}
+	r.preserveMaskedCredentials(cfg)
 	state, err := r.buildServerState(cfg)
 	if err != nil {
 		return nil, err
@@ -317,7 +313,7 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 		closePreparedServers(newBindServers)
 		return nil, err
 	}
-	next, generation, err := loadConfig(ctx, r.store)
+	next, nextGen, err := loadConfig(ctx, r.store)
 	if err != nil {
 		closePreparedServers(newBindServers)
 		return nil, err
@@ -325,69 +321,127 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 	r.mu.Lock()
 	oldHandlers := append([]*proxy.Handler(nil), r.handlers...)
 	r.config = next
-	r.generation = generation
+	r.generation = nextGen
 	r.applyServerState(state)
 	if r.started {
-		if r.activeServers == nil {
-			r.activeServers = map[string]*http.Server{}
-		}
-		if r.activeBindServers == nil {
-			r.activeBindServers = map[string]*http.Server{}
-		}
-		for addr, prepared := range newBindServers {
+		for _, prepared := range newBindServers {
 			prepared.start()
-			r.activeServers[addr] = prepared.server
-			r.activeBindServers[addr] = prepared.server
+			r.bindServers = append(r.bindServers, prepared.server)
 		}
-		for _, srv := range removedBindServers {
-			delete(r.activeServers, srv.Addr)
-			delete(r.activeBindServers, srv.Addr)
+		for _, removed := range removedBindServers {
+			for i, srv := range r.bindServers {
+				if srv.Addr == removed.Addr {
+					r.bindServers = append(r.bindServers[:i], r.bindServers[i+1:]...)
+					break
+				}
+			}
 		}
 	}
 	r.mu.Unlock()
+
 	shutdownServerListWithTimeout(removedBindServers)
 	for _, handler := range oldHandlers {
 		handler.Close()
 	}
-	return &ConfigSnapshot{Generation: generation, Config: next, YAML: string(data)}, nil
+	return &ConfigSnapshot{Generation: nextGen, Config: next, YAML: string(data)}, nil
 }
 
-func (r *Runtime) buildServers() error {
-	state, err := r.buildServerState(r.config)
+func (r *Runtime) buildMainHandler(cfg *config.Config) error {
+	state, err := r.buildServerState(cfg)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	r.applyServerState(state)
 	r.mu.Unlock()
+
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/-/api/runtime", r.runtimeAPI)
+	apiMux.HandleFunc("/-/api/config", r.configAPI)
+	apiMux.HandleFunc("/-/api/config/validate", r.validateAPI)
+	apiMux.HandleFunc("/-/api/config/reset", r.resetAPI)
+	apiMux.HandleFunc("/-/api/instances", r.instancesAPI)
+	apiMux.HandleFunc("/-/api/instances/export", r.instancesExportAPI)
+	apiMux.HandleFunc("/-/api/instances/import", r.instancesImportAPI)
+	apiMux.HandleFunc("/-/api/metrics/stats", r.metricsStatsAPI)
+	apiMux.HandleFunc("/-/api/storage/stats", r.storageStatsAPI)
+	apiMux.HandleFunc("/-/api/storage/gc", r.storageGCAPI)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /-/api/login", r.loginHandler)
+	mux.HandleFunc("POST /-/api/logout", r.logoutHandler)
+	mux.HandleFunc("GET /-/api/public/instances", r.publicInstancesAPI)
+	mux.Handle("GET /-/metrics", metricsAuthMiddleware(r.metricsToken,
+		promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, r.metricsReg}, promhttp.HandlerOpts{})))
+	mux.Handle("/-/api/", adminAuthMiddleware(r.password, apiMux))
+	mux.HandleFunc("/", r.serveRoot)
+
+	r.mu.Lock()
+	r.apiMux = apiMux
+	r.mainHandler = mux
+	r.mu.Unlock()
 	return nil
+}
+
+func (r *Runtime) serveRoot(w http.ResponseWriter, req *http.Request) {
+	if prefix := r.matchProxyPrefix(req.URL.Path); prefix != "" {
+		r.servePathProxyAt(w, req, prefix)
+		return
+	}
+	r.serveSPA(w, req)
+}
+
+func (r *Runtime) matchProxyPrefix(target string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	prefixes := make([]string, 0, len(r.pathHandlers))
+	for p := range r.pathHandlers {
+		prefixes = append(prefixes, p)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(prefixes)))
+	for _, prefix := range prefixes {
+		if target == prefix || strings.HasPrefix(target, prefix+"/") {
+			return prefix
+		}
+	}
+	return ""
+}
+
+func (r *Runtime) servePathProxyAt(w http.ResponseWriter, req *http.Request, prefix string) {
+	r.mu.RLock()
+	handler := r.pathHandlers[prefix]
+	r.mu.RUnlock()
+	if handler == nil {
+		http.NotFound(w, req)
+		return
+	}
+	next := req.Clone(req.Context())
+	next.Header = req.Header.Clone()
+	next.Header.Set("X-Cache-Proxy-Prefix", prefix)
+	http.StripPrefix(prefix, handler).ServeHTTP(w, next)
+}
+
+func (r *Runtime) serveSPA(w http.ResponseWriter, req *http.Request) {
+	assets := web.Assets()
+	filePath := strings.TrimPrefix(req.URL.Path, "/")
+	if filePath == "" {
+		filePath = "index.html"
+	}
+	if stat, err := fs.Stat(assets, filePath); err == nil && !stat.IsDir() {
+		http.FileServerFS(assets).ServeHTTP(w, req)
+		return
+	}
+	req.URL.Path = "/index.html"
+	http.FileServerFS(assets).ServeHTTP(w, req)
 }
 
 func (r *Runtime) buildServerState(cfg *config.Config) (*serverState, error) {
 	if err := r.validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	apiMux := http.NewServeMux()
-	apiMux.HandleFunc("/api/config", r.configAPI)
-	apiMux.HandleFunc("/api/config/validate", r.validateAPI)
-	apiMux.HandleFunc("/api/config/reset", r.resetAPI)
-	apiMux.HandleFunc("/api/instances", r.instancesAPI)
-	apiMux.HandleFunc("/api/instances/export", r.instancesExportAPI)
-	apiMux.HandleFunc("/api/instances/import", r.instancesImportAPI)
-	apiMux.HandleFunc("/api/runtime", r.runtimeAPI)
-	apiMux.HandleFunc("/api/metrics/stats", r.metricsStatsAPI)
-	apiMux.HandleFunc("/api/storage/stats", r.storageStatsAPI)
-	apiMux.HandleFunc("/api/storage/gc", r.storageGCAPI)
-
-	servers := []*http.Server{{Addr: r.adminBind, Handler: r}, {Addr: r.proxyBind, Handler: http.HandlerFunc(r.servePathProxy)}}
 	handlers := []*proxy.Handler{}
 	pathHandlers := map[string]*proxy.Handler{}
 	bindHandlers := map[string]*proxy.Handler{}
-	if r.metricsBind != "" && r.metricsPath != "" {
-		mux := http.NewServeMux()
-		mux.Handle(r.metricsPath, promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, r.metrics}, promhttp.HandlerOpts{}))
-		servers = append(servers, &http.Server{Addr: r.metricsBind, Handler: mux})
-	}
 	for _, instanceName := range sortedInstanceNames(cfg.Instances) {
 		instance := cfg.Instances[instanceName]
 		resolver, err := newResolver(instance)
@@ -399,49 +453,24 @@ func (r *Runtime) buildServerState(cfg *config.Config) (*serverState, error) {
 		if instance.Listen.Path != "" {
 			pathHandlers["/"+strings.Trim(instance.Listen.Path, "/")] = handler
 		} else {
-			addr := instance.Listen.Bind
-			bindHandlers[addr] = handler
-			servers = append(servers, &http.Server{Addr: addr, Handler: http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-				r.serveBind(addr, resp, req)
-			})})
+			bindHandlers[instance.Listen.Bind] = handler
 		}
 	}
-	return &serverState{servers: servers, handlers: handlers, apiMux: apiMux, pathHandlers: pathHandlers, bindHandlers: bindHandlers}, nil
+	return &serverState{handlers: handlers, pathHandlers: pathHandlers, bindHandlers: bindHandlers}, nil
 }
 
 func (r *Runtime) applyServerState(state *serverState) {
-	r.servers = state.servers
 	r.handlers = state.handlers
-	r.apiMux = state.apiMux
 	r.pathHandlers = state.pathHandlers
 	r.bindHandlers = state.bindHandlers
-}
-
-func (r *Runtime) serveBind(addr string, resp http.ResponseWriter, req *http.Request) {
-	r.mu.RLock()
-	handler := r.bindHandlers[addr]
-	r.mu.RUnlock()
-	if handler == nil {
-		http.NotFound(resp, req)
-		return
-	}
-	handler.ServeHTTP(resp, req)
-}
-
-func (p preparedServer) start() {
-	go func() {
-		if err := p.server.Serve(p.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server stopped with error", "addr", p.server.Addr, "err", err)
-		}
-	}()
 }
 
 func (r *Runtime) prepareBindServers(state *serverState) (map[string]preparedServer, []*http.Server, error) {
 	r.mu.RLock()
 	started := r.started
-	activeBindServers := map[string]*http.Server{}
-	for addr, srv := range r.activeBindServers {
-		activeBindServers[addr] = srv
+	currentAddrs := map[string]*http.Server{}
+	for _, srv := range r.bindServers {
+		currentAddrs[srv.Addr] = srv
 	}
 	r.mu.RUnlock()
 	if !started {
@@ -449,7 +478,7 @@ func (r *Runtime) prepareBindServers(state *serverState) (map[string]preparedSer
 	}
 	newServers := map[string]preparedServer{}
 	for addr := range state.bindHandlers {
-		if activeBindServers[addr] != nil {
+		if currentAddrs[addr] != nil {
 			continue
 		}
 		listener, err := net.Listen("tcp", addr)
@@ -457,18 +486,37 @@ func (r *Runtime) prepareBindServers(state *serverState) (map[string]preparedSer
 			closePreparedServers(newServers)
 			return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
 		}
-		server := &http.Server{Addr: addr, Handler: http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-			r.serveBind(addr, resp, req)
-		})}
-		newServers[addr] = preparedServer{server: server, listener: listener}
-	}
-	removedServers := []*http.Server{}
-	for addr, srv := range activeBindServers {
-		if state.bindHandlers[addr] == nil {
-			removedServers = append(removedServers, srv)
+		newServers[addr] = preparedServer{
+			server:   &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serveBind(addr, w, req) })},
+			listener: listener,
 		}
 	}
-	return newServers, removedServers, nil
+	removed := []*http.Server{}
+	for addr, srv := range currentAddrs {
+		if state.bindHandlers[addr] == nil {
+			removed = append(removed, srv)
+		}
+	}
+	return newServers, removed, nil
+}
+
+func (r *Runtime) serveBind(addr string, w http.ResponseWriter, req *http.Request) {
+	r.mu.RLock()
+	handler := r.bindHandlers[addr]
+	r.mu.RUnlock()
+	if handler == nil {
+		http.NotFound(w, req)
+		return
+	}
+	handler.ServeHTTP(w, req)
+}
+
+func (p preparedServer) start() {
+	go func() {
+		if err := p.server.Serve(p.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("bind server error", "addr", p.server.Addr, "err", err)
+		}
+	}()
 }
 
 func closePreparedServers(servers map[string]preparedServer) {
@@ -477,76 +525,65 @@ func closePreparedServers(servers map[string]preparedServer) {
 	}
 }
 
-func shutdownServerList(ctx context.Context, servers []*http.Server) {
+func shutdownServerListWithTimeout(servers []*http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	for _, srv := range servers {
 		_ = srv.Shutdown(ctx)
 	}
 }
 
-func shutdownServerListWithTimeout(servers []*http.Server) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	shutdownServerList(ctx, servers)
-}
-
-var pathIndexTemplate = template.Must(template.New("path-index").Parse(`<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>Cache Proxy</title></head>
-<body>
-<h1>可用代理路径</h1>
-{{if .}}
-<ul>{{range .}}<li><a href="{{.}}">{{.}}</a></li>{{end}}</ul>
-{{else}}
-<p>暂无路径代理实例。</p>
-{{end}}
-</body>
-</html>`))
-
-func (r *Runtime) pathIndex(resp http.ResponseWriter, req *http.Request, prefixes []string) {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		resp.Header().Set("Allow", "GET, HEAD")
-		http.Error(resp, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		return
-	}
-	resp.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if req.Method == http.MethodHead {
-		return
-	}
-	if err := pathIndexTemplate.Execute(resp, prefixes); err != nil {
-		slog.Warn("render path index failed", "err", err)
-	}
-}
-
-func (r *Runtime) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
+func (r *Runtime) preserveStartupOnlyConfig(cfg *config.Config) {
 	r.mu.RLock()
-	apiMux := r.apiMux
+	current := r.config
 	r.mu.RUnlock()
-	if strings.HasPrefix(req.URL.Path, "/api/") {
-		apiMux.ServeHTTP(resp, req)
+	if cfg == nil || current == nil {
 		return
 	}
-	r.webUI(resp, req)
+	cfg.Version = current.Version
+	cfg.Server = current.Server
+	cfg.Storage = current.Storage
 }
 
-func (r *Runtime) servePathProxy(resp http.ResponseWriter, req *http.Request) {
+func (r *Runtime) preserveMaskedCredentials(cfg *config.Config) {
 	r.mu.RLock()
-	pathHandlers := r.pathHandlers
-	prefixes := make([]string, 0, len(pathHandlers))
-	for prefix := range pathHandlers {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(prefixes)))
+	current := r.config
 	r.mu.RUnlock()
-	for _, prefix := range prefixes {
-		if req.URL.Path == prefix || strings.HasPrefix(req.URL.Path, prefix+"/") {
-			next := req.Clone(req.Context())
-			next.Header = req.Header.Clone()
-			next.Header.Set("X-Cache-Proxy-Prefix", prefix)
-			http.StripPrefix(prefix, pathHandlers[prefix]).ServeHTTP(resp, next)
-			return
+	if cfg == nil || current == nil {
+		return
+	}
+	for name, inst := range cfg.Instances {
+		if inst.OCI != nil && inst.OCI.Auth != nil {
+			auth := inst.OCI.Auth
+			if currentInst, ok := current.Instances[name]; ok && currentInst.OCI != nil && currentInst.OCI.Auth != nil {
+				currentAuth := currentInst.OCI.Auth
+				if auth.Password == "***" || (auth.Password == "" && currentAuth.Password != "") {
+					auth.Password = currentAuth.Password
+				}
+				if auth.Token == "***" || (auth.Token == "" && currentAuth.Token != "") {
+					auth.Token = currentAuth.Token
+				}
+			}
+			cfg.Instances[name] = inst
 		}
 	}
-	r.pathIndex(resp, req, prefixes)
+}
+
+func (r *Runtime) validateConfig(cfg *config.Config) error {
+	return validateConfig(cfg, r.bind)
+}
+
+func newResolver(cfg config.InstanceConfig) (proxy.Resolver, error) {
+	switch cfg.Mode {
+	case config.ModeFile:
+		return fileproxy.New(cfg.Cache), nil
+	case config.ModeOCI:
+		return ociproxy.New(cfg.OCI), nil
+	case config.ModeNPM:
+		return npmproxy.New(cfg.NPM), nil
+	default:
+		return nil, fmt.Errorf("unsupported mode %s", cfg.Mode)
+	}
 }
 
 func (r *Runtime) gcLoop(interval time.Duration) {
@@ -565,35 +602,6 @@ func (r *Runtime) gcLoop(interval time.Duration) {
 				slog.Warn("blob gc failed", "err", err)
 			}
 		}
-	}
-}
-
-func (r *Runtime) preserveStartupOnlyConfig(cfg *config.Config) {
-	r.mu.RLock()
-	current := r.config
-	r.mu.RUnlock()
-	if cfg == nil || current == nil {
-		return
-	}
-	cfg.Version = current.Version
-	cfg.Server = current.Server
-	cfg.Storage = current.Storage
-}
-
-func (r *Runtime) validateConfig(cfg *config.Config) error {
-	return validateConfig(cfg, r.adminBind, r.proxyBind, r.metricsBind)
-}
-
-func newResolver(cfg config.InstanceConfig) (proxy.Resolver, error) {
-	switch cfg.Mode {
-	case config.ModeFile:
-		return fileproxy.New(cfg.Cache), nil
-	case config.ModeOCI:
-		return ociproxy.New(cfg.OCI), nil
-	case config.ModeNPM:
-		return npmproxy.New(cfg.NPM), nil
-	default:
-		return nil, fmt.Errorf("unsupported mode %s", cfg.Mode)
 	}
 }
 
@@ -651,7 +659,7 @@ func parseConfig(data []byte) (*config.Config, error) {
 func DefaultConfig() *config.Config {
 	return &config.Config{
 		Version: 1,
-		Server:  config.ServerConfig{Metrics: config.MetricsConfig{Bind: DefaultMetricsBind, Path: DefaultMetricsPath}},
+		Server:  config.ServerConfig{Metrics: config.MetricsConfig{Path: DefaultMetricsPath}},
 		Storage: config.StorageConfig{GC: config.GCConfig{Blob: config.Duration(mustDefaultDuration("DefaultGCInterval", DefaultGCInterval))}},
 		Instances: map[string]config.InstanceConfig{"example-files": {
 			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
@@ -670,11 +678,15 @@ func cloneConfig(cfg *config.Config) *config.Config {
 	return &next
 }
 
-func ValidateConfig(cfg *config.Config, adminBind string) error {
-	return validateConfig(cfg, adminBind, "", "")
+func ValidateConfig(cfg *config.Config, bind string) error {
+	if cfg == nil {
+		return errors.New("config is nil")
+	}
+	clone := cloneConfig(cfg)
+	return validateConfig(clone, bind)
 }
 
-func validateConfig(cfg *config.Config, adminBind, proxyBind, metricsBind string) error {
+func validateConfig(cfg *config.Config, bind string) error {
 	if cfg == nil {
 		return errors.New("config is nil")
 	}
@@ -687,27 +699,9 @@ func validateConfig(cfg *config.Config, adminBind, proxyBind, metricsBind string
 	if cfg.Server.Metrics.Path == "" {
 		cfg.Server.Metrics.Path = DefaultMetricsPath
 	}
-	listens := map[string]string{}
-	addListen := func(addr, owner string) error {
-		if addr == "" {
-			return nil
-		}
-		if existing := listens[addr]; existing != "" {
-			return fmt.Errorf("listen bind %s conflicts between %s and %s", addr, existing, owner)
-		}
-		listens[addr] = owner
-		return nil
-	}
-	if err := addListen(adminBind, "admin"); err != nil {
-		return err
-	}
-	if err := addListen(proxyBind, "proxy"); err != nil {
-		return err
-	}
-	if metricsBind != "" {
-		if err := addListen(metricsBind, "metrics"); err != nil {
-			return err
-		}
+	binds := map[string]string{}
+	if bind != "" {
+		binds[bind] = "main"
 	}
 	paths := map[string]string{}
 	for instanceName, inst := range cfg.Instances {
@@ -737,9 +731,10 @@ func validateConfig(cfg *config.Config, adminBind, proxyBind, metricsBind string
 			paths[listenPath] = instanceName
 		}
 		if inst.Listen.Bind != "" {
-			if err := addListen(inst.Listen.Bind, instanceName); err != nil {
-				return err
+			if existing := binds[inst.Listen.Bind]; existing != "" {
+				return fmt.Errorf("listen bind %s conflicts between %s and %s", inst.Listen.Bind, existing, instanceName)
 			}
+			binds[inst.Listen.Bind] = instanceName
 		}
 		if len(inst.Upstreams) == 0 {
 			return fmt.Errorf("instance %s has no upstreams", instanceName)

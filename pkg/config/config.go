@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -34,7 +33,6 @@ type ServerConfig struct {
 }
 
 type MetricsConfig struct {
-	Bind string `json:"bind" yaml:"bind"`
 	Path string `json:"path" yaml:"path"`
 }
 
@@ -105,23 +103,45 @@ type Duration time.Duration
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 func (d Duration) String() string          { return time.Duration(d).String() }
 
+func (c *Config) Redacted() *Config {
+	clone := *c
+	clone.Instances = make(map[string]InstanceConfig, len(c.Instances))
+	for name, inst := range c.Instances {
+		clone.Instances[name] = inst.Redacted()
+	}
+	return &clone
+}
+
+func (i InstanceConfig) Redacted() InstanceConfig {
+	if i.OCI != nil && i.OCI.Auth != nil {
+		ociClone := *i.OCI
+		authClone := *ociClone.Auth
+		if authClone.Password != "" {
+			authClone.Password = "***"
+		}
+		if authClone.Token != "" {
+			authClone.Token = "***"
+		}
+		ociClone.Auth = &authClone
+		inst := i
+		inst.OCI = &ociClone
+		return inst
+	}
+	return i
+}
+
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
 
 func (d *Duration) UnmarshalJSON(data []byte) error {
 	var text string
-	if err := json.Unmarshal(data, &text); err == nil {
-		parsed, parseErr := time.ParseDuration(text)
-		if parseErr != nil {
-			return parseErr
-		}
-		*d = Duration(parsed)
-		return nil
-	}
-	var number int64
-	if err := json.Unmarshal(data, &number); err != nil {
+	if err := json.Unmarshal(data, &text); err != nil {
 		return err
 	}
-	*d = Duration(time.Duration(number))
+	parsed, parseErr := time.ParseDuration(text)
+	if parseErr != nil {
+		return parseErr
+	}
+	*d = Duration(parsed)
 	return nil
 }
 
@@ -133,13 +153,9 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return nil
 	}
 	parsed, err := time.ParseDuration(value.Value)
-	if err == nil {
-		*d = Duration(parsed)
-		return nil
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", value.Value, err)
 	}
-	if number, parseIntErr := strconv.ParseInt(value.Value, 10, 64); parseIntErr == nil {
-		*d = Duration(time.Duration(number))
-		return nil
-	}
-	return fmt.Errorf("invalid duration %q: %w", value.Value, err)
+	*d = Duration(parsed)
+	return nil
 }

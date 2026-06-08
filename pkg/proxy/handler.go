@@ -338,10 +338,14 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 	if !route.RewriteNPMMetadata || req.Method == http.MethodHead || response.Body == nil {
 		return response
 	}
-	body, err := io.ReadAll(response.Body)
+	const maxRewriteBody = 50 << 20
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRewriteBody+1))
 	_ = response.Body.Close()
 	if err != nil {
 		return errorResponse(http.StatusBadGateway, err)
+	}
+	if len(body) > maxRewriteBody {
+		return errorResponse(http.StatusBadGateway, errors.New("npm metadata too large to rewrite"))
 	}
 	var document any
 	if err := json.Unmarshal(body, &document); err != nil {

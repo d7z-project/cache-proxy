@@ -1,20 +1,24 @@
-<div class="shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">CP</div>
-      <div>
-        <h1>Cache Proxy</h1>
-        <p>多模式缓存反代</p>
-      </div>
+<app-toast-container></app-toast-container>
+<app-modal></app-modal>
+
+<nav class="top-nav">
+  <a class="brand" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Cache Proxy</a>
+
+  <div class="nav-links" *ngIf="isAuth$ | async">
+    <a routerLink="/dashboard" routerLinkActive="active">仪表盘</a>
+    <a routerLink="/instances" routerLinkActive="active">实例</a>
+    <a routerLink="/settings" routerLinkActive="active">设置</a>
+    <a routerLink="/storage" routerLinkActive="active">存储</a>
+  </div>
+
+  @if ({ enabled: authEnabled$ | async, loggedIn: isAuth$ | async }; as authState) {
+    <div class="nav-end">
+      <a routerLink="/login" *ngIf="authState.enabled && !authState.loggedIn">登录管理</a>
+      <button class="nav-link" (click)="logout()" *ngIf="authState.enabled && authState.loggedIn">注销</button>
     </div>
-    <nav>
-      <a routerLink="/dashboard" routerLinkActive="active">概览</a>
-      <a routerLink="/instances" routerLinkActive="active">实例</a>
-      <a routerLink="/storage" routerLinkActive="active">存储</a>
-      <a routerLink="/settings" routerLinkActive="active">设置</a>
-    </nav>
-  </aside>
-  <main class="content">
-    <router-outlet />
-  </main>
-</div>
+  }
+</nav>
+
+<main>
+  <router-outlet></router-outlet>
+</main>
