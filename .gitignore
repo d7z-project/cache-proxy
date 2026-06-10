@@ -28,3 +28,5 @@ cache-proxy
 config.local.yaml
 web/node_modules/
 web/.angular/
+web/dist/
+node_modules
