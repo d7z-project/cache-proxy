@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { AppConfig, ConfigSnapshot, InstanceSummary, InstancesExport, MetricsStats, RuntimeInfo, StorageStats } from './api.models';
+import { AppConfig, CacheLookupResult, ConfigSnapshot, InstanceSummary, InstancesExport, MetricsStats, RuntimeInfo, StorageStats } from './api.models';
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
@@ -55,5 +55,12 @@ export class ApiService {
 
   runGc(): Observable<StorageStats> {
     return this.http.post<StorageStats>(`${this.base}/storage/gc`, {}, { withCredentials: true });
+  }
+
+  cacheLookup(instance: string, path: string): Observable<CacheLookupResult> {
+    return this.http.get<CacheLookupResult>(`${this.base}/cache/lookup`, {
+      params: { instance, path },
+      withCredentials: true
+    });
   }
 }

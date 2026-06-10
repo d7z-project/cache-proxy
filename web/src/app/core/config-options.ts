@@ -1,4 +1,4 @@
-import { BusyPolicy, CachePolicy, ListenKind, OciAuthType, ProxyMode } from './api.models';
+import { BusyPolicy, CachePolicy, ListenKind, NpmResourcePolicy, OciAuthType, OciResourcePolicy, ProxyMode } from './api.models';
 
 export interface SelectOption<T extends string> {
   value: T;
@@ -34,8 +34,21 @@ export const OCI_AUTH_OPTIONS: SelectOption<OciAuthType>[] = [
   { value: OciAuthType.Bearer, label: '访问令牌', description: '适合固定令牌访问。' }
 ];
 
+export const OCI_RESOURCE_POLICY_OPTIONS: SelectOption<OciResourcePolicy>[] = [
+  { value: OciResourcePolicy.All, label: '全部资源', description: '匹配 blob、manifest 和 tag。' },
+  { value: OciResourcePolicy.Blob, label: 'Blob', description: '只匹配镜像层。' },
+  { value: OciResourcePolicy.Manifest, label: 'Manifest', description: '只匹配清单。' },
+  { value: OciResourcePolicy.Tag, label: 'Tag', description: '只匹配标签列表。' }
+];
+
+export const NPM_RESOURCE_POLICY_OPTIONS: SelectOption<NpmResourcePolicy>[] = [
+  { value: NpmResourcePolicy.All, label: '全部资源', description: '匹配包信息和下载文件。' },
+  { value: NpmResourcePolicy.Metadata, label: '包信息', description: '只匹配包元数据。' },
+  { value: NpmResourcePolicy.Tarball, label: '下载文件', description: '只匹配 .tgz 文件。' }
+];
+
 export const FILE_DEFAULT_RULES = [
-  { match: '**/*.iso', policy: CachePolicy.Immutable },
-  { match: '**/*.rpm', policy: CachePolicy.Immutable },
-  { match: '**/repodata/**', policy: CachePolicy.Revalidate }
+  { match: '**/*.iso', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' },
+  { match: '**/*.rpm', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' },
+  { match: '**/repodata/**', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' }
 ];

@@ -6,7 +6,9 @@
       管理密码
       <input type="password" name="password" [(ngModel)]="password" autofocus autocomplete="current-password" placeholder="请输入密码">
     </label>
-    <p class="message" *ngIf="error">{{ error }}</p>
+    @if (error) {
+      <p class="message">{{ error }}</p>
+    }
     <button type="submit" class="primary" [disabled]="loading || !password.trim()">
       {{ loading ? '登录中...' : '登录' }}
     </button>

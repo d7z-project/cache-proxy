@@ -1,15 +1,15 @@
 import { Component, OnInit, inject } from '@angular/core';
-import { AsyncPipe, NgFor, NgIf } from '@angular/common';
+import { AsyncPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Observable, catchError, of } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { AuthService } from '../../core/auth.service';
 import { InstanceSummary } from '../../core/api.models';
-import { PROXY_MODE_OPTIONS } from '../../core/config-options';
+import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 @Component({
   selector: 'app-home',
-  imports: [NgFor, NgIf, AsyncPipe, RouterLink],
+  imports: [AsyncPipe, RouterLink, ModeLabelPipe],
   templateUrl: './home.component.html'
 })
 export class HomeComponent implements OnInit {
@@ -28,9 +28,5 @@ export class HomeComponent implements OnInit {
         return of([]);
       })
     );
-  }
-
-  modeLabel(mode: string): string {
-    return PROXY_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? mode;
   }
 }

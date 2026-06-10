@@ -1,5 +1,4 @@
 import { Component, OnInit, inject } from '@angular/core';
-import { NgIf } from '@angular/common';
 import { forkJoin } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { ConfigSnapshot, RuntimeInfo } from '../../core/api.models';
@@ -8,7 +7,7 @@ import { ModalService } from '../../shared/modal.service';
 
 @Component({
   selector: 'app-settings',
-  imports: [NgIf],
+  imports: [],
   templateUrl: './settings.component.html'
 })
 export class SettingsComponent implements OnInit {

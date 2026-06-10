@@ -1,14 +1,18 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy"
 )
 
 type configUpdateRequest struct {
@@ -271,4 +275,123 @@ func writeError(resp http.ResponseWriter, status int, err error) {
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(status)
 	_ = json.NewEncoder(resp).Encode(map[string]string{"error": err.Error()})
+}
+
+type cacheLookupResult struct {
+	Instance    string `json:"instance"`
+	Mode        string `json:"mode"`
+	Path        string `json:"path"`
+	ObjectPath  string `json:"objectPath"`
+	Policy      string `json:"policy"`
+	FreshFor    string `json:"freshFor"`
+	ExpireAfter string `json:"expireAfter"`
+	Generation  uint64 `json:"generation"`
+	Cached      bool   `json:"cached"`
+	CachedAt    string `json:"cachedAt,omitempty"`
+	ExpiresAt   string `json:"expiresAt,omitempty"`
+	Fresh       bool   `json:"fresh"`
+}
+
+func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		resp.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	instanceName := strings.TrimSpace(req.URL.Query().Get("instance"))
+	lookupPath := strings.TrimSpace(req.URL.Query().Get("path"))
+	if instanceName == "" || lookupPath == "" {
+		writeError(resp, http.StatusBadRequest, errors.New("instance and path are required"))
+		return
+	}
+
+	r.mu.RLock()
+	inst, ok := r.config.Instances[instanceName]
+	generation := r.generation
+	r.mu.RUnlock()
+	if !ok {
+		writeError(resp, http.StatusNotFound, errors.New("instance not found"))
+		return
+	}
+
+	resolver, err := newResolver(inst)
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+
+	fakeReq := httptest.NewRequest("GET", "/"+lookupPath, nil)
+	route, err := resolver.Resolve(fakeReq)
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+
+	result := cacheLookupResult{
+		Instance:    instanceName,
+		Mode:        inst.Mode,
+		Path:        lookupPath,
+		ObjectPath:  route.ObjectPath,
+		Policy:      route.Policy,
+		Generation:  generation,
+	}
+	if route.FreshFor > 0 {
+		result.FreshFor = route.FreshFor.String()
+	}
+	if route.ExpireAfter > 0 {
+		result.ExpireAfter = route.ExpireAfter.String()
+	}
+
+	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, route, inst)
+	result.Cached = cached
+	result.Fresh = fresh
+	if !cachedAt.IsZero() {
+		result.CachedAt = cachedAt.UTC().Format(time.RFC3339)
+	}
+	if !expiresAt.IsZero() {
+		result.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
+	}
+
+	writeJSON(resp, result, nil)
+}
+
+func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName string, route proxy.Route, inst config.InstanceConfig) (bool, time.Time, time.Time, bool) {
+	reader, err := r.store.OpenObject(ctx, instanceName, route.ObjectPath)
+	if err != nil {
+		return false, time.Time{}, time.Time{}, false
+	}
+	defer reader.Close()
+
+	info := reader.Info()
+	fetchedAtStr := info.Options["fetched-at"]
+	cachedAt, err := parseFetchedAt(fetchedAtStr)
+	if err != nil {
+		return false, time.Time{}, time.Time{}, false
+	}
+
+	expireAfter := route.ExpireAfter
+	if expireAfter <= 0 {
+		expireAfter = inst.ExpireAfter
+	}
+	var expiresAt time.Time
+	if expireAfter > 0 {
+		expiresAt = cachedAt.Add(expireAfter.Duration())
+	}
+
+	freshFor := route.FreshFor
+	if freshFor <= 0 {
+		freshFor = inst.Cache.FreshFor
+	}
+	fresh := false
+	if freshFor > 0 {
+		fresh = time.Since(cachedAt) <= freshFor.Duration()
+	}
+
+	return true, cachedAt, expiresAt, fresh
+}
+
+func parseFetchedAt(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed, nil
+	}
+	return time.Parse(http.TimeFormat, value)
 }

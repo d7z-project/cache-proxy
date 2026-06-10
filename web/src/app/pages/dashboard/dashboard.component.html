@@ -9,7 +9,8 @@
     </div>
   </header>
 
-  <div *ngIf="data$ | async as data; else loadingBlock">
+  @let data = data$ | async;
+  @if (data) {
     <div class="stats-grid">
       <article class="card"><span>配置版本</span><strong>{{ data.runtime.generation }}</strong></article>
       <article class="card"><span>实例数量</span><strong>{{ data.runtime.instances }}</strong></article>
@@ -24,29 +25,37 @@
     <div class="grid-2">
       <article class="card block">
         <h3>缓存命中分布</h3>
-        <ng-container *ngIf="sliceList(data.metrics.total.cache) as slices">
-          <div class="chart-list" *ngIf="slices.length > 0; else noCacheStats">
-            <div class="chart-row" *ngFor="let s of slices">
-              <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
-              <div class="chart-track"><div class="chart-bar cache" [style.width.%]="s.percent"></div></div>
-              <span class="chart-percent">{{ s.percent }}%</span>
-            </div>
+        @let slices = sliceList(data.metrics.total.cache);
+        @if (slices.length > 0) {
+          <div class="chart-list">
+            @for (s of slices; track s.label) {
+              <div class="chart-row">
+                <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
+                <div class="chart-track"><div class="chart-bar cache" [style.width.%]="s.percent"></div></div>
+                <span class="chart-percent">{{ s.percent }}%</span>
+              </div>
+            }
           </div>
-        </ng-container>
-        <ng-template #noCacheStats><p class="hint">等待缓存请求数据。</p></ng-template>
+        } @else {
+          <p class="hint">等待缓存请求数据。</p>
+        }
       </article>
       <article class="card block">
         <h3>上游状态分布</h3>
-        <ng-container *ngIf="sliceList(data.metrics.total.upstreamStatus) as slices">
-          <div class="chart-list" *ngIf="slices.length > 0; else noUpstreamStats">
-            <div class="chart-row" *ngFor="let s of slices">
-              <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
-              <div class="chart-track"><div class="chart-bar upstream" [style.width.%]="s.percent"></div></div>
-              <span class="chart-percent">{{ s.percent }}%</span>
-            </div>
+        @let upstreamSlices = sliceList(data.metrics.total.upstreamStatus);
+        @if (upstreamSlices.length > 0) {
+          <div class="chart-list">
+            @for (s of upstreamSlices; track s.label) {
+              <div class="chart-row">
+                <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
+                <div class="chart-track"><div class="chart-bar upstream" [style.width.%]="s.percent"></div></div>
+                <span class="chart-percent">{{ s.percent }}%</span>
+              </div>
+            }
           </div>
-        </ng-container>
-        <ng-template #noUpstreamStats><p class="hint">等待上游请求数据。</p></ng-template>
+        } @else {
+          <p class="hint">等待上游请求数据。</p>
+        }
         <p class="hint">采集地址：{{ data.runtime.bind }}{{ data.runtime.metricsPath }}</p>
       </article>
     </div>
@@ -57,28 +66,35 @@
       <table>
         <thead><tr><th>名称</th><th>模式</th><th>入口</th><th>请求</th><th>缓存</th><th>上游</th><th>流量</th><th>下载</th></tr></thead>
         <tbody>
-          <tr *ngFor="let item of data.instances">
-            <td>{{ item.name }}</td>
-            <td><span class="badge">{{ modeLabel(item.mode) }}</span></td>
-            <td class="truncate">{{ item.path || item.bind }}</td>
-            <td>
-              <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>
-              <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>
-            </td>
-            <td>{{ cacheText(getMetrics(data.metrics.instances, item.name)) }}</td>
-            <td>{{ upstreamText(getMetrics(data.metrics.instances, item.name)) }}</td>
-            <td>{{ formatBytes(getMetrics(data.metrics.instances, item.name).responseBytes) }}</td>
-            <td>{{ getMetrics(data.metrics.instances, item.name).activeDownloads }}</td>
-          </tr>
+          @for (item of data.instances; track item.name) {
+            <tr>
+              <td>{{ item.name }}</td>
+              <td><span class="badge">{{ item.mode | modeLabel }}</span></td>
+              <td class="truncate">{{ item.path || item.bind }}</td>
+              <td>
+                <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>
+                <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>
+              </td>
+              <td>{{ cacheText(getMetrics(data.metrics.instances, item.name)) }}</td>
+              <td>{{ upstreamText(getMetrics(data.metrics.instances, item.name)) }}</td>
+              <td>{{ formatBytes(getMetrics(data.metrics.instances, item.name).responseBytes) }}</td>
+              <td>{{ getMetrics(data.metrics.instances, item.name).activeDownloads }}</td>
+            </tr>
+          }
         </tbody>
       </table>
       </div>
     </div>
-  </div>
-
-  <ng-template #loadingBlock>
-    <div class="stats-grid"><article class="card skeleton" *ngFor="let _ of [0,1,2,3]"></article></div>
+  } @else {
+    <div class="stats-grid">
+      @for (i of [0,1,2,3,4,5,6,7]; track i) {
+        <article class="card skeleton"></article>
+      }
+    </div>
+    <div class="grid-2">
+      <div class="card block skeleton"></div>
+      <div class="card block skeleton"></div>
+    </div>
     <div class="card block skeleton"></div>
-    <div class="card block skeleton"></div>
-  </ng-template>
+  }
 </section>

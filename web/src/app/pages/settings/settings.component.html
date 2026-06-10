@@ -10,27 +10,34 @@
     </div>
   </header>
 
-  <p *ngIf="loading">正在加载配置...</p>
+  @if (loading) {
+    <div class="grid-2">
+      <article class="card block skeleton"></article>
+      <article class="card block skeleton"></article>
+    </div>
+  }
 
-  <div class="grid-2" *ngIf="runtime && !loading">
-    <article class="card block">
-      <h3>启动参数</h3>
-      <dl class="kv-list">
-        <div><dt>监听地址</dt><dd>{{ runtime.bind }}</dd></div>
-        <div><dt>存储位置</dt><dd>{{ runtime.backend }}</dd></div>
-        <div><dt>监控路径</dt><dd>{{ runtime.metricsPath }}</dd></div>
-        <div><dt>清理周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
-      </dl>
-      <p class="hint">这些参数随服务启动生效。</p>
-    </article>
-    <article class="card block">
-      <h3>运行期配置</h3>
-      <dl class="kv-list">
-        <div><dt>配置版本</dt><dd>{{ snapshot?.generation }}</dd></div>
-        <div><dt>实例数量</dt><dd>{{ runtime.instances }}</dd></div>
-        <div><dt>处理器数</dt><dd>{{ runtime.handlers }}</dd></div>
-      </dl>
-      <p class="hint">实例、上游和缓存策略可在实例页面调整。</p>
-    </article>
-  </div>
+  @if (runtime && !loading) {
+    <div class="grid-2">
+      <article class="card block">
+        <h3>启动参数</h3>
+        <dl class="kv-list">
+          <div><dt>监听地址</dt><dd>{{ runtime.bind }}</dd></div>
+          <div><dt>存储位置</dt><dd>{{ runtime.backend }}</dd></div>
+          <div><dt>监控路径</dt><dd>{{ runtime.metricsPath }}</dd></div>
+          <div><dt>清理周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
+        </dl>
+        <p class="hint">这些参数随服务启动生效。</p>
+      </article>
+      <article class="card block">
+        <h3>运行期配置</h3>
+        <dl class="kv-list">
+          <div><dt>配置版本</dt><dd>{{ snapshot?.generation }}</dd></div>
+          <div><dt>实例数量</dt><dd>{{ runtime.instances }}</dd></div>
+          <div><dt>处理器数</dt><dd>{{ runtime.handlers }}</dd></div>
+        </dl>
+        <p class="hint">实例、上游和缓存策略可在实例页面调整。</p>
+      </article>
+    </div>
+  }
 </section>

@@ -26,6 +26,19 @@ export enum OciAuthType {
   Bearer = 'bearer'
 }
 
+export enum OciResourcePolicy {
+  Blob = 'blob',
+  Manifest = 'manifest',
+  Tag = 'tag',
+  All = '*'
+}
+
+export enum NpmResourcePolicy {
+  Metadata = 'metadata',
+  Tarball = 'tarball',
+  All = '*'
+}
+
 export interface RuntimeInfo {
   bind: string;
   backend: string;
@@ -105,18 +118,35 @@ export interface CacheConfig {
 export interface CacheRule {
   match: string;
   policy: CachePolicy;
+  freshFor?: string;
+  expireAfter?: string;
 }
 
 export interface OciConfig {
-  blobPolicy?: CachePolicy;
-  manifestPolicy?: CachePolicy;
-  tagPolicy?: CachePolicy;
+  defaultPolicy?: CachePolicy;
   auth?: OciAuthConfig;
+  rules: OciCacheRule[];
+}
+
+export interface OciCacheRule {
+  match: string;
+  resourcePolicy: OciResourcePolicy;
+  policy: CachePolicy;
+  freshFor?: string;
+  expireAfter?: string;
 }
 
 export interface NpmConfig {
-  metadataPolicy?: CachePolicy;
-  tarballPolicy?: CachePolicy;
+  defaultPolicy?: CachePolicy;
+  rules: NpmCacheRule[];
+}
+
+export interface NpmCacheRule {
+  match: string;
+  resourcePolicy: NpmResourcePolicy;
+  policy: CachePolicy;
+  freshFor?: string;
+  expireAfter?: string;
 }
 
 export interface OciAuthConfig {
@@ -148,4 +178,19 @@ export interface InstanceMetrics {
 export interface InstancesExport {
   generation: number;
   instances: Record<string, InstanceConfig>;
+}
+
+export interface CacheLookupResult {
+  instance: string;
+  mode: string;
+  path: string;
+  objectPath: string;
+  policy: string;
+  freshFor: string;
+  expireAfter: string;
+  generation: number;
+  cached: boolean;
+  cachedAt: string;
+  expiresAt: string;
+  fresh: boolean;
 }

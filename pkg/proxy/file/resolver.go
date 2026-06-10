@@ -27,17 +27,35 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 	if !proxy.SafePath(cleanPath) {
 		return proxy.Route{}, errors.New("invalid request path")
 	}
-	return proxy.Route{ObjectPath: "file/" + cleanPath, UpstreamPath: cleanPath, Policy: r.policy(cleanPath)}, nil
+	match := r.match(cleanPath)
+	return proxy.Route{
+		ObjectPath:   "file/" + cleanPath,
+		UpstreamPath: cleanPath,
+		Policy:       match.policy,
+		FreshFor:     match.freshFor,
+		ExpireAfter:  match.expireAfter,
+	}, nil
 }
 
-func (r *Resolver) policy(cleanPath string) string {
+type fileMatch struct {
+	policy      string
+	freshFor    config.Duration
+	expireAfter config.Duration
+}
+
+func (r *Resolver) match(cleanPath string) fileMatch {
 	for _, rule := range r.cache.Rules {
 		if doublestar.MatchUnvalidated(rule.Match, cleanPath) {
-			return rule.Policy
+			return fileMatch{
+				policy:      rule.Policy,
+				freshFor:    rule.FreshFor,
+				expireAfter: rule.ExpireAfter,
+			}
 		}
 	}
-	if r.cache.DefaultPolicy != "" {
-		return r.cache.DefaultPolicy
+	policy := r.cache.DefaultPolicy
+	if policy == "" {
+		policy = config.PolicyBypass
 	}
-	return config.PolicyBypass
+	return fileMatch{policy: policy}
 }

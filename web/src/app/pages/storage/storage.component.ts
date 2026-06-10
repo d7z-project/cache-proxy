@@ -1,5 +1,5 @@
 import { Component, inject } from '@angular/core';
-import { AsyncPipe, KeyValuePipe, NgFor, NgIf } from '@angular/common';
+import { AsyncPipe, KeyValuePipe } from '@angular/common';
 import { BehaviorSubject, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { StorageStats } from '../../core/api.models';
@@ -17,7 +17,7 @@ const LABELS: Record<string, string> = {
 
 @Component({
   selector: 'app-storage',
-  imports: [AsyncPipe, KeyValuePipe, NgFor, NgIf],
+  imports: [AsyncPipe, KeyValuePipe],
   templateUrl: './storage.component.html'
 })
 export class StorageComponent {

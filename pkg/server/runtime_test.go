@@ -314,7 +314,7 @@ func TestOCIProxyCachesBlobByDigest(t *testing.T) {
 		_, _ = w.Write([]byte("layer"))
 	}))
 	defer upstream.Close()
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{BlobPolicy: config.PolicyImmutable}}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable}}}}})
 	defer closeRuntime(t, rt)
 	rt.mu.RLock()
 	handler := rt.handlers[0]
@@ -379,7 +379,7 @@ func TestOCIProxySetsManifestAcceptHeader(t *testing.T) {
 		_, _ = w.Write([]byte("{}"))
 	}))
 	defer upstream.Close()
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{ManifestPolicy: config.PolicyBypass}}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "manifest", Policy: config.PolicyBypass}}}}})
 	defer closeRuntime(t, rt)
 	rt.mu.RLock()
 	handler := rt.handlers[0]
@@ -457,7 +457,7 @@ func TestOCIProxyUsesConfiguredBasicAuthAndSingleUpstream(t *testing.T) {
 	defer upstream.Close()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
 		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
-		OCI: &config.OCIConfig{BlobPolicy: config.PolicyImmutable, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
+		OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable}}, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
 	}})
 	defer closeRuntime(t, rt)
 	rt.mu.RLock()
@@ -472,8 +472,8 @@ func TestOCIProxyUsesConfiguredBasicAuthAndSingleUpstream(t *testing.T) {
 	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "independent listen bind")
 	cfg.Instances = map[string]config.InstanceConfig{"bad": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5002"}, Upstreams: []string{"https://registry-1.docker.io"}, PassHeaders: []string{"Accept"}, OCI: &config.OCIConfig{}}}
 	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "only supported in file mode")
-	cfg.Instances = map[string]config.InstanceConfig{"bad": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5003"}, Upstreams: []string{"https://registry-1.docker.io"}, OCI: &config.OCIConfig{BlobPolicy: "bad"}}}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "invalid oci blob policy")
+	cfg.Instances = map[string]config.InstanceConfig{"bad": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5003"}, Upstreams: []string{"https://registry-1.docker.io"}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "bad", Policy: "invalid-policy"}}}}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "invalid policy")
 }
 
 func TestNPMProxyRewritesTarballURLsAndCachesTarballs(t *testing.T) {
@@ -499,7 +499,7 @@ func TestNPMProxyRewritesTarballURLsAndCachesTarballs(t *testing.T) {
 	upstreamURL = upstream.URL
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"npm": {
 		Mode: config.ModeNPM, Listen: config.ListenConfig{Path: "/npm"}, Upstreams: []string{upstream.URL},
-		NPM: &config.NPMConfig{MetadataPolicy: config.PolicyRevalidate, TarballPolicy: config.PolicyImmutable},
+		NPM: &config.NPMConfig{Rules: []config.NPMCacheRule{{Match: "**", ResourcePolicy: "metadata", Policy: config.PolicyRevalidate}, {Match: "**", ResourcePolicy: "tarball", Policy: config.PolicyImmutable}}},
 	}})
 	defer closeRuntime(t, rt)
 
@@ -1067,7 +1067,7 @@ func TestImportAllowsMaskedCredentialsForExistingInstance(t *testing.T) {
 	defer cancel()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
 		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
-		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "real-password"}},
+		OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable}}, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "real-password"}},
 	}})
 	defer closeRuntime(t, rt)
 
@@ -1092,4 +1092,291 @@ func TestImportAllowsMaskedCredentialsForExistingInstance(t *testing.T) {
 	rt.mu.RLock()
 	require.Equal(t, "real-password", rt.config.Instances["oci"].OCI.Auth.Password)
 	rt.mu.RUnlock()
+}
+
+func TestCacheLookupAPIReturnsPolicyAndCacheStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var getCount int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&getCount, 1)
+		body := []byte("data")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{upstream.URL},
+		Cache: config.CacheConfig{
+			DefaultPolicy: config.PolicyBypass,
+			FreshFor:      config.Duration(5 * time.Minute),
+			Rules: []config.CacheRule{
+				{Match: "**/*.bin", Policy: config.PolicyImmutable},
+				{Match: "**/*.txt", Policy: config.PolicyRevalidate, FreshFor: config.Duration(10 * time.Second)},
+			},
+		},
+		ExpireAfter: config.Duration(time.Hour),
+	}})
+	defer closeRuntime(t, rt)
+
+	// lookup before caching
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=files&path=a.bin", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var result cacheLookupResult
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	require.Equal(t, "files", result.Instance)
+	require.Equal(t, "file", result.Mode)
+	require.Equal(t, "a.bin", result.Path)
+	require.Equal(t, "file/a.bin", result.ObjectPath)
+	require.Equal(t, "immutable", result.Policy)
+	require.False(t, result.Cached)
+
+	// fetch to populate cache
+	require.Equal(t, "data", requestBody(t, rt.mainHandler, http.MethodGet, "/files/a.bin", ""))
+
+	// lookup after caching
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=files&path=a.bin", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	require.True(t, result.Cached)
+	require.True(t, result.Fresh)
+	require.NotEmpty(t, result.CachedAt)
+	require.NotEmpty(t, result.ExpiresAt)
+
+	// lookup non-existent instance
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=nonexistent&path=a.txt", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	// lookup missing params
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=files", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestFileProxyRuleLevelFreshForAndExpireAfter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var version int32 = 1
+	var getCount int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.LoadInt32(&version)
+		body := []byte(fmt.Sprintf("fresh-%d", current))
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current))
+		if r.Method == http.MethodGet {
+			atomic.AddInt32(&getCount, 1)
+			_, _ = w.Write(body)
+		}
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{upstream.URL},
+		Cache: config.CacheConfig{
+			DefaultPolicy: config.PolicyRevalidate,
+			FreshFor:      config.Duration(time.Minute), // global default: 1 minute
+			Rules: []config.CacheRule{
+				{Match: "**/*.txt", Policy: config.PolicyRevalidate, FreshFor: config.Duration(100 * time.Millisecond)}, // override: 100ms
+				{Match: "**/*.json", Policy: config.PolicyRevalidate}, // use global default
+			},
+		},
+	}})
+	defer closeRuntime(t, rt)
+	handler := rt.mainHandler
+
+	// .txt file: rule-level 100ms freshFor
+	require.Equal(t, "fresh-1", requestBody(t, handler, http.MethodGet, "/files/data.txt", ""))
+	atomic.StoreInt32(&version, 2)
+	require.Equal(t, "fresh-1", requestBody(t, handler, http.MethodGet, "/files/data.txt", "")) // still fresh
+	time.Sleep(120 * time.Millisecond)
+	require.Equal(t, "fresh-2", requestBody(t, handler, http.MethodGet, "/files/data.txt", "")) // now stale
+
+	// .json file: global 1 minute freshFor
+	atomic.StoreInt32(&version, 3)
+	require.Equal(t, "fresh-3", requestBody(t, handler, http.MethodGet, "/files/data.json", ""))
+	atomic.StoreInt32(&version, 4)
+	require.Equal(t, "fresh-3", requestBody(t, handler, http.MethodGet, "/files/data.json", "")) // still fresh (1 min)
+}
+
+func TestOCIGlobRulesMatchRepoByPattern(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var getCount int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&getCount, 1)
+		w.Header().Set("Content-Length", "5")
+		w.Header().Set("Docker-Content-Digest", "sha256:abc")
+		_, _ = w.Write([]byte("layer"))
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
+		OCI: &config.OCIConfig{
+			DefaultPolicy: config.PolicyRevalidate,
+			Rules: []config.OCICacheRule{
+				{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable},
+				{Match: "myorg/**", ResourcePolicy: "*", Policy: config.PolicyBypass},
+			},
+		},
+	}})
+	defer closeRuntime(t, rt)
+	rt.mu.RLock()
+	handler := rt.handlers[0]
+	rt.mu.RUnlock()
+
+	// library/* blob → immutable (cached once)
+	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
+	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
+	require.Equal(t, int32(1), atomic.LoadInt32(&getCount))
+
+	// myorg/app blob → bypass (always fetched)
+	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/myorg/app/blobs/sha256:abc", ""))
+	require.Equal(t, "layer", requestBody(t, handler, http.MethodGet, "/v2/myorg/app/blobs/sha256:abc", ""))
+	require.Equal(t, int32(3), atomic.LoadInt32(&getCount)) // +2 for myorg
+}
+
+func TestOCIGlobRulesResolveManifestAndTag(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var getCount int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&getCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "2")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
+		OCI: &config.OCIConfig{
+			DefaultPolicy: config.PolicyBypass,
+			Rules: []config.OCICacheRule{
+				{Match: "library/*", ResourcePolicy: "manifest", Policy: config.PolicyRevalidate},
+				{Match: "library/*", ResourcePolicy: "tag", Policy: config.PolicyImmutable},
+			},
+		},
+	}})
+	defer closeRuntime(t, rt)
+	rt.mu.RLock()
+	handler := rt.handlers[0]
+	rt.mu.RUnlock()
+
+	// manifest → revalidate (no FreshFor → always stale → HEAD revalidation, but no ETag so passes)
+	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
+	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
+	// getCount: 1 GET + 1 HEAD (validation passes) = 2
+	require.Equal(t, int32(2), atomic.LoadInt32(&getCount))
+
+	// tags/list → immutable (cached once)
+	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/tags/list", ""))
+	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/tags/list", ""))
+	require.Equal(t, int32(3), atomic.LoadInt32(&getCount))
+}
+
+func TestNPMGlobRulesMatchPackageByPattern(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var getCount int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&getCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"test"}`))
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"npm": {
+		Mode: config.ModeNPM, Listen: config.ListenConfig{Path: "/npm"}, Upstreams: []string{upstream.URL},
+		NPM: &config.NPMConfig{
+			DefaultPolicy: config.PolicyBypass,
+			Rules: []config.NPMCacheRule{
+				{Match: "@angular/*", ResourcePolicy: "metadata", Policy: config.PolicyImmutable},
+				{Match: "left-*", ResourcePolicy: "metadata", Policy: config.PolicyRevalidate},
+			},
+		},
+	}})
+	defer closeRuntime(t, rt)
+
+	// @angular/core → immutable
+	require.Contains(t, requestBody(t, rt.mainHandler, http.MethodGet, "/npm/@angular/core", ""), `"name"`)
+	require.Contains(t, requestBody(t, rt.mainHandler, http.MethodGet, "/npm/@angular/core", ""), `"name"`)
+	require.Equal(t, int32(1), atomic.LoadInt32(&getCount))
+
+	// left-pad → revalidate (second request triggers HEAD revalidation)
+	require.Contains(t, requestBody(t, rt.mainHandler, http.MethodGet, "/npm/left-pad", ""), `"name"`)
+	require.Contains(t, requestBody(t, rt.mainHandler, http.MethodGet, "/npm/left-pad", ""), `"name"`)
+	// getCount: 2 GET + 1 HEAD for revalidation = 3
+	require.Equal(t, int32(3), atomic.LoadInt32(&getCount))
+}
+
+func TestCacheLookupAPIWithOCIGlobRules(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "5")
+		w.Header().Set("Docker-Content-Digest", "sha256:abc")
+		_, _ = w.Write([]byte("layer"))
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
+		OCI: &config.OCIConfig{
+			DefaultPolicy: config.PolicyRevalidate,
+			Rules: []config.OCICacheRule{
+				{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable, FreshFor: config.Duration(5 * time.Minute), ExpireAfter: config.Duration(24 * time.Hour)},
+			},
+		},
+	}})
+	defer closeRuntime(t, rt)
+
+	// lookup OCI blob
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=oci&path=v2/library/alpine/blobs/sha256:abc", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var result cacheLookupResult
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	require.Equal(t, "oci", result.Instance)
+	require.Equal(t, "oci", result.Mode)
+	require.Equal(t, "immutable", result.Policy)
+	require.Equal(t, "5m0s", result.FreshFor)
+	require.Equal(t, "24h0m0s", result.ExpireAfter)
+	require.False(t, result.Cached)
+}
+
+func TestCacheLookupAPIReturnsCorrectRouteForNPM(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"npm": {
+		Mode: config.ModeNPM, Listen: config.ListenConfig{Path: "/npm"}, Upstreams: []string{upstream.URL},
+		NPM: &config.NPMConfig{
+			DefaultPolicy: config.PolicyRevalidate,
+			Rules: []config.NPMCacheRule{
+				{Match: "@angular/*", ResourcePolicy: "*", Policy: config.PolicyImmutable, FreshFor: config.Duration(10 * time.Minute)},
+			},
+		},
+	}})
+	defer closeRuntime(t, rt)
+
+	// lookup npm metadata
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=npm&path=@angular/core", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var result cacheLookupResult
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	require.Equal(t, "npm", result.Instance)
+	require.Equal(t, "npm", result.Mode)
+	require.Equal(t, "immutable", result.Policy)
+	require.Equal(t, "10m0s", result.FreshFor)
+	require.False(t, result.Cached)
 }

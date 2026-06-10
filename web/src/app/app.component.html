@@ -4,17 +4,29 @@
 <nav class="top-nav">
   <a class="brand" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Cache Proxy</a>
 
-  <div class="nav-links" *ngIf="isAuth$ | async">
-    <a routerLink="/dashboard" routerLinkActive="active">仪表盘</a>
-    <a routerLink="/instances" routerLinkActive="active">实例</a>
-    <a routerLink="/settings" routerLinkActive="active">设置</a>
-    <a routerLink="/storage" routerLinkActive="active">存储</a>
-  </div>
+  <button class="hamburger" [class.open]="menuOpen" (click)="menuOpen = !menuOpen" type="button">
+    <span class="hamburger-bar"></span>
+    <span class="hamburger-bar"></span>
+    <span class="hamburger-bar"></span>
+  </button>
+
+  @if (isAuth$ | async) {
+    <div class="nav-links" [class.open]="menuOpen">
+      <a routerLink="/dashboard" routerLinkActive="active" (click)="menuOpen = false">仪表盘</a>
+      <a routerLink="/instances" routerLinkActive="active" (click)="menuOpen = false">实例</a>
+      <a routerLink="/settings" routerLinkActive="active" (click)="menuOpen = false">设置</a>
+      <a routerLink="/storage" routerLinkActive="active" (click)="menuOpen = false">存储</a>
+    </div>
+  }
 
   @if ({ enabled: authEnabled$ | async, loggedIn: isAuth$ | async }; as authState) {
     <div class="nav-end">
-      <a routerLink="/login" *ngIf="authState.enabled && !authState.loggedIn">登录管理</a>
-      <button class="nav-link" (click)="logout()" *ngIf="authState.enabled && authState.loggedIn">注销</button>
+      @if (authState.enabled && !authState.loggedIn) {
+        <a routerLink="/login">登录管理</a>
+      }
+      @if (authState.enabled && authState.loggedIn) {
+        <button class="nav-link" (click)="logout()">注销</button>
+      }
     </div>
   }
 </nav>

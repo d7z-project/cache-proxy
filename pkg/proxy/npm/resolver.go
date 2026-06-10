@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
+
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
 )
@@ -28,22 +30,59 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		upstreamPath += "?" + req.URL.RawQuery
 		objectPath += "/" + proxy.HashKey(req.URL.RawQuery)
 	}
+	packageName := extractPackageName(cleanPath)
 	if strings.HasSuffix(cleanPath, ".tgz") {
-		return proxy.Route{ObjectPath: "npm/tarballs/" + objectPath, UpstreamPath: upstreamPath, Policy: r.tarballPolicy()}, nil
+		match := r.resolveResource(packageName, "tarball")
+		return proxy.Route{
+			ObjectPath:   "npm/tarballs/" + objectPath,
+			UpstreamPath: upstreamPath,
+			Policy:       match.policy,
+			FreshFor:     match.freshFor,
+			ExpireAfter:  match.expireAfter,
+		}, nil
 	}
-	return proxy.Route{ObjectPath: "npm/metadata/" + proxy.HashKey(objectPath), UpstreamPath: upstreamPath, Policy: r.metadataPolicy(), RewriteNPMMetadata: true}, nil
+	match := r.resolveResource(packageName, "metadata")
+	return proxy.Route{
+		ObjectPath:         "npm/metadata/" + proxy.HashKey(objectPath),
+		UpstreamPath:       upstreamPath,
+		Policy:             match.policy,
+		FreshFor:           match.freshFor,
+		ExpireAfter:        match.expireAfter,
+		RewriteNPMMetadata: true,
+	}, nil
 }
 
-func (r *Resolver) metadataPolicy() string {
-	if r.cfg != nil && r.cfg.MetadataPolicy != "" {
-		return r.cfg.MetadataPolicy
-	}
-	return config.PolicyRevalidate
+type npmMatch struct {
+	policy      string
+	freshFor    config.Duration
+	expireAfter config.Duration
 }
 
-func (r *Resolver) tarballPolicy() string {
-	if r.cfg != nil && r.cfg.TarballPolicy != "" {
-		return r.cfg.TarballPolicy
+func (r *Resolver) resolveResource(packageName, resourceType string) npmMatch {
+	for _, rule := range r.cfg.Rules {
+		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != resourceType {
+			continue
+		}
+		if !doublestar.MatchUnvalidated(rule.Match, packageName) {
+			continue
+		}
+		return npmMatch{
+			policy:      rule.Policy,
+			freshFor:    rule.FreshFor,
+			expireAfter: rule.ExpireAfter,
+		}
 	}
-	return config.PolicyImmutable
+	return npmMatch{policy: r.cfg.DefaultPolicy}
+}
+
+func extractPackageName(cleanPath string) string {
+	cleanPath = strings.TrimPrefix(cleanPath, "/")
+	if strings.HasPrefix(cleanPath, "@") {
+		parts := strings.SplitN(cleanPath, "/", 3)
+		if len(parts) >= 2 {
+			return parts[0] + "/" + parts[1]
+		}
+	}
+	parts := strings.SplitN(cleanPath, "/", 2)
+	return parts[0]
 }

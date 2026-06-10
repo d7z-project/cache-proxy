@@ -75,15 +75,24 @@ type CacheConfig struct {
 }
 
 type CacheRule struct {
-	Match  string `json:"match" yaml:"match"`
-	Policy string `json:"policy" yaml:"policy"`
+	Match       string   `json:"match" yaml:"match"`
+	Policy      string   `json:"policy" yaml:"policy"`
+	FreshFor    Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type OCIConfig struct {
-	BlobPolicy     string         `json:"blobPolicy" yaml:"blob_policy"`
-	ManifestPolicy string         `json:"manifestPolicy" yaml:"manifest_policy"`
-	TagPolicy      string         `json:"tagPolicy" yaml:"tag_policy"`
-	Auth           *OCIAuthConfig `json:"auth,omitempty" yaml:"auth,omitempty"`
+	DefaultPolicy string          `json:"defaultPolicy" yaml:"default_policy"`
+	Auth          *OCIAuthConfig  `json:"auth,omitempty" yaml:"auth,omitempty"`
+	Rules         []OCICacheRule  `json:"rules" yaml:"rules"`
+}
+
+type OCICacheRule struct {
+	Match          string   `json:"match" yaml:"match"`
+	ResourcePolicy string   `json:"resourcePolicy" yaml:"resource_policy"`
+	Policy         string   `json:"policy" yaml:"policy"`
+	FreshFor       Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter    Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type OCIAuthConfig struct {
@@ -94,8 +103,16 @@ type OCIAuthConfig struct {
 }
 
 type NPMConfig struct {
-	MetadataPolicy string `json:"metadataPolicy" yaml:"metadata_policy"`
-	TarballPolicy  string `json:"tarballPolicy" yaml:"tarball_policy"`
+	DefaultPolicy string         `json:"defaultPolicy" yaml:"default_policy"`
+	Rules         []NPMCacheRule `json:"rules" yaml:"rules"`
+}
+
+type NPMCacheRule struct {
+	Match          string   `json:"match" yaml:"match"`
+	ResourcePolicy string   `json:"resourcePolicy" yaml:"resource_policy"`
+	Policy         string   `json:"policy" yaml:"policy"`
+	FreshFor       Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter    Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type Duration time.Duration

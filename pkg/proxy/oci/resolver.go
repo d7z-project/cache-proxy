@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	containername "github.com/google/go-containerregistry/pkg/name"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -38,7 +39,15 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		if part == "blobs" && i+1 < len(parts) {
 			digest := parts[i+1]
 			if strings.Contains(digest, ":") {
-				return proxy.Route{ObjectPath: "oci/blobs/" + strings.ReplaceAll(digest, ":", "/"), UpstreamPath: cleanPath, Policy: r.blobPolicy()}, nil
+				repo := strings.Join(parts[1:i], "/")
+				match := r.resolveResource(repo, "blob")
+				return proxy.Route{
+					ObjectPath:   "oci/blobs/" + strings.ReplaceAll(digest, ":", "/"),
+					UpstreamPath: cleanPath,
+					Policy:       match.policy,
+					FreshFor:     match.freshFor,
+					ExpireAfter:  match.expireAfter,
+				}, nil
 			}
 		}
 		if part == "manifests" && i+1 < len(parts) {
@@ -47,33 +56,49 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 			if _, err := containername.ParseReference("example.com/"+repo+":"+ref, containername.WeakValidation); err != nil && !strings.Contains(ref, ":") {
 				return proxy.Route{}, err
 			}
-			return proxy.Route{ObjectPath: "oci/manifests/" + repo + "/" + proxy.HashKey(ref), UpstreamPath: cleanPath, Policy: r.manifestPolicy()}, nil
+			match := r.resolveResource(repo, "manifest")
+			return proxy.Route{
+				ObjectPath:   "oci/manifests/" + repo + "/" + proxy.HashKey(ref),
+				UpstreamPath: cleanPath,
+				Policy:       match.policy,
+				FreshFor:     match.freshFor,
+				ExpireAfter:  match.expireAfter,
+			}, nil
 		}
 		if part == "tags" && i+1 < len(parts) && parts[i+1] == "list" {
 			repo := strings.Join(parts[1:i], "/")
-			return proxy.Route{ObjectPath: "oci/tags/" + repo + "/list", UpstreamPath: cleanPath, Policy: r.tagPolicy()}, nil
+			match := r.resolveResource(repo, "tag")
+			return proxy.Route{
+				ObjectPath:   "oci/tags/" + repo + "/list",
+				UpstreamPath: cleanPath,
+				Policy:       match.policy,
+				FreshFor:     match.freshFor,
+				ExpireAfter:  match.expireAfter,
+			}, nil
 		}
 	}
 	return proxy.Route{ObjectPath: "oci/other/" + proxy.HashKey(cleanPath), UpstreamPath: cleanPath, Policy: config.PolicyBypass}, nil
 }
 
-func (r *Resolver) blobPolicy() string {
-	if r.cfg != nil && r.cfg.BlobPolicy != "" {
-		return r.cfg.BlobPolicy
-	}
-	return config.PolicyImmutable
+type ociMatch struct {
+	policy      string
+	freshFor    config.Duration
+	expireAfter config.Duration
 }
 
-func (r *Resolver) manifestPolicy() string {
-	if r.cfg != nil && r.cfg.ManifestPolicy != "" {
-		return r.cfg.ManifestPolicy
+func (r *Resolver) resolveResource(repoName, resourceType string) ociMatch {
+	for _, rule := range r.cfg.Rules {
+		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != resourceType {
+			continue
+		}
+		if !doublestar.MatchUnvalidated(rule.Match, repoName) {
+			continue
+		}
+		return ociMatch{
+			policy:      rule.Policy,
+			freshFor:    rule.FreshFor,
+			expireAfter: rule.ExpireAfter,
+		}
 	}
-	return config.PolicyRevalidate
-}
-
-func (r *Resolver) tagPolicy() string {
-	if r.cfg != nil && r.cfg.TagPolicy != "" {
-		return r.cfg.TagPolicy
-	}
-	return config.PolicyRevalidate
+	return ociMatch{policy: r.cfg.DefaultPolicy}
 }

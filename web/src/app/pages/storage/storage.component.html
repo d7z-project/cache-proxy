@@ -13,24 +13,35 @@
   </header>
 
   <div class="grid-2">
-    <article class="card block" *ngIf="stats$ | async as stats">
-      <h3>当前状态</h3>
-      <dl class="kv-list">
-        <div *ngFor="let item of stats | keyvalue">
-          <dt>{{ labelText(item.key) }}</dt>
-          <dd>{{ valueText(item.value) }}</dd>
-        </div>
-      </dl>
-    </article>
+    @if (stats$ | async; as stats) {
+      <article class="card block">
+        <h3>当前状态</h3>
+        <dl class="kv-list">
+          @for (item of stats | keyvalue; track item.key) {
+            <div>
+              <dt>{{ labelText(item.key) }}</dt>
+              <dd>{{ valueText(item.value) }}</dd>
+            </div>
+          }
+        </dl>
+      </article>
+    } @else {
+      <article class="card block skeleton"></article>
+    }
     <article class="card block">
       <h3>最近 GC</h3>
-      <dl class="kv-list" *ngIf="gcResult; else noGc">
-        <div *ngFor="let item of gcResult | keyvalue">
-          <dt>{{ labelText(item.key) }}</dt>
-          <dd>{{ valueText(item.value) }}</dd>
-        </div>
-      </dl>
-      <ng-template #noGc><p class="hint">运行清理后显示结果。</p></ng-template>
+      @if (gcResult) {
+        <dl class="kv-list">
+          @for (item of gcResult | keyvalue; track item.key) {
+            <div>
+              <dt>{{ labelText(item.key) }}</dt>
+              <dd>{{ valueText(item.value) }}</dd>
+            </div>
+          }
+        </dl>
+      } @else {
+        <p class="empty">运行清理后显示结果。</p>
+      }
     </article>
   </div>
 </section>

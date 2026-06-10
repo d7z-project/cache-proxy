@@ -32,6 +32,8 @@ type Route struct {
 	ObjectPath         string
 	UpstreamPath       string
 	Policy             string
+	FreshFor           config.Duration
+	ExpireAfter        config.Duration
 	RewriteNPMMetadata bool
 }
 
@@ -148,7 +150,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		return h.bypass(ctx, req, route)
 	}
 
-	cached, err := h.openCached(ctx, route.ObjectPath)
+	cached, err := h.openCached(ctx, route)
 	if err != nil {
 		slog.Debug("cache miss", "instance", h.name, "object", route.ObjectPath, "err", err)
 		return h.downloadAndOpen(ctx, req, route, "MISS")
@@ -157,7 +159,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		cached.Headers["X-Cache"] = "HIT"
 		return h.rewriteResponse(req, route, cached), nil
 	}
-	if h.fresh(cached.Headers) {
+	if h.fresh(route, cached.Headers) {
 		cached.Headers["X-Cache"] = "FRESH"
 		return h.rewriteResponse(req, route, cached), nil
 	}
@@ -177,13 +179,13 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 
 func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
 	if h.cfg.Cache.BusyPolicy == config.BusyPolicyStale && req.Header.Get("Range") == "" {
-		cached, err := h.openCached(ctx, route.ObjectPath)
+		cached, err := h.openCached(ctx, route)
 		if err == nil {
 			cached.Headers["X-Cache"] = "STALE"
 			if route.Policy == config.PolicyImmutable {
 				cached.Headers["X-Cache"] = "HIT"
 			}
-			if h.fresh(cached.Headers) {
+			if h.fresh(route, cached.Headers) {
 				cached.Headers["X-Cache"] = "FRESH"
 			}
 			return h.rewriteResponse(req, route, cached), nil
@@ -202,8 +204,8 @@ func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*
 	return response, err
 }
 
-func (h *Handler) openCached(ctx context.Context, objectPath string) (*utils.ResponseWrapper, error) {
-	reader, err := h.store.OpenObject(ctx, h.name, objectPath)
+func (h *Handler) openCached(ctx context.Context, route Route) (*utils.ResponseWrapper, error) {
+	reader, err := h.store.OpenObject(ctx, h.name, route.ObjectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -212,13 +214,13 @@ func (h *Handler) openCached(ctx context.Context, objectPath string) (*utils.Res
 	for key, value := range info.Options {
 		headers[headerName(key)] = value
 	}
-	if h.expired(info.Options) {
+	if h.expired(route, info.Options) {
 		_ = reader.Close()
-		_ = h.store.DeleteObject(ctx, h.name, objectPath)
+		_ = h.store.DeleteObject(ctx, h.name, route.ObjectPath)
 		return nil, errors.New("cached object expired")
 	}
 	if headers["Content-Type"] == "" {
-		headers["Content-Type"] = mime.TypeByExtension(path.Ext(objectPath))
+		headers["Content-Type"] = mime.TypeByExtension(path.Ext(route.ObjectPath))
 	}
 	if headers["Content-Type"] == "" {
 		headers["Content-Type"] = "application/octet-stream"
@@ -227,14 +229,14 @@ func (h *Handler) openCached(ctx context.Context, objectPath string) (*utils.Res
 }
 
 func (h *Handler) openValidCached(ctx context.Context, route Route) (*utils.ResponseWrapper, error) {
-	cached, err := h.openCached(ctx, route.ObjectPath)
+	cached, err := h.openCached(ctx, route)
 	if err != nil {
 		return nil, err
 	}
 	if route.Policy == config.PolicyImmutable {
 		return cached, nil
 	}
-	if h.fresh(cached.Headers) {
+	if h.fresh(route, cached.Headers) {
 		return cached, nil
 	}
 	valid, err := h.validateCached(ctx, route, cached.Headers)
@@ -736,20 +738,28 @@ func passableHeader(name string) bool {
 	}
 }
 
-func (h *Handler) expired(options map[string]string) bool {
-	if h.cfg.ExpireAfter <= 0 {
+func (h *Handler) expired(route Route, options map[string]string) bool {
+	expireAfter := route.ExpireAfter
+	if expireAfter <= 0 {
+		expireAfter = h.cfg.ExpireAfter
+	}
+	if expireAfter <= 0 {
 		return false
 	}
 	fetchedAt, err := parseFetchedAt(options["fetched-at"])
-	return err == nil && time.Since(fetchedAt) > h.cfg.ExpireAfter.Duration()
+	return err == nil && time.Since(fetchedAt) > expireAfter.Duration()
 }
 
-func (h *Handler) fresh(headers map[string]string) bool {
-	if h.cfg.Cache.FreshFor <= 0 {
+func (h *Handler) fresh(route Route, headers map[string]string) bool {
+	freshFor := route.FreshFor
+	if freshFor <= 0 {
+		freshFor = h.cfg.Cache.FreshFor
+	}
+	if freshFor <= 0 {
 		return false
 	}
 	fetchedAt, err := parseFetchedAt(headers["fetched-at"])
-	return err == nil && time.Since(fetchedAt) <= h.cfg.Cache.FreshFor.Duration()
+	return err == nil && time.Since(fetchedAt) <= freshFor.Duration()
 }
 
 func parseFetchedAt(value string) (time.Time, error) {

@@ -366,6 +366,7 @@ func (r *Runtime) buildMainHandler(cfg *config.Config) error {
 	apiMux.HandleFunc("/-/api/metrics/stats", r.metricsStatsAPI)
 	apiMux.HandleFunc("/-/api/storage/stats", r.storageStatsAPI)
 	apiMux.HandleFunc("/-/api/storage/gc", r.storageGCAPI)
+	apiMux.HandleFunc("/-/api/cache/lookup", r.cacheLookupAPI)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /-/api/login", r.loginHandler)
@@ -664,7 +665,13 @@ func DefaultConfig() *config.Config {
 		Instances: map[string]config.InstanceConfig{"example-files": {
 			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
 			ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter)),
-			Cache:       config.CacheConfig{DefaultPolicy: config.PolicyBypass, Rules: []config.CacheRule{{Match: "**/*.iso", Policy: config.PolicyImmutable}, {Match: "**/repodata/**", Policy: config.PolicyRevalidate}}},
+			Cache: config.CacheConfig{
+				DefaultPolicy: config.PolicyBypass,
+				Rules: []config.CacheRule{
+					{Match: "**/*.iso", Policy: config.PolicyImmutable, ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))},
+					{Match: "**/repodata/**", Policy: config.PolicyRevalidate},
+				},
+			},
 		}},
 	}
 }
@@ -806,14 +813,22 @@ func validateOCI(inst config.InstanceConfig) error {
 	if inst.Mode != config.ModeOCI || inst.OCI == nil {
 		return nil
 	}
-	if inst.OCI.BlobPolicy != "" && !validPolicy(inst.OCI.BlobPolicy) {
-		return fmt.Errorf("invalid oci blob policy %q", inst.OCI.BlobPolicy)
+	if inst.OCI.DefaultPolicy != "" && !validPolicy(inst.OCI.DefaultPolicy) {
+		return fmt.Errorf("invalid oci default policy %q", inst.OCI.DefaultPolicy)
 	}
-	if inst.OCI.ManifestPolicy != "" && !validPolicy(inst.OCI.ManifestPolicy) {
-		return fmt.Errorf("invalid oci manifest policy %q", inst.OCI.ManifestPolicy)
-	}
-	if inst.OCI.TagPolicy != "" && !validPolicy(inst.OCI.TagPolicy) {
-		return fmt.Errorf("invalid oci tag policy %q", inst.OCI.TagPolicy)
+	for i, rule := range inst.OCI.Rules {
+		if strings.TrimSpace(rule.Match) == "" {
+			return fmt.Errorf("oci rule %d: match is empty", i)
+		}
+		if !doublestar.ValidatePattern(rule.Match) {
+			return fmt.Errorf("oci rule %d: invalid match %q", i, rule.Match)
+		}
+		if rule.Policy != "" && !validPolicy(rule.Policy) {
+			return fmt.Errorf("oci rule %d: invalid policy %q", i, rule.Policy)
+		}
+		if rule.ResourcePolicy != "" && rule.ResourcePolicy != "*" && rule.ResourcePolicy != "blob" && rule.ResourcePolicy != "manifest" && rule.ResourcePolicy != "tag" {
+			return fmt.Errorf("oci rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
+		}
 	}
 	if inst.OCI.Auth == nil {
 		return nil
@@ -839,11 +854,22 @@ func validateNPM(inst config.InstanceConfig) error {
 	if inst.Mode != config.ModeNPM || inst.NPM == nil {
 		return nil
 	}
-	if inst.NPM.MetadataPolicy != "" && !validPolicy(inst.NPM.MetadataPolicy) {
-		return fmt.Errorf("invalid npm metadata policy %q", inst.NPM.MetadataPolicy)
+	if inst.NPM.DefaultPolicy != "" && !validPolicy(inst.NPM.DefaultPolicy) {
+		return fmt.Errorf("invalid npm default policy %q", inst.NPM.DefaultPolicy)
 	}
-	if inst.NPM.TarballPolicy != "" && !validPolicy(inst.NPM.TarballPolicy) {
-		return fmt.Errorf("invalid npm tarball policy %q", inst.NPM.TarballPolicy)
+	for i, rule := range inst.NPM.Rules {
+		if strings.TrimSpace(rule.Match) == "" {
+			return fmt.Errorf("npm rule %d: match is empty", i)
+		}
+		if !doublestar.ValidatePattern(rule.Match) {
+			return fmt.Errorf("npm rule %d: invalid match %q", i, rule.Match)
+		}
+		if rule.Policy != "" && !validPolicy(rule.Policy) {
+			return fmt.Errorf("npm rule %d: invalid policy %q", i, rule.Policy)
+		}
+		if rule.ResourcePolicy != "" && rule.ResourcePolicy != "*" && rule.ResourcePolicy != "metadata" && rule.ResourcePolicy != "tarball" {
+			return fmt.Errorf("npm rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
+		}
 	}
 	return nil
 }

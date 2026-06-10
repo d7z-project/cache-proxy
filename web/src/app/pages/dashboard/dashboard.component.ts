@@ -1,22 +1,22 @@
 import { Component, inject } from '@angular/core';
-import { AsyncPipe, NgFor, NgIf } from '@angular/common';
+import { AsyncPipe } from '@angular/common';
 import { BehaviorSubject, Observable, forkJoin, of, catchError, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { InstanceMetrics, MetricsStats, RuntimeInfo, InstanceSummary, ConfigSnapshot } from '../../core/api.models';
-import { PROXY_MODE_OPTIONS } from '../../core/config-options';
+import { InstanceMetrics, RuntimeInfo, InstanceSummary, ConfigSnapshot } from '../../core/api.models';
+import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 interface DashboardData {
   runtime: RuntimeInfo;
   instances: InstanceSummary[];
   config: ConfigSnapshot;
-  metrics: MetricsStats;
+  metrics: { total: { requests: number; errors: number; responseBytes: number; cache: Record<string, number>; upstreamRequests: number; upstreamErrors: number; upstreamStatus: Record<string, number>; activeDownloads: number }; instances: Record<string, InstanceMetrics>; };
 }
 
 interface ChartSlice { label: string; value: number; percent: number; }
 
 @Component({
   selector: 'app-dashboard',
-  imports: [AsyncPipe, NgFor, NgIf],
+  imports: [AsyncPipe, ModeLabelPipe],
   templateUrl: './dashboard.component.html'
 })
 export class DashboardComponent {
@@ -66,9 +66,5 @@ export class DashboardComponent {
     let size = value, unit = 0;
     while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
     return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-  }
-
-  modeLabel(mode: string): string {
-    return PROXY_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? mode;
   }
 }

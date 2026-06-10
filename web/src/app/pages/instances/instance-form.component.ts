@@ -1,18 +1,18 @@
 import { Component, OnInit, inject } from '@angular/core';
-import { NgFor, NgIf } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
 import { forkJoin, Observable } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, OciAuthType, ProxyMode, RuntimeInfo } from '../../core/api.models';
-import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, PROXY_MODE_OPTIONS, LISTEN_KIND_OPTIONS, FILE_DEFAULT_RULES } from '../../core/config-options';
+import { BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, OciResourcePolicy, ProxyMode, RuntimeInfo } from '../../core/api.models';
+import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, FILE_DEFAULT_RULES, OCI_RESOURCE_POLICY_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
+import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 @Component({
   selector: 'app-instance-form',
-  imports: [NgFor, NgIf, FormsModule],
+  imports: [FormsModule, ModeLabelPipe],
   templateUrl: './instance-form.component.html'
 })
 export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
@@ -36,11 +36,12 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   upstreams: string[] = [];
   passHeaders: string[] = [];
 
-  readonly proxyModes = PROXY_MODE_OPTIONS;
   readonly cachePolicies = CACHE_POLICY_OPTIONS;
   readonly busyPolicies = BUSY_POLICY_OPTIONS;
   readonly listenKinds = LISTEN_KIND_OPTIONS;
   readonly ociAuthOptions = OCI_AUTH_OPTIONS;
+  readonly ociResourcePolicies = OCI_RESOURCE_POLICY_OPTIONS;
+  readonly npmResourcePolicies = NPM_RESOURCE_POLICY_OPTIONS;
   readonly ProxyMode = ProxyMode;
   readonly ListenKind = ListenKind;
   readonly OciAuthType = OciAuthType;
@@ -62,14 +63,25 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     });
   }
 
-  modeLabel(mode: string): string { return this.proxyModes.find((o) => o.value === mode)?.label ?? mode; }
-
   addUpstream(): void { this.upstreams.push(''); }
   removeUpstream(index: number): void { if (this.upstreams.length > 1) this.upstreams.splice(index, 1); }
   addPassHeader(): void { this.passHeaders.push(''); }
   removePassHeader(index: number): void { this.passHeaders.splice(index, 1); }
-  addRule(): void { this.draft?.cache.rules.push({ match: '**/*', policy: CachePolicy.Revalidate }); }
+
+  addRule(): void {
+    this.draft?.cache.rules.push({ match: '**/*', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' });
+  }
   removeRule(index: number): void { this.draft?.cache.rules.splice(index, 1); }
+
+  addOciRule(): void {
+    this.draft?.oci?.rules.push({ match: 'library/*', resourcePolicy: OciResourcePolicy.All, policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' });
+  }
+  removeOciRule(index: number): void { this.draft?.oci?.rules.splice(index, 1); }
+
+  addNpmRule(): void {
+    this.draft?.npm?.rules.push({ match: '**', resourcePolicy: NpmResourcePolicy.All, policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' });
+  }
+  removeNpmRule(index: number): void { this.draft?.npm?.rules.splice(index, 1); }
 
   back(): void {
     if (!this.dirty) { this.router.navigate(['/instances']); return; }
@@ -110,8 +122,6 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       error: (err) => { this.saving = false; this.toast.error(err.error?.error || '保存操作异常'); }
     });
   }
-
-  // ── Private ────────────────────────────────────
 
   private load(): void {
     this.loading = true;
@@ -184,18 +194,17 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     this.draft.cache.rules = [];
     delete this.draft.cache.defaultPolicy;
     if (this.draft.mode === ProxyMode.Oci) {
-      this.draft.oci = this.draft.oci ?? { blobPolicy: CachePolicy.Immutable, manifestPolicy: CachePolicy.Revalidate, tagPolicy: CachePolicy.Revalidate };
-      this.draft.oci.blobPolicy = this.draft.oci.blobPolicy ?? CachePolicy.Immutable;
-      this.draft.oci.manifestPolicy = this.draft.oci.manifestPolicy ?? CachePolicy.Revalidate;
-      this.draft.oci.tagPolicy = this.draft.oci.tagPolicy ?? CachePolicy.Revalidate;
+      this.draft.oci = this.draft.oci ?? { defaultPolicy: CachePolicy.Revalidate, rules: [] };
+      this.draft.oci.defaultPolicy = this.draft.oci.defaultPolicy ?? CachePolicy.Revalidate;
+      this.draft.oci.rules = this.draft.oci.rules ?? [];
       this.draft.oci.auth = this.draft.oci.auth ?? { type: OciAuthType.None };
       if (this.draft.oci.auth.password === '***') this.draft.oci.auth.password = '';
       if (this.draft.oci.auth.token === '***') this.draft.oci.auth.token = '';
     }
     if (this.draft.mode === ProxyMode.Npm) {
-      this.draft.npm = this.draft.npm ?? { metadataPolicy: CachePolicy.Revalidate, tarballPolicy: CachePolicy.Immutable };
-      this.draft.npm.metadataPolicy = this.draft.npm.metadataPolicy ?? CachePolicy.Revalidate;
-      this.draft.npm.tarballPolicy = this.draft.npm.tarballPolicy ?? CachePolicy.Immutable;
+      this.draft.npm = this.draft.npm ?? { defaultPolicy: CachePolicy.Revalidate, rules: [] };
+      this.draft.npm.defaultPolicy = this.draft.npm.defaultPolicy ?? CachePolicy.Revalidate;
+      this.draft.npm.rules = this.draft.npm.rules ?? [];
     }
   }
 
@@ -204,7 +213,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       return {
         mode, listen: { bind: '' }, upstreams: ['https://registry-1.docker.io'], expireAfter: '720h',
         cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-        oci: { blobPolicy: CachePolicy.Immutable, manifestPolicy: CachePolicy.Revalidate, tagPolicy: CachePolicy.Revalidate, auth: { type: OciAuthType.None } },
+        oci: { defaultPolicy: CachePolicy.Revalidate, rules: [], auth: { type: OciAuthType.None } },
         transport: {}
       };
     }
@@ -212,7 +221,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       return {
         mode, listen: { path: '/npm' }, upstreams: ['https://registry.npmjs.org'], expireAfter: '720h',
         cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-        npm: { metadataPolicy: CachePolicy.Revalidate, tarballPolicy: CachePolicy.Immutable }, transport: {}
+        npm: { defaultPolicy: CachePolicy.Revalidate, rules: [] }, transport: {}
       };
     }
     return {
@@ -245,7 +254,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       delete (instance as any).npm;
     } else if (instance.mode === ProxyMode.Npm) {
       instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
-      instance.npm = instance.npm ?? { metadataPolicy: CachePolicy.Revalidate, tarballPolicy: CachePolicy.Immutable };
+      instance.npm = this.normalizeNpm(instance.npm);
       delete (instance as any).oci;
       delete (instance as any).passHeaders;
     } else {
@@ -257,7 +266,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   }
 
   private normalizeOci(oci: InstanceConfig['oci']) {
-    if (!oci) return { blobPolicy: CachePolicy.Immutable, manifestPolicy: CachePolicy.Revalidate, tagPolicy: CachePolicy.Revalidate };
+    if (!oci) return { defaultPolicy: CachePolicy.Revalidate, rules: [] as any[] };
     const auth = oci.auth;
     if (!auth || auth.type === OciAuthType.None) { delete oci.auth; return oci; }
     auth.username = auth.username?.trim() || undefined;
@@ -266,6 +275,12 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (auth.type === OciAuthType.Basic) delete (auth as any).token;
     if (auth.type === OciAuthType.Bearer) { delete (auth as any).username; delete (auth as any).password; }
     return oci;
+  }
+
+  private normalizeNpm(npm: InstanceConfig['npm']) {
+    if (!npm) return { defaultPolicy: CachePolicy.Revalidate, rules: [] as any[] };
+    npm.rules = npm.rules ?? [];
+    return npm;
   }
 
   private normalizeTransport(t: InstanceConfig['transport']) {
