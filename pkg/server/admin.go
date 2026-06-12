@@ -12,6 +12,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -280,16 +281,16 @@ func writeError(resp http.ResponseWriter, status int, err error) {
 type cacheLookupResult struct {
 	Instance    string `json:"instance"`
 	Mode        string `json:"mode"`
-	Path        string `json:"path"`
-	ObjectPath  string `json:"objectPath"`
 	Policy      string `json:"policy"`
-	FreshFor    string `json:"freshFor"`
-	ExpireAfter string `json:"expireAfter"`
+	FreshFor    string `json:"freshFor,omitempty"`
+	ExpireAfter string `json:"expireAfter,omitempty"`
 	Generation  uint64 `json:"generation"`
 	Cached      bool   `json:"cached"`
 	CachedAt    string `json:"cachedAt,omitempty"`
 	ExpiresAt   string `json:"expiresAt,omitempty"`
 	Fresh       bool   `json:"fresh"`
+
+	objectPath string // 内部使用，不序列化
 }
 
 func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
@@ -313,16 +314,21 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	resolver, err := newResolver(inst)
-	if err != nil {
-		writeError(resp, http.StatusBadRequest, err)
-		return
-	}
-
 	var route proxy.Route
-	if lr, ok := resolver.(proxy.LookupResolver); ok {
-		route, err = lr.ResolveLookup(lookupPath)
-	} else {
+	var err error
+	switch inst.Mode {
+	case config.ModeOCI:
+		if inst.OCI == nil {
+			writeError(resp, http.StatusBadRequest, errors.New("OCI config is missing"))
+			return
+		}
+		route, err = ociproxy.LookupRef(inst.OCI, lookupPath)
+	default:
+		resolver, resolveErr := newResolver(inst)
+		if resolveErr != nil {
+			writeError(resp, http.StatusBadRequest, resolveErr)
+			return
+		}
 		fakeReq, _ := http.NewRequest("GET", lookupPath, nil)
 		fakeReq.URL.Path = "/" + lookupPath
 		route, err = resolver.Resolve(fakeReq)
@@ -335,8 +341,7 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 	result := cacheLookupResult{
 		Instance:    instanceName,
 		Mode:        inst.Mode,
-		Path:        lookupPath,
-		ObjectPath:  route.ObjectPath,
+		objectPath:  route.ObjectPath,
 		Policy:      route.Policy,
 		Generation:  generation,
 	}
@@ -355,7 +360,7 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 		result.ExpireAfter = expireAfter.String()
 	}
 
-	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, route, inst)
+	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, result.objectPath, inst)
 	result.Cached = cached
 	result.Fresh = fresh
 	if !cachedAt.IsZero() {
@@ -368,8 +373,8 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 	writeJSON(resp, result, nil)
 }
 
-func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName string, route proxy.Route, inst config.InstanceConfig) (bool, time.Time, time.Time, bool) {
-	reader, err := r.store.OpenObject(ctx, instanceName, route.ObjectPath)
+func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath string, inst config.InstanceConfig) (bool, time.Time, time.Time, bool) {
+	reader, err := r.store.OpenObject(ctx, instanceName, objectPath)
 	if err != nil {
 		return false, time.Time{}, time.Time{}, false
 	}
@@ -382,19 +387,13 @@ func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName string, rou
 		return false, time.Time{}, time.Time{}, false
 	}
 
-	expireAfter := route.ExpireAfter
-	if expireAfter <= 0 {
-		expireAfter = inst.ExpireAfter
-	}
+	expireAfter := inst.ExpireAfter
 	var expiresAt time.Time
 	if expireAfter > 0 {
 		expiresAt = cachedAt.Add(expireAfter.Duration())
 	}
 
-	freshFor := route.FreshFor
-	if freshFor <= 0 {
-		freshFor = inst.Cache.FreshFor
-	}
+	freshFor := inst.Cache.FreshFor
 	fresh := false
 	if freshFor > 0 {
 		fresh = time.Since(cachedAt) <= freshFor.Duration()

@@ -175,8 +175,6 @@ export interface InstancesExport {
 export interface CacheLookupResult {
   instance: string;
   mode: string;
-  path: string;
-  objectPath: string;
   policy: string;
   freshFor: string;
   expireAfter: string;

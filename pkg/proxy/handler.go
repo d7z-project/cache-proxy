@@ -41,10 +41,6 @@ type Resolver interface {
 	Resolve(req *http.Request) (Route, error)
 }
 
-type LookupResolver interface {
-	ResolveLookup(lookupPath string) (Route, error)
-}
-
 type Handler struct {
 	name     string
 	cfg      config.InstanceConfig

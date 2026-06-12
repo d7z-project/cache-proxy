@@ -76,14 +76,14 @@
               <label class="form-label">
                 @switch (lookupMode) {
                   @case (ProxyMode.Npm) { 包名 }
-                  @case (ProxyMode.Oci) { 镜像引用 }
+                  @case (ProxyMode.Oci) { 镜像名称 }
                   @default { 文件路径 }
                 }
               </label>
               <p class="text-muted small mb-1">
                 @switch (lookupMode) {
                   @case (ProxyMode.Npm) { 输入 npm 包名，如 @angular/core 或 lodash }
-                  @case (ProxyMode.Oci) { 输入镜像引用，如 library/alpine:latest 或 nginx@sha256:abc }
+                  @case (ProxyMode.Oci) { 输入镜像名称，如 library/alpine:latest 或 nginx:1.25 }
                   @default { 输入代理时请求的文件路径，如 nginx.conf 或 assets/logo.png }
                 }
               </p>
@@ -104,8 +104,6 @@
                   }
                 </div>
                 <dl class="kv-list">
-                  <div><dt>路径</dt><dd>{{ lookupResult.path }}</dd></div>
-                  <div><dt>对象路径</dt><dd>{{ lookupResult.objectPath }}</dd></div>
                   <div><dt>缓存策略</dt><dd>{{ lookupResult.policy | modeLabel:'policy' }}</dd></div>
                   <div><dt>快速命中</dt><dd>{{ lookupResult.freshFor || '未设置' }}</dd></div>
                   <div><dt>过期时间</dt><dd>{{ lookupResult.expireAfter || '未设置' }}</dd></div>

@@ -2,7 +2,6 @@ package oci
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -83,47 +82,29 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 	return proxy.Route{ObjectPath: "oci/other/" + proxy.HashKey(cleanPath), UpstreamPath: cleanPath, Policy: config.PolicyBypass}, nil
 }
 
-// ResolveLookup 接受用户友好的镜像引用，转换为标准 v2/... 格式后调用 Resolve。
-//
-// 支持格式:
-//   - repo           → v2/<repo>/tags/list         (查询标签列表)
-//   - repo:tag       → v2/<repo>/manifests/<tag>   (查询 manifest)
-//   - repo@digest    → v2/<repo>/blobs/<digest>    (查询 blob)
-func (r *Resolver) ResolveLookup(lookupPath string) (proxy.Route, error) {
-	v2Path, err := convertOCILookupPath(lookupPath)
+// LookupRef 解析用户友好的镜像引用，返回缓存路由。
+// 支持:
+//   - repo     → tags/list
+//   - repo:tag → manifests/tag
+func LookupRef(cfg *config.OCIConfig, ref string) (proxy.Route, error) {
+	v2Path, err := parseOCIRef(ref)
 	if err != nil {
 		return proxy.Route{}, err
 	}
-	return r.Resolve(&http.Request{URL: &url.URL{Path: "/" + v2Path}})
+	return New(cfg).Resolve(&http.Request{URL: &url.URL{Path: "/" + v2Path}})
 }
 
-func convertOCILookupPath(ref string) (string, error) {
+func parseOCIRef(ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", errors.New("empty OCI reference")
 	}
-
-	// 处理 repo@digest 格式 (如 library/alpine@sha256:abc123)
-	if i := strings.Index(ref, "@"); i >= 0 {
-		repo := ref[:i]
-		digest := ref[i+1:]
-		if !strings.Contains(digest, ":") {
-			return "", fmt.Errorf("invalid digest: %s", digest)
-		}
-		return "v2/" + repo + "/blobs/" + digest, nil
-	}
-
-	// 处理 repo:tag 格式 (如 library/alpine:latest)
 	if i := strings.LastIndex(ref, ":"); i >= 0 {
-		repo := ref[:i]
-		tag := ref[i+1:]
-		// 验证不是端口号（repo 部分不应以数字结尾后接冒号）
+		repo, tag := ref[:i], ref[i+1:]
 		if repo != "" && tag != "" {
 			return "v2/" + repo + "/manifests/" + tag, nil
 		}
 	}
-
-	// 只有 repo (如 library/alpine)
 	return "v2/" + ref + "/tags/list", nil
 }
 
