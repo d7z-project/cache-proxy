@@ -319,13 +319,14 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	fakeReq, err := http.NewRequest("GET", lookupPath, nil)
-	if err != nil {
-		writeError(resp, http.StatusBadRequest, err)
-		return
+	var route proxy.Route
+	if lr, ok := resolver.(proxy.LookupResolver); ok {
+		route, err = lr.ResolveLookup(lookupPath)
+	} else {
+		fakeReq, _ := http.NewRequest("GET", lookupPath, nil)
+		fakeReq.URL.Path = "/" + lookupPath
+		route, err = resolver.Resolve(fakeReq)
 	}
-	fakeReq.URL.Path = "/" + lookupPath
-	route, err := resolver.Resolve(fakeReq)
 	if err != nil {
 		writeError(resp, http.StatusBadRequest, err)
 		return

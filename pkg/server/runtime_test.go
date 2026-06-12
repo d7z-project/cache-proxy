@@ -1341,9 +1341,9 @@ func TestCacheLookupAPIWithOCIGlobRules(t *testing.T) {
 	}})
 	defer closeRuntime(t, rt)
 
-	// lookup OCI blob
+	// lookup OCI blob using user-friendly reference (repo@digest)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=oci&path=v2/library/alpine/blobs/sha256:abc", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=oci&path=library/alpine@sha256:abc", nil).WithContext(ctx)
 	rt.mainHandler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var result cacheLookupResult
@@ -1354,6 +1354,22 @@ func TestCacheLookupAPIWithOCIGlobRules(t *testing.T) {
 	require.Equal(t, "5m0s", result.FreshFor)
 	require.Equal(t, "24h0m0s", result.ExpireAfter)
 	require.False(t, result.Cached)
+
+	// lookup OCI manifest using repo:tag format
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=oci&path=library/alpine:latest", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	require.Equal(t, "immutable", result.Policy)
+
+	// lookup OCI tags using repo-only format
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/-/api/cache/lookup?instance=oci&path=library/alpine", nil).WithContext(ctx)
+	rt.mainHandler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+	require.Equal(t, "immutable", result.Policy)
 }
 
 func TestCacheLookupAPIReturnsCorrectRouteForNPM(t *testing.T) {

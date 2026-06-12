@@ -3,6 +3,7 @@ package file
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -35,6 +36,10 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		FreshFor:     match.freshFor,
 		ExpireAfter:  match.expireAfter,
 	}, nil
+}
+
+func (r *Resolver) ResolveLookup(lookupPath string) (proxy.Route, error) {
+	return r.Resolve(&http.Request{URL: &url.URL{Path: "/" + lookupPath}})
 }
 
 type fileMatch struct {

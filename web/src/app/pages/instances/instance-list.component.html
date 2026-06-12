@@ -76,15 +76,15 @@
               <label class="form-label">
                 @switch (lookupMode) {
                   @case (ProxyMode.Npm) { 包名 }
-                  @case (ProxyMode.Oci) { 镜像名称 }
-                  @default { 资源路径 }
+                  @case (ProxyMode.Oci) { 镜像引用 }
+                  @default { 文件路径 }
                 }
               </label>
               <p class="text-muted small mb-1">
                 @switch (lookupMode) {
                   @case (ProxyMode.Npm) { 输入 npm 包名，如 @angular/core 或 lodash }
-                  @case (ProxyMode.Oci) { 输入镜像名称，如 library/alpine 或 nginx:latest }
-                  @default { 输入要查询的文件路径 }
+                  @case (ProxyMode.Oci) { 输入镜像引用，如 library/alpine:latest 或 nginx@sha256:abc }
+                  @default { 输入代理时请求的文件路径，如 nginx.conf 或 assets/logo.png }
                 }
               </p>
               <input class="form-control" name="lookupPath" [(ngModel)]="lookupPath" [placeholder]="lookupPlaceholder" (keyup.enter)="lookupCache()">

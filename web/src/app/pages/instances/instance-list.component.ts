@@ -36,8 +36,8 @@ export class InstanceListComponent implements OnInit {
   get lookupPlaceholder(): string {
     switch (this.lookupMode) {
       case ProxyMode.Npm: return '@angular/core';
-      case ProxyMode.Oci: return 'library/alpine';
-      default: return '/library/nginx/latest';
+      case ProxyMode.Oci: return 'library/alpine:latest';
+      default: return 'nginx.conf';
     }
   }
 
