@@ -7,8 +7,8 @@ require (
 	github.com/google/go-containerregistry v0.21.6
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sync v0.20.0
-	gopkg.d7z.net/blobfs v0.0.0-20260607135345-55d48762a5fb
+	golang.org/x/sync v0.21.0
+	gopkg.d7z.net/blobfs v0.0.0-20260612062820-4d64b24f1228
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -25,7 +25,7 @@ require (
 	github.com/prometheus/common v0.68.1 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )

@@ -292,6 +292,15 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 	}
 	r.preserveStartupOnlyConfig(cfg)
 	r.preserveMaskedCredentials(cfg)
+
+	// 记录旧实例名列表，用于后续清理被删除实例的缓存
+	r.mu.RLock()
+	oldInstanceNames := make(map[string]struct{}, len(r.config.Instances))
+	for name := range r.config.Instances {
+		oldInstanceNames[name] = struct{}{}
+	}
+	r.mu.RUnlock()
+
 	state, err := r.buildServerState(cfg)
 	if err != nil {
 		return nil, err
@@ -343,6 +352,16 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 	for _, handler := range oldHandlers {
 		handler.Close()
 	}
+
+	// 清理被删除实例的缓存数据
+	for name := range oldInstanceNames {
+		if _, exists := cfg.Instances[name]; !exists {
+			if delErr := r.store.DeleteTenant(ctx, name); delErr != nil && !errors.Is(delErr, fs.ErrNotExist) {
+				slog.Warn("清理实例缓存失败", "instance", name, "error", delErr)
+			}
+		}
+	}
+
 	return &ConfigSnapshot{Generation: nextGen, Config: next, YAML: string(data)}, nil
 }
 
@@ -893,12 +912,6 @@ func validateOCI(inst config.InstanceConfig) error {
 		}
 		if !validPolicy(rule.Policy) {
 			return fmt.Errorf("oci rule %d: invalid policy %q", i, rule.Policy)
-		}
-		if rule.ResourcePolicy == "" {
-			rule.ResourcePolicy = "*"
-		}
-		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != "blob" && rule.ResourcePolicy != "manifest" && rule.ResourcePolicy != "tag" {
-			return fmt.Errorf("oci rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
 		}
 		inst.OCI.Rules[i] = rule
 	}

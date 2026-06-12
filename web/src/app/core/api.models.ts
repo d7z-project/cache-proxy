@@ -26,13 +26,6 @@ export enum OciAuthType {
   Bearer = 'bearer'
 }
 
-export enum OciResourcePolicy {
-  Blob = 'blob',
-  Manifest = 'manifest',
-  Tag = 'tag',
-  All = '*'
-}
-
 export enum NpmResourcePolicy {
   Metadata = 'metadata',
   Tarball = 'tarball',
@@ -130,7 +123,6 @@ export interface OciConfig {
 
 export interface OciCacheRule {
   match: string;
-  resourcePolicy: OciResourcePolicy;
   policy: CachePolicy;
   freshFor?: string;
   expireAfter?: string;

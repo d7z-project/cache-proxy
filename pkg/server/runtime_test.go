@@ -314,7 +314,7 @@ func TestOCIProxyCachesBlobByDigest(t *testing.T) {
 		_, _ = w.Write([]byte("layer"))
 	}))
 	defer upstream.Close()
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable}}}}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", Policy: config.PolicyImmutable}}}}})
 	defer closeRuntime(t, rt)
 	rt.mu.RLock()
 	handler := rt.handlers[0]
@@ -382,7 +382,7 @@ func TestOCIProxySetsManifestAcceptHeader(t *testing.T) {
 		_, _ = w.Write([]byte("{}"))
 	}))
 	defer upstream.Close()
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "manifest", Policy: config.PolicyBypass}}}}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL}, OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", Policy: config.PolicyBypass}}}}})
 	defer closeRuntime(t, rt)
 	rt.mu.RLock()
 	handler := rt.handlers[0]
@@ -460,7 +460,7 @@ func TestOCIProxyUsesConfiguredBasicAuthAndSingleUpstream(t *testing.T) {
 	defer upstream.Close()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
 		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{upstream.URL},
-		OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable}}, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
+		OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", Policy: config.PolicyImmutable}}, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
 	}})
 	defer closeRuntime(t, rt)
 	rt.mu.RLock()
@@ -1070,7 +1070,7 @@ func TestImportAllowsMaskedCredentialsForExistingInstance(t *testing.T) {
 	defer cancel()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
 		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
-		OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable}}, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "real-password"}},
+		OCI: &config.OCIConfig{Rules: []config.OCICacheRule{{Match: "library/*", Policy: config.PolicyImmutable}}, Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "real-password"}},
 	}})
 	defer closeRuntime(t, rt)
 
@@ -1223,8 +1223,8 @@ func TestOCIGlobRulesMatchRepoByPattern(t *testing.T) {
 		OCI: &config.OCIConfig{
 			DefaultPolicy: config.PolicyRevalidate,
 			Rules: []config.OCICacheRule{
-				{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable},
-				{Match: "myorg/**", ResourcePolicy: "*", Policy: config.PolicyBypass},
+				{Match: "library/*", Policy: config.PolicyImmutable},
+				{Match: "myorg/**", Policy: config.PolicyBypass},
 			},
 		},
 	}})
@@ -1244,7 +1244,7 @@ func TestOCIGlobRulesMatchRepoByPattern(t *testing.T) {
 	require.Equal(t, int32(3), atomic.LoadInt32(&getCount)) // +2 for myorg
 }
 
-func TestOCIGlobRulesResolveManifestAndTag(t *testing.T) {
+func TestOCIGlobRulesFirstMatchWins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var getCount int32
@@ -1260,8 +1260,8 @@ func TestOCIGlobRulesResolveManifestAndTag(t *testing.T) {
 		OCI: &config.OCIConfig{
 			DefaultPolicy: config.PolicyBypass,
 			Rules: []config.OCICacheRule{
-				{Match: "library/*", ResourcePolicy: "manifest", Policy: config.PolicyRevalidate},
-				{Match: "library/*", ResourcePolicy: "tag", Policy: config.PolicyImmutable},
+				{Match: "library/*", Policy: config.PolicyRevalidate},
+				{Match: "library/*", Policy: config.PolicyImmutable},
 			},
 		},
 	}})
@@ -1270,16 +1270,21 @@ func TestOCIGlobRulesResolveManifestAndTag(t *testing.T) {
 	handler := rt.handlers[0]
 	rt.mu.RUnlock()
 
-	// manifest → revalidate (no FreshFor → always stale → HEAD revalidation, but no ETag so passes)
+	// library/* → revalidate (first rule wins, second rule never reached)
+	// manifest: revalidate → HEAD revalidation
 	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
 	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
-	// getCount: 1 GET + 1 HEAD (validation passes) = 2
 	require.Equal(t, int32(2), atomic.LoadInt32(&getCount))
 
-	// tags/list → immutable (cached once)
+	// blob: also revalidate (same repo, same rule)
+	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
+	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/blobs/sha256:abc", ""))
+	require.Equal(t, int32(4), atomic.LoadInt32(&getCount))
+
+	// tags/list: also revalidate (same repo, same rule)
 	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/tags/list", ""))
 	require.Equal(t, "{}", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/tags/list", ""))
-	require.Equal(t, int32(3), atomic.LoadInt32(&getCount))
+	require.Equal(t, int32(6), atomic.LoadInt32(&getCount))
 }
 
 func TestNPMGlobRulesMatchPackageByPattern(t *testing.T) {
@@ -1330,7 +1335,7 @@ func TestCacheLookupAPIWithOCIGlobRules(t *testing.T) {
 		OCI: &config.OCIConfig{
 			DefaultPolicy: config.PolicyRevalidate,
 			Rules: []config.OCICacheRule{
-				{Match: "library/*", ResourcePolicy: "blob", Policy: config.PolicyImmutable, FreshFor: config.Duration(5 * time.Minute), ExpireAfter: config.Duration(24 * time.Hour)},
+				{Match: "library/*", Policy: config.PolicyImmutable, FreshFor: config.Duration(5 * time.Minute), ExpireAfter: config.Duration(24 * time.Hour)},
 			},
 		},
 	}})
@@ -1364,7 +1369,7 @@ func TestCacheLookupAPIReturnsCorrectRouteForNPM(t *testing.T) {
 		NPM: &config.NPMConfig{
 			DefaultPolicy: config.PolicyRevalidate,
 			Rules: []config.NPMCacheRule{
-				{Match: "@angular/*", ResourcePolicy: "*", Policy: config.PolicyImmutable, FreshFor: config.Duration(10 * time.Minute)},
+				{Match: "@angular/*", Policy: config.PolicyImmutable, FreshFor: config.Duration(10 * time.Minute)},
 			},
 		},
 	}})
@@ -1558,4 +1563,55 @@ func TestValidateCacheRuleRequiresPolicy(t *testing.T) {
 		},
 	}}
 	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "cache rule policy is empty")
+}
+
+func TestDeleteInstanceCleansCache(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{
+		"files": {
+			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
+			Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		},
+		"keep": {
+			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/keep"}, Upstreams: []string{"https://example.com"},
+			Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		},
+	})
+	defer closeRuntime(t, rt)
+
+	require.NoError(t, rt.store.MkdirAll("files/test", 0o755))
+	_, err := rt.store.Put(ctx, "files", "test/obj.txt", strings.NewReader("cached-data"), map[string]string{"type": "cache"})
+	require.NoError(t, err)
+	require.NoError(t, rt.store.MkdirAll("keep/test", 0o755))
+	_, err = rt.store.Put(ctx, "keep", "test/obj.txt", strings.NewReader("cached-data"), map[string]string{"type": "cache"})
+	require.NoError(t, err)
+
+	reader, err := rt.store.OpenObject(ctx, "files", "test/obj.txt")
+	require.NoError(t, err)
+	reader.Close()
+
+	reader, err = rt.store.OpenObject(ctx, "keep", "test/obj.txt")
+	require.NoError(t, err)
+	reader.Close()
+
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{
+		"keep": {
+			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/keep"}, Upstreams: []string{"https://example.com"},
+			Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		},
+	}
+	snapshot, err := rt.UpdateConfig(ctx, rt.generation, cfg)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Config.Instances, 1)
+	require.Contains(t, snapshot.Config.Instances, "keep")
+
+	_, err = rt.store.OpenObject(ctx, "files", "test/obj.txt")
+	require.Error(t, err, "deleted instance cache should be gone")
+
+	reader, err = rt.store.OpenObject(ctx, "keep", "test/obj.txt")
+	require.NoError(t, err, "kept instance cache should still exist")
+	reader.Close()
 }

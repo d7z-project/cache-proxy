@@ -3,7 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem } from '@ng-bootstrap/ng-bootstrap';
 import { ApiService } from '../../core/api.service';
-import { CacheLookupResult, ConfigSnapshot, InstanceConfig } from '../../core/api.models';
+import { CacheLookupResult, ConfigSnapshot, InstanceConfig, ProxyMode } from '../../core/api.models';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
@@ -26,9 +26,20 @@ export class InstanceListComponent implements OnInit {
 
   showLookupModal = false;
   lookupInstanceName = '';
+  lookupMode: ProxyMode = ProxyMode.File;
   lookupPath = '';
   lookupRunning = false;
   lookupResult?: CacheLookupResult;
+
+  readonly ProxyMode = ProxyMode;
+
+  get lookupPlaceholder(): string {
+    switch (this.lookupMode) {
+      case ProxyMode.Npm: return '@angular/core';
+      case ProxyMode.Oci: return 'library/alpine';
+      default: return '/library/nginx/latest';
+    }
+  }
 
   ngOnInit(): void { this.load(); }
 
@@ -68,6 +79,8 @@ export class InstanceListComponent implements OnInit {
   }
 
   openLookupModal(instanceName: string): void {
+    const inst = this.snapshot?.config.instances[instanceName];
+    this.lookupMode = inst?.mode ?? ProxyMode.File;
     this.lookupInstanceName = instanceName;
     this.lookupPath = '';
     this.lookupResult = undefined;

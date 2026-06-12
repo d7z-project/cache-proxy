@@ -88,11 +88,10 @@ type OCIConfig struct {
 }
 
 type OCICacheRule struct {
-	Match          string   `json:"match" yaml:"match"`
-	ResourcePolicy string   `json:"resourcePolicy" yaml:"resource_policy"`
-	Policy         string   `json:"policy" yaml:"policy"`
-	FreshFor       Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	ExpireAfter    Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	Match       string   `json:"match" yaml:"match"`
+	Policy      string   `json:"policy" yaml:"policy"`
+	FreshFor    Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type OCIAuthConfig struct {

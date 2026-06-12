@@ -3,8 +3,8 @@ import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
 import { forkJoin, Observable } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, OciResourcePolicy, ProxyMode, RuntimeInfo } from '../../core/api.models';
-import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, OCI_RESOURCE_POLICY_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
+import { BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, ProxyMode, RuntimeInfo } from '../../core/api.models';
+import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
@@ -42,7 +42,6 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   readonly busyPolicies = BUSY_POLICY_OPTIONS;
   readonly listenKinds = LISTEN_KIND_OPTIONS;
   readonly ociAuthOptions = OCI_AUTH_OPTIONS;
-  readonly ociResourcePolicies = OCI_RESOURCE_POLICY_OPTIONS;
   readonly npmResourcePolicies = NPM_RESOURCE_POLICY_OPTIONS;
   readonly ProxyMode = ProxyMode;
   readonly ListenKind = ListenKind;
@@ -76,7 +75,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   removeRule(index: number): void { this.draft?.cache.rules.splice(index, 1); }
 
   addOciRule(): void {
-    this.draft?.oci?.rules.push({ match: 'library/*', resourcePolicy: OciResourcePolicy.All, policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' });
+    this.draft?.oci?.rules.push({ match: 'library/*', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' });
   }
   removeOciRule(index: number): void { this.draft?.oci?.rules.splice(index, 1); }
 

@@ -1,11 +1,9 @@
 import { Component, inject, OnInit } from '@angular/core';
-import { FormsModule } from '@angular/forms';
 import { AsyncPipe, KeyValuePipe } from '@angular/common';
 import { BehaviorSubject, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { CacheLookupResult, StorageStats } from '../../core/api.models';
+import { StorageStats } from '../../core/api.models';
 import { ToastService } from '../../shared/toast.service';
-import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 const LABELS: Record<string, string> = {
   TxID: '版本', Tenants: '租户', Inodes: '索引节点', Objects: '对象', Directories: '目录',
@@ -19,7 +17,7 @@ const LABELS: Record<string, string> = {
 
 @Component({
   selector: 'app-storage',
-  imports: [FormsModule, AsyncPipe, KeyValuePipe, ModeLabelPipe],
+  imports: [AsyncPipe, KeyValuePipe],
   templateUrl: './storage.component.html'
 })
 export class StorageComponent implements OnInit {
@@ -32,22 +30,8 @@ export class StorageComponent implements OnInit {
   gcResult?: StorageStats;
   gcRunning = false;
 
-  instances: string[] = [];
-  lookupInstance = '';
-  lookupPath = '';
-  lookupRunning = false;
-  lookupResult?: CacheLookupResult;
-
   ngOnInit(): void {
     this.refreshTrigger.next();
-    this.loadInstances();
-  }
-
-  private loadInstances(): void {
-    this.api.instances().subscribe({
-      next: (list) => { this.instances = list.map(i => i.name); },
-      error: () => {}
-    });
   }
 
   refresh(): void { this.refreshTrigger.next(); }
@@ -64,22 +48,6 @@ export class StorageComponent implements OnInit {
       error: (err) => {
         this.gcRunning = false;
         this.toast.error(err.error?.error || '清理操作异常');
-      }
-    });
-  }
-
-  lookupCache(): void {
-    if (!this.lookupInstance || !this.lookupPath.trim()) return;
-    this.lookupRunning = true;
-    this.lookupResult = undefined;
-    this.api.cacheLookup(this.lookupInstance, this.lookupPath.trim()).subscribe({
-      next: (result) => {
-        this.lookupResult = result;
-        this.lookupRunning = false;
-      },
-      error: (err) => {
-        this.lookupRunning = false;
-        this.toast.error(err.error?.error || '缓存查询异常');
       }
     });
   }

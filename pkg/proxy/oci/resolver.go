@@ -31,6 +31,7 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 	if !strings.HasPrefix(cleanPath, "v2/") {
 		return proxy.Route{}, errors.New("invalid OCI request path")
 	}
+
 	parts := strings.Split(cleanPath, "/")
 	for i, part := range parts {
 		if part == "blobs" && i+2 < len(parts) && parts[i+1] == "uploads" {
@@ -40,7 +41,7 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 			digest := parts[i+1]
 			if strings.Contains(digest, ":") {
 				repo := strings.Join(parts[1:i], "/")
-				match := r.resolveResource(repo, "blob")
+				match := r.resolveRepo(repo)
 				return proxy.Route{
 					ObjectPath:   "oci/blobs/" + strings.ReplaceAll(digest, ":", "/"),
 					UpstreamPath: cleanPath,
@@ -56,7 +57,7 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 			if _, err := containername.ParseReference("example.com/"+repo+":"+ref, containername.WeakValidation); err != nil && !strings.Contains(ref, ":") {
 				return proxy.Route{}, err
 			}
-			match := r.resolveResource(repo, "manifest")
+			match := r.resolveRepo(repo)
 			return proxy.Route{
 				ObjectPath:   "oci/manifests/" + repo + "/" + proxy.HashKey(ref),
 				UpstreamPath: cleanPath,
@@ -67,7 +68,7 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		}
 		if part == "tags" && i+1 < len(parts) && parts[i+1] == "list" {
 			repo := strings.Join(parts[1:i], "/")
-			match := r.resolveResource(repo, "tag")
+			match := r.resolveRepo(repo)
 			return proxy.Route{
 				ObjectPath:   "oci/tags/" + repo + "/list",
 				UpstreamPath: cleanPath,
@@ -86,11 +87,8 @@ type ociMatch struct {
 	expireAfter config.Duration
 }
 
-func (r *Resolver) resolveResource(repoName, resourceType string) ociMatch {
+func (r *Resolver) resolveRepo(repoName string) ociMatch {
 	for _, rule := range r.cfg.Rules {
-		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != resourceType {
-			continue
-		}
 		if !doublestar.MatchUnvalidated(rule.Match, repoName) {
 			continue
 		}

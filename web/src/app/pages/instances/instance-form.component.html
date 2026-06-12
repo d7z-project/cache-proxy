@@ -164,11 +164,8 @@
             <p class="text-muted small mb-1">按仓库名 glob 匹配，从上到下首个命中即生效。</p>
             <div class="rule-list">
               @for (rule of draft.oci.rules; track $index; let i = $index) {
-                <div class="row-grid header-row-grid">
+                <div class="row-grid">
                   <input class="form-control form-control-sm" [name]="'ociRuleMatch' + i" [(ngModel)]="rule.match" placeholder="library/*">
-                  <select class="form-select form-select-sm" [name]="'ociRuleResource' + i" [(ngModel)]="rule.resourcePolicy">
-                    @for (rp of ociResourcePolicies; track rp.value) { <option [ngValue]="rp.value">{{ rp.label }}</option> }
-                  </select>
                   <select class="form-select form-select-sm" [name]="'ociRulePolicy' + i" [(ngModel)]="rule.policy">
                     @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                   </select>

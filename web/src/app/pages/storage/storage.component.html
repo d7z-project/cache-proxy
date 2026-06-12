@@ -12,60 +12,6 @@
     </div>
   </header>
 
-  <div class="card mb-3">
-    <div class="card-body">
-      <h5 class="card-title">缓存查询</h5>
-      <p class="text-muted">查询特定路径的缓存状态，验证配置是否生效。</p>
-      <div class="d-grid gap-3 mb-3">
-        <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label">实例名称</label>
-            <select class="form-select" name="lookupInstance" [(ngModel)]="lookupInstance">
-              <option value="">选择实例</option>
-              @for (inst of instances; track inst) {
-                <option [value]="inst">{{ inst }}</option>
-              }
-            </select>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">资源路径</label>
-            <input class="form-control" name="lookupPath" [(ngModel)]="lookupPath" placeholder="/library/nginx/latest" (keyup.enter)="lookupCache()">
-          </div>
-        </div>
-        <button type="button" class="btn btn-primary justify-self-start" (click)="lookupCache()" [disabled]="!lookupInstance || !lookupPath.trim() || lookupRunning">
-          {{ lookupRunning ? '查询中...' : '查询缓存状态' }}
-        </button>
-      </div>
-
-      @if (lookupResult) {
-        <div class="lookup-result" [class.cached]="lookupResult.cached" [class.fresh]="lookupResult.fresh">
-          <div class="d-flex align-items-center gap-3 mb-3">
-            <strong>{{ lookupResult.cached ? '已缓存' : '未缓存' }}</strong>
-            @if (lookupResult.cached) {
-              <span class="badge" [class.bg-success-subtle]="lookupResult.fresh" [class.text-success-emphasis]="lookupResult.fresh" [class.bg-warning-subtle]="!lookupResult.fresh" [class.text-warning-emphasis]="!lookupResult.fresh">
-                {{ lookupResult.fresh ? '有效' : '可刷新' }}
-              </span>
-            }
-          </div>
-          <dl class="kv-list">
-            <div><dt>实例</dt><dd>{{ lookupResult.instance }}</dd></div>
-            <div><dt>模式</dt><dd>{{ lookupResult.mode | modeLabel:'mode' }}</dd></div>
-            <div><dt>路径</dt><dd>{{ lookupResult.path }}</dd></div>
-            <div><dt>对象路径</dt><dd>{{ lookupResult.objectPath }}</dd></div>
-            <div><dt>缓存策略</dt><dd>{{ lookupResult.policy | modeLabel:'policy' }}</dd></div>
-            <div><dt>快速命中</dt><dd>{{ lookupResult.freshFor || '未设置' }}</dd></div>
-            <div><dt>过期时间</dt><dd>{{ lookupResult.expireAfter || '未设置' }}</dd></div>
-            @if (lookupResult.cached) {
-              <div><dt>缓存时间</dt><dd>{{ lookupResult.cachedAt }}</dd></div>
-              <div><dt>过期时间</dt><dd>{{ lookupResult.expiresAt }}</dd></div>
-            }
-            <div><dt>配置版本</dt><dd>{{ lookupResult.generation }}</dd></div>
-          </dl>
-        </div>
-      }
-    </div>
-  </div>
-
   <div class="row g-3">
     <div class="col-md-6">
       @if (stats$ | async; as stats) {

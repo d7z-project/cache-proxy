@@ -73,8 +73,21 @@
               <input class="form-control" name="lookupInstanceName" [value]="lookupInstanceName" disabled>
             </div>
             <div class="mb-3">
-              <label class="form-label">资源路径</label>
-              <input class="form-control" name="lookupPath" [(ngModel)]="lookupPath" placeholder="/library/nginx/latest" (keyup.enter)="lookupCache()">
+              <label class="form-label">
+                @switch (lookupMode) {
+                  @case (ProxyMode.Npm) { 包名 }
+                  @case (ProxyMode.Oci) { 镜像名称 }
+                  @default { 资源路径 }
+                }
+              </label>
+              <p class="text-muted small mb-1">
+                @switch (lookupMode) {
+                  @case (ProxyMode.Npm) { 输入 npm 包名，如 @angular/core 或 lodash }
+                  @case (ProxyMode.Oci) { 输入镜像名称，如 library/alpine 或 nginx:latest }
+                  @default { 输入要查询的文件路径 }
+                }
+              </p>
+              <input class="form-control" name="lookupPath" [(ngModel)]="lookupPath" [placeholder]="lookupPlaceholder" (keyup.enter)="lookupCache()">
             </div>
             <button type="button" class="btn btn-primary" (click)="lookupCache()" [disabled]="!lookupPath.trim() || lookupRunning">
               {{ lookupRunning ? '查询中...' : '查询缓存状态' }}
