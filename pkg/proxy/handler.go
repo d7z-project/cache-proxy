@@ -85,6 +85,8 @@ func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, res
 			proxyURL, err := url.Parse(cfg.Transport.Proxy)
 			if err == nil {
 				transport.Proxy = http.ProxyURL(proxyURL)
+			} else {
+				slog.Warn("invalid transport proxy URL", "instance", name, "proxy", cfg.Transport.Proxy, "err", err)
 			}
 		}
 		if cfg.Transport.Timeout > 0 {
@@ -104,7 +106,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	result, err := h.handle(req.Context(), req)
 	if err != nil {
 		slog.Warn("proxy request failed", "instance", h.name, "mode", h.cfg.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
-		http.Error(resp, err.Error(), http.StatusBadGateway)
+		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		h.stats.RecordRequest(h.name, h.cfg.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
 	}
@@ -488,7 +490,7 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		}
 		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
-			lastErr = fmt.Errorf("upstream GET failed with %d", response.StatusCode)
+			lastErr = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
 			continue
 		}
 		return responseFromHTTP(response), nil
@@ -713,7 +715,6 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 	}
 	if h.cfg.Mode == config.ModeOCI {
 		headers["Accept"] = ociManifestAccept
-		return headers
 	}
 	if h.cfg.Mode != config.ModeFile {
 		return headers
@@ -746,7 +747,7 @@ func (h *Handler) expired(route Route, options map[string]string) bool {
 	if expireAfter <= 0 {
 		return false
 	}
-	fetchedAt, err := parseFetchedAt(options["fetched-at"])
+	fetchedAt, err := utils.ParseFetchedAt(options["fetched-at"])
 	return err == nil && time.Since(fetchedAt) > expireAfter.Duration()
 }
 
@@ -758,15 +759,8 @@ func (h *Handler) fresh(route Route, headers map[string]string) bool {
 	if freshFor <= 0 {
 		return false
 	}
-	fetchedAt, err := parseFetchedAt(headers["fetched-at"])
+	fetchedAt, err := utils.ParseFetchedAt(headers["fetched-at"])
 	return err == nil && time.Since(fetchedAt) <= freshFor.Duration()
-}
-
-func parseFetchedAt(value string) (time.Time, error) {
-	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return parsed, nil
-	}
-	return time.Parse(http.TimeFormat, value)
 }
 
 func (h *Handler) staticAuthorization() string {

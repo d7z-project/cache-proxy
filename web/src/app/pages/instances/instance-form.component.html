@@ -1,266 +1,256 @@
-<section class="page">
+<section class="container-fluid" style="max-width: 1500px;">
   @if (loading) {
-    <div class="page-header">
-      <div>
-        <div class="skeleton" style="width: 80px; height: 14px; margin-bottom: 8px;"></div>
-        <div class="skeleton" style="width: 200px; height: 28px; margin-bottom: 8px;"></div>
-        <div class="skeleton" style="width: 150px; height: 14px;"></div>
-      </div>
+    <div class="placeholder-glow mb-4">
+      <span class="placeholder col-2 mb-2" style="height: 14px;"></span>
+      <span class="placeholder col-5 mb-2" style="height: 28px; display: block;"></span>
+      <span class="placeholder col-3" style="height: 14px;"></span>
     </div>
-    <div class="card form">
-      <div class="skeleton" style="height: 300px;"></div>
-    </div>
+    <div class="card"><div class="card-body placeholder-glow"><span class="placeholder col-12" style="height: 300px;"></span></div></div>
   }
 
   @if (!loading && draft) {
-    <header class="page-header">
+    <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
       <div>
         <p class="eyebrow">{{ isCreate ? '新增实例' : '编辑实例' }}</p>
-        <h2>{{ draftName || '未命名实例' }}</h2>
-        <p class="hint">{{ draft.mode | modeLabel }} · {{ listenKind === ListenKind.Bind ? '独立端口' : '路径访问' }}</p>
+        <h2 class="fw-bold mb-1">{{ draftName || '未命名实例' }}</h2>
+        <p class="text-muted mb-0">{{ draft.mode | modeLabel }} · {{ listenKind === ListenKind.Bind ? '独立端口' : '路径访问' }}</p>
       </div>
-      <div class="actions">
-        <button type="button" (click)="back()">取消</button>
-        <button class="primary" type="button" (click)="save()" [disabled]="saving">{{ saving ? '保存中...' : '保存' }}</button>
+      <div class="d-flex gap-2">
+        <button type="button" class="btn btn-outline-secondary" (click)="back()">取消</button>
+        <button class="btn btn-primary" type="button" (click)="save()" [disabled]="saving">{{ saving ? '保存中...' : '保存' }}</button>
       </div>
     </header>
 
     @if (errors.length > 0) {
-      <div class="error-panel">
+      <div class="alert alert-danger">
         <strong>请修正以下问题</strong>
-        <ul>
-          @for (error of errors; track error) {
-            <li>{{ error }}</li>
-          }
+        <ul class="mb-0 mt-1">
+          @for (error of errors; track error) { <li>{{ error }}</li> }
         </ul>
       </div>
     }
 
-    <form class="card form" (ngSubmit)="save()">
-      <!-- 1. 基础信息 -->
-      <div class="form-section">
-        <div class="section-heading"><span class="step-badge">1</span><div><h3>基础信息</h3><p class="hint">实例名称和代理模式。</p></div></div>
-        <div class="grid-2 compact">
-          <label>实例名称<input name="name" [(ngModel)]="draftName" placeholder="my-proxy"></label>
-          <label>代理模式<input [ngModel]="draft.mode | modeLabel" name="modeDisplay" disabled></label>
+    <form class="card" (ngSubmit)="save()">
+      <div class="card-body">
+        <div class="form-section">
+          <div class="section-heading"><span class="step-badge">1</span><div><h3>基础信息</h3><p class="text-muted mb-0">实例名称和代理模式。</p></div></div>
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label">实例名称</label><input class="form-control" name="name" [(ngModel)]="draftName" placeholder="my-proxy"></div>
+            <div class="col-md-6"><label class="form-label">代理模式</label><input class="form-control" [ngModel]="draft.mode | modeLabel" name="modeDisplay" disabled></div>
+          </div>
         </div>
-      </div>
 
-      <!-- 2. 访问入口 -->
-      <div class="form-section">
-        <div class="section-heading"><span class="step-badge">2</span><div><h3>访问入口</h3><p class="hint">决定客户端如何访问当前实例。</p></div></div>
-        <div class="grid-2 compact">
-          <label>监听方式
-            <select name="listenKind" [(ngModel)]="listenKind" [disabled]="draft.mode === ProxyMode.Oci">
-              @for (kind of listenKinds; track kind.value) {
-                <option [ngValue]="kind.value">{{ kind.label }}</option>
-              }
-            </select>
-          </label>
-          @if (listenKind === ListenKind.Path) {
-            <label>路径前缀<input name="listenPath" [(ngModel)]="draft.listen.path" placeholder="/files"></label>
-          }
-          @if (listenKind === ListenKind.Bind) {
-            <label>监听地址<input name="listenBind" [(ngModel)]="draft.listen.bind" placeholder="127.0.0.1:5000"></label>
-          }
-        </div>
-        @if (draft.mode === ProxyMode.Oci) {
-          <p class="hint">镜像代理固定使用独立端口，不支持路径挂载。</p>
-        }
-      </div>
-
-      <!-- 3. 上游连接 -->
-      <div class="form-section">
-        <div class="section-heading"><span class="step-badge">3</span><div><h3>上游连接</h3><p class="hint">上游地址、代理和请求参数。</p></div></div>
-
-        <label>上游地址</label>
-        <div class="tag-field">
-          @for (u of upstreams; track $index; let i = $index) {
-            <div class="tag-row">
-              <input [ngModel]="upstreams[i]" (ngModelChange)="upstreams[i] = $event" [name]="'upstream'+i" placeholder="https://">
-              <button type="button" class="tag-remove" (click)="removeUpstream(i)" [disabled]="upstreams.length <= 1" title="删除">×</button>
+        <div class="form-section">
+          <div class="section-heading"><span class="step-badge">2</span><div><h3>访问入口</h3><p class="text-muted mb-0">决定客户端如何访问当前实例。</p></div></div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">监听方式</label>
+              <select class="form-select" name="listenKind" [(ngModel)]="listenKind" [disabled]="draft.mode === ProxyMode.Oci">
+                @for (kind of listenKinds; track kind.value) { <option [ngValue]="kind.value">{{ kind.label }}</option> }
+              </select>
             </div>
-          }
-          <button type="button" class="tag-add" (click)="addUpstream()">+ 添加上游</button>
+            @if (listenKind === ListenKind.Path) {
+              <div class="col-md-6"><label class="form-label">路径前缀</label><input class="form-control" name="listenPath" [(ngModel)]="draft.listen.path" placeholder="/files"></div>
+            }
+            @if (listenKind === ListenKind.Bind) {
+              <div class="col-md-6"><label class="form-label">监听地址</label><input class="form-control" name="listenBind" [(ngModel)]="draft.listen.bind" placeholder="127.0.0.1:5000"></div>
+            }
+          </div>
+          @if (draft.mode === ProxyMode.Oci) { <p class="text-muted small mb-0">镜像代理固定使用独立端口，不支持路径挂载。</p> }
         </div>
 
-        <div class="grid-2 compact">
-          <label>上游代理<input name="proxy" [(ngModel)]="draft.transport!.proxy" placeholder="http://127.0.0.1:7890"></label>
-          <label>User-Agent<input name="ua" [(ngModel)]="draft.transport!.ua" placeholder="cache-proxy"></label>
-        </div>
-        <div class="grid-2 compact">
-          <label>连接超时<input name="timeout" [(ngModel)]="draft.transport!.timeout" placeholder="3s"></label>
-          @if (draft.mode === ProxyMode.File) {
-            <label>透传请求头</label>
-          }
-        </div>
-        @if (draft.mode === ProxyMode.File) {
+        <div class="form-section">
+          <div class="section-heading"><span class="step-badge">3</span><div><h3>上游连接</h3><p class="text-muted mb-0">上游地址、代理和请求参数。</p></div></div>
+          <label class="form-label">上游地址</label>
           <div class="tag-field">
-            @for (h of passHeaders; track $index; let i = $index) {
+            @for (u of upstreams; track $index; let i = $index) {
               <div class="tag-row">
-                <input [ngModel]="passHeaders[i]" (ngModelChange)="passHeaders[i] = $event" [name]="'passHeader'+i" placeholder="Accept">
-                <button type="button" class="tag-remove" (click)="removePassHeader(i)" title="删除">×</button>
+                <input class="form-control" [ngModel]="upstreams[i]" (ngModelChange)="upstreams[i] = $event" [name]="'upstream'+i" placeholder="https://">
+                <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeUpstream(i)" [disabled]="upstreams.length <= 1">×</button>
               </div>
             }
-            <button type="button" class="tag-add" (click)="addPassHeader()">+ 添加请求头</button>
+            <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addUpstream()">+ 添加上游</button>
+          </div>
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label">上游代理</label><input class="form-control" name="proxy" [(ngModel)]="draft.transport!.proxy" placeholder="http://127.0.0.1:7890"></div>
+            <div class="col-md-6"><label class="form-label">User-Agent</label><input class="form-control" name="ua" [(ngModel)]="draft.transport!.ua" placeholder="cache-proxy"></div>
+          </div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">连接超时</label>
+              <p class="text-muted small mb-1">留空使用系统默认值。</p>
+              <input class="form-control" name="timeout" [(ngModel)]="draft.transport!.timeout" placeholder="如 3s、30s">
+            </div>
+            @if (draft.mode === ProxyMode.File) {
+              <div class="col-md-6">
+                <label class="form-label">透传请求头</label>
+                <div class="tag-field">
+                  @for (h of passHeaders; track $index; let i = $index) {
+                    <div class="tag-row">
+                      <input class="form-control" [ngModel]="passHeaders[i]" (ngModelChange)="passHeaders[i] = $event" [name]="'passHeader'+i" placeholder="Accept">
+                      <button type="button" class="btn btn-outline-danger btn-sm" (click)="removePassHeader(i)">×</button>
+                    </div>
+                  }
+                  <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addPassHeader()">+ 添加请求头</button>
+                </div>
+              </div>
+            }
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-heading"><span class="step-badge">4</span><div><h3>通用缓存</h3><p class="text-muted mb-0">所有代理模式共享的缓存生命周期和并发行为。</p></div></div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">缓存保留时间</label>
+              <p class="text-muted small mb-1">缓存对象的绝对最大存活时间。留空使用默认值 720h。</p>
+              <input class="form-control" name="expireAfter" [(ngModel)]="draft.expireAfter" placeholder="默认 720h">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">快速命中时间</label>
+              <p class="text-muted small mb-1">缓存有效期内直接返回，无需校验上游。留空表示不限制。</p>
+              <input class="form-control" name="cacheFreshFor" [(ngModel)]="draft.cache.freshFor" placeholder="如 30s、5m">
+            </div>
+          </div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">并发刷新策略</label>
+              <p class="text-muted small mb-1">缓存过期且正在刷新时，新请求的行为。</p>
+              <select class="form-select" name="cacheBusyPolicy" [(ngModel)]="draft.cache.busyPolicy">
+                @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+              </select>
+            </div>
+          </div>
+        </div>
+
+        @if (draft.mode === ProxyMode.File) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">5</span><div><h3>文件缓存规则</h3><p class="text-muted mb-0">按 glob 路径匹配不同缓存策略。</p></div></div>
+            <label class="form-label">默认策略</label>
+            <p class="text-muted small mb-1">未匹配任何规则时使用的缓存策略。</p>
+            <select class="form-select mb-3" name="fileDefaultPolicy" [(ngModel)]="draft.cache.defaultPolicy">
+              @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+            </select>
+            <div class="rule-list">
+              @for (rule of draft.cache.rules; track $index; let i = $index) {
+                <div class="row-grid file-rule-row-grid">
+                  <input class="form-control form-control-sm" [name]="'ruleMatch' + i" [(ngModel)]="rule.match" placeholder="**/*.rpm">
+                  <select class="form-select form-select-sm" [name]="'rulePolicy' + i" [(ngModel)]="rule.policy">
+                    @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                  </select>
+                  <input class="form-control form-control-sm" [name]="'ruleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="留空用全局值">
+                  <input class="form-control form-control-sm" [name]="'ruleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="留空用全局值">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeRule(i)">删除</button>
+                </div>
+              }
+            </div>
+            <button type="button" class="btn btn-link p-0" (click)="addRule()">添加路径规则</button>
+          </div>
+        }
+
+        @if (draft.mode === ProxyMode.Oci && draft.oci) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">5</span><div><h3>镜像仓库设置</h3><p class="text-muted mb-0">默认策略应用于未匹配任何规则的仓库。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">默认策略</label>
+                <p class="text-muted small mb-1">未匹配任何规则时使用的缓存策略。</p>
+                <select class="form-select" name="ociDefaultPolicy" [(ngModel)]="draft.oci.defaultPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+            </div>
+            <label class="form-label">缓存规则</label>
+            <p class="text-muted small mb-1">按仓库名 glob 匹配，从上到下首个命中即生效。</p>
+            <div class="rule-list">
+              @for (rule of draft.oci.rules; track $index; let i = $index) {
+                <div class="row-grid header-row-grid">
+                  <input class="form-control form-control-sm" [name]="'ociRuleMatch' + i" [(ngModel)]="rule.match" placeholder="library/*">
+                  <select class="form-select form-select-sm" [name]="'ociRuleResource' + i" [(ngModel)]="rule.resourcePolicy">
+                    @for (rp of ociResourcePolicies; track rp.value) { <option [ngValue]="rp.value">{{ rp.label }}</option> }
+                  </select>
+                  <select class="form-select form-select-sm" [name]="'ociRulePolicy' + i" [(ngModel)]="rule.policy">
+                    @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                  </select>
+                  <input class="form-control form-control-sm" [name]="'ociRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="留空用全局值">
+                  <input class="form-control form-control-sm" [name]="'ociRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="留空用全局值">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeOciRule(i)">删除</button>
+                </div>
+              }
+            </div>
+            <button type="button" class="btn btn-link p-0" (click)="addOciRule()">添加仓库规则</button>
+
+            @if (draft.oci.auth) {
+              <div class="row g-3 mt-3">
+                <div class="col-md-6">
+                  <label class="form-label">鉴权方式</label>
+                  <p class="text-muted small mb-1">访问上游镜像仓库的认证方式。</p>
+                  <select class="form-select" name="ociAuthType" [(ngModel)]="draft.oci.auth.type">
+                    @for (option of ociAuthOptions; track option.value) { <option [ngValue]="option.value">{{ option.label }}</option> }
+                  </select>
+                </div>
+                @if (draft.oci.auth.type === OciAuthType.Basic) {
+                  <div class="col-md-6">
+                    <label class="form-label">用户名</label>
+                    <p class="text-muted small mb-1">基础认证的用户名。</p>
+                    <input class="form-control" name="ociAuthUsername" [(ngModel)]="draft.oci.auth.username" autocomplete="off">
+                  </div>
+                }
+              </div>
+              <div class="row g-3">
+                @if (draft.oci.auth.type === OciAuthType.Basic) {
+                  <div class="col-md-6">
+                    <label class="form-label">密码</label>
+                    <p class="text-muted small mb-1">基础认证的密码。</p>
+                    <input class="form-control" name="ociAuthPassword" [(ngModel)]="draft.oci.auth.password" type="password" autocomplete="off">
+                  </div>
+                }
+                @if (draft.oci.auth.type === OciAuthType.Bearer) {
+                  <div class="col-md-6">
+                    <label class="form-label">访问令牌</label>
+                    <p class="text-muted small mb-1">Bearer Token 认证的令牌值。</p>
+                    <input class="form-control" name="ociAuthToken" [(ngModel)]="draft.oci.auth.token" type="password" autocomplete="off">
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        }
+
+        @if (draft.mode === ProxyMode.Npm && draft.npm) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">5</span><div><h3>npm 缓存策略</h3><p class="text-muted mb-0">默认策略应用于未匹配任何规则的包。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">默认策略</label>
+                <p class="text-muted small mb-1">未匹配任何规则时使用的缓存策略。</p>
+                <select class="form-select" name="npmDefaultPolicy" [(ngModel)]="draft.npm.defaultPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+            </div>
+            <label class="form-label">缓存规则</label>
+            <p class="text-muted small mb-1">按包名 glob 匹配，从上到下首个命中即生效。</p>
+            <div class="rule-list">
+              @for (rule of draft.npm.rules; track $index; let i = $index) {
+                <div class="row-grid header-row-grid">
+                  <input class="form-control form-control-sm" [name]="'npmRuleMatch' + i" [(ngModel)]="rule.match" placeholder="@angular/*">
+                  <select class="form-select form-select-sm" [name]="'npmRuleResource' + i" [(ngModel)]="rule.resourcePolicy">
+                    @for (rp of npmResourcePolicies; track rp.value) { <option [ngValue]="rp.value">{{ rp.label }}</option> }
+                  </select>
+                  <select class="form-select form-select-sm" [name]="'npmRulePolicy' + i" [(ngModel)]="rule.policy">
+                    @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                  </select>
+                  <input class="form-control form-control-sm" [name]="'npmRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中 (如 10m)">
+                  <input class="form-control form-control-sm" [name]="'npmRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="过期时间 (如 168h)">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeNpmRule(i)">删除</button>
+                </div>
+              }
+            </div>
+            <button type="button" class="btn btn-link p-0" (click)="addNpmRule()">添加包规则</button>
           </div>
         }
       </div>
-
-      <!-- 4. 通用缓存 -->
-      <div class="form-section">
-        <div class="section-heading"><span class="step-badge">4</span><div><h3>通用缓存</h3><p class="hint">所有代理模式共享的缓存生命周期和并发行为。</p></div></div>
-        <div class="grid-2 compact">
-          <label>缓存保留时间<p class="hint">缓存对象的绝对最大存活时间，如 720h、168h。</p><input name="expireAfter" [(ngModel)]="draft.expireAfter" placeholder="720h"></label>
-          <label>快速命中时间<p class="hint">缓存有效期内直接返回，无需校验上游，如 30s、5m。</p><input name="cacheFreshFor" [(ngModel)]="draft.cache.freshFor" placeholder="30s"></label>
-        </div>
-        <div class="grid-2 compact">
-          <label>并发刷新策略<p class="hint">缓存过期且正在刷新时，新请求的行为。</p>
-            <select name="cacheBusyPolicy" [(ngModel)]="draft.cache.busyPolicy">
-              @for (policy of busyPolicies; track policy.value) {
-                <option [ngValue]="policy.value">{{ policy.label }}</option>
-              }
-            </select>
-          </label>
-          <div></div>
-        </div>
-      </div>
-
-      <!-- 5a. 文件缓存规则 -->
-      @if (draft.mode === ProxyMode.File) {
-        <div class="form-section">
-          <div class="section-heading"><span class="step-badge">5</span><div><h3>文件缓存规则</h3><p class="hint">按 glob 路径匹配不同缓存策略。每条规则可独立配置有效期和过期时间。</p></div></div>
-          <label>默认策略<p class="hint">未匹配任何规则时使用的缓存策略。</p>
-            <select name="fileDefaultPolicy" [(ngModel)]="draft.cache.defaultPolicy">
-              @for (policy of cachePolicies; track policy.value) {
-                <option [ngValue]="policy.value">{{ policy.label }}</option>
-              }
-            </select>
-          </label>
-          <div class="rule-list">
-            @for (rule of draft.cache.rules; track $index; let i = $index) {
-              <div class="row header-row">
-                <input [name]="'ruleMatch' + i" [(ngModel)]="rule.match" placeholder="**/*.rpm" title="glob 匹配模式">
-                <select [name]="'rulePolicy' + i" [(ngModel)]="rule.policy" title="缓存策略">
-                  @for (policy of cachePolicies; track policy.value) {
-                    <option [ngValue]="policy.value">{{ policy.label }}</option>
-                  }
-                </select>
-                <input [name]="'ruleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中 (如 5m)" title="快速命中时间，留空使用全局值">
-                <input [name]="'ruleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="过期时间 (如 720h)" title="缓存保留时间，留空使用全局值">
-                <button type="button" (click)="removeRule(i)">删除</button>
-              </div>
-            }
-          </div>
-          <button type="button" (click)="addRule()">添加路径规则</button>
-        </div>
-      }
-
-      <!-- 5b. OCI 镜像仓库设置 -->
-      @if (draft.mode === ProxyMode.Oci && draft.oci) {
-        <div class="form-section">
-          <div class="section-heading"><span class="step-badge">5</span><div><h3>镜像仓库设置</h3><p class="hint">默认策略应用于未匹配任何规则的仓库。规则按 glob 匹配仓库名，支持独立配置策略和缓存时间。</p></div></div>
-          <div class="grid-2 compact">
-            <label>默认策略<p class="hint">未匹配任何规则时使用的缓存策略。</p>
-              <select name="ociDefaultPolicy" [(ngModel)]="draft.oci.defaultPolicy">
-                @for (policy of cachePolicies; track policy.value) {
-                  <option [ngValue]="policy.value">{{ policy.label }}</option>
-                }
-              </select>
-            </label>
-            <div></div>
-          </div>
-
-          <label>缓存规则<p class="hint">按仓库名 glob 匹配，从上到下首个命中即生效。</p></label>
-          <div class="rule-list">
-            @for (rule of draft.oci.rules; track $index; let i = $index) {
-              <div class="row header-row">
-                <input [name]="'ociRuleMatch' + i" [(ngModel)]="rule.match" placeholder="library/*" title="glob 匹配仓库名">
-                <select [name]="'ociRuleResource' + i" [(ngModel)]="rule.resourcePolicy" title="匹配的资源类型">
-                  @for (rp of ociResourcePolicies; track rp.value) {
-                    <option [ngValue]="rp.value">{{ rp.label }}</option>
-                  }
-                </select>
-                <select [name]="'ociRulePolicy' + i" [(ngModel)]="rule.policy" title="缓存策略">
-                  @for (policy of cachePolicies; track policy.value) {
-                    <option [ngValue]="policy.value">{{ policy.label }}</option>
-                  }
-                </select>
-                <input [name]="'ociRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中 (如 5m)" title="快速命中时间，留空使用全局值">
-                <input [name]="'ociRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="过期时间 (如 720h)" title="缓存保留时间，留空使用全局值">
-                <button type="button" (click)="removeOciRule(i)">删除</button>
-              </div>
-            }
-          </div>
-          <button type="button" (click)="addOciRule()">添加仓库规则</button>
-
-          @if (draft.oci.auth) {
-            <div class="grid-2 compact" style="margin-top: 16px;">
-              <label>鉴权方式<p class="hint">访问上游镜像仓库的认证方式。</p>
-                <select name="ociAuthType" [(ngModel)]="draft.oci.auth.type">
-                  @for (option of ociAuthOptions; track option.value) {
-                    <option [ngValue]="option.value">{{ option.label }}</option>
-                  }
-                </select>
-              </label>
-              @if (draft.oci.auth.type === OciAuthType.Basic) {
-                <label>用户名<p class="hint">基础认证的用户名。</p><input name="ociAuthUsername" [(ngModel)]="draft.oci.auth.username" autocomplete="off"></label>
-              }
-            </div>
-            <div class="grid-2 compact">
-              @if (draft.oci.auth.type === OciAuthType.Basic) {
-                <label>密码<p class="hint">基础认证的密码。</p><input name="ociAuthPassword" [(ngModel)]="draft.oci.auth.password" type="password" autocomplete="off"></label>
-              }
-              @if (draft.oci.auth.type === OciAuthType.Bearer) {
-                <label>访问令牌<p class="hint">Bearer Token 认证的令牌值。</p><input name="ociAuthToken" [(ngModel)]="draft.oci.auth.token" type="password" autocomplete="off"></label>
-              }
-              @if (draft.oci.auth.type === OciAuthType.None) {
-                <div></div>
-              }
-            </div>
-          }
-        </div>
-      }
-
-      <!-- 5c. npm 缓存策略 -->
-      @if (draft.mode === ProxyMode.Npm && draft.npm) {
-        <div class="form-section">
-          <div class="section-heading"><span class="step-badge">5</span><div><h3>npm 缓存策略</h3><p class="hint">默认策略应用于未匹配任何规则的包。规则按 glob 匹配包名，支持独立配置策略和缓存时间。</p></div></div>
-          <div class="grid-2 compact">
-            <label>默认策略<p class="hint">未匹配任何规则时使用的缓存策略。</p>
-              <select name="npmDefaultPolicy" [(ngModel)]="draft.npm.defaultPolicy">
-                @for (policy of cachePolicies; track policy.value) {
-                  <option [ngValue]="policy.value">{{ policy.label }}</option>
-                }
-              </select>
-            </label>
-            <div></div>
-          </div>
-
-          <label>缓存规则<p class="hint">按包名 glob 匹配，从上到下首个命中即生效。</p></label>
-          <div class="rule-list">
-            @for (rule of draft.npm.rules; track $index; let i = $index) {
-              <div class="row header-row">
-                <input [name]="'npmRuleMatch' + i" [(ngModel)]="rule.match" placeholder="@angular/*" title="glob 匹配包名">
-                <select [name]="'npmRuleResource' + i" [(ngModel)]="rule.resourcePolicy" title="匹配的资源类型">
-                  @for (rp of npmResourcePolicies; track rp.value) {
-                    <option [ngValue]="rp.value">{{ rp.label }}</option>
-                  }
-                </select>
-                <select [name]="'npmRulePolicy' + i" [(ngModel)]="rule.policy" title="缓存策略">
-                  @for (policy of cachePolicies; track policy.value) {
-                    <option [ngValue]="policy.value">{{ policy.label }}</option>
-                  }
-                </select>
-                <input [name]="'npmRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中 (如 10m)" title="快速命中时间，留空使用全局值">
-                <input [name]="'npmRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="过期时间 (如 168h)" title="缓存保留时间，留空使用全局值">
-                <button type="button" (click)="removeNpmRule(i)">删除</button>
-              </div>
-            }
-          </div>
-          <button type="button" (click)="addNpmRule()">添加包规则</button>
-        </div>
-      }
     </form>
   }
 </section>

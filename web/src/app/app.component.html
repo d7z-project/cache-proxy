@@ -1,34 +1,43 @@
 <app-toast-container></app-toast-container>
-<app-modal></app-modal>
 
-<nav class="top-nav">
-  <a class="brand" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Cache Proxy</a>
+<nav class="navbar navbar-expand-lg bg-white border-bottom">
+  <div class="container-fluid">
+    <a class="navbar-brand" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Cache Proxy</a>
 
-  <button class="hamburger" [class.open]="menuOpen" (click)="menuOpen = !menuOpen" type="button">
-    <span class="hamburger-bar"></span>
-    <span class="hamburger-bar"></span>
-    <span class="hamburger-bar"></span>
-  </button>
+    @if ({ enabled: authEnabled$ | async, loggedIn: isAuth$ | async }; as authState) {
+      <div class="d-flex align-items-center gap-2 order-lg-3">
+        @if (authState.enabled && !authState.loggedIn) {
+          <a class="nav-link" routerLink="/login">登录管理</a>
+        }
+        @if (authState.enabled && authState.loggedIn) {
+          <button class="btn btn-link nav-link text-decoration-none" (click)="logout()">注销</button>
+        }
+      </div>
+    }
 
-  @if (isAuth$ | async) {
-    <div class="nav-links" [class.open]="menuOpen">
-      <a routerLink="/dashboard" routerLinkActive="active" (click)="menuOpen = false">仪表盘</a>
-      <a routerLink="/instances" routerLinkActive="active" (click)="menuOpen = false">实例</a>
-      <a routerLink="/settings" routerLinkActive="active" (click)="menuOpen = false">设置</a>
-      <a routerLink="/storage" routerLinkActive="active" (click)="menuOpen = false">存储</a>
-    </div>
-  }
+    <button class="navbar-toggler" type="button" (click)="menuOpen = !menuOpen" [attr.aria-expanded]="menuOpen" aria-controls="mainNav">
+      <span class="navbar-toggler-icon"></span>
+    </button>
 
-  @if ({ enabled: authEnabled$ | async, loggedIn: isAuth$ | async }; as authState) {
-    <div class="nav-end">
-      @if (authState.enabled && !authState.loggedIn) {
-        <a routerLink="/login">登录管理</a>
+    <div class="collapse navbar-collapse order-lg-2" id="mainNav" [ngbCollapse]="!menuOpen">
+      @if (isAuth$ | async) {
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item">
+            <a class="nav-link" routerLink="/dashboard" routerLinkActive="active" (click)="menuOpen = false">仪表盘</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" routerLink="/instances" routerLinkActive="active" (click)="menuOpen = false">实例</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" routerLink="/settings" routerLinkActive="active" (click)="menuOpen = false">设置</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" routerLink="/storage" routerLinkActive="active" (click)="menuOpen = false">存储</a>
+          </li>
+        </ul>
       }
-      @if (authState.enabled && authState.loggedIn) {
-        <button class="nav-link" (click)="logout()">注销</button>
-      }
     </div>
-  }
+  </div>
 </nav>
 
 <main>

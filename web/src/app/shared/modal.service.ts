@@ -1,5 +1,7 @@
-import { Injectable } from '@angular/core';
-import { BehaviorSubject, Observable } from 'rxjs';
+import { Injectable, inject } from '@angular/core';
+import { NgbModal } from '@ng-bootstrap/ng-bootstrap';
+import { Observable } from 'rxjs';
+import { ModalComponent } from './modal.component';
 
 export interface ModalConfig {
   title: string;
@@ -8,23 +10,21 @@ export interface ModalConfig {
   danger?: boolean;
 }
 
-interface ModalState extends ModalConfig {
-  resolve: (value: boolean) => void;
-}
-
 @Injectable({ providedIn: 'root' })
 export class ModalService {
-  private state$ = new BehaviorSubject<ModalState | null>(null);
-  readonly state = this.state$.asObservable();
+  private readonly ngbModal = inject(NgbModal);
 
   confirm(cfg: ModalConfig): Observable<boolean> {
+    const ref = this.ngbModal.open(ModalComponent, { centered: true, size: 'sm' });
+    ref.componentInstance.title = cfg.title;
+    ref.componentInstance.message = cfg.message;
+    ref.componentInstance.confirmLabel = cfg.confirmLabel ?? '确认';
+    ref.componentInstance.danger = cfg.danger ?? false;
     return new Observable<boolean>(observer => {
-      this.state$.next({ ...cfg, resolve: (v: boolean) => { observer.next(v); observer.complete(); } });
+      ref.result.then(
+        (value) => { observer.next(value); observer.complete(); },
+        () => { observer.next(false); observer.complete(); }
+      );
     });
-  }
-
-  close(value: boolean) {
-    const s = this.state$.value;
-    if (s) { this.state$.next(null); s.resolve(value); }
   }
 }

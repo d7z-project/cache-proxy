@@ -3,7 +3,7 @@ import { CanActivate, Router } from '@angular/router';
 import { AuthService } from './auth.service';
 import { filter, map, take, race, timer } from 'rxjs';
 
-const GUARD_TIMEOUT = 3000;
+const GUARD_TIMEOUT = 5000;
 
 @Injectable({ providedIn: 'root' })
 export class AuthGuard implements CanActivate {
@@ -13,7 +13,7 @@ export class AuthGuard implements CanActivate {
   canActivate() {
     return race([
       this.auth.isAuth$.pipe(filter((v): v is boolean => v !== null)),
-      timer(GUARD_TIMEOUT).pipe(map(() => true as const))
+      timer(GUARD_TIMEOUT).pipe(map(() => false as const))
     ]).pipe(
       take(1),
       map((v) => v === true ? true as const : this.router.parseUrl('/login'))

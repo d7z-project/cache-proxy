@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 type configUpdateRequest struct {
@@ -319,7 +319,12 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	fakeReq := httptest.NewRequest("GET", "/"+lookupPath, nil)
+	fakeReq, err := http.NewRequest("GET", lookupPath, nil)
+	if err != nil {
+		writeError(resp, http.StatusBadRequest, err)
+		return
+	}
+	fakeReq.URL.Path = "/" + lookupPath
 	route, err := resolver.Resolve(fakeReq)
 	if err != nil {
 		writeError(resp, http.StatusBadRequest, err)
@@ -334,11 +339,19 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 		Policy:      route.Policy,
 		Generation:  generation,
 	}
-	if route.FreshFor > 0 {
-		result.FreshFor = route.FreshFor.String()
+	freshFor := route.FreshFor
+	if freshFor <= 0 {
+		freshFor = inst.Cache.FreshFor
 	}
-	if route.ExpireAfter > 0 {
-		result.ExpireAfter = route.ExpireAfter.String()
+	if freshFor > 0 {
+		result.FreshFor = freshFor.String()
+	}
+	expireAfter := route.ExpireAfter
+	if expireAfter <= 0 {
+		expireAfter = inst.ExpireAfter
+	}
+	if expireAfter > 0 {
+		result.ExpireAfter = expireAfter.String()
 	}
 
 	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, route, inst)
@@ -363,7 +376,7 @@ func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName string, rou
 
 	info := reader.Info()
 	fetchedAtStr := info.Options["fetched-at"]
-	cachedAt, err := parseFetchedAt(fetchedAtStr)
+	cachedAt, err := utils.ParseFetchedAt(fetchedAtStr)
 	if err != nil {
 		return false, time.Time{}, time.Time{}, false
 	}
@@ -387,11 +400,4 @@ func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName string, rou
 	}
 
 	return true, cachedAt, expiresAt, fresh
-}
-
-func parseFetchedAt(value string) (time.Time, error) {
-	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return parsed, nil
-	}
-	return time.Parse(http.TimeFormat, value)
 }

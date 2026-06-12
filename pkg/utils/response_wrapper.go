@@ -22,7 +22,8 @@ type HttpClientWrapper struct {
 
 func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return net.DialTimeout(network, addr, timeout)
+		dialer := net.Dialer{Timeout: timeout}
+		return dialer.DialContext(ctx, network, addr)
 	}
 }
 
@@ -71,4 +72,11 @@ func (receiver *ResponseWrapper) Close() error {
 		receiver.Closes = nil
 	}
 	return err
+}
+
+func ParseFetchedAt(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed, nil
+	}
+	return time.Parse(http.TimeFormat, value)
 }

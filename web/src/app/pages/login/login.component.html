@@ -1,19 +1,23 @@
-<section class="page login-page">
-  <form class="card login-form" (ngSubmit)="submit()" novalidate>
-    <h1>Cache Proxy</h1>
-    <p class="hint">请输入管理密码以继续。</p>
-    <label>
-      管理密码
-      <input type="password" name="password" [(ngModel)]="password" autofocus autocomplete="current-password" placeholder="请输入密码">
-    </label>
-    @if (error) {
-      <p class="message">{{ error }}</p>
-    }
-    <button type="submit" class="primary" [disabled]="loading || !password.trim()">
-      {{ loading ? '登录中...' : '登录' }}
-    </button>
-    <p class="hint">
-      <a routerLink="/">返回实例列表</a>
-    </p>
-  </form>
+<section class="d-flex align-items-center justify-content-center" style="min-height: calc(100vh - 3.5rem); padding: 2rem;">
+  <div class="card" style="width: 100%; max-width: 400px;">
+    <div class="card-body">
+      <h3 class="mb-1">Cache Proxy</h3>
+      <p class="text-muted">请输入管理密码以继续。</p>
+      <form (ngSubmit)="submit()" novalidate>
+        <div class="mb-3">
+          <label class="form-label">管理密码</label>
+          <input type="password" class="form-control" name="password" [(ngModel)]="password" autofocus autocomplete="current-password" placeholder="请输入密码">
+        </div>
+        @if (error) {
+          <div class="alert alert-danger py-2">{{ error }}</div>
+        }
+        <button type="submit" class="btn btn-primary w-100" [disabled]="loading || !password.trim()">
+          {{ loading ? '登录中...' : '登录' }}
+        </button>
+      </form>
+      <p class="text-muted small text-center mt-3 mb-0">
+        <a routerLink="/">返回实例列表</a>
+      </p>
+    </div>
+  </div>
 </section>

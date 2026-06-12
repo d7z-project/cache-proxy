@@ -1,43 +1,44 @@
-<section class="page">
-  <header class="page-header">
+<section class="container-fluid" style="max-width: 1500px;">
+  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
     <div>
       <p class="eyebrow">Cache Proxy</p>
-      <h2>可用代理实例</h2>
-      <p class="hint">以下代理路径可直接访问，登录后可管理实例配置。</p>
+      <h2 class="fw-bold mb-1">可用代理实例</h2>
+      <p class="text-muted mb-0">以下代理路径可直接访问，登录后可管理实例配置。</p>
     </div>
     @if ((authEnabled$ | async) && (isAuth$ | async) === false) {
-      <div class="actions">
-        <a routerLink="/login" class="button-link">登录管理</a>
-      </div>
+      <a routerLink="/login" class="btn btn-outline-secondary">登录管理</a>
     }
   </header>
 
   @if (error) {
-    <p class="message">{{ error }}</p>
+    <div class="alert alert-info">{{ error }}</div>
   }
 
   @if (instances$ | async; as instances) {
     @if (instances.length === 0 && !error) {
-      <p class="empty">没有配置任何代理实例。</p>
+      <div class="text-center text-muted py-5">没有配置任何代理实例。</div>
     }
     @if (instances.length > 0) {
-      <div class="instance-grid">
-        @for (item of instances; track item.name) {
-          <article class="card block">
-            <div class="instance-card-header">
-              <strong>{{ item.name }}</strong>
-              <span class="badge">{{ item.mode | modeLabel }}</span>
-            </div>
-            <p class="hint">{{ item.path || item.bind }}</p>
-          </article>
-        }
+      <div class="card">
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <thead><tr><th>名称</th><th>模式</th><th>入口</th></tr></thead>
+            <tbody>
+              @for (item of instances; track item.name) {
+                <tr>
+                  <td><strong>{{ item.name }}</strong></td>
+                  <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
+                  <td>{{ item.path || (item.bind?.includes('0.0.0.0') || item.bind?.includes('127.') ? '独立端口' : item.bind) }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
       </div>
     }
   } @else {
-    <div class="instance-grid">
-      @for (i of [0,1,2]; track i) {
-        <article class="card block skeleton"></article>
-      }
+    <div class="card">
+      <div class="card-body placeholder-glow"><span class="placeholder col-12" style="height: 150px;"></span></div>
     </div>
   }
 </section>

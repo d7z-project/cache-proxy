@@ -1,100 +1,117 @@
-<section class="page">
-  <header class="page-header">
+<section class="container-fluid" style="max-width: 1500px;">
+  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
     <div>
       <p class="eyebrow">概览</p>
-      <h2>运行状态</h2>
+      <h2 class="fw-bold mb-0">运行状态</h2>
     </div>
-    <div class="actions">
-      <button type="button" (click)="refresh()">刷新</button>
-    </div>
+    <button type="button" class="btn btn-outline-secondary" (click)="refresh()">刷新</button>
   </header>
 
   @let data = data$ | async;
   @if (data) {
-    <div class="stats-grid">
-      <article class="card"><span>配置版本</span><strong>{{ data.runtime.generation }}</strong></article>
-      <article class="card"><span>实例数量</span><strong>{{ data.runtime.instances }}</strong></article>
-      <article class="card"><span>总请求</span><strong>{{ data.metrics.total.requests }}</strong></article>
-      <article class="card"><span>服务异常</span><strong>{{ data.metrics.total.errors }}</strong></article>
-      <article class="card"><span>上游请求</span><strong>{{ data.metrics.total.upstreamRequests }}</strong></article>
-      <article class="card"><span>响应流量</span><strong>{{ formatBytes(data.metrics.total.responseBytes) }}</strong></article>
-      <article class="card"><span>活跃下载</span><strong>{{ data.metrics.total.activeDownloads }}</strong></article>
-      <article class="card"><span>监听地址</span><strong>{{ data.runtime.bind }}</strong></article>
+    <div class="row row-cols-1 row-cols-sm-2 row-cols-md-4 g-3 mb-3">
+      @for (stat of [
+        { label: '配置版本', value: data.runtime.generation },
+        { label: '实例数量', value: data.runtime.instances },
+        { label: '总请求', value: data.metrics.total.requests },
+        { label: '服务异常', value: data.metrics.total.errors },
+        { label: '上游请求', value: data.metrics.total.upstreamRequests },
+        { label: '响应流量', value: formatBytes(data.metrics.total.responseBytes) },
+        { label: '活跃下载', value: data.metrics.total.activeDownloads },
+        { label: '监听地址', value: data.runtime.bind }
+      ]; track stat.label) {
+        <div class="col">
+          <article class="card h-100">
+            <div class="card-body d-flex flex-column gap-1">
+              <small class="stat-label">{{ stat.label }}</small>
+              <strong class="fs-5 fw-bold text-break">{{ stat.value }}</strong>
+            </div>
+          </article>
+        </div>
+      }
     </div>
 
-    <div class="grid-2">
-      <article class="card block">
-        <h3>缓存命中分布</h3>
-        @let slices = sliceList(data.metrics.total.cache);
-        @if (slices.length > 0) {
-          <div class="chart-list">
-            @for (s of slices; track s.label) {
-              <div class="chart-row">
-                <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
-                <div class="chart-track"><div class="chart-bar cache" [style.width.%]="s.percent"></div></div>
-                <span class="chart-percent">{{ s.percent }}%</span>
+    <div class="row g-3 mb-3">
+      <div class="col-md-6">
+        <article class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">缓存命中分布</h5>
+            @let slices = sliceList(data.metrics.total.cache);
+            @if (slices.length > 0) {
+              <div class="chart-list">
+                @for (s of slices; track s.label) {
+                  <div class="chart-row">
+                    <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
+                    <div class="chart-track"><div class="chart-bar cache" [style.width.%]="s.percent"></div></div>
+                    <span class="chart-percent">{{ s.percent }}%</span>
+                  </div>
+                }
               </div>
+            } @else {
+              <p class="text-muted mb-0">等待缓存请求数据。</p>
             }
           </div>
-        } @else {
-          <p class="hint">等待缓存请求数据。</p>
-        }
-      </article>
-      <article class="card block">
-        <h3>上游状态分布</h3>
-        @let upstreamSlices = sliceList(data.metrics.total.upstreamStatus);
-        @if (upstreamSlices.length > 0) {
-          <div class="chart-list">
-            @for (s of upstreamSlices; track s.label) {
-              <div class="chart-row">
-                <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
-                <div class="chart-track"><div class="chart-bar upstream" [style.width.%]="s.percent"></div></div>
-                <span class="chart-percent">{{ s.percent }}%</span>
+        </article>
+      </div>
+      <div class="col-md-6">
+        <article class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">上游状态分布</h5>
+            @let upstreamSlices = sliceList(data.metrics.total.upstreamStatus);
+            @if (upstreamSlices.length > 0) {
+              <div class="chart-list">
+                @for (s of upstreamSlices; track s.label) {
+                  <div class="chart-row">
+                    <div class="chart-label"><span>{{ s.label }}</span><strong>{{ s.value }}</strong></div>
+                    <div class="chart-track"><div class="chart-bar upstream" [style.width.%]="s.percent"></div></div>
+                    <span class="chart-percent">{{ s.percent }}%</span>
+                  </div>
+                }
               </div>
+            } @else {
+              <p class="text-muted mb-0">等待上游请求数据。</p>
             }
+            <p class="text-muted small mt-2 mb-0">采集地址：{{ data.runtime.bind }}{{ data.runtime.metricsPath }}</p>
           </div>
-        } @else {
-          <p class="hint">等待上游请求数据。</p>
-        }
-        <p class="hint">采集地址：{{ data.runtime.bind }}{{ data.runtime.metricsPath }}</p>
-      </article>
+        </article>
+      </div>
     </div>
 
-    <div class="card block">
-      <h3>实例摘要</h3>
-      <div class="table-wrap">
-      <table>
-        <thead><tr><th>名称</th><th>模式</th><th>入口</th><th>请求</th><th>缓存</th><th>上游</th><th>流量</th><th>下载</th></tr></thead>
-        <tbody>
-          @for (item of data.instances; track item.name) {
-            <tr>
-              <td>{{ item.name }}</td>
-              <td><span class="badge">{{ item.mode | modeLabel }}</span></td>
-              <td class="truncate">{{ item.path || item.bind }}</td>
-              <td>
-                <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>
-                <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>
-              </td>
-              <td>{{ cacheText(getMetrics(data.metrics.instances, item.name)) }}</td>
-              <td>{{ upstreamText(getMetrics(data.metrics.instances, item.name)) }}</td>
-              <td>{{ formatBytes(getMetrics(data.metrics.instances, item.name).responseBytes) }}</td>
-              <td>{{ getMetrics(data.metrics.instances, item.name).activeDownloads }}</td>
-            </tr>
-          }
-        </tbody>
-      </table>
+    <div class="card">
+      <div class="card-body">
+        <h5 class="card-title">实例摘要</h5>
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <thead><tr><th>名称</th><th>模式</th><th>入口</th><th>请求</th><th>流量</th><th>下载</th></tr></thead>
+            <tbody>
+              @for (item of data.instances; track item.name) {
+                <tr>
+                  <td>{{ item.name }}</td>
+                  <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
+                  <td class="text-truncate" style="max-width: 200px;">{{ item.path || item.bind }}</td>
+                  <td>
+                    <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>
+                    <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>
+                  </td>
+                  <td>{{ formatBytes(getMetrics(data.metrics.instances, item.name).responseBytes) }}</td>
+                  <td>{{ getMetrics(data.metrics.instances, item.name).activeDownloads }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   } @else {
-    <div class="stats-grid">
+    <div class="row row-cols-1 row-cols-sm-2 row-cols-md-4 g-3 mb-3">
       @for (i of [0,1,2,3,4,5,6,7]; track i) {
-        <article class="card skeleton"></article>
+        <div class="col"><article class="card placeholder-glow" style="min-height:80px"><span class="placeholder col-12 h-100"></span></article></div>
       }
     </div>
-    <div class="grid-2">
-      <div class="card block skeleton"></div>
-      <div class="card block skeleton"></div>
+    <div class="row g-3 mb-3">
+      <div class="col-md-6"><div class="card placeholder-glow" style="min-height:200px"><span class="placeholder col-12 h-100"></span></div></div>
+      <div class="col-md-6"><div class="card placeholder-glow" style="min-height:200px"><span class="placeholder col-12 h-100"></span></div></div>
     </div>
-    <div class="card block skeleton"></div>
+    <div class="card placeholder-glow" style="min-height:200px"><span class="placeholder col-12 h-100"></span></div>
   }
 </section>

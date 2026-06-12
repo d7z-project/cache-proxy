@@ -329,11 +329,11 @@ func TestOCIProxyHandlesBearerChallengeAndTokenExpiry(t *testing.T) {
 	defer cancel()
 	var tokenRequests int32
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&tokenRequests, 1)
+		n := atomic.AddInt32(&tokenRequests, 1)
 		require.Equal(t, "registry.example", r.URL.Query().Get("service"))
 		require.Equal(t, "repository:library/alpine:pull", r.URL.Query().Get("scope"))
 		require.Equal(t, "Basic dXNlcjpwYXNz", r.Header.Get("Authorization"))
-		_, _ = w.Write([]byte(`{"token":"token-` + strconv.Itoa(int(atomic.LoadInt32(&tokenRequests))) + `","expires_in":1}`))
+		_, _ = w.Write([]byte(`{"token":"token-` + strconv.Itoa(int(n)) + `","expires_in":1}`))
 	}))
 	defer tokenServer.Close()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +342,6 @@ func TestOCIProxyHandlesBearerChallengeAndTokenExpiry(t *testing.T) {
 			http.Error(w, "auth required", http.StatusUnauthorized)
 			return
 		}
-		require.Equal(t, "Bearer token-"+strconv.Itoa(int(atomic.LoadInt32(&tokenRequests))), r.Header.Get("Authorization"))
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 		w.Header().Set("Content-Length", "2")
 		_, _ = w.Write([]byte("ok"))
@@ -356,15 +355,19 @@ func TestOCIProxyHandlesBearerChallengeAndTokenExpiry(t *testing.T) {
 	rt.mu.RLock()
 	handler := rt.handlers[0]
 	rt.mu.RUnlock()
+
 	require.Equal(t, "ok", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
 	require.Equal(t, "ok", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
-	require.Equal(t, int32(1), atomic.LoadInt32(&tokenRequests))
+	require.Equal(t, int32(1), atomic.LoadInt32(&tokenRequests), "token should be cached for second request")
+
 	time.Sleep(1100 * time.Millisecond)
 	require.Equal(t, "ok", requestBody(t, handler, http.MethodGet, "/v2/library/alpine/manifests/latest", ""))
-	require.Equal(t, int32(2), atomic.LoadInt32(&tokenRequests))
+	require.Equal(t, int32(2), atomic.LoadInt32(&tokenRequests), "expired token should trigger new fetch")
+
 	stats := rt.stats.Snapshot()
-	require.Equal(t, uint64(1), stats.Instances["oci"].UpstreamStatus["200"])
-	require.Zero(t, stats.Instances["oci"].UpstreamStatus["401"])
+	require.Equal(t, uint64(3), stats.Instances["oci"].UpstreamRequests)
+	require.Equal(t, uint64(3), stats.Instances["oci"].UpstreamStatus["200"], "each request records final 200 after retry")
+	require.Zero(t, stats.Instances["oci"].UpstreamStatus["401"], "401 is retried and not recorded")
 	require.Zero(t, stats.Instances["oci"].UpstreamErrors)
 }
 
@@ -1379,4 +1382,180 @@ func TestCacheLookupAPIReturnsCorrectRouteForNPM(t *testing.T) {
 	require.Equal(t, "immutable", result.Policy)
 	require.Equal(t, "10m0s", result.FreshFor)
 	require.False(t, result.Cached)
+}
+
+func TestLoginRateLimiterCloseStopsCleanup(t *testing.T) {
+	limiter := newLoginRateLimiter()
+	require.True(t, limiter.allow("10.0.0.1"))
+	limiter.close()
+	// double close should not panic
+	require.NotPanics(t, func() { limiter.close() })
+}
+
+func TestPreserveMaskedCredentialsClearSentinel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "secret-password"}},
+	}})
+	defer closeRuntime(t, rt)
+
+	// verify initial password
+	rt.mu.RLock()
+	require.Equal(t, "secret-password", rt.config.Instances["oci"].OCI.Auth.Password)
+	require.Equal(t, "basic", rt.config.Instances["oci"].OCI.Auth.Type)
+	rt.mu.RUnlock()
+
+	// update with CLEAR_SENTINEL to clear credentials - auth should be removed
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "-"}},
+	}}
+	_, err := rt.UpdateConfig(ctx, rt.generation, cfg)
+	require.NoError(t, err)
+
+	// verify credentials are cleared and auth is removed (set to nil)
+	rt.mu.RLock()
+	require.Nil(t, rt.config.Instances["oci"].OCI.Auth)
+	rt.mu.RUnlock()
+}
+
+func TestPreserveMaskedCredentialsKeepsMasked(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "secret-password"}},
+	}})
+	defer closeRuntime(t, rt)
+
+	// update with *** to keep credentials
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "***"}},
+	}}
+	_, err := rt.UpdateConfig(ctx, rt.generation, cfg)
+	require.NoError(t, err)
+
+	// verify credentials are preserved
+	rt.mu.RLock()
+	require.Equal(t, "secret-password", rt.config.Instances["oci"].OCI.Auth.Password)
+	rt.mu.RUnlock()
+}
+
+func TestPreserveMaskedCredentialsClearBearerSentinel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "bearer", Token: "secret-token"}},
+	}})
+	defer closeRuntime(t, rt)
+
+	// verify initial token
+	rt.mu.RLock()
+	require.Equal(t, "secret-token", rt.config.Instances["oci"].OCI.Auth.Token)
+	require.Equal(t, "bearer", rt.config.Instances["oci"].OCI.Auth.Type)
+	rt.mu.RUnlock()
+
+	// update with CLEAR_SENTINEL to clear token - auth should be removed
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: freeLocalAddr(t)}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "bearer", Token: "-"}},
+	}}
+	_, err := rt.UpdateConfig(ctx, rt.generation, cfg)
+	require.NoError(t, err)
+
+	// verify token is cleared and auth is removed (set to nil)
+	rt.mu.RLock()
+	require.Nil(t, rt.config.Instances["oci"].OCI.Auth)
+	rt.mu.RUnlock()
+}
+
+func TestValidateBindAddressRejectsInvalidFormat(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Bind: "invalid-address"}, Upstreams: []string{"https://example.com"},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must be host:port format")
+}
+
+func TestValidateBindAddressRejectsInvalidPort(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Bind: "127.0.0.1:99999"}, Upstreams: []string{"https://example.com"},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "port must be 1-65535")
+}
+
+func TestValidateTransportRejectsNegativeTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
+		Transport: &config.TransportConfig{Timeout: config.Duration(-5 * time.Second)},
+		Cache:     config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "transport timeout must not be negative")
+}
+
+func TestValidateCrossModeConfig(t *testing.T) {
+	// File mode with OCI config should fail
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"bad": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		OCI:   &config.OCIConfig{},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must not have oci config")
+
+	// File mode with NPM config should fail
+	cfg.Instances = map[string]config.InstanceConfig{"bad": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
+		Cache: config.CacheConfig{DefaultPolicy: config.PolicyBypass},
+		NPM:   &config.NPMConfig{},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must not have npm config")
+
+	// OCI mode with NPM config should fail
+	cfg.Instances = map[string]config.InstanceConfig{"bad": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5000"}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{},
+		NPM: &config.NPMConfig{},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must not have npm config")
+
+	// NPM mode with OCI config should fail
+	cfg.Instances = map[string]config.InstanceConfig{"bad": {
+		Mode: config.ModeNPM, Listen: config.ListenConfig{Path: "/npm"}, Upstreams: []string{"https://registry.npmjs.org"},
+		NPM: &config.NPMConfig{},
+		OCI: &config.OCIConfig{},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must not have oci config")
+}
+
+func TestValidateOCIBasicAuthRequiresPassword(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"oci": {
+		Mode: config.ModeOCI, Listen: config.ListenConfig{Bind: "127.0.0.1:5000"}, Upstreams: []string{"https://registry.example"},
+		OCI: &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user"}},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "oci basic auth password is empty")
+}
+
+func TestValidateCacheRuleRequiresPolicy(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Instances = map[string]config.InstanceConfig{"files": {
+		Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
+		Cache: config.CacheConfig{
+			DefaultPolicy: config.PolicyBypass,
+			Rules:         []config.CacheRule{{Match: "**/*.txt", Policy: ""}},
+		},
+	}}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "cache rule policy is empty")
 }

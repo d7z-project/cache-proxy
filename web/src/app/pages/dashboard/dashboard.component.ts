@@ -40,16 +40,6 @@ export class DashboardComponent {
     return entries.map(([label, count]) => ({ label, value: count, percent: total === 0 ? 0 : Math.round((count / total) * 100) }));
   }
 
-  cacheText(metrics: InstanceMetrics): string {
-    const entries = Object.entries(metrics.cache ?? {}).sort(([l], [r]) => l.localeCompare(r));
-    return entries.length === 0 ? '-' : entries.map(([k, c]) => `${k}: ${c}`).join(' · ');
-  }
-
-  upstreamText(metrics: InstanceMetrics): string {
-    const entries = Object.entries(metrics.upstreamStatus ?? {}).sort(([l], [r]) => l.localeCompare(r));
-    return entries.length === 0 ? '-' : entries.map(([k, c]) => `${k}: ${c}`).join(' · ');
-  }
-
   getMetrics(metrics: Record<string, InstanceMetrics>, name: string): InstanceMetrics {
     return metrics[name] ?? { requests: 0, errors: 0, responseBytes: 0, cache: {}, upstreamRequests: 0, upstreamErrors: 0, upstreamStatus: {}, activeDownloads: 0 };
   }

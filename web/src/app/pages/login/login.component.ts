@@ -19,7 +19,7 @@ export class LoginComponent implements OnInit {
   private redirect = '/dashboard';
 
   ngOnInit(): void {
-    const raw = this.route.snapshot.queryParams['redirect'];
+    const raw = this.route.snapshot.queryParams['returnUrl'];
     if (typeof raw === 'string' && raw.startsWith('/') && !raw.includes('//') && !raw.includes('@')) {
       this.redirect = raw;
     }
@@ -29,9 +29,13 @@ export class LoginComponent implements OnInit {
     this.error = '';
     this.loading = true;
     this.auth.login(this.password).subscribe({
-      next: (ok) => {
+      next: (result) => {
         this.loading = false;
-        if (ok) { this.router.navigateByUrl(this.redirect); } else { this.error = '密码错误'; }
+        if (result.ok) {
+          this.router.navigateByUrl(this.redirect);
+        } else {
+          this.error = result.error;
+        }
       },
       error: () => { this.loading = false; this.error = '登录失败'; }
     });

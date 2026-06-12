@@ -4,11 +4,13 @@ import { Router, ActivatedRoute } from '@angular/router';
 import { forkJoin, Observable } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, OciResourcePolicy, ProxyMode, RuntimeInfo } from '../../core/api.models';
-import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, FILE_DEFAULT_RULES, OCI_RESOURCE_POLICY_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
+import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, OCI_RESOURCE_POLICY_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
+
+const CLEAR_SENTINEL = '-';
 
 @Component({
   selector: 'app-instance-form',
@@ -108,10 +110,22 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     next.instances[name] = instance;
 
     this.saving = true;
-    this.api.saveConfig(this.snapshot.generation, next).subscribe({
+    this.api.validateConfig(next).subscribe({
+      next: () => this.doSave(name, instance, next),
+      error: (err) => { this.saving = false; this.toast.error(err.error?.error || '配置校验失败，请检查表单。'); }
+    });
+  }
+
+  private doSave(name: string, instance: InstanceConfig, next: any): void {
+    const mode = this.draft!.mode;
+    if ((mode === ProxyMode.Oci || mode === ProxyMode.Npm) && this.upstreams.filter(u => u.trim()).length > 1) {
+      this.toast.success('已保存。注意：' + (mode === ProxyMode.Oci ? '镜像' : 'npm') + '代理仅使用第一个上游地址。');
+    }
+    this.api.saveConfig(this.snapshot!.generation, next).subscribe({
       next: (snapshot) => {
         this.saving = false;
         this.snapshot = snapshot;
+        this.draft = structuredClone(instance);
         this.draftOriginal = structuredClone(instance);
         this.toast.success(name + ' 已保存。');
         if (this.isCreate) {
@@ -119,7 +133,21 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
           this.router.navigate(['/instances', name], { replaceUrl: true });
         }
       },
-      error: (err) => { this.saving = false; this.toast.error(err.error?.error || '保存操作异常'); }
+      error: (err) => {
+        this.saving = false;
+        if (err.status === 409) {
+          this.modal.confirm({
+            title: '配置冲突',
+            message: '配置已被其他人修改，是否重新加载并重试？',
+            confirmLabel: '重新加载',
+            danger: false
+          }).subscribe(ok => {
+            if (ok) this.load();
+          });
+        } else {
+          this.toast.error(err.error?.error || '保存操作异常');
+        }
+      }
     });
   }
 
@@ -148,8 +176,11 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (copyName) {
       const source = this.snapshot!.config.instances[copyName];
       if (source) {
-        this.loadDraft(copyName + '-copy', source);
-        this.draftName = copyName + '-copy';
+        let base = copyName + '-copy';
+        let i = 1;
+        while (this.snapshot!.config.instances[base]) { i++; base = copyName + '-copy-' + i; }
+        this.loadDraft(base, source);
+        this.draftName = base;
         return;
       }
     }
@@ -173,7 +204,6 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   private loadDraft(name: string, instance: InstanceConfig): void {
     this.draftName = name;
     this.draft = structuredClone(instance);
-    this.draft.transport = this.draft.transport ?? {};
     this.listenKind = this.draft.listen.bind ? ListenKind.Bind : ListenKind.Path;
     this.upstreams = [...(this.draft.upstreams ?? [])];
     this.passHeaders = [...(this.draft.passHeaders ?? [])];
@@ -184,6 +214,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   private normalizeDraftDefaults(): void {
     if (!this.draft) return;
     this.draft.listen = this.draft.listen ?? {};
+    this.draft.transport = this.draft.transport ?? {};
     this.draft.cache = this.draft.cache ?? { rules: [] };
     this.draft.cache.rules = this.draft.cache.rules ?? [];
     this.draft.cache.busyPolicy = this.draft.cache.busyPolicy ?? BusyPolicy.Bypass;
@@ -191,8 +222,6 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       this.draft.cache.defaultPolicy = this.draft.cache.defaultPolicy ?? CachePolicy.Bypass;
       return;
     }
-    this.draft.cache.rules = [];
-    delete this.draft.cache.defaultPolicy;
     if (this.draft.mode === ProxyMode.Oci) {
       this.draft.oci = this.draft.oci ?? { defaultPolicy: CachePolicy.Revalidate, rules: [] };
       this.draft.oci.defaultPolicy = this.draft.oci.defaultPolicy ?? CachePolicy.Revalidate;
@@ -226,7 +255,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     }
     return {
       mode, listen: { path: '/files' }, upstreams: ['https://example.com'], expireAfter: '720h',
-      cache: { defaultPolicy: CachePolicy.Bypass, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [...FILE_DEFAULT_RULES] },
+      cache: { defaultPolicy: CachePolicy.Bypass, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
       passHeaders: ['Accept', 'Accept-Language'], transport: {}
     };
   }
@@ -243,8 +272,9 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     }
     instance.passHeaders = this.passHeaders.map((h) => h.trim()).filter(Boolean);
     if (instance.passHeaders.length === 0) delete instance.passHeaders;
-    instance.expireAfter = instance.expireAfter?.trim() || undefined;
-    instance.cache.freshFor = instance.cache.freshFor?.trim() || undefined;
+    instance.expireAfter = this.normalizeDuration(instance.expireAfter);
+    instance.cache.freshFor = this.normalizeDuration(instance.cache.freshFor);
+    instance.cache.rules = this.normalizeRules(instance.cache.rules);
     instance.cache.busyPolicy = instance.cache.busyPolicy || BusyPolicy.Bypass;
     instance.transport = this.normalizeTransport(instance.transport);
     if (instance.mode === ProxyMode.Oci) {
@@ -265,21 +295,51 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     return instance;
   }
 
+  private normalizeDuration(value: string | undefined): string | undefined {
+    const trimmed = value?.trim();
+    return trimmed || undefined;
+  }
+
+  private normalizeRules(rules: any[]): any[] {
+    return (rules ?? []).map(r => ({
+      ...r,
+      match: r.match?.trim(),
+      freshFor: this.normalizeDuration(r.freshFor),
+      expireAfter: this.normalizeDuration(r.expireAfter),
+    }));
+  }
+
   private normalizeOci(oci: InstanceConfig['oci']) {
     if (!oci) return { defaultPolicy: CachePolicy.Revalidate, rules: [] as any[] };
     const auth = oci.auth;
     if (!auth || auth.type === OciAuthType.None) { delete oci.auth; return oci; }
     auth.username = auth.username?.trim() || undefined;
-    auth.password = auth.password || undefined;
+    if (auth.password === '' || auth.password === CLEAR_SENTINEL) {
+      auth.password = CLEAR_SENTINEL;
+    }
     auth.token = auth.token?.trim() || undefined;
+    if (auth.token === '' || auth.token === CLEAR_SENTINEL) {
+      auth.token = CLEAR_SENTINEL;
+    }
     if (auth.type === OciAuthType.Basic) delete (auth as any).token;
     if (auth.type === OciAuthType.Bearer) { delete (auth as any).username; delete (auth as any).password; }
+    oci.rules = (oci.rules ?? []).map(r => ({
+      ...r,
+      match: r.match?.trim(),
+      freshFor: this.normalizeDuration(r.freshFor),
+      expireAfter: this.normalizeDuration(r.expireAfter),
+    }));
     return oci;
   }
 
   private normalizeNpm(npm: InstanceConfig['npm']) {
     if (!npm) return { defaultPolicy: CachePolicy.Revalidate, rules: [] as any[] };
-    npm.rules = npm.rules ?? [];
+    npm.rules = (npm.rules ?? []).map(r => ({
+      ...r,
+      match: r.match?.trim(),
+      freshFor: this.normalizeDuration(r.freshFor),
+      expireAfter: this.normalizeDuration(r.expireAfter),
+    }));
     return npm;
   }
 
@@ -305,6 +365,8 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     const listenValue = this.listenKind === ListenKind.Bind ? this.draft.listen.bind?.trim() : this.draft.listen.path?.trim();
     if (!listenValue) e.push(this.listenKind === ListenKind.Bind ? '监听地址不能为空。' : '路径前缀不能为空。');
     if (this.listenKind === ListenKind.Path && listenValue && !listenValue.startsWith('/')) e.push('路径前缀必须以 / 开头。');
+    if (this.listenKind === ListenKind.Path && listenValue && /\s/.test(listenValue)) e.push('路径前缀不能包含空格。');
+    if (this.listenKind === ListenKind.Path && listenValue && /[^a-zA-Z0-9/_\-]/.test(listenValue)) e.push('路径前缀只能包含字母、数字、/、_、-。');
     if (!Object.values(BusyPolicy).includes(this.draft.cache.busyPolicy ?? BusyPolicy.Bypass)) e.push('并发策略需要重新选择。');
     const validUpstreams = this.upstreams.map((u) => u.trim()).filter(Boolean);
     if (validUpstreams.length === 0) e.push('至少需要一个上游地址。');
@@ -320,6 +382,33 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       catch { e.push('上游代理地址格式需要调整。'); }
     }
     if (this.draft.mode === ProxyMode.Oci && this.listenKind !== ListenKind.Bind) e.push('镜像代理请选择独立端口。');
+    if (this.draft.expireAfter?.trim() && !this.isValidDuration(this.draft.expireAfter.trim())) e.push('缓存保留时间格式无效，示例：720h、168h。');
+    if (this.draft.cache.freshFor?.trim() && !this.isValidDuration(this.draft.cache.freshFor.trim())) e.push('快速命中时间格式无效，示例：30s、5m。');
+    if (this.draft.transport?.timeout?.trim() && !this.isValidDuration(this.draft.transport.timeout.trim())) e.push('连接超时格式无效，示例：3s、30s。');
+    if (this.draft.mode === ProxyMode.File) {
+      for (let i = 0; i < this.draft.cache.rules.length; i++) {
+        const rule = this.draft.cache.rules[i];
+        if (!rule.match?.trim()) e.push(`文件规则 #${i + 1} 的匹配模式不能为空。`);
+        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`文件规则 #${i + 1} 的快速命中时间格式无效。`);
+        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`文件规则 #${i + 1} 的缓存保留时间格式无效。`);
+      }
+    }
+    if (this.draft.mode === ProxyMode.Oci && this.draft.oci) {
+      for (let i = 0; i < this.draft.oci.rules.length; i++) {
+        const rule = this.draft.oci.rules[i];
+        if (!rule.match?.trim()) e.push(`仓库规则 #${i + 1} 的匹配模式不能为空。`);
+        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`仓库规则 #${i + 1} 的快速命中时间格式无效。`);
+        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`仓库规则 #${i + 1} 的缓存保留时间格式无效。`);
+      }
+    }
+    if (this.draft.mode === ProxyMode.Npm && this.draft.npm) {
+      for (let i = 0; i < this.draft.npm.rules.length; i++) {
+        const rule = this.draft.npm.rules[i];
+        if (!rule.match?.trim()) e.push(`包规则 #${i + 1} 的匹配模式不能为空。`);
+        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`包规则 #${i + 1} 的快速命中时间格式无效。`);
+        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`包规则 #${i + 1} 的缓存保留时间格式无效。`);
+      }
+    }
 
     const bindOwners = new Map<string, string>();
     if (this.runtime?.bind) bindOwners.set(this.runtime.bind, '主监听');
@@ -339,7 +428,12 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       if (owner) e.push(`路径前缀 ${listenValue} 已被 ${owner} 使用。`);
     }
     if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Basic && !this.draft.oci.auth.username?.trim()) e.push('请填写镜像仓库用户名。');
+    if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Basic && !this.draft.oci.auth.password?.trim()) e.push('请填写镜像仓库密码。');
     if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Bearer && !this.draft.oci.auth.token?.trim()) e.push('请填写镜像仓库访问令牌。');
     return e;
+  }
+
+  private isValidDuration(value: string): boolean {
+    return /^(\d+(ns|us|ms|s|m|h))+$/.test(value) && !value.startsWith('-');
   }
 }

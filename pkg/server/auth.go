@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -28,10 +29,55 @@ type sessionPayload struct {
 type loginRateLimiter struct {
 	mu       sync.Mutex
 	attempts map[string][]time.Time
+	stop     chan struct{}
+	closed   bool
 }
 
 func newLoginRateLimiter() *loginRateLimiter {
-	return &loginRateLimiter{attempts: map[string][]time.Time{}}
+	l := &loginRateLimiter{
+		attempts: map[string][]time.Time{},
+		stop:     make(chan struct{}),
+	}
+	go l.periodicCleanup()
+	return l
+}
+
+func (l *loginRateLimiter) close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.closed {
+		l.closed = true
+		close(l.stop)
+	}
+}
+
+func (l *loginRateLimiter) periodicCleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticker.C:
+			l.mu.Lock()
+			now := time.Now()
+			cutoff := now.Add(-loginWindow)
+			for ip, times := range l.attempts {
+				recent := times[:0]
+				for _, t := range times {
+					if t.After(cutoff) {
+						recent = append(recent, t)
+					}
+				}
+				if len(recent) == 0 {
+					delete(l.attempts, ip)
+				} else {
+					l.attempts[ip] = recent
+				}
+			}
+			l.mu.Unlock()
+		}
+	}
 }
 
 func (l *loginRateLimiter) allow(ip string) bool {
@@ -97,24 +143,28 @@ func verifySession(password, token string) bool {
 	return time.Now().Unix() < payload.Exp
 }
 
-func setSessionCookie(w http.ResponseWriter, token string) {
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	secure := r.TLS != nil || strings.HasPrefix(r.Host, "localhost") || strings.HasPrefix(r.Host, "127.")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(sessionMaxAge.Seconds()),
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	secure := r.TLS != nil || strings.HasPrefix(r.Host, "localhost") || strings.HasPrefix(r.Host, "127.")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -160,9 +210,8 @@ func metricsAuthMiddleware(token string, next http.Handler) http.HandlerFunc {
 }
 
 func computeTokenHash(value string) []byte {
-	mac := hmac.New(sha256.New, nil)
-	mac.Write([]byte(value))
-	return mac.Sum(nil)
+	h := sha256.Sum256([]byte(value))
+	return h[:]
 }
 
 func (r *Runtime) loginHandler(w http.ResponseWriter, req *http.Request) {
@@ -195,7 +244,7 @@ func (r *Runtime) loginHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusTooManyRequests, errors.New("too many login attempts"))
 		return
 	}
-	if input.Password != r.password {
+	if subtle.ConstantTimeCompare([]byte(input.Password), []byte(r.password)) != 1 {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
 		return
 	}
@@ -204,7 +253,7 @@ func (r *Runtime) loginHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	setSessionCookie(w, token)
+	setSessionCookie(w, req, token)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
@@ -213,6 +262,6 @@ func (r *Runtime) logoutHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	clearSessionCookie(w)
+	clearSessionCookie(w, req)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }

@@ -1,13 +1,13 @@
 import { Component, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AsyncPipe } from '@angular/common';
+import { NgbCollapse } from '@ng-bootstrap/ng-bootstrap';
 import { AuthService } from './core/auth.service';
 import { ToastContainerComponent } from './shared/toast.component';
-import { ModalComponent } from './shared/modal.component';
 
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, AsyncPipe, ToastContainerComponent, ModalComponent],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, AsyncPipe, NgbCollapse, ToastContainerComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent {

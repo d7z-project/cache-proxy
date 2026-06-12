@@ -46,9 +46,3 @@ export const NPM_RESOURCE_POLICY_OPTIONS: SelectOption<NpmResourcePolicy>[] = [
   { value: NpmResourcePolicy.Metadata, label: '包信息', description: '只匹配包元数据。' },
   { value: NpmResourcePolicy.Tarball, label: '下载文件', description: '只匹配 .tgz 文件。' }
 ];
-
-export const FILE_DEFAULT_RULES = [
-  { match: '**/*.iso', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' },
-  { match: '**/*.rpm', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' },
-  { match: '**/repodata/**', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' }
-];

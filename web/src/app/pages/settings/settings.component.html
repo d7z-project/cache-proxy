@@ -1,43 +1,51 @@
-<section class="page">
-  <header class="page-header">
+<section class="container-fluid" style="max-width: 1500px;">
+  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
     <div>
       <p class="eyebrow">设置</p>
-      <h2>全局设置</h2>
+      <h2 class="fw-bold mb-0">全局设置</h2>
     </div>
-    <div class="actions">
-      <button type="button" (click)="load()">重新载入</button>
-      <button type="button" class="danger" (click)="promptReset()">重置所有配置</button>
+    <div class="d-flex gap-2">
+      <button type="button" class="btn btn-outline-secondary" (click)="load()">重新载入</button>
+      <button type="button" class="btn btn-outline-danger" (click)="promptReset()">重置所有配置</button>
     </div>
   </header>
 
   @if (loading) {
-    <div class="grid-2">
-      <article class="card block skeleton"></article>
-      <article class="card block skeleton"></article>
+    <div class="row g-3">
+      <div class="col-md-6"><div class="card placeholder-glow" style="min-height:200px"><span class="placeholder col-12 h-100"></span></div></div>
+      <div class="col-md-6"><div class="card placeholder-glow" style="min-height:200px"><span class="placeholder col-12 h-100"></span></div></div>
     </div>
   }
 
   @if (runtime && !loading) {
-    <div class="grid-2">
-      <article class="card block">
-        <h3>启动参数</h3>
-        <dl class="kv-list">
-          <div><dt>监听地址</dt><dd>{{ runtime.bind }}</dd></div>
-          <div><dt>存储位置</dt><dd>{{ runtime.backend }}</dd></div>
-          <div><dt>监控路径</dt><dd>{{ runtime.metricsPath }}</dd></div>
-          <div><dt>清理周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
-        </dl>
-        <p class="hint">这些参数随服务启动生效。</p>
-      </article>
-      <article class="card block">
-        <h3>运行期配置</h3>
-        <dl class="kv-list">
-          <div><dt>配置版本</dt><dd>{{ snapshot?.generation }}</dd></div>
-          <div><dt>实例数量</dt><dd>{{ runtime.instances }}</dd></div>
-          <div><dt>处理器数</dt><dd>{{ runtime.handlers }}</dd></div>
-        </dl>
-        <p class="hint">实例、上游和缓存策略可在实例页面调整。</p>
-      </article>
+    <div class="row g-3">
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">启动参数</h5>
+            <dl class="kv-list">
+              <div><dt>监听地址</dt><dd>{{ runtime.bind }}</dd></div>
+              <div><dt>存储位置</dt><dd>{{ runtime.backend }}</dd></div>
+              <div><dt>监控路径</dt><dd>{{ runtime.metricsPath }}</dd></div>
+              <div><dt>清理周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
+            </dl>
+            <p class="text-muted small mb-0">这些参数随服务启动生效。</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title">运行期配置</h5>
+            <dl class="kv-list">
+              <div><dt>配置版本</dt><dd>{{ snapshot?.generation }}</dd></div>
+              <div><dt>实例数量</dt><dd>{{ runtime.instances }}</dd></div>
+              <div><dt>处理器数</dt><dd>{{ runtime.handlers }}</dd></div>
+            </dl>
+            <p class="text-muted small mb-0">实例、上游和缓存策略可在实例页面调整。</p>
+          </div>
+        </div>
+      </div>
     </div>
   }
 </section>

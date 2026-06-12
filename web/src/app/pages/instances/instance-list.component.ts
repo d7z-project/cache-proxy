@@ -1,9 +1,9 @@
-import { Component, OnInit, HostListener, inject } from '@angular/core';
+import { Component, OnInit, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { forkJoin } from 'rxjs';
+import { NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem } from '@ng-bootstrap/ng-bootstrap';
 import { ApiService } from '../../core/api.service';
-import { ConfigSnapshot, InstanceConfig } from '../../core/api.models';
+import { CacheLookupResult, ConfigSnapshot, InstanceConfig } from '../../core/api.models';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
@@ -11,7 +11,7 @@ import { ImportExportModalComponent } from '../../shared/import-export-modal.com
 
 @Component({
   selector: 'app-instance-list',
-  imports: [FormsModule, ModeLabelPipe, ImportExportModalComponent],
+  imports: [FormsModule, ModeLabelPipe, NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem, ImportExportModalComponent],
   templateUrl: './instance-list.component.html'
 })
 export class InstanceListComponent implements OnInit {
@@ -22,9 +22,13 @@ export class InstanceListComponent implements OnInit {
 
   snapshot?: ConfigSnapshot;
   loading = true;
-
-  dropdownOpen = false;
   showImportExport = false;
+
+  showLookupModal = false;
+  lookupInstanceName = '';
+  lookupPath = '';
+  lookupRunning = false;
+  lookupResult?: CacheLookupResult;
 
   ngOnInit(): void { this.load(); }
 
@@ -33,16 +37,7 @@ export class InstanceListComponent implements OnInit {
     return Object.keys(map).sort().map((name) => ({ name, config: map[name] }));
   }
 
-  toggleDropdown(): void { this.dropdownOpen = !this.dropdownOpen; }
-
-  @HostListener('document:click', ['$event'])
-  onDocClick(event: MouseEvent): void {
-    const target = event.target as HTMLElement;
-    if (!target.closest('.dropdown')) this.dropdownOpen = false;
-  }
-
   startCreate(mode: string): void {
-    this.dropdownOpen = false;
     this.router.navigate(['/instances/new'], { queryParams: { mode } });
   }
 
@@ -72,10 +67,40 @@ export class InstanceListComponent implements OnInit {
     });
   }
 
+  openLookupModal(instanceName: string): void {
+    this.lookupInstanceName = instanceName;
+    this.lookupPath = '';
+    this.lookupResult = undefined;
+    this.showLookupModal = true;
+  }
+
+  closeLookupModal(): void {
+    this.showLookupModal = false;
+    this.lookupInstanceName = '';
+    this.lookupPath = '';
+    this.lookupResult = undefined;
+  }
+
+  lookupCache(): void {
+    if (!this.lookupInstanceName || !this.lookupPath.trim()) return;
+    this.lookupRunning = true;
+    this.lookupResult = undefined;
+    this.api.cacheLookup(this.lookupInstanceName, this.lookupPath.trim()).subscribe({
+      next: (result) => {
+        this.lookupResult = result;
+        this.lookupRunning = false;
+      },
+      error: (err) => {
+        this.lookupRunning = false;
+        this.toast.error(err.error?.error || '缓存查询异常');
+      }
+    });
+  }
+
   load(): void {
     this.loading = true;
-    forkJoin({ snapshot: this.api.config(), runtime: this.api.runtime() }).subscribe({
-      next: ({ snapshot }) => { this.snapshot = snapshot; this.loading = false; },
+    this.api.config().subscribe({
+      next: (snapshot) => { this.snapshot = snapshot; this.loading = false; },
       error: (err) => { this.loading = false; this.toast.error(err.error?.error || '配置加载异常'); }
     });
   }

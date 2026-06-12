@@ -1,52 +1,114 @@
-<section class="page">
-  <header class="page-header">
+<section class="container-fluid" style="max-width: 1500px;">
+  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
     <div>
       <p class="eyebrow">实例</p>
-      <h2>代理实例</h2>
-      <p class="hint">管理监听入口、上游连接和缓存策略。</p>
+      <h2 class="fw-bold mb-1">代理实例</h2>
+      <p class="text-muted mb-0">管理监听入口、上游连接和缓存策略。</p>
     </div>
-    <div class="actions">
-      <div class="dropdown">
-        <button type="button" class="primary" (click)="toggleDropdown()">新增实例 ▾</button>
-        @if (dropdownOpen) {
-          <div class="dropdown-menu">
-            <button type="button" (click)="startCreate('file')">文件代理</button>
-            <button type="button" (click)="startCreate('oci')">容器镜像代理</button>
-            <button type="button" (click)="startCreate('npm')">npm 包代理</button>
-          </div>
-        }
+    <div class="d-flex gap-2">
+      <div ngbDropdown>
+        <button type="button" class="btn btn-primary" ngbDropdownToggle>新增实例</button>
+        <div ngbDropdownMenu>
+          <button ngbDropdownItem (click)="startCreate('file')">文件代理</button>
+          <button ngbDropdownItem (click)="startCreate('oci')">容器镜像代理</button>
+          <button ngbDropdownItem (click)="startCreate('npm')">npm 包代理</button>
+        </div>
       </div>
-      <button type="button" (click)="showImportExport = true">导入导出</button>
+      <button type="button" class="btn btn-outline-secondary" (click)="showImportExport = true">导入导出</button>
     </div>
   </header>
 
   @if (loading) {
-    <div class="instance-grid">
-      @for (i of [0,1,2]; track i) {
-        <article class="card block skeleton"></article>
-      }
-    </div>
+    <div class="card placeholder-glow"><span class="placeholder col-12" style="height: 200px;"></span></div>
   }
 
   @if (!loading) {
-    <div class="instance-grid">
-      @for (item of instances; track item.name) {
-        <article class="card block">
-          <div class="instance-card-header">
-            <strong>{{ item.name }}</strong>
-            <span class="badge">{{ item.config.mode | modeLabel }}</span>
+    @if (instances.length === 0) {
+      <div class="text-center text-muted py-5">还没有实例，点击上方按钮创建。</div>
+    } @else {
+      <div class="card">
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>模式</th>
+                <th>入口</th>
+                <th class="text-end">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (item of instances; track item.name) {
+                <tr>
+                  <td><strong>{{ item.name }}</strong></td>
+                  <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.config.mode | modeLabel }}</span></td>
+                  <td class="text-truncate" style="max-width: 200px;">{{ item.config.listen.path || item.config.listen.bind }}</td>
+                  <td class="text-end text-nowrap">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="copyInstance(item.name)">复制</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="openLookupModal(item.name)">查询缓存</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger ms-1" (click)="promptDelete(item.name)">删除</button>
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    }
+  }
+
+  @if (showLookupModal) {
+    <div class="modal-backdrop fade show" (click)="closeLookupModal()"></div>
+    <div class="modal d-block" tabindex="-1" (click)="closeLookupModal()">
+      <div class="modal-dialog modal-dialog-centered" (click)="$event.stopPropagation()">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">缓存查询</h5>
+            <button type="button" class="btn-close" (click)="closeLookupModal()"></button>
           </div>
-          <p class="hint">{{ item.config.listen.path || item.config.listen.bind }}</p>
-          <div class="actions card-actions">
-            <button type="button" (click)="startEdit(item.name)">编辑</button>
-            <button type="button" (click)="copyInstance(item.name)">复制</button>
-            <button type="button" class="danger" (click)="promptDelete(item.name)">删除</button>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label class="form-label">实例名称</label>
+              <input class="form-control" name="lookupInstanceName" [value]="lookupInstanceName" disabled>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">资源路径</label>
+              <input class="form-control" name="lookupPath" [(ngModel)]="lookupPath" placeholder="/library/nginx/latest" (keyup.enter)="lookupCache()">
+            </div>
+            <button type="button" class="btn btn-primary" (click)="lookupCache()" [disabled]="!lookupPath.trim() || lookupRunning">
+              {{ lookupRunning ? '查询中...' : '查询缓存状态' }}
+            </button>
+
+            @if (lookupResult) {
+              <div class="lookup-result mt-3" [class.cached]="lookupResult.cached" [class.fresh]="lookupResult.fresh">
+                <div class="d-flex align-items-center gap-3 mb-3">
+                  <strong>{{ lookupResult.cached ? '已缓存' : '未缓存' }}</strong>
+                  @if (lookupResult.cached) {
+                    <span class="badge" [class.bg-success-subtle]="lookupResult.fresh" [class.text-success-emphasis]="lookupResult.fresh" [class.bg-warning-subtle]="!lookupResult.fresh" [class.text-warning-emphasis]="!lookupResult.fresh">
+                      {{ lookupResult.fresh ? '有效' : '可刷新' }}
+                    </span>
+                  }
+                </div>
+                <dl class="kv-list">
+                  <div><dt>路径</dt><dd>{{ lookupResult.path }}</dd></div>
+                  <div><dt>对象路径</dt><dd>{{ lookupResult.objectPath }}</dd></div>
+                  <div><dt>缓存策略</dt><dd>{{ lookupResult.policy | modeLabel:'policy' }}</dd></div>
+                  <div><dt>快速命中</dt><dd>{{ lookupResult.freshFor || '未设置' }}</dd></div>
+                  <div><dt>过期时间</dt><dd>{{ lookupResult.expireAfter || '未设置' }}</dd></div>
+                  @if (lookupResult.cached) {
+                    <div><dt>缓存时间</dt><dd>{{ lookupResult.cachedAt }}</dd></div>
+                    <div><dt>过期时间</dt><dd>{{ lookupResult.expiresAt }}</dd></div>
+                  }
+                </dl>
+              </div>
+            }
           </div>
-        </article>
-      }
-      @if (instances.length === 0) {
-        <p class="empty">还没有实例，点击上方按钮创建。</p>
-      }
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" (click)="closeLookupModal()">关闭</button>
+          </div>
+        </div>
+      </div>
     </div>
   }
 

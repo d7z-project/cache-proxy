@@ -62,7 +62,6 @@ type Runtime struct {
 	generation   uint64
 	mu           sync.RWMutex
 
-	apiMux       *http.ServeMux
 	mainHandler  http.Handler
 	handlers     []*proxy.Handler
 	pathHandlers map[string]*proxy.Handler
@@ -253,6 +252,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 	close(r.gcStop)
 	<-r.gcDone
+	r.loginLimiter.close()
 
 	var joined error
 	r.mu.RLock()
@@ -378,7 +378,6 @@ func (r *Runtime) buildMainHandler(cfg *config.Config) error {
 	mux.HandleFunc("/", r.serveRoot)
 
 	r.mu.Lock()
-	r.apiMux = apiMux
 	r.mainHandler = mux
 	r.mu.Unlock()
 	return nil
@@ -428,10 +427,12 @@ func (r *Runtime) serveSPA(w http.ResponseWriter, req *http.Request) {
 	if filePath == "" {
 		filePath = "index.html"
 	}
+	// For root directory files, check embed first
 	if stat, err := fs.Stat(assets, filePath); err == nil && !stat.IsDir() {
 		http.FileServerFS(assets).ServeHTTP(w, req)
 		return
 	}
+	// Fallback to index.html for SPA routing
 	req.URL.Path = "/index.html"
 	http.FileServerFS(assets).ServeHTTP(w, req)
 }
@@ -553,17 +554,30 @@ func (r *Runtime) preserveMaskedCredentials(cfg *config.Config) {
 	if cfg == nil || current == nil {
 		return
 	}
+	const clearSentinel = "-"
 	for name, inst := range cfg.Instances {
 		if inst.OCI != nil && inst.OCI.Auth != nil {
 			auth := inst.OCI.Auth
 			if currentInst, ok := current.Instances[name]; ok && currentInst.OCI != nil && currentInst.OCI.Auth != nil {
 				currentAuth := currentInst.OCI.Auth
-				if auth.Password == "***" || (auth.Password == "" && currentAuth.Password != "") {
+				if auth.Password == "***" {
 					auth.Password = currentAuth.Password
+				} else if auth.Password == clearSentinel {
+					auth.Password = ""
 				}
-				if auth.Token == "***" || (auth.Token == "" && currentAuth.Token != "") {
+				if auth.Token == "***" {
 					auth.Token = currentAuth.Token
+				} else if auth.Token == clearSentinel {
+					auth.Token = ""
 				}
+			}
+			if auth.Type == "basic" && (auth.Password == "" || auth.Username == "") {
+				auth.Type = "none"
+				auth.Username = ""
+				auth.Password = ""
+			}
+			if auth.Type == "bearer" && auth.Token == "" {
+				auth.Type = "none"
 			}
 			cfg.Instances[name] = inst
 		}
@@ -721,6 +735,24 @@ func validateConfig(cfg *config.Config, bind string) error {
 		if inst.Mode != config.ModeFile && inst.Mode != config.ModeOCI && inst.Mode != config.ModeNPM {
 			return fmt.Errorf("instance %s has unsupported mode %q", instanceName, inst.Mode)
 		}
+		if inst.Mode == config.ModeFile {
+			if inst.OCI != nil {
+				return fmt.Errorf("instance %s in file mode must not have oci config", instanceName)
+			}
+			if inst.NPM != nil {
+				return fmt.Errorf("instance %s in file mode must not have npm config", instanceName)
+			}
+		}
+		if inst.Mode == config.ModeOCI {
+			if inst.NPM != nil {
+				return fmt.Errorf("instance %s in oci mode must not have npm config", instanceName)
+			}
+		}
+		if inst.Mode == config.ModeNPM {
+			if inst.OCI != nil {
+				return fmt.Errorf("instance %s in npm mode must not have oci config", instanceName)
+			}
+		}
 		if inst.Mode == config.ModeOCI && inst.Listen.Bind == "" {
 			return fmt.Errorf("instance %s in oci mode must use independent listen bind", instanceName)
 		}
@@ -735,9 +767,15 @@ func validateConfig(cfg *config.Config, bind string) error {
 			if owner := paths[listenPath]; owner != "" {
 				return fmt.Errorf("listen path %s conflicts between %s and %s", listenPath, owner, instanceName)
 			}
+			if listenPath == "/-" || strings.HasPrefix(listenPath, "/-/") {
+				return fmt.Errorf("listen path %q conflicts with admin API prefix /-/", listenPath)
+			}
 			paths[listenPath] = instanceName
 		}
 		if inst.Listen.Bind != "" {
+			if err := validateBindAddress(inst.Listen.Bind); err != nil {
+				return fmt.Errorf("instance %s: %w", instanceName, err)
+			}
 			if existing := binds[inst.Listen.Bind]; existing != "" {
 				return fmt.Errorf("listen bind %s conflicts between %s and %s", inst.Listen.Bind, existing, instanceName)
 			}
@@ -786,6 +824,24 @@ func validateConfig(cfg *config.Config, bind string) error {
 	return nil
 }
 
+func validateBindAddress(bind string) error {
+	host, port, err := net.SplitHostPort(bind)
+	if err != nil {
+		return fmt.Errorf("invalid listen bind %q: must be host:port format", bind)
+	}
+	if port == "" {
+		return fmt.Errorf("invalid listen bind %q: port is required", bind)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("invalid listen bind %q: port must be 1-65535", bind)
+	}
+	if host != "" && host != "localhost" && net.ParseIP(host) == nil {
+		return fmt.Errorf("invalid listen bind %q: invalid host %q", bind, host)
+	}
+	return nil
+}
+
 func validateTransport(transport *config.TransportConfig) error {
 	if transport == nil {
 		return nil
@@ -795,6 +851,9 @@ func validateTransport(transport *config.TransportConfig) error {
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5") {
 			return fmt.Errorf("invalid upstream proxy %q", transport.Proxy)
 		}
+	}
+	if transport.Timeout < 0 {
+		return errors.New("transport timeout must not be negative")
 	}
 	return nil
 }
@@ -810,10 +869,16 @@ func validatePassHeaders(headers []string) error {
 }
 
 func validateOCI(inst config.InstanceConfig) error {
-	if inst.Mode != config.ModeOCI || inst.OCI == nil {
+	if inst.Mode != config.ModeOCI {
 		return nil
 	}
-	if inst.OCI.DefaultPolicy != "" && !validPolicy(inst.OCI.DefaultPolicy) {
+	if inst.OCI == nil {
+		return errors.New("oci mode requires oci config to be set")
+	}
+	if inst.OCI.DefaultPolicy == "" {
+		inst.OCI.DefaultPolicy = config.PolicyBypass
+	}
+	if !validPolicy(inst.OCI.DefaultPolicy) {
 		return fmt.Errorf("invalid oci default policy %q", inst.OCI.DefaultPolicy)
 	}
 	for i, rule := range inst.OCI.Rules {
@@ -823,12 +888,19 @@ func validateOCI(inst config.InstanceConfig) error {
 		if !doublestar.ValidatePattern(rule.Match) {
 			return fmt.Errorf("oci rule %d: invalid match %q", i, rule.Match)
 		}
-		if rule.Policy != "" && !validPolicy(rule.Policy) {
+		if rule.Policy == "" {
+			rule.Policy = config.PolicyBypass
+		}
+		if !validPolicy(rule.Policy) {
 			return fmt.Errorf("oci rule %d: invalid policy %q", i, rule.Policy)
 		}
-		if rule.ResourcePolicy != "" && rule.ResourcePolicy != "*" && rule.ResourcePolicy != "blob" && rule.ResourcePolicy != "manifest" && rule.ResourcePolicy != "tag" {
+		if rule.ResourcePolicy == "" {
+			rule.ResourcePolicy = "*"
+		}
+		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != "blob" && rule.ResourcePolicy != "manifest" && rule.ResourcePolicy != "tag" {
 			return fmt.Errorf("oci rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
 		}
+		inst.OCI.Rules[i] = rule
 	}
 	if inst.OCI.Auth == nil {
 		return nil
@@ -840,8 +912,11 @@ func validateOCI(inst config.InstanceConfig) error {
 		if inst.OCI.Auth.Username == "" {
 			return errors.New("oci basic auth username is empty")
 		}
+		if inst.OCI.Auth.Password == "" || inst.OCI.Auth.Password == "-" {
+			return errors.New("oci basic auth password is empty")
+		}
 	case "bearer":
-		if inst.OCI.Auth.Token == "" {
+		if inst.OCI.Auth.Token == "" || inst.OCI.Auth.Token == "-" {
 			return errors.New("oci bearer auth token is empty")
 		}
 	default:
@@ -851,10 +926,16 @@ func validateOCI(inst config.InstanceConfig) error {
 }
 
 func validateNPM(inst config.InstanceConfig) error {
-	if inst.Mode != config.ModeNPM || inst.NPM == nil {
+	if inst.Mode != config.ModeNPM {
 		return nil
 	}
-	if inst.NPM.DefaultPolicy != "" && !validPolicy(inst.NPM.DefaultPolicy) {
+	if inst.NPM == nil {
+		return errors.New("npm mode requires npm config to be set")
+	}
+	if inst.NPM.DefaultPolicy == "" {
+		inst.NPM.DefaultPolicy = config.PolicyBypass
+	}
+	if !validPolicy(inst.NPM.DefaultPolicy) {
 		return fmt.Errorf("invalid npm default policy %q", inst.NPM.DefaultPolicy)
 	}
 	for i, rule := range inst.NPM.Rules {
@@ -864,12 +945,19 @@ func validateNPM(inst config.InstanceConfig) error {
 		if !doublestar.ValidatePattern(rule.Match) {
 			return fmt.Errorf("npm rule %d: invalid match %q", i, rule.Match)
 		}
-		if rule.Policy != "" && !validPolicy(rule.Policy) {
+		if rule.Policy == "" {
+			rule.Policy = config.PolicyBypass
+		}
+		if !validPolicy(rule.Policy) {
 			return fmt.Errorf("npm rule %d: invalid policy %q", i, rule.Policy)
 		}
-		if rule.ResourcePolicy != "" && rule.ResourcePolicy != "*" && rule.ResourcePolicy != "metadata" && rule.ResourcePolicy != "tarball" {
+		if rule.ResourcePolicy == "" {
+			rule.ResourcePolicy = "*"
+		}
+		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != "metadata" && rule.ResourcePolicy != "tarball" {
 			return fmt.Errorf("npm rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
 		}
+		inst.NPM.Rules[i] = rule
 	}
 	return nil
 }
@@ -890,6 +978,9 @@ func validateCache(cache config.CacheConfig) error {
 		}
 		if !doublestar.ValidatePattern(rule.Match) {
 			return fmt.Errorf("invalid cache rule match %q", rule.Match)
+		}
+		if rule.Policy == "" {
+			return errors.New("cache rule policy is empty")
 		}
 		if !validPolicy(rule.Policy) {
 			return fmt.Errorf("invalid cache policy %q", rule.Policy)

@@ -19,13 +19,10 @@ export class AuthService {
       map((info) => {
         this.authEnabled.next(info.authEnabled);
         this.isAuth.next(true);
-        return null;
       }),
-      catchError((err) => {
-        if (err.status === 401) {
-          this.authEnabled.next(true);
-          this.isAuth.next(false);
-        }
+      catchError(() => {
+        this.authEnabled.next(true);
+        this.isAuth.next(false);
         return of(null);
       })
     ).subscribe();
@@ -35,14 +32,22 @@ export class AuthService {
     return this.http.post<{ ok: boolean }>(
       '/-/api/login', { password }, { withCredentials: true }
     ).pipe(
-      map(() => { this.isAuth.next(true); return true; }),
-      catchError(() => { this.isAuth.next(false); return of(false); })
+      map(() => { this.isAuth.next(true); return { ok: true as const, error: '' }; }),
+      catchError((err) => {
+        this.isAuth.next(false);
+        let error = '登录失败';
+        if (err.status === 401) error = '密码错误';
+        else if (err.status === 429) error = '登录尝试过于频繁，请稍后再试';
+        else if (err.status === 0) error = '无法连接到服务';
+        return of({ ok: false as const, error });
+      })
     );
   }
 
   logout() {
     return this.http.post('/-/api/logout', {}, { withCredentials: true }).pipe(
-      map(() => { this.isAuth.next(false); })
+      map(() => { this.isAuth.next(false); }),
+      catchError(() => { this.isAuth.next(false); return of(null); })
     );
   }
 }

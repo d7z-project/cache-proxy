@@ -1,25 +1,27 @@
-import { Component, inject } from '@angular/core';
-import { AsyncPipe } from '@angular/common';
-import { ModalService } from './modal.service';
+import { Component, Input } from '@angular/core';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
 @Component({
   selector: 'app-modal',
-  imports: [AsyncPipe],
   template: `
-    @if (svc.state | async; as cfg) {
-      <div class="modal-backdrop" (click)="svc.close(false)">
-        <div class="modal-card card" (click)="$event.stopPropagation()">
-          <h3>{{ cfg.title }}</h3>
-          <p class="hint">{{ cfg.message }}</p>
-          <div class="actions modal-actions">
-            <button type="button" (click)="svc.close(false)">取消</button>
-            <button type="button" [class.danger]="cfg.danger" (click)="svc.close(true)">{{ cfg.confirmLabel || '确认' }}</button>
-          </div>
-        </div>
-      </div>
-    }
+    <div class="modal-header">
+      <h5 class="modal-title">{{ title }}</h5>
+      <button type="button" class="btn-close" (click)="activeModal.dismiss()"></button>
+    </div>
+    <div class="modal-body">
+      <p class="text-muted mb-0">{{ message }}</p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary" (click)="activeModal.close(false)">取消</button>
+      <button type="button" [class.btn-danger]="danger" [class.btn-primary]="!danger" class="btn" (click)="activeModal.close(true)">{{ confirmLabel }}</button>
+    </div>
   `
 })
 export class ModalComponent {
-  readonly svc = inject(ModalService);
+  @Input() title = '';
+  @Input() message = '';
+  @Input() confirmLabel = '确认';
+  @Input() danger = false;
+
+  constructor(readonly activeModal: NgbActiveModal) {}
 }

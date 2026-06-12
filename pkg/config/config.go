@@ -154,6 +154,10 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &text); err != nil {
 		return err
 	}
+	if text == "" {
+		*d = 0
+		return nil
+	}
 	parsed, parseErr := time.ParseDuration(text)
 	if parseErr != nil {
 		return parseErr
