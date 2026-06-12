@@ -339,11 +339,11 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 	}
 
 	result := cacheLookupResult{
-		Instance:    instanceName,
-		Mode:        inst.Mode,
-		objectPath:  route.ObjectPath,
-		Policy:      route.Policy,
-		Generation:  generation,
+		Instance:   instanceName,
+		Mode:       inst.Mode,
+		objectPath: route.ObjectPath,
+		Policy:     route.Policy,
+		Generation: generation,
 	}
 	freshFor := route.FreshFor
 	if freshFor <= 0 {
@@ -360,7 +360,7 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 		result.ExpireAfter = expireAfter.String()
 	}
 
-	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, result.objectPath, inst)
+	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, result.objectPath, freshFor, expireAfter)
 	result.Cached = cached
 	result.Fresh = fresh
 	if !cachedAt.IsZero() {
@@ -373,7 +373,7 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 	writeJSON(resp, result, nil)
 }
 
-func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath string, inst config.InstanceConfig) (bool, time.Time, time.Time, bool) {
+func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath string, freshFor, expireAfter config.Duration) (bool, time.Time, time.Time, bool) {
 	reader, err := r.store.OpenObject(ctx, instanceName, objectPath)
 	if err != nil {
 		return false, time.Time{}, time.Time{}, false
@@ -387,13 +387,11 @@ func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath
 		return false, time.Time{}, time.Time{}, false
 	}
 
-	expireAfter := inst.ExpireAfter
 	var expiresAt time.Time
 	if expireAfter > 0 {
 		expiresAt = cachedAt.Add(expireAfter.Duration())
 	}
 
-	freshFor := inst.Cache.FreshFor
 	fresh := false
 	if freshFor > 0 {
 		fresh = time.Since(cachedAt) <= freshFor.Duration()

@@ -80,7 +80,10 @@ func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, res
 		if cfg.Transport.UserAgent != "" {
 			client.UserAgent = cfg.Transport.UserAgent
 		}
-		transport := client.Transport.(*http.Transport)
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok {
+			slog.Warn("cannot configure transport options, unexpected transport type", "instance", name)
+		} else {
 		if cfg.Transport.Proxy != "" {
 			proxyURL, err := url.Parse(cfg.Transport.Proxy)
 			if err == nil {
@@ -91,6 +94,7 @@ func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, res
 		}
 		if cfg.Transport.Timeout > 0 {
 			transport.DialContext = utils.DefaultDialContext(cfg.Transport.Timeout.Duration())
+		}
 		}
 	}
 	return &Handler{name: name, cfg: cfg, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, ociTokens: map[string]ociToken{}}
@@ -732,7 +736,8 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 
 func passableHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "authorization":
+	case "", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "authorization",
+		"x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix", "x-real-ip":
 		return false
 	default:
 		return true

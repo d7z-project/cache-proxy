@@ -72,7 +72,11 @@ func (r *Resolver) resolveResource(packageName, resourceType string) npmMatch {
 			expireAfter: rule.ExpireAfter,
 		}
 	}
-	return npmMatch{policy: r.cfg.DefaultPolicy}
+	match := npmMatch{policy: r.cfg.DefaultPolicy}
+	if match.policy == "" {
+		match.policy = config.PolicyBypass
+	}
+	return match
 }
 
 func extractPackageName(cleanPath string) string {

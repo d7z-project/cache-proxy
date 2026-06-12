@@ -125,5 +125,9 @@ func (r *Resolver) resolveRepo(repoName string) ociMatch {
 			expireAfter: rule.ExpireAfter,
 		}
 	}
-	return ociMatch{policy: r.cfg.DefaultPolicy}
+	match := ociMatch{policy: r.cfg.DefaultPolicy}
+	if match.policy == "" {
+		match.policy = config.PolicyBypass
+	}
+	return match
 }

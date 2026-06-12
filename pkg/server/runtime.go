@@ -166,7 +166,7 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 		metricsPath:  options.MetricsPath,
 		gcInterval:   options.GCInterval,
 		store:        store,
-		stats:        proxy.NewStats(),
+		stats:        proxy.NewStats(metricsReg),
 		metricsReg:   metricsReg,
 		config:       cfg,
 		generation:   generation,

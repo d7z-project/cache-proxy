@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -33,7 +34,7 @@ func TestOCIBearerTokenSingleflightAndExpiredCleanup(t *testing.T) {
 	handler := NewHandler("oci", config.InstanceConfig{
 		Mode: config.ModeOCI,
 		OCI:  &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
-	}, nil, nil, NewStats())
+	}, nil, nil, NewStats(prometheus.NewRegistry()))
 	challenge := ociChallenge{
 		scheme: "Bearer",
 		realm:  tokenServer.URL + "/token",

@@ -5,32 +5,43 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var (
-	requestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cache_proxy_requests_total",
-		Help: "Total proxy requests by instance, mode, method, cache result and status.",
-	}, []string{"instance", "mode", "method", "cache", "status"})
-	responseBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cache_proxy_response_bytes_total",
-		Help: "Total proxy response bytes estimated from Content-Length.",
-	}, []string{"instance", "mode", "cache"})
-	upstreamRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cache_proxy_upstream_requests_total",
-		Help: "Total upstream requests by instance, mode, method and status.",
-	}, []string{"instance", "mode", "method", "status"})
-	activeDownloads = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cache_proxy_active_downloads",
-		Help: "Active cache downloads by instance and mode.",
-	}, []string{"instance", "mode"})
-)
+type metricsCollector struct {
+	requestsTotal        *prometheus.CounterVec
+	responseBytesTotal   *prometheus.CounterVec
+	upstreamRequestsTotal *prometheus.CounterVec
+	activeDownloads      *prometheus.GaugeVec
+}
+
+func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
+	mc := &metricsCollector{
+		requestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_requests_total",
+			Help: "Total proxy requests by instance, mode, method, cache result and status.",
+		}, []string{"instance", "mode", "method", "cache", "status"}),
+		responseBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_response_bytes_total",
+			Help: "Total proxy response bytes estimated from Content-Length.",
+		}, []string{"instance", "mode", "cache"}),
+		upstreamRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_upstream_requests_total",
+			Help: "Total upstream requests by instance, mode, method and status.",
+		}, []string{"instance", "mode", "method", "status"}),
+		activeDownloads: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "cache_proxy_active_downloads",
+			Help: "Active cache downloads by instance and mode.",
+		}, []string{"instance", "mode"}),
+	}
+	reg.MustRegister(mc.requestsTotal, mc.responseBytesTotal, mc.upstreamRequestsTotal, mc.activeDownloads)
+	return mc
+}
 
 type Stats struct {
 	mu        sync.RWMutex
 	total     InstanceStats
 	instances map[string]InstanceStats
+	mc        *metricsCollector
 }
 
 type StatsSnapshot struct {
@@ -50,8 +61,12 @@ type InstanceStats struct {
 	ActiveDownloads  int64             `json:"activeDownloads"`
 }
 
-func NewStats() *Stats {
-	return &Stats{total: emptyInstanceStats(""), instances: map[string]InstanceStats{}}
+func NewStats(reg prometheus.Registerer) *Stats {
+	return &Stats{
+		total:     emptyInstanceStats(""),
+		instances: map[string]InstanceStats{},
+		mc:        newMetricsCollector(reg),
+	}
 }
 
 func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, bytes uint64) {
@@ -62,9 +77,9 @@ func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, 
 		cache = "UNKNOWN"
 	}
 	statusText := strconv.Itoa(status)
-	requestsTotal.WithLabelValues(instance, mode, method, cache, statusText).Inc()
+	s.mc.requestsTotal.WithLabelValues(instance, mode, method, cache, statusText).Inc()
 	if bytes > 0 {
-		responseBytesTotal.WithLabelValues(instance, mode, cache).Add(float64(bytes))
+		s.mc.responseBytesTotal.WithLabelValues(instance, mode, cache).Add(float64(bytes))
 	}
 
 	s.mu.Lock()
@@ -93,7 +108,7 @@ func (s *Stats) RecordUpstream(instance, mode, method string, status int) {
 	if status == 0 {
 		statusText = "error"
 	}
-	upstreamRequestsTotal.WithLabelValues(instance, mode, method, statusText).Inc()
+	s.mc.upstreamRequestsTotal.WithLabelValues(instance, mode, method, statusText).Inc()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,7 +130,7 @@ func (s *Stats) AddActiveDownload(instance, mode string, delta int64) {
 	if s == nil {
 		return
 	}
-	activeDownloads.WithLabelValues(instance, mode).Add(float64(delta))
+	s.mc.activeDownloads.WithLabelValues(instance, mode).Add(float64(delta))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item := s.instance(instance, mode)
