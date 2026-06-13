@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,6 +84,23 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	require.Equal(t, http.StatusOK, allowed.Code)
 	require.Equal(t, "v1.0.0", allowed.Body.String())
 	require.Equal(t, int64(1), upstreamRequests.Load())
+}
+
+func TestGoFetcherEnvNeverEnablesLocalGoExecution(t *testing.T) {
+	env := goFetcherEnv([]string{"https://proxy.golang.org"}, &config.GoConfig{
+		SumDB:   "sum.golang.org",
+		NoSumDB: "*.corp.example.com",
+		Direct:  true,
+		Private: "*.private.example.com",
+		NoProxy: "*.noproxy.example.com",
+	})
+	require.Contains(t, env, "GOPROXY=https://proxy.golang.org")
+	require.Contains(t, env, "GOPRIVATE=")
+	require.Contains(t, env, "GONOPROXY=")
+	require.Contains(t, env, "GONOSUMDB=*.corp.example.com")
+	require.NotContains(t, strings.Join(env, "\n"), "direct")
+	require.NotContains(t, strings.Join(env, "\n"), "*.private.example.com")
+	require.NotContains(t, strings.Join(env, "\n"), "*.noproxy.example.com")
 }
 
 func newTestHandler(t *testing.T, store *blobfs.Store, cfg config.InstanceConfig) *Handler {

@@ -264,9 +264,8 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       this.draft.npm.rules = this.draft.npm.rules ?? [];
     }
     if (this.draft.mode === ProxyMode.Go) {
-      this.draft.go = this.draft.go ?? { sumdb: 'sum.golang.org', direct: true, maxDirectFetches: 8, proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true };
+      this.draft.go = this.draft.go ?? { sumdb: 'sum.golang.org', proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true };
       this.draft.go.sumdb = this.draft.go.sumdb ?? 'sum.golang.org';
-      this.draft.go.direct = this.draft.go.direct ?? true;
       this.draft.go.proxiedSumDBs = this.draft.go.proxiedSumDBs ?? [];
     }
   }
@@ -291,7 +290,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       return {
         mode, listen: { path: '/go' }, upstreams: ['https://proxy.golang.org'], expireAfter: '8760h',
         cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-        go: { sumdb: 'sum.golang.org', direct: true, maxDirectFetches: 8, proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true },
+        go: { sumdb: 'sum.golang.org', proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true },
         transport: {}
       };
     }
@@ -385,16 +384,12 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   }
 
   private normalizeGo(go: InstanceConfig['go']): NonNullable<InstanceConfig['go']> {
-    const next = go ?? { direct: true };
+    const next = go ?? {};
     next.sumdb = next.sumdb?.trim() || 'sum.golang.org';
-    next.private = next.private?.trim() || undefined;
-    next.noProxy = next.noProxy?.trim() || undefined;
     next.noSumDB = next.noSumDB?.trim() || undefined;
-    next.maxDirectFetches = Number(next.maxDirectFetches || 0) > 0 ? Number(next.maxDirectFetches) : undefined;
     next.proxiedSumDBs = this.proxiedSumDBs.map(s => s.trim()).filter(Boolean);
     if (next.proxiedSumDBs.length === 0) delete next.proxiedSumDBs;
     next.disableModuleFetchHeader = Boolean(next.disableModuleFetchHeader);
-    next.direct = Boolean(next.direct);
     return next;
   }
 
@@ -474,7 +469,6 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       }
     }
     if (this.draft.mode === ProxyMode.Go && this.draft.go) {
-      if ((this.draft.go.maxDirectFetches ?? 0) < 0) e.push('Go 直连并发数不能为负数。');
       if (this.draft.go.sumdb?.includes('\n') || this.draft.go.sumdb?.includes('\r')) e.push('Go SumDB 不能包含换行。');
       for (const item of this.proxiedSumDBs.map(s => s.trim()).filter(Boolean)) {
         if (item.includes('\n') || item.includes('\r')) e.push(`Go SumDB 代理项 ${item} 不能包含换行。`);

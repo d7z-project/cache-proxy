@@ -118,13 +118,16 @@ type NPMCacheRule struct {
 
 type GoConfig struct {
 	SumDB                    string   `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
-	Private                  string   `json:"private,omitempty" yaml:"private,omitempty"`
-	NoProxy                  string   `json:"noProxy,omitempty" yaml:"no_proxy,omitempty"`
 	NoSumDB                  string   `json:"noSumDB,omitempty" yaml:"no_sumdb,omitempty"`
-	Direct                   bool     `json:"direct" yaml:"direct"`
-	MaxDirectFetches         int      `json:"maxDirectFetches,omitempty" yaml:"max_direct_fetches,omitempty"`
 	ProxiedSumDBs            []string `json:"proxiedSumDBs,omitempty" yaml:"proxied_sumdbs,omitempty"`
 	DisableModuleFetchHeader bool     `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
+
+	// Deprecated direct-fetch fields are kept only so validation can reject
+	// old configs instead of silently enabling local go execution paths.
+	Private          string `json:"private,omitempty" yaml:"private,omitempty"`
+	NoProxy          string `json:"noProxy,omitempty" yaml:"no_proxy,omitempty"`
+	Direct           bool   `json:"direct,omitempty" yaml:"direct,omitempty"`
+	MaxDirectFetches int    `json:"maxDirectFetches,omitempty" yaml:"max_direct_fetches,omitempty"`
 }
 
 type Duration time.Duration

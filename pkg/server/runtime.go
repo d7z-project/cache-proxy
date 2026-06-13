@@ -1077,8 +1077,17 @@ func validateGo(inst config.InstanceConfig) error {
 	if inst.Cache.DefaultPolicy != "" || len(inst.Cache.Rules) > 0 {
 		return errors.New("go mode does not support generic cache rules")
 	}
-	if inst.Go.MaxDirectFetches < 0 {
-		return errors.New("go max_direct_fetches must not be negative")
+	if strings.TrimSpace(inst.Go.Private) != "" {
+		return errors.New("go private modules are not supported because they require local go execution")
+	}
+	if strings.TrimSpace(inst.Go.NoProxy) != "" {
+		return errors.New("go no_proxy is not supported because it requires local go execution")
+	}
+	if inst.Go.Direct {
+		return errors.New("go direct fallback is not supported because it requires local go execution")
+	}
+	if inst.Go.MaxDirectFetches != 0 {
+		return errors.New("go max_direct_fetches is not supported because direct fetch is disabled")
 	}
 	sumdb := strings.TrimSpace(inst.Go.SumDB)
 	if strings.ContainsAny(sumdb, "\r\n") {
@@ -1092,8 +1101,8 @@ func validateGo(inst config.InstanceConfig) error {
 			return fmt.Errorf("go proxied_sumdbs %d must not contain line breaks", i)
 		}
 	}
-	if !inst.Go.Direct && len(inst.Upstreams) == 0 {
-		return errors.New("go mode requires at least one upstream or direct fetch enabled")
+	if len(inst.Upstreams) == 0 {
+		return errors.New("go mode requires at least one HTTP GOPROXY upstream")
 	}
 	return nil
 }

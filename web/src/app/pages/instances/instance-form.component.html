@@ -250,38 +250,15 @@
 
         @if (draft.mode === ProxyMode.Go && draft.go) {
           <div class="form-section">
-            <div class="section-heading"><span class="step-badge">5</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">GOPROXY、SumDB 和私有模块行为。</p></div></div>
+            <div class="section-heading"><span class="step-badge">5</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">HTTP GOPROXY 和 SumDB 行为。</p></div></div>
             <div class="row g-3">
               <div class="col-md-6">
                 <label class="form-label">GOSUMDB</label>
                 <input class="form-control" name="goSumDB" [(ngModel)]="draft.go.sumdb" placeholder="sum.golang.org">
               </div>
               <div class="col-md-6">
-                <label class="form-label">GOPRIVATE</label>
-                <input class="form-control" name="goPrivate" [(ngModel)]="draft.go.private" placeholder="*.corp.example.com">
-              </div>
-            </div>
-            <div class="row g-3">
-              <div class="col-md-6">
-                <label class="form-label">GONOPROXY</label>
-                <input class="form-control" name="goNoProxy" [(ngModel)]="draft.go.noProxy" placeholder="留空跟随 GOPRIVATE">
-              </div>
-              <div class="col-md-6">
                 <label class="form-label">GONOSUMDB</label>
-                <input class="form-control" name="goNoSumDB" [(ngModel)]="draft.go.noSumDB" placeholder="留空跟随 GOPRIVATE">
-              </div>
-            </div>
-            <div class="row g-3">
-              <div class="col-md-6">
-                <label class="form-label">直连回退</label>
-                <select class="form-select" name="goDirect" [(ngModel)]="draft.go.direct">
-                  <option [ngValue]="true">允许 direct</option>
-                  <option [ngValue]="false">仅使用上游代理</option>
-                </select>
-              </div>
-              <div class="col-md-6">
-                <label class="form-label">直连并发上限</label>
-                <input class="form-control" name="goMaxDirectFetches" type="number" min="0" [(ngModel)]="draft.go.maxDirectFetches" placeholder="8">
+                <input class="form-control" name="goNoSumDB" [(ngModel)]="draft.go.noSumDB" placeholder="*.corp.example.com">
               </div>
             </div>
             <div class="form-check mt-3">

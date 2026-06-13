@@ -145,11 +145,7 @@ export interface NpmCacheRule {
 
 export interface GoConfig {
   sumdb?: string;
-  private?: string;
-  noProxy?: string;
   noSumDB?: string;
-  direct: boolean;
-  maxDirectFetches?: number;
   proxiedSumDBs?: string[];
   disableModuleFetchHeader?: boolean;
 }

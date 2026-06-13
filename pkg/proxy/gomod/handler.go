@@ -36,10 +36,9 @@ func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, sta
 	transport := &statsTransport{base: transportForConfig(name, cfg.Transport), stats: stats, instance: name}
 	env := goFetcherEnv(cfg.Upstreams, goCfg)
 	fetcher := &goproxy.GoFetcher{
-		Env:              env,
-		MaxDirectFetches: goCfg.MaxDirectFetches,
-		TempDir:          tempDir,
-		Transport:        transport,
+		Env:       env,
+		TempDir:   tempDir,
+		Transport: transport,
 	}
 	inner := &goproxy.Goproxy{
 		Fetcher:       fetcher,
@@ -118,9 +117,6 @@ func (r *statusRecorder) Flush() {
 
 func goFetcherEnv(upstreams []string, cfg *config.GoConfig) []string {
 	proxies := append([]string(nil), upstreams...)
-	if cfg.Direct {
-		proxies = append(proxies, "direct")
-	}
 	sumdb := strings.TrimSpace(cfg.SumDB)
 	if sumdb == "" {
 		sumdb = "sum.golang.org"
@@ -128,8 +124,8 @@ func goFetcherEnv(upstreams []string, cfg *config.GoConfig) []string {
 	env := []string{
 		"GOPROXY=" + strings.Join(proxies, ","),
 		"GOSUMDB=" + sumdb,
-		"GOPRIVATE=" + strings.TrimSpace(cfg.Private),
-		"GONOPROXY=" + strings.TrimSpace(cfg.NoProxy),
+		"GOPRIVATE=",
+		"GONOPROXY=",
 		"GONOSUMDB=" + strings.TrimSpace(cfg.NoSumDB),
 	}
 	return env

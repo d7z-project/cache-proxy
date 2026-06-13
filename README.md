@@ -54,7 +54,7 @@ http://127.0.0.1:18080/files/
 Go modules can use a path-mounted instance directly:
 
 ```bash
-GOPROXY=http://127.0.0.1:18080/go,direct go mod download
+GOPROXY=http://127.0.0.1:18080/go go mod download
 ```
 
 ## Options
@@ -86,7 +86,7 @@ npm mode proxies one npm registry upstream. Package metadata is rewritten so `di
 
 ### Go
 
-Go mode implements the GOPROXY protocol through `github.com/goproxy/goproxy`. It uses configured HTTP upstream proxies such as `https://proxy.golang.org`, optional `direct` fallback, SumDB proxying, and BlobFS-backed persistent module cache.
+Go mode implements the GOPROXY protocol through `github.com/goproxy/goproxy`. It only uses configured HTTP upstream proxies such as `https://proxy.golang.org`, SumDB proxying, and BlobFS-backed persistent module cache. It never performs direct module fetches, so the server runtime does not require a local `go` executable or VCS tools.
 
 ## Cache Policies
 

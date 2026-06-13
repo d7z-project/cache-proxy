@@ -59,7 +59,7 @@ func TestValidateGoModeConfig(t *testing.T) {
 		Mode:      config.ModeGo,
 		Listen:    config.ListenConfig{Path: "/go"},
 		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{SumDB: "off", MaxDirectFetches: 4},
+		Go:        &config.GoConfig{SumDB: "off", NoSumDB: "*.corp.example.com"},
 	}}
 	require.NoError(t, ValidateConfig(cfg, "127.0.0.1:0"))
 
@@ -76,7 +76,31 @@ func TestValidateGoModeConfig(t *testing.T) {
 		Mode:      config.ModeGo,
 		Listen:    config.ListenConfig{Path: "/go"},
 		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{MaxDirectFetches: -1},
+		Go:        &config.GoConfig{Direct: true},
 	}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must not be negative")
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "direct fallback is not supported")
+
+	cfg.Instances["gomod"] = config.InstanceConfig{
+		Mode:      config.ModeGo,
+		Listen:    config.ListenConfig{Path: "/go"},
+		Upstreams: []string{"https://proxy.golang.org"},
+		Go:        &config.GoConfig{Private: "*.corp.example.com"},
+	}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "private modules are not supported")
+
+	cfg.Instances["gomod"] = config.InstanceConfig{
+		Mode:      config.ModeGo,
+		Listen:    config.ListenConfig{Path: "/go"},
+		Upstreams: []string{"https://proxy.golang.org"},
+		Go:        &config.GoConfig{NoProxy: "*.corp.example.com"},
+	}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "no_proxy is not supported")
+
+	cfg.Instances["gomod"] = config.InstanceConfig{
+		Mode:      config.ModeGo,
+		Listen:    config.ListenConfig{Path: "/go"},
+		Upstreams: []string{"https://proxy.golang.org"},
+		Go:        &config.GoConfig{MaxDirectFetches: 4},
+	}
+	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "max_direct_fetches is not supported")
 }
