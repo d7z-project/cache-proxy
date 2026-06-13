@@ -13,7 +13,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/server"
 )
 
-var DefaultShutdownTimeout = "10s"
+var defaultShutdownTimeoutValue, _ = time.ParseDuration("10s")
 
 func main() {
 	opts := server.DefaultOptions()
@@ -81,9 +81,5 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 }
 
 func defaultShutdownTimeout() time.Duration {
-	duration, err := time.ParseDuration(DefaultShutdownTimeout)
-	if err != nil {
-		panic(fmt.Sprintf("invalid DefaultShutdownTimeout %q: %v", DefaultShutdownTimeout, err))
-	}
-	return duration
+	return defaultShutdownTimeoutValue
 }

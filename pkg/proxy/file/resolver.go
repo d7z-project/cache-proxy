@@ -12,11 +12,11 @@ import (
 )
 
 type Resolver struct {
-	cache config.CacheConfig
+	policy *Policy
 }
 
-func New(cache config.CacheConfig) *Resolver {
-	return &Resolver{cache: cache}
+func New(policy *Policy) *Resolver {
+	return &Resolver{policy: policy}
 }
 
 func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
@@ -44,7 +44,10 @@ type fileMatch struct {
 }
 
 func (r *Resolver) match(cleanPath string) fileMatch {
-	for _, rule := range r.cache.Rules {
+	if r.policy == nil {
+		return fileMatch{policy: config.PolicyBypass}
+	}
+	for _, rule := range r.policy.Rules {
 		if doublestar.MatchUnvalidated(rule.Match, cleanPath) {
 			return fileMatch{
 				policy:      rule.Policy,
@@ -53,7 +56,7 @@ func (r *Resolver) match(cleanPath string) fileMatch {
 			}
 		}
 	}
-	policy := r.cache.DefaultPolicy
+	policy := r.policy.DefaultPolicy
 	if policy == "" {
 		policy = config.PolicyBypass
 	}

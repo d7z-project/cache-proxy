@@ -41,9 +41,27 @@ type Resolver interface {
 	Resolve(req *http.Request) (Route, error)
 }
 
+type OCIAuthConfig struct {
+	Type     string
+	Username string
+	Password string
+	Token    string
+}
+
+type RuntimeConfig struct {
+	Mode            string
+	ExpireAfter     config.Duration
+	Upstreams       []string
+	Transport       *config.TransportConfig
+	BusyPolicy      string
+	DefaultFreshFor config.Duration
+	PassHeaders     []string
+	OCIAuth         *OCIAuthConfig
+}
+
 type Handler struct {
 	name     string
-	cfg      config.InstanceConfig
+	config   RuntimeConfig
 	store    *blobfs.Store
 	client   *utils.HttpClientWrapper
 	locks    *utils.RWLockGroup
@@ -74,44 +92,44 @@ type ociChallenge struct {
 
 const ociManifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v1+json, application/json"
 
-func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, resolver Resolver, stats *Stats) *Handler {
+func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats) *Handler {
 	client := utils.DefaultHttpClientWrapper()
-	if cfg.Transport != nil {
-		if cfg.Transport.UserAgent != "" {
-			client.UserAgent = cfg.Transport.UserAgent
+	if runtime.Transport != nil {
+		if runtime.Transport.UserAgent != "" {
+			client.UserAgent = runtime.Transport.UserAgent
 		}
 		transport, ok := client.Transport.(*http.Transport)
 		if !ok {
 			slog.Warn("cannot configure transport options, unexpected transport type", "instance", name)
 		} else {
-			if cfg.Transport.Proxy != "" {
-				proxyURL, err := url.Parse(cfg.Transport.Proxy)
+			if runtime.Transport.Proxy != "" {
+				proxyURL, err := url.Parse(runtime.Transport.Proxy)
 				if err == nil {
 					transport.Proxy = http.ProxyURL(proxyURL)
 				} else {
-					slog.Warn("invalid transport proxy URL", "instance", name, "proxy", cfg.Transport.Proxy, "err", err)
+					slog.Warn("invalid transport proxy URL", "instance", name, "proxy", runtime.Transport.Proxy, "err", err)
 				}
 			}
-			if cfg.Transport.Timeout > 0 {
-				transport.DialContext = utils.DefaultDialContext(cfg.Transport.Timeout.Duration())
+			if runtime.Transport.Timeout > 0 {
+				transport.DialContext = utils.DefaultDialContext(runtime.Transport.Timeout.Duration())
 			}
 		}
 	}
-	return &Handler{name: name, cfg: cfg, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, ociTokens: map[string]ociToken{}}
+	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, ociTokens: map[string]ociToken{}}
 }
 
 func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		resp.Header().Set("Allow", "GET, HEAD")
 		http.Error(resp, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		h.stats.RecordRequest(h.name, h.cfg.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
+		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
 		return
 	}
 	result, err := h.handle(req.Context(), req)
 	if err != nil {
-		slog.Warn("proxy request failed", "instance", h.name, "mode", h.cfg.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
+		slog.Warn("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
 		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		h.stats.RecordRequest(h.name, h.cfg.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
+		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
 	}
 	status := result.StatusCode
@@ -123,7 +141,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 			status = http.StatusBadGateway
 		}
 	}
-	h.stats.RecordRequest(h.name, h.cfg.Mode, req.Method, cache, status, bytes)
+	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, bytes)
 }
 
 func (h *Handler) Close() {
@@ -137,7 +155,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("proxy route resolved", "instance", h.name, "mode", h.cfg.Mode, "method", req.Method, "path", req.URL.Path, "object", route.ObjectPath, "upstream_path", route.UpstreamPath, "policy", route.Policy)
+	slog.Debug("proxy route resolved", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "object", route.ObjectPath, "upstream_path", route.UpstreamPath, "policy", route.Policy)
 	if route.Policy == config.PolicyBypass {
 		return h.bypass(ctx, req, route)
 	}
@@ -184,7 +202,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 }
 
 func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	if h.cfg.Cache.BusyPolicy == config.BusyPolicyStale && req.Header.Get("Range") == "" {
+	if h.config.BusyPolicy == config.BusyPolicyStale && req.Header.Get("Range") == "" {
 		cached, err := h.openCached(ctx, route)
 		if err == nil {
 			cached.Headers["X-Cache"] = "STALE"
@@ -225,12 +243,7 @@ func (h *Handler) openCached(ctx context.Context, route Route) (*utils.ResponseW
 		_ = h.store.DeleteObject(ctx, h.name, route.ObjectPath)
 		return nil, errors.New("cached object expired")
 	}
-	if headers["Content-Type"] == "" {
-		headers["Content-Type"] = mime.TypeByExtension(path.Ext(route.ObjectPath))
-	}
-	if headers["Content-Type"] == "" {
-		headers["Content-Type"] = "application/octet-stream"
-	}
+	setContentType(headers, route.ObjectPath)
 	return &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}, nil
 }
 
@@ -289,8 +302,8 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 }
 
 func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
-	h.stats.AddActiveDownload(h.name, h.cfg.Mode, 1)
-	defer h.stats.AddActiveDownload(h.name, h.cfg.Mode, -1)
+	h.stats.AddActiveDownload(h.name, h.config.Mode, 1)
+	defer h.stats.AddActiveDownload(h.name, h.config.Mode, -1)
 	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.requestHeaders(req))
 	if err != nil {
 		return nil, err
@@ -319,7 +332,7 @@ func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route 
 			return nil, err
 		}
 	}
-	meta := metadata(resp.Headers, h.cfg.Mode, status)
+	meta := metadata(resp.Headers, h.config.Mode, status)
 	if _, err = h.store.Put(ctx, h.name, route.ObjectPath, tempFile, meta); err != nil {
 		_ = tempFile.Close()
 		return nil, err
@@ -337,12 +350,7 @@ func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route 
 	for key, value := range meta {
 		headers[headerName(key)] = value
 	}
-	if headers["Content-Type"] == "" {
-		headers["Content-Type"] = mime.TypeByExtension(path.Ext(route.ObjectPath))
-	}
-	if headers["Content-Type"] == "" {
-		headers["Content-Type"] = "application/octet-stream"
-	}
+	setContentType(headers, route.ObjectPath)
 	return h.rewriteResponse(req, route, &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: tempFile}), nil
 }
 
@@ -364,7 +372,7 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 		response.Body = io.NopCloser(bytes.NewReader(body))
 		return response
 	}
-	if rewriteNPMTarballs(document, h.cfg.Upstreams, publicBaseURL(req)) {
+	if rewriteNPMTarballs(document, h.config.Upstreams, publicBaseURL(req)) {
 		body, err = json.Marshal(document)
 		if err != nil {
 			return errorResponse(http.StatusBadGateway, err)
@@ -453,7 +461,7 @@ func publicBaseURL(req *http.Request) string {
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	var lastErr error
-	for _, baseURL := range h.cfg.Upstreams {
+	for _, baseURL := range h.config.Upstreams {
 		pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
 		targetURL := strings.TrimRight(baseURL, "/") + "/" + EscapePath(pathPart)
 		if rawQuery != "" {
@@ -475,14 +483,14 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		response, err := h.client.Do(request)
 		if err != nil {
 			if options.Record {
-				h.stats.RecordUpstream(h.name, h.cfg.Mode, method, 0)
+				h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
 			}
 			lastErr = err
 			slog.Debug("upstream request failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
 			continue
 		}
 		slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
-		if h.cfg.Mode == config.ModeOCI && response.StatusCode == http.StatusUnauthorized {
+		if h.config.Mode == config.ModeOCI && response.StatusCode == http.StatusUnauthorized {
 			retry, retryErr := h.retryOCIChallenge(ctx, method, targetURL, headers, response)
 			if retryErr != nil {
 				lastErr = retryErr
@@ -494,7 +502,7 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 			}
 		}
 		if options.Record {
-			h.stats.RecordUpstream(h.name, h.cfg.Mode, method, response.StatusCode)
+			h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
 		}
 		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
@@ -721,13 +729,13 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 	if value := req.Header.Get("Range"); value != "" {
 		headers["Range"] = value
 	}
-	if h.cfg.Mode == config.ModeOCI {
+	if h.config.Mode == config.ModeOCI {
 		headers["Accept"] = ociManifestAccept
 	}
-	if h.cfg.Mode != config.ModeFile {
+	if h.config.Mode != config.ModeFile {
 		return headers
 	}
-	for _, name := range h.cfg.PassHeaders {
+	for _, name := range h.passHeaders() {
 		if !passableHeader(name) {
 			continue
 		}
@@ -736,6 +744,10 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 		}
 	}
 	return headers
+}
+
+func (h *Handler) passHeaders() []string {
+	return h.config.PassHeaders
 }
 
 func passableHeader(name string) bool {
@@ -751,7 +763,7 @@ func passableHeader(name string) bool {
 func (h *Handler) expired(route Route, options map[string]string) bool {
 	expireAfter := route.ExpireAfter
 	if expireAfter <= 0 {
-		expireAfter = h.cfg.ExpireAfter
+		expireAfter = h.config.ExpireAfter
 	}
 	if expireAfter <= 0 {
 		return false
@@ -763,7 +775,7 @@ func (h *Handler) expired(route Route, options map[string]string) bool {
 func (h *Handler) fresh(route Route, headers map[string]string) bool {
 	freshFor := route.FreshFor
 	if freshFor <= 0 {
-		freshFor = h.cfg.Cache.FreshFor
+		freshFor = h.config.DefaultFreshFor
 	}
 	if freshFor <= 0 {
 		return false
@@ -773,7 +785,7 @@ func (h *Handler) fresh(route Route, headers map[string]string) bool {
 }
 
 func (h *Handler) staticAuthorization() string {
-	if h.cfg.Mode == config.ModeOCI {
+	if h.config.Mode == config.ModeOCI {
 		if bearer := h.ociBearerAuthorization(); bearer != "" {
 			return bearer
 		}
@@ -783,10 +795,10 @@ func (h *Handler) staticAuthorization() string {
 }
 
 func (h *Handler) ociBearerAuthorization() string {
-	if h.cfg.Mode != config.ModeOCI || h.cfg.OCI == nil || h.cfg.OCI.Auth == nil {
+	if h.config.Mode != config.ModeOCI || h.config.OCIAuth == nil {
 		return ""
 	}
-	auth := h.cfg.OCI.Auth
+	auth := h.config.OCIAuth
 	switch strings.ToLower(auth.Type) {
 	case "bearer":
 		if auth.Token == "" {
@@ -799,14 +811,23 @@ func (h *Handler) ociBearerAuthorization() string {
 }
 
 func (h *Handler) ociBasicAuthorization() string {
-	if h.cfg.Mode != config.ModeOCI || h.cfg.OCI == nil || h.cfg.OCI.Auth == nil || strings.ToLower(h.cfg.OCI.Auth.Type) != "basic" {
+	if h.config.Mode != config.ModeOCI || h.config.OCIAuth == nil || strings.ToLower(h.config.OCIAuth.Type) != "basic" {
 		return ""
 	}
-	auth := h.cfg.OCI.Auth
+	auth := h.config.OCIAuth
 	if auth.Username == "" && auth.Password == "" {
 		return ""
 	}
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth.Username+":"+auth.Password))
+}
+
+func setContentType(headers map[string]string, objectPath string) {
+	if headers["Content-Type"] == "" {
+		headers["Content-Type"] = mime.TypeByExtension(path.Ext(objectPath))
+	}
+	if headers["Content-Type"] == "" {
+		headers["Content-Type"] = "application/octet-stream"
+	}
 }
 
 func errorResponse(status int, err error) *utils.ResponseWrapper {

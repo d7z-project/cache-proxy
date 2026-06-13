@@ -3,7 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem } from '@ng-bootstrap/ng-bootstrap';
 import { ApiService } from '../../core/api.service';
-import { CacheLookupResult, ConfigSnapshot, InstanceConfig, ProxyMode } from '../../core/api.models';
+import { CacheLookupResult, InstanceCollectionResponse, InstanceSummary, ProxyMode } from '../../core/api.models';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
@@ -20,7 +20,7 @@ export class InstanceListComponent implements OnInit {
   private readonly toast = inject(ToastService);
   private readonly modal = inject(ModalService);
 
-  snapshot?: ConfigSnapshot;
+  collection?: InstanceCollectionResponse;
   loading = true;
   showImportExport = false;
 
@@ -33,6 +33,16 @@ export class InstanceListComponent implements OnInit {
 
   readonly ProxyMode = ProxyMode;
 
+  ngOnInit(): void { this.load(); }
+
+  get instances(): InstanceSummary[] {
+    return this.collection?.items ?? [];
+  }
+
+  get generation(): number {
+    return this.collection?.generation ?? 0;
+  }
+
   get lookupPlaceholder(): string {
     switch (this.lookupMode) {
       case ProxyMode.Npm: return '@angular/core';
@@ -42,23 +52,18 @@ export class InstanceListComponent implements OnInit {
     }
   }
 
-  ngOnInit(): void { this.load(); }
-
-  get instances(): { name: string; config: InstanceConfig }[] {
-    const map = this.snapshot?.config.instances ?? {};
-    return Object.keys(map).sort().map((name) => ({ name, config: map[name] }));
-  }
-
-  startCreate(mode: string): void {
+  startCreate(mode: ProxyMode): void {
     this.router.navigate(['/instances/new'], { queryParams: { mode } });
   }
 
-  startEdit(name: string): void { this.router.navigate(['/instances', name]); }
+  startEdit(name: string): void {
+    this.router.navigate(['/instances', name]);
+  }
 
   copyInstance(name: string): void {
-    const inst = this.snapshot?.config.instances[name];
-    if (!inst) return;
-    this.router.navigate(['/instances/new'], { queryParams: { mode: inst.mode, copy: name } });
+    const item = this.instances.find((instance) => instance.name === name);
+    if (!item) return;
+    this.router.navigate(['/instances/new'], { queryParams: { mode: item.mode, copy: name } });
   }
 
   promptDelete(name: string): void {
@@ -67,21 +72,21 @@ export class InstanceListComponent implements OnInit {
       message: `确定删除实例 "${name}"？此操作不可撤销。`,
       confirmLabel: '删除',
       danger: true
-    }).subscribe(confirmed => {
-      if (confirmed && this.snapshot) {
-        const next = structuredClone(this.snapshot.config);
-        delete next.instances[name];
-        this.api.saveConfig(this.snapshot.generation, next).subscribe({
-          next: (snapshot) => { this.snapshot = snapshot; this.toast.success('实例已删除。'); },
-          error: (err) => this.toast.error(err.error?.error || '删除操作异常')
-        });
-      }
+    }).subscribe((confirmed) => {
+      if (!confirmed) return;
+      this.api.deleteInstance(this.generation, name).subscribe({
+        next: () => {
+          this.toast.success('实例已删除。');
+          this.load();
+        },
+        error: (err) => this.toast.error(err.error?.error || '删除操作异常')
+      });
     });
   }
 
   openLookupModal(instanceName: string): void {
-    const inst = this.snapshot?.config.instances[instanceName];
-    this.lookupMode = inst?.mode ?? ProxyMode.File;
+    const item = this.instances.find((instance) => instance.name === instanceName);
+    this.lookupMode = item?.mode ?? ProxyMode.File;
     this.lookupInstanceName = instanceName;
     this.lookupPath = '';
     this.lookupResult = undefined;
@@ -113,9 +118,15 @@ export class InstanceListComponent implements OnInit {
 
   load(): void {
     this.loading = true;
-    this.api.config().subscribe({
-      next: (snapshot) => { this.snapshot = snapshot; this.loading = false; },
-      error: (err) => { this.loading = false; this.toast.error(err.error?.error || '配置加载异常'); }
+    this.api.instancesCollection().subscribe({
+      next: (collection) => {
+        this.collection = collection;
+        this.loading = false;
+      },
+      error: (err) => {
+        this.loading = false;
+        this.toast.error(err.error?.error || '实例列表加载异常');
+      }
     });
   }
 }

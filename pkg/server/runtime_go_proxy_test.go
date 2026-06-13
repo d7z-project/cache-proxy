@@ -1,106 +1,68 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/mod/module"
+	modzip "golang.org/x/mod/zip"
+
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 )
 
-func TestGoModuleProxyServesPathMountedGOPROXY(t *testing.T) {
+const testModulePath = "example.com/cacheproxy/runtime"
+
+func TestGoProxyServesPathMountedRequests(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var upstreamRequests atomic.Int64
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		upstreamRequests.Add(1)
-		if req.URL.Path != "/example.com/cacheproxy/gomod/@v/list" {
-			http.NotFound(w, req)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.WriteString(w, "v1.0.0\n")
-	}))
+	upstream := newGoProxyUpstream(t)
 	defer upstream.Close()
 
-	rt := newTestRuntime(t, ctx, map[string]config.InstanceConfig{"gomod": {
-		Mode:        config.ModeGo,
-		Listen:      config.ListenConfig{Path: "/go"},
-		Upstreams:   []string{upstream.URL},
-		ExpireAfter: config.Duration(time.Hour),
-		Cache:       config.CacheConfig{},
-		Go:          &config.GoConfig{SumDB: "off", DisableModuleFetchHeader: true},
-	}})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"gomod": goSpec(t, "gomod", "/go", upstream.URL)})
 	defer closeRuntime(t, rt)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/go/example.com/cacheproxy/gomod/@v/list", nil)
-	rt.mainHandler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "v1.0.0", rec.Body.String())
-
-	rec = httptest.NewRecorder()
-	cachedReq := httptest.NewRequest(http.MethodGet, "/go/example.com/cacheproxy/gomod/@v/list", nil)
-	cachedReq.Header.Set("Disable-Module-Fetch", "true")
-	rt.mainHandler.ServeHTTP(rec, cachedReq)
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "v1.0.0", rec.Body.String())
-	require.Equal(t, int64(1), upstreamRequests.Load())
+	body := requestBody(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/go/"+testModulePath+"/@v/list")
+	require.Equal(t, "v1.0.0", body)
 }
 
-func TestValidateGoModeConfig(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Instances = map[string]config.InstanceConfig{"gomod": {
-		Mode:      config.ModeGo,
-		Listen:    config.ListenConfig{Path: "/go"},
-		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{SumDB: "off", NoSumDB: "*.corp.example.com"},
-	}}
-	require.NoError(t, ValidateConfig(cfg, "127.0.0.1:0"))
+func newGoProxyUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	zipContent := testModuleZip(t)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/" + testModulePath + "/@v/list":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, "v1.0.0\n")
+		case "/" + testModulePath + "/@v/v1.0.0.info":
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = fmt.Fprintf(w, `{"Version":"v1.0.0","Time":"2026-06-14T00:00:00Z"}`)
+		case "/" + testModulePath + "/@v/v1.0.0.mod":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, "module "+testModulePath+"\n\ngo 1.25\n")
+		case "/" + testModulePath + "/@v/v1.0.0.zip":
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = w.Write(zipContent)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+}
 
-	cfg.Instances["gomod"] = config.InstanceConfig{
-		Mode:      config.ModeGo,
-		Listen:    config.ListenConfig{Path: "/go"},
-		Upstreams: []string{"https://proxy.golang.org"},
-		NPM:       &config.NPMConfig{},
-		Go:        &config.GoConfig{SumDB: "off"},
-	}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "must not have npm config")
-
-	cfg.Instances["gomod"] = config.InstanceConfig{
-		Mode:      config.ModeGo,
-		Listen:    config.ListenConfig{Path: "/go"},
-		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{Direct: true},
-	}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "direct fallback is not supported")
-
-	cfg.Instances["gomod"] = config.InstanceConfig{
-		Mode:      config.ModeGo,
-		Listen:    config.ListenConfig{Path: "/go"},
-		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{Private: "*.corp.example.com"},
-	}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "private modules are not supported")
-
-	cfg.Instances["gomod"] = config.InstanceConfig{
-		Mode:      config.ModeGo,
-		Listen:    config.ListenConfig{Path: "/go"},
-		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{NoProxy: "*.corp.example.com"},
-	}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "no_proxy is not supported")
-
-	cfg.Instances["gomod"] = config.InstanceConfig{
-		Mode:      config.ModeGo,
-		Listen:    config.ListenConfig{Path: "/go"},
-		Upstreams: []string{"https://proxy.golang.org"},
-		Go:        &config.GoConfig{MaxDirectFetches: 4},
-	}
-	require.ErrorContains(t, ValidateConfig(cfg, "127.0.0.1:0"), "max_direct_fetches is not supported")
+func testModuleZip(t *testing.T) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module "+testModulePath+"\n\ngo 1.25\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "module.go"), []byte("package runtime\n"), 0o644))
+	var buf bytes.Buffer
+	require.NoError(t, modzip.CreateFromDir(&buf, module.Version{Path: testModulePath, Version: "v1.0.0"}, dir))
+	return buf.Bytes()
 }

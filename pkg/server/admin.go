@@ -5,278 +5,362 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"path"
 	"strings"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-type configUpdateRequest struct {
-	Generation uint64         `json:"generation"`
-	Config     *config.Config `json:"config"`
+type globalConfigResponse struct {
+	Generation uint64               `json:"generation"`
+	Config     *config.GlobalConfig `json:"config"`
 }
 
-type instancesExportResponse struct {
-	Generation uint64                           `json:"generation"`
-	Instances  map[string]config.InstanceConfig `json:"instances"`
+type instanceDocumentResponse struct {
+	Generation uint64              `json:"generation"`
+	Spec       config.InstanceSpec `json:"spec"`
 }
 
-type instancesImportRequest struct {
-	Generation uint64                           `json:"generation"`
-	Replace    bool                             `json:"replace"`
-	Name       string                           `json:"name,omitempty"`
-	Instance   *config.InstanceConfig           `json:"instance,omitempty"`
-	Instances  map[string]config.InstanceConfig `json:"instances,omitempty"`
+type exportResponse struct {
+	Generation uint64                `json:"generation"`
+	Global     *config.GlobalConfig  `json:"global"`
+	Instances  []config.InstanceSpec `json:"instances"`
 }
 
-func (r *Runtime) configAPI(resp http.ResponseWriter, req *http.Request) {
-	switch req.Method {
-	case http.MethodGet:
-		snapshot, err := r.Snapshot(req.Context())
-		if snapshot != nil {
-			snapshot.Config = snapshot.Config.Redacted()
-		}
-		writeJSON(resp, snapshot, err)
-	case http.MethodPut:
-		var input configUpdateRequest
-		if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, int64(defaultConfigMaxBytes()))).Decode(&input); err != nil {
-			writeError(resp, http.StatusBadRequest, err)
-			return
-		}
-		snapshot, err := r.UpdateConfig(req.Context(), input.Generation, input.Config)
-		if err != nil {
-			var conflict conflictError
-			if errors.As(err, &conflict) {
-				writeError(resp, http.StatusConflict, err)
-				return
-			}
-			writeError(resp, http.StatusBadRequest, err)
-			return
-		}
-		if snapshot != nil {
-			snapshot.Config = snapshot.Config.Redacted()
-		}
-		writeJSON(resp, snapshot, nil)
+type saveGlobalRequest struct {
+	Generation uint64               `json:"generation"`
+	Config     *config.GlobalConfig `json:"config"`
+}
+
+type saveInstanceRequest struct {
+	Generation uint64               `json:"generation"`
+	Spec       *config.InstanceSpec `json:"spec"`
+}
+
+type importInstancesRequest struct {
+	Generation uint64                `json:"generation"`
+	Replace    bool                  `json:"replace"`
+	Instances  []config.InstanceSpec `json:"instances"`
+}
+
+func (r *Runtime) serveAPI(w http.ResponseWriter, req *http.Request) {
+	switch {
+	case req.URL.Path == "/-/api/runtime":
+		r.runtimeAPI(w, req)
+	case req.URL.Path == "/-/api/global-config":
+		r.globalConfigAPI(w, req)
+	case req.URL.Path == "/-/api/instances":
+		r.instancesCollectionAPI(w, req)
+	case req.URL.Path == "/-/api/instances/export":
+		r.instancesExportAPI(w, req)
+	case req.URL.Path == "/-/api/instances/import":
+		r.instancesImportAPI(w, req)
+	case strings.HasPrefix(req.URL.Path, "/-/api/instances/"):
+		r.instanceDocumentAPI(w, req, strings.TrimPrefix(req.URL.Path, "/-/api/instances/"))
+	case req.URL.Path == "/-/api/metrics/stats":
+		r.metricsStatsAPI(w, req)
+	case req.URL.Path == "/-/api/storage/stats":
+		r.storageStatsAPI(w, req)
+	case req.URL.Path == "/-/api/storage/gc":
+		r.storageGCAPI(w, req)
+	case req.URL.Path == "/-/api/cache/lookup":
+		r.cacheLookupAPI(w, req)
+	case req.URL.Path == "/-/api/system/reset":
+		r.resetAPI(w, req)
 	default:
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+		http.NotFound(w, req)
 	}
 }
 
-func (r *Runtime) validateAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	var cfg config.Config
-	if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, int64(defaultConfigMaxBytes()))).Decode(&cfg); err != nil {
-		writeError(resp, http.StatusBadRequest, err)
-		return
-	}
-	r.preserveStartupOnlyConfig(&cfg)
-	if err := r.validateConfig(&cfg); err != nil {
-		writeError(resp, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(resp, map[string]bool{"valid": true}, nil)
-}
-
-func (r *Runtime) resetAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+func (r *Runtime) publicInstancesAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	r.mu.RLock()
-	generation := r.generation
+	instances := config.CloneInstances(r.instances)
 	r.mu.RUnlock()
-	snapshot, err := r.UpdateConfig(req.Context(), generation, DefaultConfig())
-	writeJSON(resp, snapshot, err)
+	writeJSON(w, listInstanceSummaries(instances), nil)
 }
 
-type instanceSummary struct {
-	Name string `json:"name"`
-	Mode string `json:"mode"`
-	Path string `json:"path,omitempty"`
-	Bind string `json:"bind,omitempty"`
-}
-
-func (r *Runtime) listInstanceSummaries() []instanceSummary {
-	r.mu.RLock()
-	instances := r.config.Instances
-	r.mu.RUnlock()
-	result := make([]instanceSummary, 0, len(instances))
-	for _, name := range sortedInstanceNames(instances) {
-		cfg := instances[name]
-		result = append(result, instanceSummary{Name: name, Mode: cfg.Mode, Path: cfg.Listen.Path, Bind: cfg.Listen.Bind})
-	}
-	return result
-}
-
-func (r *Runtime) publicInstancesAPI(resp http.ResponseWriter, req *http.Request) {
+func (r *Runtime) runtimeAPI(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	writeJSON(resp, r.listInstanceSummaries(), nil)
-}
-
-func (r *Runtime) instancesAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	writeJSON(resp, r.listInstanceSummaries(), nil)
-}
-
-func (r *Runtime) instancesExportAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	name := strings.TrimSpace(req.URL.Query().Get("name"))
-	r.mu.RLock()
-	generation := r.generation
-	result := map[string]config.InstanceConfig{}
-	if name != "" {
-		instance, ok := r.config.Instances[name]
-		if !ok {
-			r.mu.RUnlock()
-			writeError(resp, http.StatusNotFound, errors.New("instance not found"))
-			return
-		}
-		result[name] = instance.Redacted()
-	} else {
-		for _, instanceName := range sortedInstanceNames(r.config.Instances) {
-			result[instanceName] = r.config.Instances[instanceName].Redacted()
-		}
-	}
-	r.mu.RUnlock()
-	writeJSON(resp, instancesExportResponse{Generation: generation, Instances: result}, nil)
-}
-
-func (r *Runtime) instancesImportAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	var input instancesImportRequest
-	if err := json.NewDecoder(http.MaxBytesReader(resp, req.Body, int64(defaultConfigMaxBytes()))).Decode(&input); err != nil {
-		writeError(resp, http.StatusBadRequest, err)
-		return
-	}
-	instances := input.Instances
-	if instances == nil && input.Name != "" && input.Instance != nil {
-		instances = map[string]config.InstanceConfig{input.Name: *input.Instance}
-	}
-	if len(instances) == 0 {
-		writeError(resp, http.StatusBadRequest, errors.New("no instances to import"))
-		return
-	}
-
-	r.mu.RLock()
-	currentGeneration := r.generation
-	next := cloneConfig(r.config)
-	r.mu.RUnlock()
-	if input.Generation != currentGeneration {
-		writeError(resp, http.StatusConflict, conflictError("config generation changed"))
-		return
-	}
-	for name, instance := range instances {
-		if _, exists := next.Instances[name]; exists {
-			if !input.Replace {
-				writeError(resp, http.StatusConflict, errors.New("instance already exists: "+name))
-				return
-			}
-		} else if instance.OCI != nil && instance.OCI.Auth != nil &&
-			(instance.OCI.Auth.Password == "***" || instance.OCI.Auth.Token == "***") {
-			writeError(resp, http.StatusBadRequest, errors.New("new instance "+name+" contains masked credentials"))
-			return
-		}
-		next.Instances[name] = instance
-	}
-	snapshot, err := r.UpdateConfig(req.Context(), input.Generation, next)
-	if err != nil {
-		var conflict conflictError
-		if errors.As(err, &conflict) {
-			writeError(resp, http.StatusConflict, err)
-			return
-		}
-		writeError(resp, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(resp, snapshot, nil)
-}
-
-func (r *Runtime) runtimeAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	stats := r.stats.Snapshot()
 	r.mu.RLock()
-	generation := r.generation
-	instanceCount := len(r.config.Instances)
-	handlerCount := len(r.handlers)
-	r.mu.RUnlock()
-	writeJSON(resp, map[string]any{
+	response := map[string]any{
 		"bind":        r.bind,
 		"backend":     r.backend,
 		"authEnabled": r.password != "",
-		"metricsPath": r.metricsPath,
-		"gcInterval":  r.gcInterval.String(),
-		"generation":  generation,
-		"instances":   instanceCount,
-		"handlers":    handlerCount,
+		"metricsPath": r.global.Metrics.Path,
+		"gcInterval":  r.global.Storage.GC.Blob.String(),
+		"generation":  r.generation,
+		"instances":   len(r.instances),
+		"handlers":    len(r.handlers),
 		"requests":    stats.Total.Requests,
 		"errors":      stats.Total.Errors,
 		"upstreams":   stats.Total.UpstreamRequests,
-	}, nil)
+	}
+	r.mu.RUnlock()
+	writeJSON(w, response, nil)
 }
 
-func (r *Runtime) metricsStatsAPI(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+func (r *Runtime) globalConfigAPI(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		r.mu.RLock()
+		response := globalConfigResponse{Generation: r.generation, Config: config.CloneGlobal(r.global)}
+		r.mu.RUnlock()
+		writeJSON(w, response, nil)
+	case http.MethodPut:
+		var input saveGlobalRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, int64(defaultConfigLimit))).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if input.Config == nil {
+			writeError(w, http.StatusBadRequest, errors.New("config is required"))
+			return
+		}
+		r.mu.RLock()
+		instances := config.CloneInstances(r.instances)
+		r.mu.RUnlock()
+		nextGeneration, err := r.replaceState(req.Context(), input.Generation, input.Config, instances, nil, nil)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
+		writeJSON(w, globalConfigResponse{Generation: nextGeneration, Config: config.CloneGlobal(input.Config)}, nil)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (r *Runtime) instancesCollectionAPI(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		r.mu.RLock()
+		instances := config.CloneInstances(r.instances)
+		generation := r.generation
+		r.mu.RUnlock()
+		writeJSON(w, map[string]any{"generation": generation, "items": listInstanceSummaries(instances)}, nil)
+	case http.MethodPost:
+		var input saveInstanceRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, int64(defaultConfigLimit))).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if input.Spec == nil {
+			writeError(w, http.StatusBadRequest, errors.New("spec is required"))
+			return
+		}
+		spec := config.CloneInstance(*input.Spec)
+		r.mu.RLock()
+		global := config.CloneGlobal(r.global)
+		instances := config.CloneInstances(r.instances)
+		r.mu.RUnlock()
+		if _, exists := instances[spec.Name]; exists {
+			writeError(w, http.StatusConflict, errors.New("instance already exists"))
+			return
+		}
+		instances[spec.Name] = spec
+		nextGeneration, err := r.replaceState(req.Context(), input.Generation, global, instances, []config.InstanceSpec{spec}, nil)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
+		writeJSON(w, instanceDocumentResponse{Generation: nextGeneration, Spec: spec}, nil)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (r *Runtime) instanceDocumentAPI(w http.ResponseWriter, req *http.Request, name string) {
+	if name == "" || strings.Contains(name, "/") {
+		http.NotFound(w, req)
 		return
 	}
-	writeJSON(resp, r.stats.Snapshot(), nil)
+	switch req.Method {
+	case http.MethodGet:
+		r.mu.RLock()
+		spec, ok := r.instances[name]
+		generation := r.generation
+		r.mu.RUnlock()
+		if !ok {
+			writeError(w, http.StatusNotFound, errors.New("instance not found"))
+			return
+		}
+		writeJSON(w, instanceDocumentResponse{Generation: generation, Spec: config.CloneInstance(spec)}, nil)
+	case http.MethodPut:
+		var input saveInstanceRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, int64(defaultConfigLimit))).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if input.Spec == nil {
+			writeError(w, http.StatusBadRequest, errors.New("spec is required"))
+			return
+		}
+		spec := config.CloneInstance(*input.Spec)
+		if spec.Name != name {
+			writeError(w, http.StatusBadRequest, errors.New("instance name cannot be changed"))
+			return
+		}
+		r.mu.RLock()
+		global := config.CloneGlobal(r.global)
+		instances := config.CloneInstances(r.instances)
+		r.mu.RUnlock()
+		if _, exists := instances[name]; !exists {
+			writeError(w, http.StatusNotFound, errors.New("instance not found"))
+			return
+		}
+		instances[name] = spec
+		nextGeneration, err := r.replaceState(req.Context(), input.Generation, global, instances, []config.InstanceSpec{spec}, nil)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
+		writeJSON(w, instanceDocumentResponse{Generation: nextGeneration, Spec: spec}, nil)
+	case http.MethodDelete:
+		generation, err := parseGeneration(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		r.mu.RLock()
+		global := config.CloneGlobal(r.global)
+		instances := config.CloneInstances(r.instances)
+		r.mu.RUnlock()
+		if _, exists := instances[name]; !exists {
+			writeError(w, http.StatusNotFound, errors.New("instance not found"))
+			return
+		}
+		delete(instances, name)
+		nextGeneration, replaceErr := r.replaceState(req.Context(), generation, global, instances, nil, []string{name})
+		if replaceErr != nil {
+			writeConfigError(w, replaceErr)
+			return
+		}
+		writeJSON(w, map[string]any{"generation": nextGeneration, "deleted": name}, nil)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
-func (r *Runtime) storageStatsAPI(resp http.ResponseWriter, req *http.Request) {
+func (r *Runtime) instancesExportAPI(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	r.mu.RLock()
+	items := make([]config.InstanceSpec, 0, len(r.instances))
+	for _, name := range sortedInstanceNames(r.instances) {
+		items = append(items, config.CloneInstance(r.instances[name]))
+	}
+	response := exportResponse{
+		Generation: r.generation,
+		Global:     config.CloneGlobal(r.global),
+		Instances:  items,
+	}
+	r.mu.RUnlock()
+	writeJSON(w, response, nil)
+}
+
+func (r *Runtime) instancesImportAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var input importInstancesRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, int64(defaultConfigLimit))).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(input.Instances) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("no instances to import"))
+		return
+	}
+	r.mu.RLock()
+	global := config.CloneGlobal(r.global)
+	instances := config.CloneInstances(r.instances)
+	r.mu.RUnlock()
+	changed := make([]config.InstanceSpec, 0, len(input.Instances))
+	for _, item := range input.Instances {
+		spec := config.CloneInstance(item)
+		if spec.Name == "" {
+			writeError(w, http.StatusBadRequest, errors.New("instance name is required"))
+			return
+		}
+		if _, exists := instances[spec.Name]; exists && !input.Replace {
+			writeError(w, http.StatusConflict, errors.New("instance already exists: "+spec.Name))
+			return
+		}
+		instances[spec.Name] = spec
+		changed = append(changed, spec)
+	}
+	nextGeneration, err := r.replaceState(req.Context(), input.Generation, global, instances, changed, nil)
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"generation": nextGeneration, "imported": len(changed)}, nil)
+}
+
+func (r *Runtime) resetAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	r.mu.RLock()
+	generation := r.generation
+	global := DefaultGlobalConfig(r.global.Metrics.Path, r.global.Storage.GC.Blob.Duration())
+	r.mu.RUnlock()
+	instances := DefaultInstances()
+	removed := []string{}
+	r.mu.RLock()
+	for name := range r.instances {
+		if _, keep := instances[name]; !keep {
+			removed = append(removed, name)
+		}
+	}
+	r.mu.RUnlock()
+	nextGeneration, err := r.replaceState(req.Context(), generation, global, instances, collectChanged(instances), removed)
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"generation": nextGeneration}, nil)
+}
+
+func (r *Runtime) metricsStatsAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, r.stats.Snapshot(), nil)
+}
+
+func (r *Runtime) storageStatsAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	stats, err := r.store.Stats(req.Context())
-	writeJSON(resp, stats, err)
+	writeJSON(w, stats, err)
 }
 
-func (r *Runtime) storageGCAPI(resp http.ResponseWriter, req *http.Request) {
+func (r *Runtime) storageGCAPI(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	result, err := r.store.RunGC(req.Context(), blobfs.GCOptions{Compact: true})
-	writeJSON(resp, result, err)
-}
-
-func writeJSON(resp http.ResponseWriter, value any, err error) {
-	if err != nil {
-		writeError(resp, http.StatusInternalServerError, err)
-		return
-	}
-	resp.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(resp).Encode(value)
-}
-
-func writeError(resp http.ResponseWriter, status int, err error) {
-	resp.Header().Set("Content-Type", "application/json")
-	resp.WriteHeader(status)
-	_ = json.NewEncoder(resp).Encode(map[string]string{"error": err.Error()})
+	writeJSON(w, result, err)
 }
 
 type cacheLookupResult struct {
@@ -291,83 +375,59 @@ type cacheLookupResult struct {
 	ExpiresAt   string `json:"expiresAt,omitempty"`
 	Fresh       bool   `json:"fresh"`
 
-	objectPath string // 内部使用，不序列化
+	objectPath string
 }
 
-func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
+func (r *Runtime) cacheLookupAPI(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
-		resp.WriteHeader(http.StatusMethodNotAllowed)
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	instanceName := strings.TrimSpace(req.URL.Query().Get("instance"))
 	lookupPath := strings.TrimSpace(req.URL.Query().Get("path"))
 	if instanceName == "" || lookupPath == "" {
-		writeError(resp, http.StatusBadRequest, errors.New("instance and path are required"))
+		writeError(w, http.StatusBadRequest, errors.New("instance and path are required"))
 		return
 	}
-
 	r.mu.RLock()
-	inst, ok := r.config.Instances[instanceName]
+	spec, ok := r.instances[instanceName]
 	generation := r.generation
 	r.mu.RUnlock()
 	if !ok {
-		writeError(resp, http.StatusNotFound, errors.New("instance not found"))
+		writeError(w, http.StatusNotFound, errors.New("instance not found"))
 		return
 	}
-
-	var route proxy.Route
-	var err error
-	switch inst.Mode {
-	case config.ModeOCI:
-		if inst.OCI == nil {
-			writeError(resp, http.StatusBadRequest, errors.New("OCI config is missing"))
-			return
-		}
-		route, err = ociproxy.LookupRef(inst.OCI, lookupPath)
-	case config.ModeGo:
-		lookupPath = strings.TrimPrefix(path.Clean("/"+lookupPath), "/")
-		if lookupPath == "." || lookupPath == "" {
-			writeError(resp, http.StatusBadRequest, errors.New("path is required"))
-			return
-		}
-		route = proxy.Route{ObjectPath: "go/" + lookupPath, Policy: "goproxy"}
-	default:
-		resolver, resolveErr := newResolver(inst)
-		if resolveErr != nil {
-			writeError(resp, http.StatusBadRequest, resolveErr)
-			return
-		}
-		fakeReq, _ := http.NewRequest("GET", lookupPath, nil)
-		fakeReq.URL.Path = "/" + lookupPath
-		route, err = resolver.Resolve(fakeReq)
-	}
+	_, resolved, err := validateInstanceSpec(spec, r.registry)
 	if err != nil {
-		writeError(resp, http.StatusBadRequest, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-
+	route, err := resolved.Driver.Lookup(resolved, lookupPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	result := cacheLookupResult{
 		Instance:   instanceName,
-		Mode:       inst.Mode,
-		objectPath: route.ObjectPath,
+		Mode:       spec.Meta.Mode,
 		Policy:     route.Policy,
 		Generation: generation,
+		objectPath: route.ObjectPath,
 	}
 	freshFor := route.FreshFor
 	if freshFor <= 0 {
-		freshFor = inst.Cache.FreshFor
+		freshFor = resolved.Driver.DefaultFreshFor(resolved)
 	}
 	if freshFor > 0 {
 		result.FreshFor = freshFor.String()
 	}
 	expireAfter := route.ExpireAfter
 	if expireAfter <= 0 {
-		expireAfter = inst.ExpireAfter
+		expireAfter = spec.Meta.ExpireAfter
 	}
 	if expireAfter > 0 {
 		result.ExpireAfter = expireAfter.String()
 	}
-
 	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, result.objectPath, freshFor, expireAfter)
 	result.Cached = cached
 	result.Fresh = fresh
@@ -377,8 +437,7 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 	if !expiresAt.IsZero() {
 		result.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
 	}
-
-	writeJSON(resp, result, nil)
+	writeJSON(w, result, nil)
 }
 
 func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath string, freshFor, expireAfter config.Duration) (bool, time.Time, time.Time, bool) {
@@ -387,23 +446,18 @@ func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath
 		return false, time.Time{}, time.Time{}, false
 	}
 	defer reader.Close()
-
 	info := reader.Info()
-	fetchedAtStr := info.Options["fetched-at"]
-	cachedAt, err := utils.ParseFetchedAt(fetchedAtStr)
+	fetchedAt, err := utils.ParseFetchedAt(info.Options["fetched-at"])
 	if err != nil {
 		return false, time.Time{}, time.Time{}, false
 	}
-
 	var expiresAt time.Time
 	if expireAfter > 0 {
-		expiresAt = cachedAt.Add(expireAfter.Duration())
+		expiresAt = fetchedAt.Add(expireAfter.Duration())
 	}
-
 	fresh := false
 	if freshFor > 0 {
-		fresh = time.Since(cachedAt) <= freshFor.Duration()
+		fresh = time.Since(fetchedAt) <= freshFor.Duration()
 	}
-
-	return true, cachedAt, expiresAt, fresh
+	return true, fetchedAt, expiresAt, fresh
 }

@@ -2,14 +2,13 @@ import { Component, inject } from '@angular/core';
 import { AsyncPipe } from '@angular/common';
 import { BehaviorSubject, Observable, forkJoin, of, catchError, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { InstanceMetrics, RuntimeInfo, InstanceSummary, ConfigSnapshot } from '../../core/api.models';
+import { InstanceMetrics, MetricsStats, RuntimeInfo, InstanceSummary } from '../../core/api.models';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 interface DashboardData {
   runtime: RuntimeInfo;
   instances: InstanceSummary[];
-  config: ConfigSnapshot;
-  metrics: { total: { requests: number; errors: number; responseBytes: number; cache: Record<string, number>; upstreamRequests: number; upstreamErrors: number; upstreamStatus: Record<string, number>; activeDownloads: number }; instances: Record<string, InstanceMetrics>; };
+  metrics: MetricsStats;
 }
 
 interface ChartSlice { label: string; value: number; percent: number; }
@@ -27,7 +26,6 @@ export class DashboardComponent {
     switchMap(() => forkJoin({
       runtime: this.api.runtime(),
       instances: this.api.instances(),
-      config: this.api.config(),
       metrics: this.api.metricsStats()
     }).pipe(catchError(() => of(null))))
   );

@@ -14,10 +14,10 @@ import (
 )
 
 type Resolver struct {
-	cfg *config.OCIConfig
+	cfg *Policy
 }
 
-func New(cfg *config.OCIConfig) *Resolver {
+func New(cfg *Policy) *Resolver {
 	return &Resolver{cfg: cfg}
 }
 
@@ -86,7 +86,7 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 // 支持:
 //   - repo     → tags/list
 //   - repo:tag → manifests/tag
-func LookupRef(cfg *config.OCIConfig, ref string) (proxy.Route, error) {
+func LookupRef(cfg *Policy, ref string) (proxy.Route, error) {
 	v2Path, err := parseOCIRef(ref)
 	if err != nil {
 		return proxy.Route{}, err

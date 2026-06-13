@@ -9,10 +9,10 @@
       <div ngbDropdown>
         <button type="button" class="btn btn-primary" ngbDropdownToggle>新增实例</button>
         <div ngbDropdownMenu>
-          <button ngbDropdownItem (click)="startCreate('file')">文件代理</button>
-          <button ngbDropdownItem (click)="startCreate('oci')">容器镜像代理</button>
-          <button ngbDropdownItem (click)="startCreate('npm')">npm 包代理</button>
-          <button ngbDropdownItem (click)="startCreate('go')">Go 模块代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.File)">文件代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Oci)">容器镜像代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Npm)">npm 包代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Go)">Go 模块代理</button>
         </div>
       </div>
       <button type="button" class="btn btn-outline-secondary" (click)="showImportExport = true">导入导出</button>
@@ -42,8 +42,8 @@
               @for (item of instances; track item.name) {
                 <tr>
                   <td><strong>{{ item.name }}</strong></td>
-                  <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.config.mode | modeLabel }}</span></td>
-                  <td class="text-truncate" style="max-width: 200px;">{{ item.config.listen.path || item.config.listen.bind }}</td>
+                  <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
+                  <td class="text-truncate" style="max-width: 200px;">{{ item.path || item.bind }}</td>
                   <td class="text-end text-nowrap">
                     <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
                     <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="copyInstance(item.name)">复制</button>
@@ -126,5 +126,5 @@
     </div>
   }
 
-  <app-import-export-modal [(show)]="showImportExport" [generation]="snapshot?.generation ?? 0" (imported)="load()"></app-import-export-modal>
+  <app-import-export-modal [(show)]="showImportExport" [generation]="generation" (imported)="load()"></app-import-export-modal>
 </section>

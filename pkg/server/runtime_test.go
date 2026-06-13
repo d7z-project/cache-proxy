@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -12,30 +13,32 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	gomodproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
+	npmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
+	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
 )
 
-func structuredCloneConfig(cfg *config.Config) *config.Config {
-	next := *cfg
-	next.Instances = map[string]config.InstanceConfig{}
-	for name, instance := range cfg.Instances {
-		next.Instances[name] = instance
-	}
-	return &next
+func requestBody(t *testing.T, handler http.Handler, method, target string) string {
+	t.Helper()
+	rec := performRequest(t, handler, method, target, nil, nil)
+	require.True(t, rec.Code < 400, "expected success status, got %d: %s", rec.Code, rec.Body.String())
+	return rec.Body.String()
 }
 
-func requestBody(t *testing.T, handler http.Handler, method, target, rangeHeader string) string {
+func performRequest(t *testing.T, handler http.Handler, method, target string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, target, nil)
-	if rangeHeader != "" {
-		req.Header.Set("Range", rangeHeader)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, method, target, body)
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	require.Less(t, rec.Code, 500)
-	body, err := io.ReadAll(rec.Result().Body)
-	require.NoError(t, err)
-	return string(body)
+	return rec
 }
 
 func httpBody(t *testing.T, rawURL string) string {
@@ -45,9 +48,9 @@ func httpBody(t *testing.T, rawURL string) string {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return string(body)
+	return string(data)
 }
 
 func freeLocalAddr(t *testing.T) string {
@@ -58,7 +61,7 @@ func freeLocalAddr(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func newTestRuntime(t *testing.T, ctx context.Context, instances map[string]config.InstanceConfig) *Runtime {
+func newTestRuntime(t *testing.T, ctx context.Context, instances map[string]config.InstanceSpec) *Runtime {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "cache-proxy-runtime-*")
 	require.NoError(t, err)
@@ -74,26 +77,22 @@ func newTestRuntime(t *testing.T, ctx context.Context, instances map[string]conf
 	return rt
 }
 
-func newTestRuntimeWithOptions(t *testing.T, ctx context.Context, options Options, instances map[string]config.InstanceConfig) *Runtime {
+func newTestRuntimeWithOptions(t *testing.T, ctx context.Context, options Options, instances map[string]config.InstanceSpec) *Runtime {
 	t.Helper()
 	rt, err := OpenWithOptions(ctx, options)
 	require.NoError(t, err)
 	if instances != nil {
-		cfg := DefaultConfig()
-		cfg.Server.Metrics.Path = ""
-		cfg.Instances = instances
-		snapshot, err := rt.UpdateConfig(ctx, rt.generation, cfg)
+		global := config.CloneGlobal(rt.global)
+		removed := []string{}
+		for name := range rt.instances {
+			if _, keep := instances[name]; !keep {
+				removed = append(removed, name)
+			}
+		}
+		_, err = rt.replaceState(ctx, rt.generation, global, config.CloneInstances(instances), collectChanged(instances), removed)
 		require.NoError(t, err)
-		require.NotZero(t, snapshot.Generation)
 	}
 	return rt
-}
-
-func mustJSON(t *testing.T, value any) string {
-	t.Helper()
-	data, err := json.Marshal(value)
-	require.NoError(t, err)
-	return string(data)
 }
 
 func closeRuntime(t *testing.T, rt *Runtime) {
@@ -104,4 +103,62 @@ func closeRuntime(t *testing.T, rt *Runtime) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, rt.Close(ctx))
+}
+
+func mustJSONReader(t *testing.T, value any) *bytes.Reader {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return bytes.NewReader(data)
+}
+
+func mustPolicyJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return data
+}
+
+func fileSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeFile, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &fileproxy.Policy{DefaultPolicy: config.PolicyBypass, BusyPolicy: config.BusyPolicyBypass, Rules: []fileproxy.Rule{}}),
+	}
+}
+
+func npmSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeNPM, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &npmproxy.Policy{DefaultPolicy: config.PolicyRevalidate, BusyPolicy: config.BusyPolicyBypass, Rules: []npmproxy.Rule{}}),
+	}
+}
+
+func ociSpec(t *testing.T, name, bind, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeOCI, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Bind: bind},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &ociproxy.Policy{DefaultPolicy: config.PolicyRevalidate, BusyPolicy: config.BusyPolicyBypass, Rules: []ociproxy.Rule{}}),
+	}
+}
+
+func goSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &gomodproxy.Policy{SumDB: "off", DisableModuleFetchHeader: true}),
+	}
 }

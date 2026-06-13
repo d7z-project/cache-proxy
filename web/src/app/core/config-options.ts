@@ -3,40 +3,39 @@ import { BusyPolicy, CachePolicy, ListenKind, NpmResourcePolicy, OciAuthType, Pr
 export interface SelectOption<T extends string> {
   value: T;
   label: string;
-  description: string;
 }
 
 export const PROXY_MODE_OPTIONS: SelectOption<ProxyMode>[] = [
-  { value: ProxyMode.File, label: '文件代理', description: '适合镜像站和制品仓库静态文件。' },
-  { value: ProxyMode.Oci, label: '容器镜像代理', description: '适合容器镜像仓库。' },
-  { value: ProxyMode.Npm, label: 'npm 包代理', description: '适合 npm registry。' },
-  { value: ProxyMode.Go, label: 'Go 模块代理', description: '适合 GOPROXY 模块缓存。' }
+  { value: ProxyMode.File, label: '文件代理' },
+  { value: ProxyMode.Oci, label: '容器镜像代理' },
+  { value: ProxyMode.Npm, label: 'npm 包代理' },
+  { value: ProxyMode.Go, label: 'Go 模块代理' }
 ];
 
 export const CACHE_POLICY_OPTIONS: SelectOption<CachePolicy>[] = [
-  { value: CachePolicy.Bypass, label: '直接转发', description: '请求直接访问上游。' },
-  { value: CachePolicy.Immutable, label: '固定缓存', description: '适合版本固定的资源。' },
-  { value: CachePolicy.Revalidate, label: '校验缓存', description: '适合可能更新的资源。' }
+  { value: CachePolicy.Bypass, label: '直接转发' },
+  { value: CachePolicy.Immutable, label: '固定缓存' },
+  { value: CachePolicy.Revalidate, label: '校验缓存' }
 ];
 
 export const BUSY_POLICY_OPTIONS: SelectOption<BusyPolicy>[] = [
-  { value: BusyPolicy.Bypass, label: '直接转发', description: '并发刷新时新请求访问上游。' },
-  { value: BusyPolicy.Stale, label: '使用现有缓存', description: '并发刷新时优先快速响应。' }
+  { value: BusyPolicy.Bypass, label: '直接转发' },
+  { value: BusyPolicy.Stale, label: '使用现有缓存' }
 ];
 
 export const LISTEN_KIND_OPTIONS: SelectOption<ListenKind>[] = [
-  { value: ListenKind.Path, label: '路径访问', description: '通过统一入口访问。' },
-  { value: ListenKind.Bind, label: '独立端口', description: '通过专用端口访问。' }
+  { value: ListenKind.Path, label: '路径访问' },
+  { value: ListenKind.Bind, label: '独立端口' }
 ];
 
 export const OCI_AUTH_OPTIONS: SelectOption<OciAuthType>[] = [
-  { value: OciAuthType.None, label: '匿名访问', description: '适合公开仓库。' },
-  { value: OciAuthType.Basic, label: '用户名密码', description: '适合账号访问。' },
-  { value: OciAuthType.Bearer, label: '访问令牌', description: '适合固定令牌访问。' }
+  { value: OciAuthType.None, label: '匿名访问' },
+  { value: OciAuthType.Basic, label: '用户名密码' },
+  { value: OciAuthType.Bearer, label: '访问令牌' }
 ];
 
 export const NPM_RESOURCE_POLICY_OPTIONS: SelectOption<NpmResourcePolicy>[] = [
-  { value: NpmResourcePolicy.All, label: '全部资源', description: '匹配包信息和下载文件。' },
-  { value: NpmResourcePolicy.Metadata, label: '包信息', description: '只匹配包元数据。' },
-  { value: NpmResourcePolicy.Tarball, label: '下载文件', description: '只匹配 .tgz 文件。' }
+  { value: NpmResourcePolicy.All, label: '全部资源' },
+  { value: NpmResourcePolicy.Metadata, label: '包信息' },
+  { value: NpmResourcePolicy.Tarball, label: '下载文件' }
 ];

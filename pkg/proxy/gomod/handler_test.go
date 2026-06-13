@@ -3,6 +3,7 @@ package gomod
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,17 +35,16 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.InstanceConfig{
-		Mode:        config.ModeGo,
-		Listen:      config.ListenConfig{Path: "/go"},
-		Upstreams:   []string{upstream.URL},
-		ExpireAfter: config.Duration(time.Hour),
-		Cache:       config.CacheConfig{},
-		Go:          &config.GoConfig{SumDB: "off"},
+	handler := newTestHandler(t, store, config.InstanceSpec{
+		Name:   "gomod",
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: "/go"},
+		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
+		Policy: mustPolicyJSON(t, &Policy{SumDB: "off"}),
 	})
 	target := "/" + testModulePath + "/@v/" + testModuleVersion + ".mod"
 
-	first := requestGoProxy(t, handler, target, "")
+	first := requestGoProxy(t, handler, target, false)
 	require.Equal(t, http.StatusOK, first.Code)
 	require.Contains(t, first.Body.String(), "module "+testModulePath)
 	require.Equal(t, int64(3), upstreamRequests.Load())
@@ -53,7 +53,7 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	require.NoError(t, err)
 	_ = reader.Close()
 
-	second := requestGoProxy(t, handler, target, "")
+	second := requestGoProxy(t, handler, target, false)
 	require.Equal(t, http.StatusOK, second.Code)
 	require.Contains(t, second.Body.String(), "module "+testModulePath)
 	require.Equal(t, int64(3), upstreamRequests.Load())
@@ -64,35 +64,32 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	cfg := config.InstanceConfig{
-		Mode:        config.ModeGo,
-		Listen:      config.ListenConfig{Path: "/go"},
-		Upstreams:   []string{upstream.URL},
-		ExpireAfter: config.Duration(time.Hour),
-		Go:          &config.GoConfig{SumDB: "off", DisableModuleFetchHeader: true},
+	cfg := config.InstanceSpec{
+		Name:   "gomod",
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: "/go"},
+		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
+		Policy: mustPolicyJSON(t, &Policy{SumDB: "off", DisableModuleFetchHeader: true}),
 	}
 	handler := newTestHandler(t, store, cfg)
 
 	target := "/" + testModulePath + "/@v/list"
-	blocked := requestGoProxy(t, handler, target, "true")
+	blocked := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusNotFound, blocked.Code)
 	require.Zero(t, upstreamRequests.Load())
 
-	cfg.Go.DisableModuleFetchHeader = false
+	cfg.Policy = mustPolicyJSON(t, &Policy{SumDB: "off", DisableModuleFetchHeader: false})
 	handler = newTestHandler(t, store, cfg)
-	allowed := requestGoProxy(t, handler, target, "true")
+	allowed := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusOK, allowed.Code)
 	require.Equal(t, "v1.0.0", allowed.Body.String())
 	require.Equal(t, int64(1), upstreamRequests.Load())
 }
 
 func TestGoFetcherEnvNeverEnablesLocalGoExecution(t *testing.T) {
-	env := goFetcherEnv([]string{"https://proxy.golang.org"}, &config.GoConfig{
+	env := goFetcherEnv([]string{"https://proxy.golang.org"}, &Policy{
 		SumDB:   "sum.golang.org",
 		NoSumDB: "*.corp.example.com",
-		Direct:  true,
-		Private: "*.private.example.com",
-		NoProxy: "*.noproxy.example.com",
 	})
 	require.Contains(t, env, "GOPROXY=https://proxy.golang.org")
 	require.Contains(t, env, "GOPRIVATE=")
@@ -103,12 +100,21 @@ func TestGoFetcherEnvNeverEnablesLocalGoExecution(t *testing.T) {
 	require.NotContains(t, strings.Join(env, "\n"), "*.noproxy.example.com")
 }
 
-func newTestHandler(t *testing.T, store *blobfs.Store, cfg config.InstanceConfig) *Handler {
+func newTestHandler(t *testing.T, store *blobfs.Store, cfg config.InstanceSpec) *Handler {
 	t.Helper()
-	handler, err := NewHandler("gomod", cfg, store, proxy.NewStats(prometheus.NewRegistry()))
+	policy := &Policy{}
+	require.NoError(t, json.Unmarshal(cfg.Policy, policy))
+	handler, err := NewHandler("gomod", cfg.Meta, cfg.Source, policy, store, proxy.NewStats(prometheus.NewRegistry()))
 	require.NoError(t, err)
 	t.Cleanup(handler.Close)
 	return handler
+}
+
+func mustPolicyJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return data
 }
 
 func newTestStore(t *testing.T) *blobfs.Store {
@@ -119,13 +125,13 @@ func newTestStore(t *testing.T) *blobfs.Store {
 	return store
 }
 
-func requestGoProxy(t *testing.T, handler http.Handler, target, disableFetch string) *httptest.ResponseRecorder {
+func requestGoProxy(t *testing.T, handler http.Handler, target string, disableFetch bool) *httptest.ResponseRecorder {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if disableFetch != "" {
-		req.Header.Set("Disable-Module-Fetch", disableFetch)
+	if disableFetch {
+		req.Header.Set("Disable-Module-Fetch", "true")
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

@@ -31,9 +31,13 @@ func TestOCIBearerTokenSingleflightAndExpiredCleanup(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 
-	handler := NewHandler("oci", config.InstanceConfig{
+	handler := NewHandler("oci", RuntimeConfig{
 		Mode: config.ModeOCI,
-		OCI:  &config.OCIConfig{Auth: &config.OCIAuthConfig{Type: "basic", Username: "user", Password: "pass"}},
+		OCIAuth: &OCIAuthConfig{
+			Type:     "basic",
+			Username: "user",
+			Password: "pass",
+		},
 	}, nil, nil, NewStats(prometheus.NewRegistry()))
 	challenge := ociChallenge{
 		scheme: "Bearer",

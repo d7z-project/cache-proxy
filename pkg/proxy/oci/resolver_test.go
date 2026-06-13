@@ -5,7 +5,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
 )
 
@@ -37,11 +36,11 @@ func TestParseOCIRef(t *testing.T) {
 }
 
 func TestLookupRefRoutesCorrectly(t *testing.T) {
-	cfg := &config.OCIConfig{
-		DefaultPolicy: config.PolicyRevalidate,
-		Rules: []config.OCICacheRule{
-			{Match: "library/*", Policy: config.PolicyImmutable},
-			{Match: "org/**", Policy: config.PolicyBypass},
+	cfg := &Policy{
+		DefaultPolicy: "revalidate",
+		Rules: []Rule{
+			{Match: "library/*", Policy: "immutable"},
+			{Match: "org/**", Policy: "bypass"},
 		},
 	}
 

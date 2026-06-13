@@ -47,54 +47,58 @@ export interface RuntimeInfo {
   upstreams: number;
 }
 
+export interface GlobalConfigResponse {
+  generation: number;
+  config: GlobalConfig;
+}
+
+export interface GlobalConfig {
+  version: number;
+  metrics: { path: string };
+  storage: { gc: { blob: string } };
+}
+
+export interface InstanceCollectionResponse {
+  generation: number;
+  items: InstanceSummary[];
+}
+
 export interface InstanceSummary {
   name: string;
   mode: ProxyMode;
+  enabled: boolean;
   path?: string;
   bind?: string;
 }
 
-export interface ConfigSnapshot {
+export interface InstanceDocumentResponse {
   generation: number;
-  config: AppConfig;
-  yaml: string;
+  spec: InstanceSpec;
 }
 
-export interface AppConfig {
-  version: number;
-  server: ServerConfig;
-  storage: StorageConfig;
-  instances: Record<string, InstanceConfig>;
+export interface InstanceSpec {
+  name: string;
+  meta: InstanceMeta;
+  route: InstanceRoute;
+  source: InstanceSource;
+  policy: ModePolicy;
 }
 
-export interface ServerConfig {
-  metrics: MetricsConfig;
-}
-
-export interface MetricsConfig {
-  path: string;
-}
-
-export interface StorageConfig {
-  gc: { blob: string };
-}
-
-export interface InstanceConfig {
+export interface InstanceMeta {
   mode: ProxyMode;
-  listen: ListenConfig;
-  upstreams: string[];
-  transport?: TransportConfig;
-  cache: CacheConfig;
-  oci?: OciConfig;
-  npm?: NpmConfig;
-  go?: GoConfig;
-  passHeaders?: string[];
+  enabled: boolean;
+  description?: string;
   expireAfter?: string;
 }
 
-export interface ListenConfig {
+export interface InstanceRoute {
   path?: string;
   bind?: string;
+}
+
+export interface InstanceSource {
+  upstreams: string[];
+  transport?: TransportConfig;
 }
 
 export interface TransportConfig {
@@ -103,51 +107,36 @@ export interface TransportConfig {
   timeout?: string;
 }
 
-export interface CacheConfig {
+export type ModePolicy = FilePolicy | OciPolicy | NpmPolicy | GoPolicy;
+
+export interface FilePolicy {
+  passHeaders?: string[];
   defaultPolicy?: CachePolicy;
   freshFor?: string;
   busyPolicy?: BusyPolicy;
-  rules: CacheRule[];
+  rules: FileRule[];
 }
 
-export interface CacheRule {
+export interface FileRule {
   match: string;
   policy: CachePolicy;
   freshFor?: string;
   expireAfter?: string;
 }
 
-export interface OciConfig {
-  defaultPolicy?: CachePolicy;
+export interface OciPolicy {
   auth?: OciAuthConfig;
-  rules: OciCacheRule[];
-}
-
-export interface OciCacheRule {
-  match: string;
-  policy: CachePolicy;
-  freshFor?: string;
-  expireAfter?: string;
-}
-
-export interface NpmConfig {
   defaultPolicy?: CachePolicy;
-  rules: NpmCacheRule[];
+  freshFor?: string;
+  busyPolicy?: BusyPolicy;
+  rules: OciRule[];
 }
 
-export interface NpmCacheRule {
+export interface OciRule {
   match: string;
-  resourcePolicy: NpmResourcePolicy;
   policy: CachePolicy;
   freshFor?: string;
   expireAfter?: string;
-}
-
-export interface GoConfig {
-  sumdb?: string;
-  noSumDB?: string;
-  proxiedSumDBs?: string[];
-  disableModuleFetchHeader?: boolean;
 }
 
 export interface OciAuthConfig {
@@ -155,6 +144,34 @@ export interface OciAuthConfig {
   username?: string;
   password?: string;
   token?: string;
+}
+
+export interface NpmPolicy {
+  defaultPolicy?: CachePolicy;
+  freshFor?: string;
+  busyPolicy?: BusyPolicy;
+  rules: NpmRule[];
+}
+
+export interface NpmRule {
+  match: string;
+  resourcePolicy: NpmResourcePolicy;
+  policy: CachePolicy;
+  freshFor?: string;
+  expireAfter?: string;
+}
+
+export interface GoPolicy {
+  sumdb?: string;
+  noSumDB?: string;
+  proxiedSumDBs?: string[];
+  disableModuleFetchHeader?: boolean;
+}
+
+export interface ExportBundle {
+  generation: number;
+  global: GlobalConfig;
+  instances: InstanceSpec[];
 }
 
 export type StorageStats = Record<string, unknown>;
@@ -174,11 +191,6 @@ export interface InstanceMetrics {
   upstreamErrors: number;
   upstreamStatus: Record<string, number>;
   activeDownloads: number;
-}
-
-export interface InstancesExport {
-  generation: number;
-  instances: Record<string, InstanceConfig>;
 }
 
 export interface CacheLookupResult {

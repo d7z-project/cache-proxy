@@ -1,16 +1,35 @@
 import { Component, OnInit, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
-import { forkJoin, Observable } from 'rxjs';
+import { forkJoin, Observable, of } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { AppConfig, BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, ProxyMode, RuntimeInfo } from '../../core/api.models';
-import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
+import {
+  BusyPolicy,
+  CachePolicy,
+  FilePolicy,
+  FileRule,
+  GoPolicy,
+  InstanceCollectionResponse,
+  InstanceDocumentResponse,
+  InstanceSpec,
+  ListenKind,
+  ModePolicy,
+  NpmPolicy,
+  NpmResourcePolicy,
+  NpmRule,
+  OciAuthConfig,
+  OciAuthType,
+  OciPolicy,
+  OciRule,
+  ProxyMode,
+  RuntimeInfo
+} from '../../core/api.models';
+import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS, OCI_AUTH_OPTIONS } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
-const CLEAR_SENTINEL = '-';
 const BLOCKED_PASS_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
   'transfer-encoding', 'upgrade', 'host', 'authorization', 'x-forwarded-for',
@@ -30,19 +49,19 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   private readonly modal = inject(ModalService);
 
   isCreate = true;
-  snapshot?: ConfigSnapshot;
-  runtime?: RuntimeInfo;
-  errors: string[] = [];
   loading = true;
   saving = false;
+  errors: string[] = [];
 
-  draftName = '';
-  draft?: InstanceConfig;
-  private savedFormState = '';
+  generation = 0;
+  collection?: InstanceCollectionResponse;
+  runtime?: RuntimeInfo;
+  draft?: InstanceSpec;
   listenKind = ListenKind.Path;
   upstreams: string[] = [];
   passHeaders: string[] = [];
   proxiedSumDBs: string[] = [];
+  private savedFormState = '';
 
   readonly cachePolicies = CACHE_POLICY_OPTIONS;
   readonly busyPolicies = BUSY_POLICY_OPTIONS;
@@ -55,9 +74,11 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
 
   ngOnInit(): void { this.load(); }
 
-  get dirty(): boolean {
-    return this.formState() !== this.savedFormState;
-  }
+  get dirty(): boolean { return this.formState() !== this.savedFormState; }
+  get filePolicy(): FilePolicy | undefined { return this.draft?.meta.mode === ProxyMode.File ? this.draft.policy as FilePolicy : undefined; }
+  get ociPolicy(): OciPolicy | undefined { return this.draft?.meta.mode === ProxyMode.Oci ? this.draft.policy as OciPolicy : undefined; }
+  get npmPolicy(): NpmPolicy | undefined { return this.draft?.meta.mode === ProxyMode.Npm ? this.draft.policy as NpmPolicy : undefined; }
+  get goPolicy(): GoPolicy | undefined { return this.draft?.meta.mode === ProxyMode.Go ? this.draft.policy as GoPolicy : undefined; }
 
   isDirty(): boolean { return this.dirty; }
 
@@ -76,159 +97,316 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   removePassHeader(index: number): void { this.passHeaders.splice(index, 1); }
   addProxiedSumDB(): void { this.proxiedSumDBs.push(''); }
   removeProxiedSumDB(index: number): void { this.proxiedSumDBs.splice(index, 1); }
-
-  addRule(): void {
-    this.draft?.cache.rules.push({ match: '**/*', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' });
-  }
-  removeRule(index: number): void { this.draft?.cache.rules.splice(index, 1); }
-
-  addOciRule(): void {
-    this.draft?.oci?.rules.push({ match: 'library/*', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' });
-  }
-  removeOciRule(index: number): void { this.draft?.oci?.rules.splice(index, 1); }
-
-  addNpmRule(): void {
-    this.draft?.npm?.rules.push({ match: '**', resourcePolicy: NpmResourcePolicy.All, policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' });
-  }
-  removeNpmRule(index: number): void { this.draft?.npm?.rules.splice(index, 1); }
+  addFileRule(): void { this.filePolicy?.rules.push({ match: '**/*', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' }); }
+  removeFileRule(index: number): void { this.filePolicy?.rules.splice(index, 1); }
+  addOciRule(): void { this.ociPolicy?.rules.push({ match: 'library/*', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' }); }
+  removeOciRule(index: number): void { this.ociPolicy?.rules.splice(index, 1); }
+  addNpmRule(): void { this.npmPolicy?.rules.push({ match: '**', resourcePolicy: NpmResourcePolicy.All, policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' }); }
+  removeNpmRule(index: number): void { this.npmPolicy?.rules.splice(index, 1); }
 
   back(): void {
-    if (!this.dirty) { this.router.navigate(['/instances']); return; }
-    this.modal.confirm({
-      title: '放弃更改',
-      message: '有未保存的更改，确定放弃？',
-      confirmLabel: '放弃',
-      danger: true
-    }).subscribe(ok => { if (ok) this.router.navigate(['/instances']); });
-  }
-
-  save(): void {
-    if (!this.snapshot || !this.draft) return;
-    this.errors = this.validateForm();
-    if (this.errors.length > 0) return;
-
-    const name = this.draftName.trim();
-    const instance = this.normalize();
-    const next = structuredClone(this.snapshot.config);
-    if (!this.isCreate) {
-      const oldName = this.route.snapshot.paramMap.get('name')!;
-      if (oldName !== name) delete next.instances[oldName];
+    if (!this.dirty) {
+      this.router.navigate(['/instances']);
+      return;
     }
-    next.instances[name] = instance;
-
-    this.saving = true;
-    this.api.validateConfig(next).subscribe({
-      next: () => this.doSave(name, instance, next),
-      error: (err) => { this.saving = false; this.toast.error(err.error?.error || '配置校验失败，请检查表单。'); }
+    this.confirmDeactivate().subscribe((ok) => {
+      if (ok) this.router.navigate(['/instances']);
     });
   }
 
-  private doSave(name: string, instance: InstanceConfig, next: AppConfig): void {
-    const mode = this.draft!.mode;
-    if ((mode === ProxyMode.Oci || mode === ProxyMode.Npm) && this.upstreams.filter(u => u.trim()).length > 1) {
-      this.toast.success('已保存。注意：' + (mode === ProxyMode.Oci ? '镜像' : 'npm') + '代理仅使用第一个上游地址。');
-    }
-    this.api.saveConfig(this.snapshot!.generation, next).subscribe({
-      next: (snapshot) => {
+  save(): void {
+    if (!this.draft) return;
+    this.errors = this.validateForm();
+    if (this.errors.length > 0) return;
+    const spec = this.normalize();
+    this.saving = true;
+    const request = this.isCreate
+      ? this.api.createInstance(this.generation, spec)
+      : this.api.updateInstance(this.generation, spec.name, spec);
+    request.subscribe({
+      next: (response) => {
         this.saving = false;
-        this.snapshot = snapshot;
-        this.draftName = name;
-        this.draft = structuredClone(instance);
-        this.listenKind = instance.listen.bind ? ListenKind.Bind : ListenKind.Path;
-        this.upstreams = [...instance.upstreams];
-        this.passHeaders = [...(instance.passHeaders ?? [])];
-        this.proxiedSumDBs = [...(instance.go?.proxiedSumDBs ?? [])];
+        this.generation = response.generation;
+        this.draft = structuredClone(response.spec);
+        this.loadDraftState(response.spec);
         this.markSaved();
-        this.toast.success(name + ' 已保存。');
+        this.toast.success(`${response.spec.name} 已保存。`);
         if (this.isCreate) {
           this.isCreate = false;
-          this.router.navigate(['/instances', name], { replaceUrl: true });
+          this.router.navigate(['/instances', response.spec.name], { replaceUrl: true });
         }
       },
       error: (err) => {
         this.saving = false;
-        if (err.status === 409) {
-          this.modal.confirm({
-            title: '配置冲突',
-            message: '配置已被其他人修改，是否重新加载并重试？',
-            confirmLabel: '重新加载',
-            danger: false
-          }).subscribe(ok => {
-            if (ok) this.load();
-          });
-        } else {
-          this.toast.error(err.error?.error || '保存操作异常');
-        }
+        this.toast.error(err.error?.error || '保存操作异常');
       }
     });
   }
 
   private load(): void {
     this.loading = true;
-    forkJoin({ snapshot: this.api.config(), runtime: this.api.runtime() }).subscribe({
-      next: ({ snapshot, runtime }) => {
-        this.snapshot = snapshot;
+    const name = this.route.snapshot.paramMap.get('name');
+    const copyName = this.route.snapshot.queryParamMap.get('copy');
+    const mode = (this.route.snapshot.queryParamMap.get('mode') as ProxyMode) || ProxyMode.File;
+    const draftRequest = name
+      ? this.api.instance(name)
+      : copyName
+        ? this.api.instance(copyName)
+        : of(undefined);
+    forkJoin({
+      runtime: this.api.runtime(),
+      collection: this.api.instancesCollection(),
+      draftDoc: draftRequest
+    }).subscribe({
+      next: ({ runtime, collection, draftDoc }) => {
         this.runtime = runtime;
-        const name = this.route.snapshot.paramMap.get('name');
-        if (name) {
-          this.initEdit(name);
+        this.collection = collection;
+        this.generation = collection.generation;
+        if (name && draftDoc) {
+          this.isCreate = false;
+          this.draft = structuredClone((draftDoc as InstanceDocumentResponse).spec);
+          this.loadDraftState(this.draft);
+        } else if (copyName && draftDoc) {
+          this.isCreate = true;
+          this.draft = structuredClone((draftDoc as InstanceDocumentResponse).spec);
+          this.draft.name = this.suggestCopyName(this.draft.name);
+          this.loadDraftState(this.draft);
         } else {
-          const mode = (this.route.snapshot.queryParamMap.get('mode') as ProxyMode) || ProxyMode.File;
-          const copyName = this.route.snapshot.queryParamMap.get('copy');
-          this.initCreate(mode, copyName);
+          this.isCreate = true;
+          this.draft = this.defaultDraft(mode);
+          this.loadDraftState(this.draft);
         }
+        this.markSaved();
         this.loading = false;
       },
-      error: (err) => { this.loading = false; this.toast.error(err.error?.error || '配置加载异常'); }
+      error: (err) => {
+        this.loading = false;
+        this.toast.error(err.error?.error || '实例配置加载异常');
+      }
     });
   }
 
-  private initCreate(mode: ProxyMode, copyName: string | null): void {
-    this.isCreate = true;
-    if (copyName) {
-      const source = this.snapshot!.config.instances[copyName];
-      if (source) {
-        let base = copyName + '-copy';
-        let i = 1;
-        while (this.snapshot!.config.instances[base]) { i++; base = copyName + '-copy-' + i; }
-        this.loadDraft(base, source);
-        this.draftName = base;
-        return;
+  private suggestCopyName(base: string): string {
+    const existing = new Set((this.collection?.items ?? []).map((item) => item.name));
+    let next = `${base}-copy`;
+    let counter = 2;
+    while (existing.has(next)) {
+      next = `${base}-copy-${counter}`;
+      counter++;
+    }
+    return next;
+  }
+
+  private loadDraftState(spec: InstanceSpec): void {
+    this.listenKind = spec.route.bind ? ListenKind.Bind : ListenKind.Path;
+    this.upstreams = [...(spec.source.upstreams ?? [])];
+    this.passHeaders = [...(this.asFilePolicy(spec.policy)?.passHeaders ?? [])];
+    this.proxiedSumDBs = [...(this.asGoPolicy(spec.policy)?.proxiedSumDBs ?? [])];
+    this.normalizeDraftDefaults();
+  }
+
+  private normalizeDraftDefaults(): void {
+    if (!this.draft) return;
+    this.draft.meta.expireAfter = this.draft.meta.expireAfter ?? '720h';
+    this.draft.source.transport = this.draft.source.transport ?? {};
+    switch (this.draft.meta.mode) {
+      case ProxyMode.File:
+        this.draft.policy = {
+          defaultPolicy: this.filePolicy?.defaultPolicy ?? CachePolicy.Bypass,
+          freshFor: this.filePolicy?.freshFor ?? '30s',
+          busyPolicy: this.filePolicy?.busyPolicy ?? BusyPolicy.Bypass,
+          passHeaders: this.filePolicy?.passHeaders ?? [],
+          rules: this.filePolicy?.rules ?? []
+        } as FilePolicy;
+        break;
+      case ProxyMode.Oci:
+        this.draft.policy = {
+          defaultPolicy: this.ociPolicy?.defaultPolicy ?? CachePolicy.Revalidate,
+          freshFor: this.ociPolicy?.freshFor ?? '30s',
+          busyPolicy: this.ociPolicy?.busyPolicy ?? BusyPolicy.Bypass,
+          auth: this.ociPolicy?.auth ?? { type: OciAuthType.None },
+          rules: this.ociPolicy?.rules ?? []
+        } as OciPolicy;
+        break;
+      case ProxyMode.Npm:
+        this.draft.policy = {
+          defaultPolicy: this.npmPolicy?.defaultPolicy ?? CachePolicy.Revalidate,
+          freshFor: this.npmPolicy?.freshFor ?? '30s',
+          busyPolicy: this.npmPolicy?.busyPolicy ?? BusyPolicy.Bypass,
+          rules: this.npmPolicy?.rules ?? []
+        } as NpmPolicy;
+        break;
+      case ProxyMode.Go: {
+        const goPolicy: GoPolicy = this.goPolicy ?? { sumdb: 'sum.golang.org', proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true };
+        goPolicy.sumdb = goPolicy.sumdb ?? 'sum.golang.org';
+        goPolicy.proxiedSumDBs = goPolicy.proxiedSumDBs ?? [];
+        this.draft.policy = goPolicy;
+        break;
       }
     }
-    this.draftName = mode === ProxyMode.Oci ? 'dockerhub' : mode === ProxyMode.Npm ? 'npmjs' : mode === ProxyMode.Go ? 'golang' : 'files';
-    this.listenKind = mode === ProxyMode.Oci ? ListenKind.Bind : ListenKind.Path;
-    this.draft = this.defaultDraft(mode);
-    this.upstreams = mode === ProxyMode.Oci ? ['https://registry-1.docker.io']
-      : mode === ProxyMode.Npm ? ['https://registry.npmjs.org']
-      : mode === ProxyMode.Go ? ['https://proxy.golang.org']
-      : ['https://example.com'];
-    this.passHeaders = mode === ProxyMode.File ? ['Accept', 'Accept-Language'] : [];
-    this.proxiedSumDBs = mode === ProxyMode.Go ? ['sum.golang.org'] : [];
-    this.markSaved();
   }
 
-  private initEdit(name: string): void {
-    const instance = this.snapshot!.config.instances[name];
-    if (!instance) { this.toast.error(`实例 ${name} 不存在。`); this.router.navigate(['/instances']); return; }
-    this.isCreate = false;
-    this.loadDraft(name, instance);
+  private defaultDraft(mode: ProxyMode): InstanceSpec {
+    if (mode === ProxyMode.Oci) {
+      return {
+        name: 'dockerhub',
+        meta: { mode, enabled: true, expireAfter: '720h' },
+        route: { bind: '' },
+        source: { upstreams: ['https://registry-1.docker.io'], transport: {} },
+        policy: { defaultPolicy: CachePolicy.Revalidate, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, auth: { type: OciAuthType.None }, rules: [] } as OciPolicy
+      };
+    }
+    if (mode === ProxyMode.Npm) {
+      return {
+        name: 'npmjs',
+        meta: { mode, enabled: true, expireAfter: '720h' },
+        route: { path: '/npm' },
+        source: { upstreams: ['https://registry.npmjs.org'], transport: {} },
+        policy: { defaultPolicy: CachePolicy.Revalidate, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] } as NpmPolicy
+      };
+    }
+    if (mode === ProxyMode.Go) {
+      return {
+        name: 'golang',
+        meta: { mode, enabled: true, expireAfter: '8760h' },
+        route: { path: '/go' },
+        source: { upstreams: ['https://proxy.golang.org'], transport: {} },
+        policy: { sumdb: 'sum.golang.org', proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true } as GoPolicy
+      };
+    }
+    return {
+      name: 'files',
+      meta: { mode, enabled: true, expireAfter: '720h' },
+      route: { path: '/files' },
+      source: { upstreams: ['https://example.com'], transport: {} },
+      policy: { defaultPolicy: CachePolicy.Bypass, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, passHeaders: ['Accept', 'Accept-Language'], rules: [] } as FilePolicy
+    };
   }
 
-  private loadDraft(name: string, instance: InstanceConfig): void {
-    this.draftName = name;
-    this.draft = structuredClone(instance);
-    this.listenKind = this.draft.listen.bind ? ListenKind.Bind : ListenKind.Path;
-    this.upstreams = [...(this.draft.upstreams ?? [])];
-    this.passHeaders = [...(this.draft.passHeaders ?? [])];
-    this.proxiedSumDBs = [...(this.draft.go?.proxiedSumDBs ?? [])];
-    this.normalizeDraftDefaults();
-    this.markSaved();
+  private normalize(): InstanceSpec {
+    const spec = structuredClone(this.draft!);
+    spec.name = spec.name.trim();
+    spec.meta.description = spec.meta.description?.trim() || undefined;
+    spec.meta.expireAfter = this.normalizeDuration(spec.meta.expireAfter);
+    spec.route = this.listenKind === ListenKind.Bind
+      ? { bind: spec.route.bind?.trim() || undefined }
+      : { path: spec.route.path?.trim() || undefined };
+    spec.source.upstreams = this.upstreams.map((value) => value.trim()).filter(Boolean);
+    spec.source.transport = this.normalizeTransport(spec.source.transport);
+    if (!spec.source.transport) delete spec.source.transport;
+    switch (spec.meta.mode) {
+      case ProxyMode.File:
+        spec.policy = this.normalizeFilePolicy(this.asFilePolicy(spec.policy));
+        break;
+      case ProxyMode.Oci:
+        spec.policy = this.normalizeOciPolicy(this.asOciPolicy(spec.policy));
+        break;
+      case ProxyMode.Npm:
+        spec.policy = this.normalizeNpmPolicy(this.asNpmPolicy(spec.policy));
+        break;
+      case ProxyMode.Go:
+        spec.policy = this.normalizeGoPolicy(this.asGoPolicy(spec.policy));
+        break;
+    }
+    return spec;
+  }
+
+  private normalizeTransport(transport?: InstanceSpec['source']['transport']) {
+    if (!transport) return undefined;
+    const next = {
+      proxy: transport.proxy?.trim() || undefined,
+      ua: transport.ua?.trim() || undefined,
+      timeout: transport.timeout?.trim() || undefined
+    };
+    return next.proxy || next.ua || next.timeout ? next : undefined;
+  }
+
+  private normalizeDuration(value?: string): string | undefined {
+    const trimmed = value?.trim();
+    return trimmed || undefined;
+  }
+
+  private normalizeFilePolicy(policy?: FilePolicy): FilePolicy {
+    const next: FilePolicy = {
+      ...policy,
+      defaultPolicy: policy?.defaultPolicy ?? CachePolicy.Bypass,
+      freshFor: this.normalizeDuration(policy?.freshFor),
+      busyPolicy: policy?.busyPolicy ?? BusyPolicy.Bypass,
+      passHeaders: this.passHeaders.map((header) => header.trim()).filter(Boolean),
+      rules: (policy?.rules ?? []).map((rule) => this.normalizeFileRule(rule))
+    };
+    if ((next.passHeaders?.length ?? 0) === 0) delete next.passHeaders;
+    return next;
+  }
+
+  private normalizeOciPolicy(policy?: OciPolicy): OciPolicy {
+    const auth = policy?.auth;
+    return {
+      ...policy,
+      defaultPolicy: policy?.defaultPolicy ?? CachePolicy.Revalidate,
+      freshFor: this.normalizeDuration(policy?.freshFor),
+      busyPolicy: policy?.busyPolicy ?? BusyPolicy.Bypass,
+      auth: !auth || auth.type === OciAuthType.None ? undefined : {
+        type: auth.type,
+        username: auth.username?.trim() || undefined,
+        password: auth.password?.trim() || undefined,
+        token: auth.token?.trim() || undefined
+      },
+      rules: (policy?.rules ?? []).map((rule) => this.normalizeOciRule(rule))
+    };
+  }
+
+  private normalizeNpmPolicy(policy?: NpmPolicy): NpmPolicy {
+    return {
+      ...policy,
+      defaultPolicy: policy?.defaultPolicy ?? CachePolicy.Revalidate,
+      freshFor: this.normalizeDuration(policy?.freshFor),
+      busyPolicy: policy?.busyPolicy ?? BusyPolicy.Bypass,
+      rules: (policy?.rules ?? []).map((rule) => this.normalizeNpmRule(rule))
+    };
+  }
+
+  private normalizeGoPolicy(policy?: GoPolicy): GoPolicy {
+    const next: GoPolicy = {
+      ...policy,
+      sumdb: policy?.sumdb?.trim() || undefined,
+      noSumDB: policy?.noSumDB?.trim() || undefined,
+      proxiedSumDBs: this.proxiedSumDBs.map((value) => value.trim()).filter(Boolean),
+      disableModuleFetchHeader: Boolean(policy?.disableModuleFetchHeader)
+    };
+    if ((next.proxiedSumDBs?.length ?? 0) === 0) delete next.proxiedSumDBs;
+    return next;
+  }
+
+  private normalizeFileRule(rule: FileRule): FileRule {
+    return {
+      ...rule,
+      match: rule.match.trim(),
+      freshFor: this.normalizeDuration(rule.freshFor),
+      expireAfter: this.normalizeDuration(rule.expireAfter)
+    };
+  }
+
+  private normalizeOciRule(rule: OciRule): OciRule {
+    return {
+      ...rule,
+      match: rule.match.trim(),
+      freshFor: this.normalizeDuration(rule.freshFor),
+      expireAfter: this.normalizeDuration(rule.expireAfter)
+    };
+  }
+
+  private normalizeNpmRule(rule: NpmRule): NpmRule {
+    return {
+      ...rule,
+      match: rule.match.trim(),
+      freshFor: this.normalizeDuration(rule.freshFor),
+      expireAfter: this.normalizeDuration(rule.expireAfter)
+    };
   }
 
   private formState(): string {
     return JSON.stringify({
-      name: this.draftName,
       draft: this.draft,
       listenKind: this.listenKind,
       upstreams: this.upstreams,
@@ -241,265 +419,113 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     this.savedFormState = this.formState();
   }
 
-  private normalizeDraftDefaults(): void {
-    if (!this.draft) return;
-    this.draft.listen = this.draft.listen ?? {};
-    this.draft.transport = this.draft.transport ?? {};
-    this.draft.cache = this.draft.cache ?? { rules: [] };
-    this.draft.cache.rules = this.draft.cache.rules ?? [];
-    this.draft.cache.busyPolicy = this.draft.cache.busyPolicy ?? BusyPolicy.Bypass;
-    if (this.draft.mode === ProxyMode.File) {
-      this.draft.cache.defaultPolicy = this.draft.cache.defaultPolicy ?? CachePolicy.Bypass;
-      return;
-    }
-    if (this.draft.mode === ProxyMode.Oci) {
-      this.draft.oci = this.draft.oci ?? { defaultPolicy: CachePolicy.Revalidate, rules: [] };
-      this.draft.oci.defaultPolicy = this.draft.oci.defaultPolicy ?? CachePolicy.Revalidate;
-      this.draft.oci.rules = this.draft.oci.rules ?? [];
-      this.draft.oci.auth = this.draft.oci.auth ?? { type: OciAuthType.None };
-    }
-    if (this.draft.mode === ProxyMode.Npm) {
-      this.draft.npm = this.draft.npm ?? { defaultPolicy: CachePolicy.Revalidate, rules: [] };
-      this.draft.npm.defaultPolicy = this.draft.npm.defaultPolicy ?? CachePolicy.Revalidate;
-      this.draft.npm.rules = this.draft.npm.rules ?? [];
-    }
-    if (this.draft.mode === ProxyMode.Go) {
-      this.draft.go = this.draft.go ?? { sumdb: 'sum.golang.org', proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true };
-      this.draft.go.sumdb = this.draft.go.sumdb ?? 'sum.golang.org';
-      this.draft.go.proxiedSumDBs = this.draft.go.proxiedSumDBs ?? [];
-    }
-  }
-
-  private defaultDraft(mode: ProxyMode): InstanceConfig {
-    if (mode === ProxyMode.Oci) {
-      return {
-        mode, listen: { bind: '' }, upstreams: ['https://registry-1.docker.io'], expireAfter: '720h',
-        cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-        oci: { defaultPolicy: CachePolicy.Revalidate, rules: [], auth: { type: OciAuthType.None } },
-        transport: {}
-      };
-    }
-    if (mode === ProxyMode.Npm) {
-      return {
-        mode, listen: { path: '/npm' }, upstreams: ['https://registry.npmjs.org'], expireAfter: '720h',
-        cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-        npm: { defaultPolicy: CachePolicy.Revalidate, rules: [] }, transport: {}
-      };
-    }
-    if (mode === ProxyMode.Go) {
-      return {
-        mode, listen: { path: '/go' }, upstreams: ['https://proxy.golang.org'], expireAfter: '8760h',
-        cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-        go: { sumdb: 'sum.golang.org', proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true },
-        transport: {}
-      };
-    }
-    return {
-      mode, listen: { path: '/files' }, upstreams: ['https://example.com'], expireAfter: '720h',
-      cache: { defaultPolicy: CachePolicy.Bypass, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
-      passHeaders: ['Accept', 'Accept-Language'], transport: {}
-    };
-  }
-
-  private normalize(): InstanceConfig {
-    if (!this.draft) throw new Error('no draft');
-    const instance = structuredClone(this.draft);
-    instance.listen = this.listenKind === ListenKind.Bind
-      ? { bind: instance.listen.bind?.trim() }
-      : { path: instance.listen.path?.trim() };
-    instance.upstreams = this.upstreams.map((u) => u.trim()).filter(Boolean);
-    if ((instance.mode === ProxyMode.Oci || instance.mode === ProxyMode.Npm) && instance.upstreams.length > 1) {
-      instance.upstreams = instance.upstreams.slice(0, 1);
-    }
-    instance.passHeaders = this.passHeaders.map((h) => h.trim()).filter(Boolean);
-    if (instance.passHeaders.length === 0) delete instance.passHeaders;
-    instance.expireAfter = this.normalizeDuration(instance.expireAfter);
-    instance.cache.freshFor = this.normalizeDuration(instance.cache.freshFor);
-    instance.cache.rules = this.normalizeRules(instance.cache.rules);
-    instance.cache.busyPolicy = instance.cache.busyPolicy || BusyPolicy.Bypass;
-    instance.transport = this.normalizeTransport(instance.transport);
-    if (instance.mode === ProxyMode.Oci) {
-      instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
-      instance.oci = this.normalizeOci(instance.oci);
-      delete instance.passHeaders;
-      delete instance.npm;
-      delete instance.go;
-    } else if (instance.mode === ProxyMode.Npm) {
-      instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
-      instance.npm = this.normalizeNpm(instance.npm);
-      delete instance.oci;
-      delete instance.passHeaders;
-      delete instance.go;
-    } else if (instance.mode === ProxyMode.Go) {
-      instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
-      instance.go = this.normalizeGo(instance.go);
-      delete instance.oci;
-      delete instance.npm;
-      delete instance.passHeaders;
-    } else {
-      delete instance.oci;
-      delete instance.npm;
-      delete instance.go;
-      instance.cache.defaultPolicy = instance.cache.defaultPolicy || CachePolicy.Bypass;
-    }
-    return instance;
-  }
-
-  private normalizeDuration(value: string | undefined): string | undefined {
-    const trimmed = value?.trim();
-    return trimmed || undefined;
-  }
-
-  private normalizeRules<T extends { match: string; freshFor?: string; expireAfter?: string }>(rules: T[] = []): T[] {
-    return (rules ?? []).map(r => ({
-      ...r,
-      match: r.match?.trim(),
-      freshFor: this.normalizeDuration(r.freshFor),
-      expireAfter: this.normalizeDuration(r.expireAfter),
-    }));
-  }
-
-  private normalizeOci(oci: InstanceConfig['oci']): NonNullable<InstanceConfig['oci']> {
-    if (!oci) return { defaultPolicy: CachePolicy.Revalidate, rules: [] };
-    const auth = oci.auth;
-    if (!auth || auth.type === OciAuthType.None) { delete oci.auth; return oci; }
-    auth.username = auth.username?.trim() || undefined;
-    if (auth.password === '' || auth.password === CLEAR_SENTINEL) {
-      auth.password = CLEAR_SENTINEL;
-    }
-    auth.token = auth.token?.trim() || undefined;
-    if (auth.token === '' || auth.token === CLEAR_SENTINEL) {
-      auth.token = CLEAR_SENTINEL;
-    }
-    if (auth.type === OciAuthType.Basic) delete auth.token;
-    if (auth.type === OciAuthType.Bearer) { delete auth.username; delete auth.password; }
-    oci.rules = this.normalizeRules(oci.rules);
-    return oci;
-  }
-
-  private normalizeNpm(npm: InstanceConfig['npm']): NonNullable<InstanceConfig['npm']> {
-    if (!npm) return { defaultPolicy: CachePolicy.Revalidate, rules: [] };
-    npm.rules = this.normalizeRules(npm.rules);
-    return npm;
-  }
-
-  private normalizeGo(go: InstanceConfig['go']): NonNullable<InstanceConfig['go']> {
-    const next = go ?? {};
-    next.sumdb = next.sumdb?.trim() || 'sum.golang.org';
-    next.noSumDB = next.noSumDB?.trim() || undefined;
-    next.proxiedSumDBs = this.proxiedSumDBs.map(s => s.trim()).filter(Boolean);
-    if (next.proxiedSumDBs.length === 0) delete next.proxiedSumDBs;
-    next.disableModuleFetchHeader = Boolean(next.disableModuleFetchHeader);
-    return next;
-  }
-
-  private normalizeTransport(t: InstanceConfig['transport']) {
-    if (!t) return undefined;
-    t.proxy = t.proxy?.trim() || undefined;
-    t.ua = t.ua?.trim() || undefined;
-    t.timeout = t.timeout?.trim() || undefined;
-    return t.proxy || t.ua || t.timeout ? t : undefined;
-  }
-
   private validateForm(): string[] {
-    const e: string[] = [];
-    if (!this.snapshot || !this.draft) return ['配置未加载完成。'];
-    const name = this.draftName.trim();
-    if (!name) e.push('实例名称不能为空。');
-    if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') e.push('实例名称不能包含路径字符。');
-    if (this.isCreate && this.snapshot.config.instances[name]) e.push(`实例名称 ${name} 已存在。`);
-    if (!this.isCreate) {
-      const oldName = this.route.snapshot.paramMap.get('name')!;
-      if (oldName !== name && this.snapshot.config.instances[name]) e.push(`实例名称 ${name} 已存在。`);
+    if (!this.draft) return ['配置未加载完成。'];
+    const errors: string[] = [];
+    const name = this.draft.name.trim();
+    if (!name) errors.push('实例名称不能为空。');
+    if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') errors.push('实例名称不能包含路径字符。');
+    if (this.isCreate && this.collection?.items.some((item) => item.name === name)) errors.push(`实例名称 ${name} 已存在。`);
+
+    const routeValue = this.listenKind === ListenKind.Bind ? this.draft.route.bind?.trim() : this.draft.route.path?.trim();
+    if (!routeValue) errors.push(this.listenKind === ListenKind.Bind ? '监听地址不能为空。' : '路径前缀不能为空。');
+    if (this.listenKind === ListenKind.Path && routeValue && !routeValue.startsWith('/')) errors.push('路径前缀必须以 / 开头。');
+    if (this.listenKind === ListenKind.Path && routeValue && /\s/.test(routeValue)) errors.push('路径前缀不能包含空格。');
+    if (this.listenKind === ListenKind.Path && routeValue && routeValue.includes('//')) errors.push('路径前缀不能包含连续 /。');
+    if (this.listenKind === ListenKind.Bind && routeValue && !/^[^:]+:\d+$/.test(routeValue)) errors.push('监听地址需要使用 host:port 格式。');
+
+    const owners = this.collection?.items.filter((item) => item.name !== this.draft!.name) ?? [];
+    if (this.listenKind === ListenKind.Path && routeValue) {
+      const normalized = '/' + routeValue.replace(/^\/+|\/+$/g, '');
+      const owner = owners.find((item) => item.path === normalized);
+      if (owner) errors.push(`路径前缀 ${normalized} 已被 ${owner.name} 使用。`);
     }
-    const listenValue = this.listenKind === ListenKind.Bind ? this.draft.listen.bind?.trim() : this.draft.listen.path?.trim();
-    if (!listenValue) e.push(this.listenKind === ListenKind.Bind ? '监听地址不能为空。' : '路径前缀不能为空。');
-    if (this.listenKind === ListenKind.Path && listenValue && !listenValue.startsWith('/')) e.push('路径前缀必须以 / 开头。');
-    if (this.listenKind === ListenKind.Path && listenValue && /\s/.test(listenValue)) e.push('路径前缀不能包含空格。');
-    if (this.listenKind === ListenKind.Path && listenValue && listenValue.includes('//')) e.push('路径前缀不能包含连续 /。');
-    if (this.listenKind === ListenKind.Path && listenValue && /[^a-zA-Z0-9/_\-]/.test(listenValue)) e.push('路径前缀只能包含字母、数字、/、_、-。');
-    if (this.listenKind === ListenKind.Path && listenValue && `/${listenValue.replace(/^\/+|\/+$/g, '')}` === '/') e.push('路径前缀不能使用根路径 /。');
-    if (!Object.values(BusyPolicy).includes(this.draft.cache.busyPolicy ?? BusyPolicy.Bypass)) e.push('并发策略需要重新选择。');
-    const validUpstreams = this.upstreams.map((u) => u.trim()).filter(Boolean);
-    if (validUpstreams.length === 0) e.push('至少需要一个上游地址。');
-    if (this.draft.mode === ProxyMode.Oci && validUpstreams.length !== 1) e.push('镜像代理需要一个上游地址。');
-    if (this.draft.mode === ProxyMode.Npm && validUpstreams.length !== 1) e.push('npm 代理需要一个上游地址。');
-    for (const u of validUpstreams) {
-      try { const url = new URL(u); if (url.protocol !== 'http:' && url.protocol !== 'https:') e.push(`上游 ${u} 必须是 HTTP/HTTPS。`); }
-      catch { e.push(`上游 ${u} 地址格式需要调整。`); }
+    if (this.listenKind === ListenKind.Bind && routeValue) {
+      const owner = owners.find((item) => item.bind === routeValue);
+      if (owner) errors.push(`监听地址 ${routeValue} 已被 ${owner.name} 使用。`);
     }
-    const proxy = this.draft.transport?.proxy?.trim();
-    if (proxy) {
-      try { const url = new URL(proxy); if (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'socks5:') e.push('上游代理请选择 http、https 或 socks5。'); if (!url.hostname) e.push('上游连接代理缺少 host。'); }
-      catch { e.push('上游代理地址格式需要调整。'); }
-    }
-    if (this.draft.mode === ProxyMode.Oci && this.listenKind !== ListenKind.Bind) e.push('镜像代理请选择独立端口。');
-    if (this.draft.expireAfter?.trim() && !this.isValidDuration(this.draft.expireAfter.trim())) e.push('缓存保留时间格式无效，示例：720h、168h。');
-    if (this.draft.cache.freshFor?.trim() && !this.isValidDuration(this.draft.cache.freshFor.trim())) e.push('快速命中时间格式无效，示例：30s、5m。');
-    if (this.draft.transport?.timeout?.trim() && !this.isValidDuration(this.draft.transport.timeout.trim())) e.push('连接超时格式无效，示例：3s、30s。');
-    if (this.draft.mode === ProxyMode.File) {
-      for (const header of this.passHeaders.map((h) => h.trim()).filter(Boolean)) {
-        const lower = header.toLowerCase();
-        if (/[\s\r\n:]/.test(header)) e.push(`请求头 ${header} 格式无效。`);
-        if (BLOCKED_PASS_HEADERS.has(lower)) e.push(`请求头 ${header} 不能透传。`);
-      }
-    }
-    if (this.draft.mode === ProxyMode.File) {
-      for (let i = 0; i < this.draft.cache.rules.length; i++) {
-        const rule = this.draft.cache.rules[i];
-        if (!rule.match?.trim()) e.push(`文件规则 #${i + 1} 的匹配模式不能为空。`);
-        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`文件规则 #${i + 1} 的快速命中时间格式无效。`);
-        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`文件规则 #${i + 1} 的缓存保留时间格式无效。`);
-      }
-    }
-    if (this.draft.mode === ProxyMode.Oci && this.draft.oci) {
-      for (let i = 0; i < this.draft.oci.rules.length; i++) {
-        const rule = this.draft.oci.rules[i];
-        if (!rule.match?.trim()) e.push(`仓库规则 #${i + 1} 的匹配模式不能为空。`);
-        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`仓库规则 #${i + 1} 的快速命中时间格式无效。`);
-        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`仓库规则 #${i + 1} 的缓存保留时间格式无效。`);
-      }
-    }
-    if (this.draft.mode === ProxyMode.Npm && this.draft.npm) {
-      for (let i = 0; i < this.draft.npm.rules.length; i++) {
-        const rule = this.draft.npm.rules[i];
-        if (!rule.match?.trim()) e.push(`包规则 #${i + 1} 的匹配模式不能为空。`);
-        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`包规则 #${i + 1} 的快速命中时间格式无效。`);
-        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`包规则 #${i + 1} 的缓存保留时间格式无效。`);
-      }
-    }
-    if (this.draft.mode === ProxyMode.Go && this.draft.go) {
-      if (this.draft.go.sumdb?.includes('\n') || this.draft.go.sumdb?.includes('\r')) e.push('Go SumDB 不能包含换行。');
-      for (const item of this.proxiedSumDBs.map(s => s.trim()).filter(Boolean)) {
-        if (item.includes('\n') || item.includes('\r')) e.push(`Go SumDB 代理项 ${item} 不能包含换行。`);
+
+    const upstreams = this.upstreams.map((value) => value.trim()).filter(Boolean);
+    if (upstreams.length === 0) errors.push('至少需要一个上游地址。');
+    if ((this.draft.meta.mode === ProxyMode.Oci || this.draft.meta.mode === ProxyMode.Npm) && upstreams.length !== 1) errors.push('当前模式需要且只能配置一个上游地址。');
+    for (const upstream of upstreams) {
+      try {
+        const url = new URL(upstream);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') errors.push(`上游 ${upstream} 必须是 HTTP/HTTPS。`);
+      } catch {
+        errors.push(`上游 ${upstream} 地址格式需要调整。`);
       }
     }
 
-    const bindOwners = new Map<string, string>();
-    if (this.runtime?.bind) bindOwners.set(this.runtime.bind, '主监听');
-    const pathOwners = new Map<string, string>();
-    const currentName = this.isCreate ? undefined : this.route.snapshot.paramMap.get('name')!;
-    for (const [iname, inst] of Object.entries(this.snapshot.config.instances)) {
-      if (iname === currentName) continue;
-      if (inst.listen.bind) bindOwners.set(inst.listen.bind, iname);
-      if (inst.listen.path) pathOwners.set('/' + inst.listen.path.replace(/^\/+|\/+$/g, ''), iname);
+    const transport = this.draft.source.transport;
+    if (transport?.proxy?.trim()) {
+      try {
+        const url = new URL(transport.proxy.trim());
+        if (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'socks5:') errors.push('上游代理请选择 http、https 或 socks5。');
+      } catch {
+        errors.push('上游代理地址格式需要调整。');
+      }
     }
-    if (this.listenKind === ListenKind.Bind && listenValue) {
-      const owner = bindOwners.get(listenValue);
-      if (owner) e.push(`监听地址 ${listenValue} 已被 ${owner} 使用。`);
+    if (this.draft.meta.expireAfter?.trim() && !this.isValidDuration(this.draft.meta.expireAfter.trim())) errors.push('缓存保留时间格式无效。');
+    if (transport?.timeout?.trim() && !this.isValidDuration(transport.timeout.trim())) errors.push('连接超时格式无效。');
+
+    if (this.draft.meta.mode === ProxyMode.File && this.filePolicy) {
+      if (this.filePolicy.freshFor?.trim() && !this.isValidDuration(this.filePolicy.freshFor.trim())) errors.push('文件模式快速命中时间格式无效。');
+      for (const header of this.passHeaders.map((item) => item.trim()).filter(Boolean)) {
+        if (/[\s\r\n:]/.test(header)) errors.push(`请求头 ${header} 格式无效。`);
+        if (BLOCKED_PASS_HEADERS.has(header.toLowerCase())) errors.push(`请求头 ${header} 不能透传。`);
+      }
+      for (const [index, rule] of this.filePolicy.rules.entries()) {
+        if (!rule.match.trim()) errors.push(`文件规则 #${index + 1} 的匹配模式不能为空。`);
+        if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) errors.push(`文件规则 #${index + 1} 的快速命中时间格式无效。`);
+        if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) errors.push(`文件规则 #${index + 1} 的缓存保留时间格式无效。`);
+      }
     }
-    if (this.listenKind === ListenKind.Path && listenValue) {
-      const normalizedPath = '/' + listenValue.replace(/^\/+|\/+$/g, '');
-      const owner = pathOwners.get(normalizedPath);
-      if (owner) e.push(`路径前缀 ${normalizedPath} 已被 ${owner} 使用。`);
+
+    if (this.draft.meta.mode === ProxyMode.Oci && this.ociPolicy) {
+      if (this.listenKind !== ListenKind.Bind) errors.push('镜像代理必须使用独立端口。');
+      if (this.ociPolicy.freshFor?.trim() && !this.isValidDuration(this.ociPolicy.freshFor.trim())) errors.push('镜像模式快速命中时间格式无效。');
+      for (const [index, rule] of this.ociPolicy.rules.entries()) {
+        if (!rule.match.trim()) errors.push(`仓库规则 #${index + 1} 的匹配模式不能为空。`);
+      }
+      const auth = this.ociPolicy.auth;
+      if (auth?.type === OciAuthType.Basic && (!auth.username?.trim() || !auth.password?.trim())) errors.push('基础认证需要用户名和密码。');
+      if (auth?.type === OciAuthType.Bearer && !auth.token?.trim()) errors.push('Bearer 认证需要令牌。');
     }
-    if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Basic && !this.draft.oci.auth.username?.trim()) e.push('请填写镜像仓库用户名。');
-    if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Basic && !this.draft.oci.auth.password?.trim()) e.push('请填写镜像仓库密码。');
-    if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Bearer && !this.draft.oci.auth.token?.trim()) e.push('请填写镜像仓库访问令牌。');
-    return e;
+
+    if (this.draft.meta.mode === ProxyMode.Npm && this.npmPolicy) {
+      if (this.npmPolicy.freshFor?.trim() && !this.isValidDuration(this.npmPolicy.freshFor.trim())) errors.push('npm 模式快速命中时间格式无效。');
+      for (const [index, rule] of this.npmPolicy.rules.entries()) {
+        if (!rule.match.trim()) errors.push(`包规则 #${index + 1} 的匹配模式不能为空。`);
+      }
+    }
+
+    if (this.draft.meta.mode === ProxyMode.Go && this.goPolicy) {
+      if (this.goPolicy.sumdb?.includes('\n') || this.goPolicy.sumdb?.includes('\r')) errors.push('Go SumDB 不能包含换行。');
+      for (const value of this.proxiedSumDBs.map((item) => item.trim()).filter(Boolean)) {
+        if (value.includes('\n') || value.includes('\r')) errors.push(`Go SumDB 代理项 ${value} 不能包含换行。`);
+      }
+    }
+    return errors;
   }
 
   private isValidDuration(value: string): boolean {
     return /^(\d+(ns|us|ms|s|m|h))+$/.test(value) && !value.startsWith('-');
+  }
+
+  private asFilePolicy(policy: ModePolicy): FilePolicy | undefined {
+    return policy as FilePolicy | undefined;
+  }
+
+  private asOciPolicy(policy: ModePolicy): OciPolicy | undefined {
+    return policy as OciPolicy | undefined;
+  }
+
+  private asNpmPolicy(policy: ModePolicy): NpmPolicy | undefined {
+    return policy as NpmPolicy | undefined;
+  }
+
+  private asGoPolicy(policy: ModePolicy): GoPolicy | undefined {
+    return policy as GoPolicy | undefined;
   }
 }

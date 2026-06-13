@@ -12,10 +12,10 @@ import (
 )
 
 type Resolver struct {
-	cfg *config.NPMConfig
+	cfg *Policy
 }
 
-func New(cfg *config.NPMConfig) *Resolver {
+func New(cfg *Policy) *Resolver {
 	return &Resolver{cfg: cfg}
 }
 

@@ -17,24 +17,24 @@ import (
 )
 
 type Handler struct {
-	name  string
-	cfg   config.InstanceConfig
-	inner http.Handler
-	stats *proxy.Stats
-	wait  sync.WaitGroup
+	name   string
+	meta   config.InstanceMeta
+	policy *Policy
+	inner  http.Handler
+	stats  *proxy.Stats
+	wait   sync.WaitGroup
 }
 
-func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, stats *proxy.Stats) (*Handler, error) {
-	goCfg := cfg.Go
-	if goCfg == nil {
-		goCfg = &config.GoConfig{}
+func NewHandler(name string, meta config.InstanceMeta, source config.InstanceSource, policy *Policy, store *blobfs.Store, stats *proxy.Stats) (*Handler, error) {
+	if policy == nil {
+		policy = &Policy{}
 	}
 	tempDir, err := os.MkdirTemp("", "cache-proxy-go-*")
 	if err != nil {
 		return nil, err
 	}
-	transport := &statsTransport{base: transportForConfig(name, cfg.Transport), stats: stats, instance: name}
-	env := goFetcherEnv(cfg.Upstreams, goCfg)
+	transport := &statsTransport{base: transportForConfig(name, source.Transport), stats: stats, instance: name}
+	env := goFetcherEnv(source.Upstreams, policy)
 	fetcher := &goproxy.GoFetcher{
 		Env:       env,
 		TempDir:   tempDir,
@@ -42,20 +42,20 @@ func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, sta
 	}
 	inner := &goproxy.Goproxy{
 		Fetcher:       fetcher,
-		ProxiedSumDBs: goCfg.ProxiedSumDBs,
-		Cacher:        newBlobFSCacher(store, name, cfg.ExpireAfter),
+		ProxiedSumDBs: policy.ProxiedSumDBs,
+		Cacher:        newBlobFSCacher(store, name, meta.ExpireAfter),
 		TempDir:       tempDir,
 		Transport:     transport,
 		Logger:        slog.Default().With("instance", name, "mode", config.ModeGo),
 	}
-	return &Handler{name: name, cfg: cfg, inner: closeableTempHandler{Handler: inner, tempDir: tempDir}, stats: stats}, nil
+	return &Handler{name: name, meta: meta, policy: policy, inner: closeableTempHandler{Handler: inner, tempDir: tempDir}, stats: stats}, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		h.stats.RecordRequest(h.name, h.cfg.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
+		h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
 		return
 	}
 	h.wait.Add(1)
@@ -63,7 +63,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	next := req
-	if h.cfg.Go == nil || !h.cfg.Go.DisableModuleFetchHeader {
+	if h.policy == nil || !h.policy.DisableModuleFetchHeader {
 		next = req.Clone(req.Context())
 		next.Header = req.Header.Clone()
 		next.Header.Del("Disable-Module-Fetch")
@@ -73,7 +73,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if cache == "" {
 		cache = "GO"
 	}
-	h.stats.RecordRequest(h.name, h.cfg.Mode, req.Method, cache, rec.status, uint64(rec.bytes))
+	h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, cache, rec.status, uint64(rec.bytes))
 }
 
 func (h *Handler) Close() {
@@ -115,7 +115,7 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-func goFetcherEnv(upstreams []string, cfg *config.GoConfig) []string {
+func goFetcherEnv(upstreams []string, cfg *Policy) []string {
 	proxies := append([]string(nil), upstreams...)
 	sumdb := strings.TrimSpace(cfg.SumDB)
 	if sumdb == "" {

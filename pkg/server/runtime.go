@@ -1,52 +1,48 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
-	containername "github.com/google/go-containerregistry/pkg/name"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
-	gomodproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
-	npmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
-	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
 	"gopkg.d7z.net/cache-proxy/web"
 )
 
 const (
-	systemTenant = "_system"
-	configPath   = "config.yaml"
+	systemTenant       = "_system"
+	globalConfigPath   = "config/global/current.yaml"
+	instanceIndexPath  = "config/instances/index.yaml"
+	revisionStatePath  = "config/revision.json"
+	defaultConfigLimit = 1 << 20
 )
 
 var (
-	DefaultBackend        = "/tmp/cache-proxy"
-	DefaultBind           = "127.0.0.1:18080"
-	DefaultMetricsPath    = "/-/metrics"
-	DefaultGCInterval     = "24h"
-	DefaultExpireAfter    = "720h"
-	DefaultConfigMaxBytes = "1048576"
+	DefaultBackend     = "/tmp/cache-proxy"
+	DefaultBind        = "127.0.0.1:18080"
+	DefaultMetricsPath = "/-/metrics"
+	DefaultGCInterval  = "24h"
+	DefaultExpireAfter = "720h"
 )
 
 type Runtime struct {
@@ -54,29 +50,32 @@ type Runtime struct {
 	backend      string
 	password     string
 	metricsToken string
-	metricsPath  string
-	gcInterval   time.Duration
 	store        *blobfs.Store
 	stats        *proxy.Stats
 	metricsReg   *prometheus.Registry
-	config       *config.Config
-	generation   uint64
-	mu           sync.RWMutex
+	registry     *proxydriver.Registry
 
-	mainHandler  http.Handler
+	global     *config.GlobalConfig
+	instances  map[string]config.InstanceSpec
+	generation uint64
+
+	mu sync.RWMutex
+
 	handlers     []closeableHandler
 	pathHandlers map[string]http.Handler
 	bindHandlers map[string]http.Handler
 
 	mainListener net.Listener
 	mainSrv      *http.Server
-	bindServers  []*http.Server
+	bindServers  map[string]*http.Server
 
-	loginLimiter *loginRateLimiter
-	started      bool
-	closed       atomic.Bool
-	gcStop       chan struct{}
-	gcDone       chan struct{}
+	loginLimiter      *loginRateLimiter
+	defaultMetrics    string
+	defaultGCInterval time.Duration
+	started           bool
+	closed            atomic.Bool
+	gcStop            chan struct{}
+	gcDone            chan struct{}
 }
 
 type serverState struct {
@@ -95,10 +94,15 @@ type preparedServer struct {
 	listener net.Listener
 }
 
-type ConfigSnapshot struct {
-	Generation uint64         `json:"generation"`
-	Config     *config.Config `json:"config"`
-	YAML       string         `json:"yaml"`
+type runtimeHandler struct {
+	http.Handler
+	close func()
+}
+
+func (h runtimeHandler) Close() {
+	if h.close != nil {
+		h.close()
+	}
 }
 
 type Options struct {
@@ -110,14 +114,22 @@ type Options struct {
 	GCInterval   time.Duration
 }
 
+type revisionState struct {
+	Generation uint64 `json:"generation"`
+}
+
+type instanceIndexDocument struct {
+	Instances []config.InstanceSummary `json:"instances" yaml:"instances"`
+}
+
 func DefaultOptions() Options {
 	return Options{
 		Backend:      DefaultBackend,
 		Bind:         DefaultBind,
-		Password:     "",
-		MetricsToken: "",
 		MetricsPath:  DefaultMetricsPath,
 		GCInterval:   mustDefaultDuration("DefaultGCInterval", DefaultGCInterval),
+		Password:     "",
+		MetricsToken: "",
 	}
 }
 
@@ -127,14 +139,6 @@ func mustDefaultDuration(name, value string) time.Duration {
 		panic(fmt.Sprintf("invalid %s %q: %v", name, value, err))
 	}
 	return duration
-}
-
-func defaultConfigMaxBytes() int {
-	value, err := strconv.Atoi(DefaultConfigMaxBytes)
-	if err != nil || value <= 0 {
-		panic(fmt.Sprintf("invalid DefaultConfigMaxBytes %q", DefaultConfigMaxBytes))
-	}
-	return value
 }
 
 func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
@@ -147,9 +151,6 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 	if options.MetricsPath == "" {
 		options.MetricsPath = DefaultMetricsPath
 	}
-	if err := validateMetricsPath(options.MetricsPath); err != nil {
-		return nil, err
-	}
 	if options.GCInterval <= 0 {
 		options.GCInterval = mustDefaultDuration("DefaultGCInterval", DefaultGCInterval)
 	}
@@ -160,7 +161,7 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, generation, err := loadOrInitConfig(ctx, store)
+	global, instances, generation, err := loadOrInitState(ctx, store, proxydriver.Default, options.MetricsPath, options.GCInterval)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
@@ -168,27 +169,32 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 	metricsReg := prometheus.NewRegistry()
 	metricsReg.MustRegister(newBlobfsCollector(store))
 	runtime := &Runtime{
-		bind:         options.Bind,
-		backend:      options.Backend,
-		password:     options.Password,
-		metricsToken: options.MetricsToken,
-		metricsPath:  options.MetricsPath,
-		gcInterval:   options.GCInterval,
-		store:        store,
-		stats:        proxy.NewStats(metricsReg),
-		metricsReg:   metricsReg,
-		config:       cfg,
-		generation:   generation,
-		loginLimiter: newLoginRateLimiter(),
-		gcStop:       make(chan struct{}),
-		gcDone:       make(chan struct{}),
+		bind:              options.Bind,
+		backend:           options.Backend,
+		password:          options.Password,
+		metricsToken:      options.MetricsToken,
+		store:             store,
+		stats:             proxy.NewStats(metricsReg),
+		metricsReg:        metricsReg,
+		registry:          proxydriver.Default,
+		global:            global,
+		instances:         instances,
+		generation:        generation,
+		bindServers:       map[string]*http.Server{},
+		loginLimiter:      newLoginRateLimiter(),
+		defaultMetrics:    options.MetricsPath,
+		defaultGCInterval: options.GCInterval,
+		gcStop:            make(chan struct{}),
+		gcDone:            make(chan struct{}),
 	}
-	if err := runtime.buildMainHandler(cfg); err != nil {
+	state, err := runtime.buildServerState(instances)
+	if err != nil {
 		_ = store.Close()
 		return nil, err
 	}
-	runtime.mainSrv = &http.Server{Addr: runtime.bind, Handler: runtime.mainHandler}
-	go runtime.gcLoop(options.GCInterval)
+	runtime.applyServerState(state)
+	runtime.mainSrv = &http.Server{Addr: runtime.bind, Handler: http.HandlerFunc(runtime.serveMain)}
+	go runtime.gcLoop()
 	return runtime, nil
 }
 
@@ -198,46 +204,42 @@ func (r *Runtime) Start() error {
 		r.mu.RUnlock()
 		return nil
 	}
+	bindHandlers := make(map[string]http.Handler, len(r.bindHandlers))
+	for addr, handler := range r.bindHandlers {
+		bindHandlers[addr] = handler
+	}
 	r.mu.RUnlock()
 
 	mainLn, err := net.Listen("tcp", r.bind)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", r.bind, err)
 	}
-
-	bindServers := []*http.Server{}
-	bindListeners := []net.Listener{}
-	r.mu.RLock()
-	for addr := range r.bindHandlers {
-		bindServers = append(bindServers, &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			r.serveBind(addr, w, req)
-		})})
-	}
-	r.mu.RUnlock()
-	for _, srv := range bindServers {
-		ln, listenErr := net.Listen("tcp", srv.Addr)
+	prepared := map[string]preparedServer{}
+	for addr := range bindHandlers {
+		listener, listenErr := net.Listen("tcp", addr)
 		if listenErr != nil {
 			_ = mainLn.Close()
-			for _, opened := range bindListeners {
-				_ = opened.Close()
-			}
-			return fmt.Errorf("listen %s: %w", srv.Addr, listenErr)
+			closePreparedServers(prepared)
+			return fmt.Errorf("listen %s: %w", addr, listenErr)
 		}
-		bindListeners = append(bindListeners, ln)
+		prepared[addr] = preparedServer{
+			server:   &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serveBind(addr, w, req) })},
+			listener: listener,
+		}
 	}
 
 	r.mu.Lock()
 	if r.started {
 		r.mu.Unlock()
 		_ = mainLn.Close()
-		for _, ln := range bindListeners {
-			_ = ln.Close()
-		}
+		closePreparedServers(prepared)
 		return nil
 	}
 	r.mainListener = mainLn
-	r.bindServers = bindServers
 	r.started = true
+	for addr, item := range prepared {
+		r.bindServers[addr] = item.server
+	}
 	r.mu.Unlock()
 
 	go func() {
@@ -245,12 +247,12 @@ func (r *Runtime) Start() error {
 			slog.Error("main server error", "addr", r.bind, "err", err)
 		}
 	}()
-	for i, srv := range bindServers {
-		go func(server *http.Server, ln net.Listener) {
-			if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	for _, item := range prepared {
+		go func(server *http.Server, listener net.Listener) {
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("bind server error", "addr", server.Addr, "err", err)
 			}
-		}(srv, bindListeners[i])
+		}(item.server, item.listener)
 	}
 	return nil
 }
@@ -266,11 +268,16 @@ func (r *Runtime) Close(ctx context.Context) error {
 	var joined error
 	r.mu.RLock()
 	mainSrv := r.mainSrv
-	bindServers := append([]*http.Server(nil), r.bindServers...)
+	bindServers := make([]*http.Server, 0, len(r.bindServers))
+	for _, srv := range r.bindServers {
+		bindServers = append(bindServers, srv)
+	}
 	handlers := append([]closeableHandler(nil), r.handlers...)
 	r.mu.RUnlock()
 
-	joined = errors.Join(joined, mainSrv.Shutdown(ctx))
+	if mainSrv != nil {
+		joined = errors.Join(joined, mainSrv.Shutdown(ctx))
+	}
 	for _, srv := range bindServers {
 		joined = errors.Join(joined, srv.Shutdown(ctx))
 	}
@@ -280,138 +287,24 @@ func (r *Runtime) Close(ctx context.Context) error {
 	return errors.Join(joined, r.store.Close())
 }
 
-func (r *Runtime) Snapshot(ctx context.Context) (*ConfigSnapshot, error) {
-	data, generation, err := readConfigObject(ctx, r.store)
-	if err != nil {
-		return nil, err
+func (r *Runtime) serveMain(w http.ResponseWriter, req *http.Request) {
+	switch {
+	case req.Method == http.MethodPost && req.URL.Path == "/-/api/login":
+		r.loginHandler(w, req)
+		return
+	case req.Method == http.MethodPost && req.URL.Path == "/-/api/logout":
+		r.logoutHandler(w, req)
+		return
+	case req.Method == http.MethodGet && req.URL.Path == "/-/api/public/instances":
+		r.publicInstancesAPI(w, req)
+		return
+	case req.Method == http.MethodGet && req.URL.Path == r.metricsPath():
+		metricsAuthMiddleware(r.metricsToken, promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, r.metricsReg}, promhttp.HandlerOpts{})).ServeHTTP(w, req)
+		return
+	case strings.HasPrefix(req.URL.Path, "/-/api/"):
+		adminAuthMiddleware(r.password, http.HandlerFunc(r.serveAPI)).ServeHTTP(w, req)
+		return
 	}
-	cfg, err := parseConfig(data)
-	if err != nil {
-		return nil, err
-	}
-	return &ConfigSnapshot{Generation: generation, Config: cfg, YAML: string(data)}, nil
-}
-
-func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *config.Config) (*ConfigSnapshot, error) {
-	r.mu.RLock()
-	currentGeneration := r.generation
-	r.mu.RUnlock()
-	if generation != currentGeneration {
-		return nil, conflictError("config generation changed")
-	}
-	r.preserveStartupOnlyConfig(cfg)
-	r.preserveMaskedCredentials(cfg)
-
-	// 记录旧实例名列表，用于后续清理被删除实例的缓存
-	r.mu.RLock()
-	oldInstanceNames := make(map[string]struct{}, len(r.config.Instances))
-	for name := range r.config.Instances {
-		oldInstanceNames[name] = struct{}{}
-	}
-	r.mu.RUnlock()
-
-	state, err := r.buildServerState(cfg)
-	if err != nil {
-		return nil, err
-	}
-	newBindServers, removedBindServers, err := r.prepareBindServers(state)
-	if err != nil {
-		return nil, err
-	}
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		closePreparedServers(newBindServers)
-		return nil, err
-	}
-	if len(data) > defaultConfigMaxBytes() {
-		closePreparedServers(newBindServers)
-		return nil, errors.New("config is too large")
-	}
-	if _, err = r.store.Put(ctx, systemTenant, configPath, bytes.NewReader(data), map[string]string{"type": "config", "updated-at": time.Now().UTC().Format(time.RFC3339)}); err != nil {
-		closePreparedServers(newBindServers)
-		return nil, err
-	}
-	next, nextGen, err := loadConfig(ctx, r.store)
-	if err != nil {
-		closePreparedServers(newBindServers)
-		return nil, err
-	}
-	r.mu.Lock()
-	oldHandlers := append([]closeableHandler(nil), r.handlers...)
-	r.config = next
-	r.generation = nextGen
-	r.applyServerState(state)
-	if r.started {
-		for _, prepared := range newBindServers {
-			prepared.start()
-			r.bindServers = append(r.bindServers, prepared.server)
-		}
-		for _, removed := range removedBindServers {
-			for i, srv := range r.bindServers {
-				if srv.Addr == removed.Addr {
-					r.bindServers = append(r.bindServers[:i], r.bindServers[i+1:]...)
-					break
-				}
-			}
-		}
-	}
-	r.mu.Unlock()
-
-	shutdownServerListWithTimeout(removedBindServers)
-	for _, handler := range oldHandlers {
-		handler.Close()
-	}
-
-	// 清理被删除实例的缓存数据
-	for name := range oldInstanceNames {
-		if _, exists := cfg.Instances[name]; !exists {
-			if delErr := r.store.DeleteTenant(ctx, name); delErr != nil && !errors.Is(delErr, fs.ErrNotExist) {
-				slog.Warn("清理实例缓存失败", "instance", name, "error", delErr)
-			}
-		}
-	}
-
-	return &ConfigSnapshot{Generation: nextGen, Config: next, YAML: string(data)}, nil
-}
-
-func (r *Runtime) buildMainHandler(cfg *config.Config) error {
-	state, err := r.buildServerState(cfg)
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	r.applyServerState(state)
-	r.mu.Unlock()
-
-	apiMux := http.NewServeMux()
-	apiMux.HandleFunc("/-/api/runtime", r.runtimeAPI)
-	apiMux.HandleFunc("/-/api/config", r.configAPI)
-	apiMux.HandleFunc("/-/api/config/validate", r.validateAPI)
-	apiMux.HandleFunc("/-/api/config/reset", r.resetAPI)
-	apiMux.HandleFunc("/-/api/instances", r.instancesAPI)
-	apiMux.HandleFunc("/-/api/instances/export", r.instancesExportAPI)
-	apiMux.HandleFunc("/-/api/instances/import", r.instancesImportAPI)
-	apiMux.HandleFunc("/-/api/metrics/stats", r.metricsStatsAPI)
-	apiMux.HandleFunc("/-/api/storage/stats", r.storageStatsAPI)
-	apiMux.HandleFunc("/-/api/storage/gc", r.storageGCAPI)
-	apiMux.HandleFunc("/-/api/cache/lookup", r.cacheLookupAPI)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /-/api/login", r.loginHandler)
-	mux.HandleFunc("POST /-/api/logout", r.logoutHandler)
-	mux.HandleFunc("GET /-/api/public/instances", r.publicInstancesAPI)
-	mux.Handle("GET "+r.metricsPath, metricsAuthMiddleware(r.metricsToken,
-		promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, r.metricsReg}, promhttp.HandlerOpts{})))
-	mux.Handle("/-/api/", adminAuthMiddleware(r.password, apiMux))
-	mux.HandleFunc("/", r.serveRoot)
-
-	r.mu.Lock()
-	r.mainHandler = mux
-	r.mu.Unlock()
-	return nil
-}
-
-func (r *Runtime) serveRoot(w http.ResponseWriter, req *http.Request) {
 	if prefix := r.matchProxyPrefix(req.URL.Path); prefix != "" {
 		r.servePathProxyAt(w, req, prefix)
 		return
@@ -419,12 +312,96 @@ func (r *Runtime) serveRoot(w http.ResponseWriter, req *http.Request) {
 	r.serveSPA(w, req)
 }
 
+func (r *Runtime) serveSPA(w http.ResponseWriter, req *http.Request) {
+	assets := web.Assets()
+	filePath := strings.TrimPrefix(req.URL.Path, "/")
+	if filePath == "" {
+		filePath = "index.html"
+	}
+	if stat, err := fs.Stat(assets, filePath); err == nil && !stat.IsDir() {
+		http.FileServerFS(assets).ServeHTTP(w, req)
+		return
+	}
+	req.URL.Path = "/index.html"
+	http.FileServerFS(assets).ServeHTTP(w, req)
+}
+
+func (r *Runtime) metricsPath() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.global != nil && strings.TrimSpace(r.global.Metrics.Path) != "" {
+		return r.global.Metrics.Path
+	}
+	return r.defaultMetrics
+}
+
+func (r *Runtime) gcInterval() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.global != nil && r.global.Storage.GC.Blob > 0 {
+		return r.global.Storage.GC.Blob.Duration()
+	}
+	return r.defaultGCInterval
+}
+
+func (r *Runtime) gcLoop() {
+	defer close(r.gcDone)
+	for {
+		interval := r.gcInterval()
+		if interval <= 0 {
+			interval = r.defaultGCInterval
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-r.gcStop:
+			timer.Stop()
+			return
+		case <-timer.C:
+			if _, err := r.store.RunGC(context.Background(), blobfs.GCOptions{Compact: true}); err != nil {
+				slog.Warn("blob gc failed", "err", err)
+			}
+		}
+	}
+}
+
+func (r *Runtime) buildServerState(instances map[string]config.InstanceSpec) (*serverState, error) {
+	handlers := []closeableHandler{}
+	pathHandlers := map[string]http.Handler{}
+	bindHandlers := map[string]http.Handler{}
+	for _, name := range sortedInstanceNames(instances) {
+		spec := instances[name]
+		if !spec.Meta.Enabled {
+			continue
+		}
+		handler, err := r.newInstanceHandler(name, spec)
+		if err != nil {
+			for _, current := range handlers {
+				current.Close()
+			}
+			return nil, err
+		}
+		handlers = append(handlers, handler)
+		if spec.Route.Path != "" {
+			pathHandlers["/"+strings.Trim(spec.Route.Path, "/")] = handler
+		} else {
+			bindHandlers[spec.Route.Bind] = handler
+		}
+	}
+	return &serverState{handlers: handlers, pathHandlers: pathHandlers, bindHandlers: bindHandlers}, nil
+}
+
+func (r *Runtime) applyServerState(state *serverState) {
+	r.handlers = state.handlers
+	r.pathHandlers = state.pathHandlers
+	r.bindHandlers = state.bindHandlers
+}
+
 func (r *Runtime) matchProxyPrefix(target string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	prefixes := make([]string, 0, len(r.pathHandlers))
-	for p := range r.pathHandlers {
-		prefixes = append(prefixes, p)
+	for prefix := range r.pathHandlers {
+		prefixes = append(prefixes, prefix)
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(prefixes)))
 	for _, prefix := range prefixes {
@@ -449,86 +426,6 @@ func (r *Runtime) servePathProxyAt(w http.ResponseWriter, req *http.Request, pre
 	http.StripPrefix(prefix, handler).ServeHTTP(w, next)
 }
 
-func (r *Runtime) serveSPA(w http.ResponseWriter, req *http.Request) {
-	assets := web.Assets()
-	filePath := strings.TrimPrefix(req.URL.Path, "/")
-	if filePath == "" {
-		filePath = "index.html"
-	}
-	// For root directory files, check embed first
-	if stat, err := fs.Stat(assets, filePath); err == nil && !stat.IsDir() {
-		http.FileServerFS(assets).ServeHTTP(w, req)
-		return
-	}
-	// Fallback to index.html for SPA routing
-	req.URL.Path = "/index.html"
-	http.FileServerFS(assets).ServeHTTP(w, req)
-}
-
-func (r *Runtime) buildServerState(cfg *config.Config) (*serverState, error) {
-	if err := r.validateConfig(cfg); err != nil {
-		return nil, err
-	}
-	handlers := []closeableHandler{}
-	pathHandlers := map[string]http.Handler{}
-	bindHandlers := map[string]http.Handler{}
-	for _, instanceName := range sortedInstanceNames(cfg.Instances) {
-		instance := cfg.Instances[instanceName]
-		handler, err := r.newInstanceHandler(instanceName, instance)
-		if err != nil {
-			return nil, err
-		}
-		handlers = append(handlers, handler)
-		if instance.Listen.Path != "" {
-			pathHandlers["/"+strings.Trim(instance.Listen.Path, "/")] = handler
-		} else {
-			bindHandlers[instance.Listen.Bind] = handler
-		}
-	}
-	return &serverState{handlers: handlers, pathHandlers: pathHandlers, bindHandlers: bindHandlers}, nil
-}
-
-func (r *Runtime) applyServerState(state *serverState) {
-	r.handlers = state.handlers
-	r.pathHandlers = state.pathHandlers
-	r.bindHandlers = state.bindHandlers
-}
-
-func (r *Runtime) prepareBindServers(state *serverState) (map[string]preparedServer, []*http.Server, error) {
-	r.mu.RLock()
-	started := r.started
-	currentAddrs := map[string]*http.Server{}
-	for _, srv := range r.bindServers {
-		currentAddrs[srv.Addr] = srv
-	}
-	r.mu.RUnlock()
-	if !started {
-		return nil, nil, nil
-	}
-	newServers := map[string]preparedServer{}
-	for addr := range state.bindHandlers {
-		if currentAddrs[addr] != nil {
-			continue
-		}
-		listener, err := net.Listen("tcp", addr)
-		if err != nil {
-			closePreparedServers(newServers)
-			return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
-		}
-		newServers[addr] = preparedServer{
-			server:   &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serveBind(addr, w, req) })},
-			listener: listener,
-		}
-	}
-	removed := []*http.Server{}
-	for addr, srv := range currentAddrs {
-		if state.bindHandlers[addr] == nil {
-			removed = append(removed, srv)
-		}
-	}
-	return newServers, removed, nil
-}
-
 func (r *Runtime) serveBind(addr string, w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	handler := r.bindHandlers[addr]
@@ -540,6 +437,53 @@ func (r *Runtime) serveBind(addr string, w http.ResponseWriter, req *http.Reques
 	handler.ServeHTTP(w, req)
 }
 
+func (r *Runtime) newInstanceHandler(name string, spec config.InstanceSpec) (closeableHandler, error) {
+	resolved, err := r.registry.Resolve(spec)
+	if err != nil {
+		return nil, err
+	}
+	handler, closeFn, err := resolved.Driver.NewHandler(name, resolved, r.store, r.stats)
+	if err != nil {
+		return nil, err
+	}
+	return runtimeHandler{Handler: handler, close: closeFn}, nil
+}
+
+func (r *Runtime) prepareBindServers(state *serverState) (map[string]preparedServer, []*http.Server, error) {
+	r.mu.RLock()
+	started := r.started
+	current := make(map[string]*http.Server, len(r.bindServers))
+	for addr, srv := range r.bindServers {
+		current[addr] = srv
+	}
+	r.mu.RUnlock()
+	if !started {
+		return nil, nil, nil
+	}
+	added := map[string]preparedServer{}
+	for addr := range state.bindHandlers {
+		if current[addr] != nil {
+			continue
+		}
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			closePreparedServers(added)
+			return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
+		}
+		added[addr] = preparedServer{
+			server:   &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { r.serveBind(addr, w, req) })},
+			listener: listener,
+		}
+	}
+	removed := []*http.Server{}
+	for addr, srv := range current {
+		if state.bindHandlers[addr] == nil {
+			removed = append(removed, srv)
+		}
+	}
+	return added, removed, nil
+}
+
 func (p preparedServer) start() {
 	go func() {
 		if err := p.server.Serve(p.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -549,8 +493,8 @@ func (p preparedServer) start() {
 }
 
 func closePreparedServers(servers map[string]preparedServer) {
-	for _, prepared := range servers {
-		_ = prepared.listener.Close()
+	for _, server := range servers {
+		_ = server.listener.Close()
 	}
 }
 
@@ -562,591 +506,97 @@ func shutdownServerListWithTimeout(servers []*http.Server) {
 	}
 }
 
-func (r *Runtime) preserveStartupOnlyConfig(cfg *config.Config) {
+func (r *Runtime) replaceState(ctx context.Context, generation uint64, global *config.GlobalConfig, instances map[string]config.InstanceSpec, changed []config.InstanceSpec, removed []string) (uint64, error) {
 	r.mu.RLock()
-	current := r.config
+	currentGeneration := r.generation
 	r.mu.RUnlock()
-	if cfg == nil || current == nil {
-		return
+	if generation != currentGeneration {
+		return 0, conflictError("config generation changed")
 	}
-	cfg.Version = current.Version
-	cfg.Server = current.Server
-	cfg.Storage = current.Storage
-}
-
-func (r *Runtime) preserveMaskedCredentials(cfg *config.Config) {
-	r.mu.RLock()
-	current := r.config
-	r.mu.RUnlock()
-	if cfg == nil || current == nil {
-		return
+	if err := validateGlobalConfig(global, r.defaultMetrics, r.defaultGCInterval); err != nil {
+		return 0, err
 	}
-	const clearSentinel = "-"
-	for name, inst := range cfg.Instances {
-		if inst.OCI != nil && inst.OCI.Auth != nil {
-			auth := inst.OCI.Auth
-			if currentInst, ok := current.Instances[name]; ok && currentInst.OCI != nil && currentInst.OCI.Auth != nil {
-				currentAuth := currentInst.OCI.Auth
-				if auth.Password == "***" {
-					auth.Password = currentAuth.Password
-				} else if auth.Password == clearSentinel {
-					auth.Password = ""
-				}
-				if auth.Token == "***" {
-					auth.Token = currentAuth.Token
-				} else if auth.Token == clearSentinel {
-					auth.Token = ""
-				}
-			}
-			if auth.Type == "basic" && (auth.Password == "" || auth.Username == "") {
-				auth.Type = "none"
-				auth.Username = ""
-				auth.Password = ""
-			}
-			if auth.Type == "bearer" && auth.Token == "" {
-				auth.Type = "none"
-			}
-			cfg.Instances[name] = inst
-		}
+	if err := validateInstances(instances, r.registry, r.bind, global.Metrics.Path); err != nil {
+		return 0, err
 	}
-}
-
-func (r *Runtime) validateConfig(cfg *config.Config) error {
-	return validateConfig(cfg, r.bind, r.metricsPath)
-}
-
-func (r *Runtime) newInstanceHandler(name string, cfg config.InstanceConfig) (closeableHandler, error) {
-	if cfg.Mode == config.ModeGo {
-		return gomodproxy.NewHandler(name, cfg, r.store, r.stats)
-	}
-	resolver, err := newResolver(cfg)
+	state, err := r.buildServerState(instances)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return proxy.NewHandler(name, cfg, r.store, resolver, r.stats), nil
-}
-
-func newResolver(cfg config.InstanceConfig) (proxy.Resolver, error) {
-	switch cfg.Mode {
-	case config.ModeFile:
-		return fileproxy.New(cfg.Cache), nil
-	case config.ModeOCI:
-		return ociproxy.New(cfg.OCI), nil
-	case config.ModeNPM:
-		return npmproxy.New(cfg.NPM), nil
-	case config.ModeGo:
-		return nil, fmt.Errorf("go mode uses a dedicated handler")
-	default:
-		return nil, fmt.Errorf("unsupported mode %s", cfg.Mode)
-	}
-}
-
-func (r *Runtime) gcLoop(interval time.Duration) {
-	defer close(r.gcDone)
-	if interval <= 0 {
-		interval = 24 * time.Hour
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-r.gcStop:
-			return
-		case <-ticker.C:
-			if _, err := r.store.RunGC(context.Background(), blobfs.GCOptions{Compact: true}); err != nil {
-				slog.Warn("blob gc failed", "err", err)
-			}
-		}
-	}
-}
-
-func loadOrInitConfig(ctx context.Context, store *blobfs.Store) (*config.Config, uint64, error) {
-	cfg, generation, err := loadConfig(ctx, store)
-	if err == nil {
-		return cfg, generation, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, err
-	}
-	cfg = DefaultConfig()
-	data, err := yaml.Marshal(cfg)
+	addedServers, removedServers, err := r.prepareBindServers(state)
 	if err != nil {
-		return nil, 0, err
-	}
-	if _, err = store.Put(ctx, systemTenant, configPath, bytes.NewReader(data), map[string]string{"type": "config", "updated-at": time.Now().UTC().Format(time.RFC3339)}); err != nil {
-		return nil, 0, err
-	}
-	return loadConfig(ctx, store)
-}
-
-func validateMetricsPath(metricsPath string) error {
-	if !strings.HasPrefix(metricsPath, "/") || strings.Contains(metricsPath, "//") ||
-		strings.HasSuffix(metricsPath, "/") || strings.ContainsAny(metricsPath, " \t\r\n{}") {
-		return fmt.Errorf("invalid metrics path %q", metricsPath)
-	}
-	if metricsPath == "/" || metricsPath == "/-" || strings.HasPrefix(metricsPath, "/-/api/") {
-		return fmt.Errorf("metrics path %q conflicts with reserved routes", metricsPath)
-	}
-	return nil
-}
-
-func loadConfig(ctx context.Context, store *blobfs.Store) (*config.Config, uint64, error) {
-	data, generation, err := readConfigObject(ctx, store)
-	if err != nil {
-		return nil, 0, err
-	}
-	cfg, err := parseConfig(data)
-	return cfg, generation, err
-}
-
-func readConfigObject(ctx context.Context, store *blobfs.Store) ([]byte, uint64, error) {
-	reader, err := store.OpenObject(ctx, systemTenant, configPath)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer reader.Close()
-	info := reader.Info()
-	maxBytes := defaultConfigMaxBytes()
-	data, err := io.ReadAll(io.LimitReader(reader, int64(maxBytes)+1))
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(data) > maxBytes {
-		return nil, 0, errors.New("config is too large")
-	}
-	return data, info.Generation, nil
-}
-
-func parseConfig(data []byte) (*config.Config, error) {
-	cfg := &config.Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
-func DefaultConfig() *config.Config {
-	return &config.Config{
-		Version: 1,
-		Server:  config.ServerConfig{Metrics: config.MetricsConfig{Path: DefaultMetricsPath}},
-		Storage: config.StorageConfig{GC: config.GCConfig{Blob: config.Duration(mustDefaultDuration("DefaultGCInterval", DefaultGCInterval))}},
-		Instances: map[string]config.InstanceConfig{"example-files": {
-			Mode: config.ModeFile, Listen: config.ListenConfig{Path: "/files"}, Upstreams: []string{"https://example.com"},
-			ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter)),
-			Cache: config.CacheConfig{
-				DefaultPolicy: config.PolicyBypass,
-				Rules: []config.CacheRule{
-					{Match: "**/*.iso", Policy: config.PolicyImmutable, ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))},
-					{Match: "**/repodata/**", Policy: config.PolicyRevalidate},
-				},
-			},
-		}},
-	}
-}
-
-func cloneConfig(cfg *config.Config) *config.Config {
-	next := *cfg
-	next.Instances = map[string]config.InstanceConfig{}
-	for name, instance := range cfg.Instances {
-		next.Instances[name] = cloneInstanceConfig(instance)
-	}
-	return &next
-}
-
-func cloneInstanceConfig(instance config.InstanceConfig) config.InstanceConfig {
-	clone := instance
-	clone.Upstreams = append([]string(nil), instance.Upstreams...)
-	clone.PassHeaders = append([]string(nil), instance.PassHeaders...)
-	clone.Cache.Rules = append([]config.CacheRule(nil), instance.Cache.Rules...)
-	if instance.Transport != nil {
-		transport := *instance.Transport
-		clone.Transport = &transport
-	}
-	if instance.OCI != nil {
-		oci := *instance.OCI
-		oci.Rules = append([]config.OCICacheRule(nil), instance.OCI.Rules...)
-		if instance.OCI.Auth != nil {
-			auth := *instance.OCI.Auth
-			oci.Auth = &auth
+		for _, handler := range state.handlers {
+			handler.Close()
 		}
-		clone.OCI = &oci
+		return 0, err
 	}
-	if instance.NPM != nil {
-		npm := *instance.NPM
-		npm.Rules = append([]config.NPMCacheRule(nil), instance.NPM.Rules...)
-		clone.NPM = &npm
-	}
-	if instance.Go != nil {
-		goCfg := *instance.Go
-		goCfg.ProxiedSumDBs = append([]string(nil), instance.Go.ProxiedSumDBs...)
-		clone.Go = &goCfg
-	}
-	return clone
-}
 
-func ValidateConfig(cfg *config.Config, bind string) error {
-	if cfg == nil {
-		return errors.New("config is nil")
-	}
-	clone := cloneConfig(cfg)
-	return validateConfig(clone, bind, DefaultMetricsPath)
-}
-
-func validateConfig(cfg *config.Config, bind, metricsPath string) error {
-	if cfg == nil {
-		return errors.New("config is nil")
-	}
-	if cfg.Version == 0 {
-		cfg.Version = 1
-	}
-	if cfg.Storage.GC.Blob <= 0 {
-		cfg.Storage.GC.Blob = config.Duration(mustDefaultDuration("DefaultGCInterval", DefaultGCInterval))
-	}
-	if cfg.Server.Metrics.Path == "" {
-		cfg.Server.Metrics.Path = DefaultMetricsPath
-	}
-	binds := map[string]string{}
-	if bind != "" {
-		binds[bind] = "main"
-	}
-	paths := map[string]string{}
-	for instanceName, inst := range cfg.Instances {
-		if inst.ExpireAfter <= 0 {
-			inst.ExpireAfter = config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))
+	if err := writeYAMLObject(ctx, r.store, systemTenant, globalConfigPath, global); err != nil {
+		closePreparedServers(addedServers)
+		for _, handler := range state.handlers {
+			handler.Close()
 		}
-		if instanceName == "" || strings.ContainsAny(instanceName, `/\`) || instanceName == "." || instanceName == ".." {
-			return fmt.Errorf("invalid instance name %q", instanceName)
-		}
-		if inst.Mode != config.ModeFile && inst.Mode != config.ModeOCI && inst.Mode != config.ModeNPM && inst.Mode != config.ModeGo {
-			return fmt.Errorf("instance %s has unsupported mode %q", instanceName, inst.Mode)
-		}
-		if inst.Mode == config.ModeFile {
-			if inst.OCI != nil {
-				return fmt.Errorf("instance %s in file mode must not have oci config", instanceName)
+		return 0, err
+	}
+	for _, spec := range changed {
+		if err := writeInstanceSpec(ctx, r.store, r.registry, spec); err != nil {
+			closePreparedServers(addedServers)
+			for _, handler := range state.handlers {
+				handler.Close()
 			}
-			if inst.NPM != nil {
-				return fmt.Errorf("instance %s in file mode must not have npm config", instanceName)
-			}
-			if inst.Go != nil {
-				return fmt.Errorf("instance %s in file mode must not have go config", instanceName)
-			}
+			return 0, err
 		}
-		if inst.Mode == config.ModeOCI {
-			if inst.NPM != nil {
-				return fmt.Errorf("instance %s in oci mode must not have npm config", instanceName)
-			}
-			if inst.Go != nil {
-				return fmt.Errorf("instance %s in oci mode must not have go config", instanceName)
-			}
-		}
-		if inst.Mode == config.ModeNPM {
-			if inst.OCI != nil {
-				return fmt.Errorf("instance %s in npm mode must not have oci config", instanceName)
-			}
-			if inst.Go != nil {
-				return fmt.Errorf("instance %s in npm mode must not have go config", instanceName)
-			}
-		}
-		if inst.Mode == config.ModeGo {
-			if inst.OCI != nil {
-				return fmt.Errorf("instance %s in go mode must not have oci config", instanceName)
-			}
-			if inst.NPM != nil {
-				return fmt.Errorf("instance %s in go mode must not have npm config", instanceName)
-			}
-		}
-		if inst.Mode == config.ModeOCI && inst.Listen.Bind == "" {
-			return fmt.Errorf("instance %s in oci mode must use independent listen bind", instanceName)
-		}
-		if (inst.Listen.Path == "") == (inst.Listen.Bind == "") {
-			return fmt.Errorf("instance %s must set exactly one listen path or bind", instanceName)
-		}
-		if inst.Listen.Path != "" && (!strings.HasPrefix(inst.Listen.Path, "/") || strings.Contains(inst.Listen.Path, "//")) {
-			return fmt.Errorf("instance %s has invalid listen path", instanceName)
-		}
-		if inst.Listen.Path != "" {
-			listenPath := "/" + strings.Trim(inst.Listen.Path, "/")
-			if listenPath == "/" {
-				return fmt.Errorf("listen path %q conflicts with web UI root", listenPath)
-			}
-			if owner := paths[listenPath]; owner != "" {
-				return fmt.Errorf("listen path %s conflicts between %s and %s", listenPath, owner, instanceName)
-			}
-			if listenPath == "/-" || strings.HasPrefix(listenPath, "/-/") {
-				return fmt.Errorf("listen path %q conflicts with admin API prefix /-/", listenPath)
-			}
-			if listenPath == metricsPath {
-				return fmt.Errorf("listen path %q conflicts with metrics path", listenPath)
-			}
-			paths[listenPath] = instanceName
-		}
-		if inst.Listen.Bind != "" {
-			if err := validateBindAddress(inst.Listen.Bind); err != nil {
-				return fmt.Errorf("instance %s: %w", instanceName, err)
-			}
-			if existing := binds[inst.Listen.Bind]; existing != "" {
-				return fmt.Errorf("listen bind %s conflicts between %s and %s", inst.Listen.Bind, existing, instanceName)
-			}
-			binds[inst.Listen.Bind] = instanceName
-		}
-		if len(inst.Upstreams) == 0 {
-			return fmt.Errorf("instance %s has no upstreams", instanceName)
-		}
-		if inst.Mode == config.ModeOCI && len(inst.Upstreams) != 1 {
-			return fmt.Errorf("instance %s in oci mode must set exactly one upstream", instanceName)
-		}
-		if inst.Mode == config.ModeNPM && len(inst.Upstreams) != 1 {
-			return fmt.Errorf("instance %s in npm mode must set exactly one upstream", instanceName)
-		}
-		if inst.Mode != config.ModeFile && len(inst.PassHeaders) > 0 {
-			return fmt.Errorf("instance %s pass headers are only supported in file mode", instanceName)
-		}
-		if err := validatePassHeaders(inst.PassHeaders); err != nil {
-			return fmt.Errorf("instance %s: %w", instanceName, err)
-		}
-		if err := validateTransport(inst.Transport); err != nil {
-			return fmt.Errorf("instance %s: %w", instanceName, err)
-		}
-		for _, rawURL := range inst.Upstreams {
-			parsed, err := url.Parse(rawURL)
-			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-				return fmt.Errorf("instance %s has invalid upstream %q", instanceName, rawURL)
-			}
-			if inst.Mode == config.ModeOCI {
-				if _, err := containername.NewRegistry(parsed.Host); err != nil {
-					return fmt.Errorf("instance %s has invalid OCI registry %q: %w", instanceName, parsed.Host, err)
-				}
-			}
-		}
-		if err := validateCache(inst.Cache); err != nil {
-			return fmt.Errorf("instance %s: %w", instanceName, err)
-		}
-		if err := validateOCI(inst); err != nil {
-			return fmt.Errorf("instance %s: %w", instanceName, err)
-		}
-		if err := validateNPM(inst); err != nil {
-			return fmt.Errorf("instance %s: %w", instanceName, err)
-		}
-		if err := validateGo(inst); err != nil {
-			return fmt.Errorf("instance %s: %w", instanceName, err)
-		}
-		cfg.Instances[instanceName] = inst
 	}
-	return nil
+	for _, name := range removed {
+		if err := deleteInstanceConfig(ctx, r.store, name); err != nil {
+			closePreparedServers(addedServers)
+			for _, handler := range state.handlers {
+				handler.Close()
+			}
+			return 0, err
+		}
+	}
+	if err := writeYAMLObject(ctx, r.store, systemTenant, instanceIndexPath, buildIndexDocument(instances)); err != nil {
+		closePreparedServers(addedServers)
+		for _, handler := range state.handlers {
+			handler.Close()
+		}
+		return 0, err
+	}
+	nextGeneration := currentGeneration + 1
+	if err := writeJSONObject(ctx, r.store, systemTenant, revisionStatePath, revisionState{Generation: nextGeneration}); err != nil {
+		closePreparedServers(addedServers)
+		for _, handler := range state.handlers {
+			handler.Close()
+		}
+		return 0, err
+	}
+
+	r.mu.Lock()
+	oldHandlers := append([]closeableHandler(nil), r.handlers...)
+	r.global = config.CloneGlobal(global)
+	r.instances = config.CloneInstances(instances)
+	r.generation = nextGeneration
+	r.applyServerState(state)
+	if r.started {
+		for addr, item := range addedServers {
+			item.start()
+			r.bindServers[addr] = item.server
+		}
+		for _, srv := range removedServers {
+			delete(r.bindServers, srv.Addr)
+		}
+	}
+	r.mu.Unlock()
+
+	shutdownServerListWithTimeout(removedServers)
+	for _, handler := range oldHandlers {
+		handler.Close()
+	}
+	for _, name := range removed {
+		if err := r.store.DeleteTenant(ctx, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("delete instance tenant failed", "instance", name, "err", err)
+		}
+	}
+	return nextGeneration, nil
 }
-
-func validateBindAddress(bind string) error {
-	host, port, err := net.SplitHostPort(bind)
-	if err != nil {
-		return fmt.Errorf("invalid listen bind %q: must be host:port format", bind)
-	}
-	if port == "" {
-		return fmt.Errorf("invalid listen bind %q: port is required", bind)
-	}
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum < 1 || portNum > 65535 {
-		return fmt.Errorf("invalid listen bind %q: port must be 1-65535", bind)
-	}
-	if host != "" && host != "localhost" && net.ParseIP(host) == nil {
-		return fmt.Errorf("invalid listen bind %q: invalid host %q", bind, host)
-	}
-	return nil
-}
-
-func validateTransport(transport *config.TransportConfig) error {
-	if transport == nil {
-		return nil
-	}
-	if transport.Proxy != "" {
-		parsed, err := url.Parse(transport.Proxy)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5") {
-			return fmt.Errorf("invalid upstream proxy %q", transport.Proxy)
-		}
-	}
-	if transport.Timeout < 0 {
-		return errors.New("transport timeout must not be negative")
-	}
-	return nil
-}
-
-func validatePassHeaders(headers []string) error {
-	for _, header := range headers {
-		name := strings.TrimSpace(header)
-		if name == "" || strings.ContainsAny(name, " \t\r\n:") {
-			return fmt.Errorf("invalid pass header %q", header)
-		}
-	}
-	return nil
-}
-
-func validateOCI(inst config.InstanceConfig) error {
-	if inst.Mode != config.ModeOCI {
-		return nil
-	}
-	if inst.OCI == nil {
-		return errors.New("oci mode requires oci config to be set")
-	}
-	if inst.OCI.DefaultPolicy == "" {
-		inst.OCI.DefaultPolicy = config.PolicyBypass
-	}
-	if !validPolicy(inst.OCI.DefaultPolicy) {
-		return fmt.Errorf("invalid oci default policy %q", inst.OCI.DefaultPolicy)
-	}
-	for i, rule := range inst.OCI.Rules {
-		if strings.TrimSpace(rule.Match) == "" {
-			return fmt.Errorf("oci rule %d: match is empty", i)
-		}
-		if !doublestar.ValidatePattern(rule.Match) {
-			return fmt.Errorf("oci rule %d: invalid match %q", i, rule.Match)
-		}
-		if rule.Policy == "" {
-			rule.Policy = config.PolicyBypass
-		}
-		if !validPolicy(rule.Policy) {
-			return fmt.Errorf("oci rule %d: invalid policy %q", i, rule.Policy)
-		}
-		inst.OCI.Rules[i] = rule
-	}
-	if inst.OCI.Auth == nil {
-		return nil
-	}
-	switch strings.ToLower(inst.OCI.Auth.Type) {
-	case "", "none":
-		inst.OCI.Auth = nil
-	case "basic":
-		if inst.OCI.Auth.Username == "" {
-			return errors.New("oci basic auth username is empty")
-		}
-		if inst.OCI.Auth.Password == "" || inst.OCI.Auth.Password == "-" {
-			return errors.New("oci basic auth password is empty")
-		}
-	case "bearer":
-		if inst.OCI.Auth.Token == "" || inst.OCI.Auth.Token == "-" {
-			return errors.New("oci bearer auth token is empty")
-		}
-	default:
-		return fmt.Errorf("unsupported oci auth type %q", inst.OCI.Auth.Type)
-	}
-	return nil
-}
-
-func validateNPM(inst config.InstanceConfig) error {
-	if inst.Mode != config.ModeNPM {
-		return nil
-	}
-	if inst.NPM == nil {
-		return errors.New("npm mode requires npm config to be set")
-	}
-	if inst.NPM.DefaultPolicy == "" {
-		inst.NPM.DefaultPolicy = config.PolicyBypass
-	}
-	if !validPolicy(inst.NPM.DefaultPolicy) {
-		return fmt.Errorf("invalid npm default policy %q", inst.NPM.DefaultPolicy)
-	}
-	for i, rule := range inst.NPM.Rules {
-		if strings.TrimSpace(rule.Match) == "" {
-			return fmt.Errorf("npm rule %d: match is empty", i)
-		}
-		if !doublestar.ValidatePattern(rule.Match) {
-			return fmt.Errorf("npm rule %d: invalid match %q", i, rule.Match)
-		}
-		if rule.Policy == "" {
-			rule.Policy = config.PolicyBypass
-		}
-		if !validPolicy(rule.Policy) {
-			return fmt.Errorf("npm rule %d: invalid policy %q", i, rule.Policy)
-		}
-		if rule.ResourcePolicy == "" {
-			rule.ResourcePolicy = "*"
-		}
-		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != "metadata" && rule.ResourcePolicy != "tarball" {
-			return fmt.Errorf("npm rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
-		}
-		inst.NPM.Rules[i] = rule
-	}
-	return nil
-}
-
-func validateGo(inst config.InstanceConfig) error {
-	if inst.Mode != config.ModeGo {
-		return nil
-	}
-	if inst.Go == nil {
-		return errors.New("go mode requires go config to be set")
-	}
-	if inst.Cache.DefaultPolicy != "" || len(inst.Cache.Rules) > 0 {
-		return errors.New("go mode does not support generic cache rules")
-	}
-	if strings.TrimSpace(inst.Go.Private) != "" {
-		return errors.New("go private modules are not supported because they require local go execution")
-	}
-	if strings.TrimSpace(inst.Go.NoProxy) != "" {
-		return errors.New("go no_proxy is not supported because it requires local go execution")
-	}
-	if inst.Go.Direct {
-		return errors.New("go direct fallback is not supported because it requires local go execution")
-	}
-	if inst.Go.MaxDirectFetches != 0 {
-		return errors.New("go max_direct_fetches is not supported because direct fetch is disabled")
-	}
-	sumdb := strings.TrimSpace(inst.Go.SumDB)
-	if strings.ContainsAny(sumdb, "\r\n") {
-		return errors.New("go sumdb must not contain line breaks")
-	}
-	for i, sumdb := range inst.Go.ProxiedSumDBs {
-		if strings.TrimSpace(sumdb) == "" {
-			return fmt.Errorf("go proxied_sumdbs %d is empty", i)
-		}
-		if strings.ContainsAny(sumdb, "\r\n") {
-			return fmt.Errorf("go proxied_sumdbs %d must not contain line breaks", i)
-		}
-	}
-	if len(inst.Upstreams) == 0 {
-		return errors.New("go mode requires at least one HTTP GOPROXY upstream")
-	}
-	return nil
-}
-
-func validateCache(cache config.CacheConfig) error {
-	if cache.DefaultPolicy != "" && !validPolicy(cache.DefaultPolicy) {
-		return fmt.Errorf("invalid default policy %q", cache.DefaultPolicy)
-	}
-	if cache.FreshFor < 0 {
-		return errors.New("cache fresh_for must not be negative")
-	}
-	if cache.BusyPolicy != "" && cache.BusyPolicy != config.BusyPolicyBypass && cache.BusyPolicy != config.BusyPolicyStale {
-		return fmt.Errorf("invalid cache busy policy %q", cache.BusyPolicy)
-	}
-	for _, rule := range cache.Rules {
-		if strings.TrimSpace(rule.Match) == "" {
-			return errors.New("cache rule match is empty")
-		}
-		if !doublestar.ValidatePattern(rule.Match) {
-			return fmt.Errorf("invalid cache rule match %q", rule.Match)
-		}
-		if rule.Policy == "" {
-			return errors.New("cache rule policy is empty")
-		}
-		if !validPolicy(rule.Policy) {
-			return fmt.Errorf("invalid cache policy %q", rule.Policy)
-		}
-	}
-	return nil
-}
-
-func validPolicy(policy string) bool {
-	return policy == "" || policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
-}
-
-func sortedInstanceNames(instances map[string]config.InstanceConfig) []string {
-	names := make([]string, 0, len(instances))
-	for name := range instances {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-type conflictError string
-
-func (e conflictError) Error() string { return string(e) }
