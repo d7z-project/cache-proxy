@@ -9,7 +9,8 @@ export interface SelectOption<T extends string> {
 export const PROXY_MODE_OPTIONS: SelectOption<ProxyMode>[] = [
   { value: ProxyMode.File, label: '文件代理', description: '适合镜像站和制品仓库静态文件。' },
   { value: ProxyMode.Oci, label: '容器镜像代理', description: '适合容器镜像仓库。' },
-  { value: ProxyMode.Npm, label: 'npm 包代理', description: '适合 npm registry。' }
+  { value: ProxyMode.Npm, label: 'npm 包代理', description: '适合 npm registry。' },
+  { value: ProxyMode.Go, label: 'Go 模块代理', description: '适合 GOPROXY 模块缓存。' }
 ];
 
 export const CACHE_POLICY_OPTIONS: SelectOption<CachePolicy>[] = [

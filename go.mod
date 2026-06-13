@@ -5,14 +5,17 @@ go 1.25.0
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/google/go-containerregistry v0.21.6
+	github.com/goproxy/goproxy v0.26.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/mod v0.36.0
 	golang.org/x/sync v0.21.0
 	gopkg.d7z.net/blobfs v0.0.0-20260612062820-4d64b24f1228
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	github.com/aofei/backoff v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

@@ -29,6 +29,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
 	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	gomodproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
 	npmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
 	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
 	"gopkg.d7z.net/cache-proxy/web"
@@ -63,9 +64,9 @@ type Runtime struct {
 	mu           sync.RWMutex
 
 	mainHandler  http.Handler
-	handlers     []*proxy.Handler
-	pathHandlers map[string]*proxy.Handler
-	bindHandlers map[string]*proxy.Handler
+	handlers     []closeableHandler
+	pathHandlers map[string]http.Handler
+	bindHandlers map[string]http.Handler
 
 	mainListener net.Listener
 	mainSrv      *http.Server
@@ -79,9 +80,14 @@ type Runtime struct {
 }
 
 type serverState struct {
-	handlers     []*proxy.Handler
-	pathHandlers map[string]*proxy.Handler
-	bindHandlers map[string]*proxy.Handler
+	handlers     []closeableHandler
+	pathHandlers map[string]http.Handler
+	bindHandlers map[string]http.Handler
+}
+
+type closeableHandler interface {
+	http.Handler
+	Close()
 }
 
 type preparedServer struct {
@@ -261,7 +267,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	r.mu.RLock()
 	mainSrv := r.mainSrv
 	bindServers := append([]*http.Server(nil), r.bindServers...)
-	handlers := append([]*proxy.Handler(nil), r.handlers...)
+	handlers := append([]closeableHandler(nil), r.handlers...)
 	r.mu.RUnlock()
 
 	joined = errors.Join(joined, mainSrv.Shutdown(ctx))
@@ -331,7 +337,7 @@ func (r *Runtime) UpdateConfig(ctx context.Context, generation uint64, cfg *conf
 		return nil, err
 	}
 	r.mu.Lock()
-	oldHandlers := append([]*proxy.Handler(nil), r.handlers...)
+	oldHandlers := append([]closeableHandler(nil), r.handlers...)
 	r.config = next
 	r.generation = nextGen
 	r.applyServerState(state)
@@ -463,16 +469,15 @@ func (r *Runtime) buildServerState(cfg *config.Config) (*serverState, error) {
 	if err := r.validateConfig(cfg); err != nil {
 		return nil, err
 	}
-	handlers := []*proxy.Handler{}
-	pathHandlers := map[string]*proxy.Handler{}
-	bindHandlers := map[string]*proxy.Handler{}
+	handlers := []closeableHandler{}
+	pathHandlers := map[string]http.Handler{}
+	bindHandlers := map[string]http.Handler{}
 	for _, instanceName := range sortedInstanceNames(cfg.Instances) {
 		instance := cfg.Instances[instanceName]
-		resolver, err := newResolver(instance)
+		handler, err := r.newInstanceHandler(instanceName, instance)
 		if err != nil {
 			return nil, err
 		}
-		handler := proxy.NewHandler(instanceName, instance, r.store, resolver, r.stats)
 		handlers = append(handlers, handler)
 		if instance.Listen.Path != "" {
 			pathHandlers["/"+strings.Trim(instance.Listen.Path, "/")] = handler
@@ -610,6 +615,17 @@ func (r *Runtime) validateConfig(cfg *config.Config) error {
 	return validateConfig(cfg, r.bind, r.metricsPath)
 }
 
+func (r *Runtime) newInstanceHandler(name string, cfg config.InstanceConfig) (closeableHandler, error) {
+	if cfg.Mode == config.ModeGo {
+		return gomodproxy.NewHandler(name, cfg, r.store, r.stats)
+	}
+	resolver, err := newResolver(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return proxy.NewHandler(name, cfg, r.store, resolver, r.stats), nil
+}
+
 func newResolver(cfg config.InstanceConfig) (proxy.Resolver, error) {
 	switch cfg.Mode {
 	case config.ModeFile:
@@ -618,6 +634,8 @@ func newResolver(cfg config.InstanceConfig) (proxy.Resolver, error) {
 		return ociproxy.New(cfg.OCI), nil
 	case config.ModeNPM:
 		return npmproxy.New(cfg.NPM), nil
+	case config.ModeGo:
+		return nil, fmt.Errorf("go mode uses a dedicated handler")
 	default:
 		return nil, fmt.Errorf("unsupported mode %s", cfg.Mode)
 	}
@@ -758,6 +776,11 @@ func cloneInstanceConfig(instance config.InstanceConfig) config.InstanceConfig {
 		npm.Rules = append([]config.NPMCacheRule(nil), instance.NPM.Rules...)
 		clone.NPM = &npm
 	}
+	if instance.Go != nil {
+		goCfg := *instance.Go
+		goCfg.ProxiedSumDBs = append([]string(nil), instance.Go.ProxiedSumDBs...)
+		clone.Go = &goCfg
+	}
 	return clone
 }
 
@@ -794,7 +817,7 @@ func validateConfig(cfg *config.Config, bind, metricsPath string) error {
 		if instanceName == "" || strings.ContainsAny(instanceName, `/\`) || instanceName == "." || instanceName == ".." {
 			return fmt.Errorf("invalid instance name %q", instanceName)
 		}
-		if inst.Mode != config.ModeFile && inst.Mode != config.ModeOCI && inst.Mode != config.ModeNPM {
+		if inst.Mode != config.ModeFile && inst.Mode != config.ModeOCI && inst.Mode != config.ModeNPM && inst.Mode != config.ModeGo {
 			return fmt.Errorf("instance %s has unsupported mode %q", instanceName, inst.Mode)
 		}
 		if inst.Mode == config.ModeFile {
@@ -804,15 +827,32 @@ func validateConfig(cfg *config.Config, bind, metricsPath string) error {
 			if inst.NPM != nil {
 				return fmt.Errorf("instance %s in file mode must not have npm config", instanceName)
 			}
+			if inst.Go != nil {
+				return fmt.Errorf("instance %s in file mode must not have go config", instanceName)
+			}
 		}
 		if inst.Mode == config.ModeOCI {
 			if inst.NPM != nil {
 				return fmt.Errorf("instance %s in oci mode must not have npm config", instanceName)
 			}
+			if inst.Go != nil {
+				return fmt.Errorf("instance %s in oci mode must not have go config", instanceName)
+			}
 		}
 		if inst.Mode == config.ModeNPM {
 			if inst.OCI != nil {
 				return fmt.Errorf("instance %s in npm mode must not have oci config", instanceName)
+			}
+			if inst.Go != nil {
+				return fmt.Errorf("instance %s in npm mode must not have go config", instanceName)
+			}
+		}
+		if inst.Mode == config.ModeGo {
+			if inst.OCI != nil {
+				return fmt.Errorf("instance %s in go mode must not have oci config", instanceName)
+			}
+			if inst.NPM != nil {
+				return fmt.Errorf("instance %s in go mode must not have npm config", instanceName)
 			}
 		}
 		if inst.Mode == config.ModeOCI && inst.Listen.Bind == "" {
@@ -885,6 +925,9 @@ func validateConfig(cfg *config.Config, bind, metricsPath string) error {
 			return fmt.Errorf("instance %s: %w", instanceName, err)
 		}
 		if err := validateNPM(inst); err != nil {
+			return fmt.Errorf("instance %s: %w", instanceName, err)
+		}
+		if err := validateGo(inst); err != nil {
 			return fmt.Errorf("instance %s: %w", instanceName, err)
 		}
 		cfg.Instances[instanceName] = inst
@@ -1020,6 +1063,37 @@ func validateNPM(inst config.InstanceConfig) error {
 			return fmt.Errorf("npm rule %d: invalid resource_policy %q", i, rule.ResourcePolicy)
 		}
 		inst.NPM.Rules[i] = rule
+	}
+	return nil
+}
+
+func validateGo(inst config.InstanceConfig) error {
+	if inst.Mode != config.ModeGo {
+		return nil
+	}
+	if inst.Go == nil {
+		return errors.New("go mode requires go config to be set")
+	}
+	if inst.Cache.DefaultPolicy != "" || len(inst.Cache.Rules) > 0 {
+		return errors.New("go mode does not support generic cache rules")
+	}
+	if inst.Go.MaxDirectFetches < 0 {
+		return errors.New("go max_direct_fetches must not be negative")
+	}
+	sumdb := strings.TrimSpace(inst.Go.SumDB)
+	if strings.ContainsAny(sumdb, "\r\n") {
+		return errors.New("go sumdb must not contain line breaks")
+	}
+	for i, sumdb := range inst.Go.ProxiedSumDBs {
+		if strings.TrimSpace(sumdb) == "" {
+			return fmt.Errorf("go proxied_sumdbs %d is empty", i)
+		}
+		if strings.ContainsAny(sumdb, "\r\n") {
+			return fmt.Errorf("go proxied_sumdbs %d must not contain line breaks", i)
+		}
+	}
+	if !inst.Go.Direct && len(inst.Upstreams) == 0 {
+		return errors.New("go mode requires at least one upstream or direct fetch enabled")
 	}
 	return nil
 }

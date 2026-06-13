@@ -247,6 +247,59 @@
             <button type="button" class="btn btn-link p-0" (click)="addNpmRule()">添加包规则</button>
           </div>
         }
+
+        @if (draft.mode === ProxyMode.Go && draft.go) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">5</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">GOPROXY、SumDB 和私有模块行为。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">GOSUMDB</label>
+                <input class="form-control" name="goSumDB" [(ngModel)]="draft.go.sumdb" placeholder="sum.golang.org">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">GOPRIVATE</label>
+                <input class="form-control" name="goPrivate" [(ngModel)]="draft.go.private" placeholder="*.corp.example.com">
+              </div>
+            </div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">GONOPROXY</label>
+                <input class="form-control" name="goNoProxy" [(ngModel)]="draft.go.noProxy" placeholder="留空跟随 GOPRIVATE">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">GONOSUMDB</label>
+                <input class="form-control" name="goNoSumDB" [(ngModel)]="draft.go.noSumDB" placeholder="留空跟随 GOPRIVATE">
+              </div>
+            </div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">直连回退</label>
+                <select class="form-select" name="goDirect" [(ngModel)]="draft.go.direct">
+                  <option [ngValue]="true">允许 direct</option>
+                  <option [ngValue]="false">仅使用上游代理</option>
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">直连并发上限</label>
+                <input class="form-control" name="goMaxDirectFetches" type="number" min="0" [(ngModel)]="draft.go.maxDirectFetches" placeholder="8">
+              </div>
+            </div>
+            <div class="form-check mt-3">
+              <input class="form-check-input" type="checkbox" name="goDisableFetchHeader" [(ngModel)]="draft.go.disableModuleFetchHeader" id="goDisableFetchHeader">
+              <label class="form-check-label" for="goDisableFetchHeader">允许客户端使用 Disable-Module-Fetch 只读缓存</label>
+            </div>
+            <label class="form-label mt-3">代理 SumDB</label>
+            <div class="tag-field">
+              @for (s of proxiedSumDBs; track $index; let i = $index) {
+                <div class="tag-row">
+                  <input class="form-control" [ngModel]="proxiedSumDBs[i]" (ngModelChange)="proxiedSumDBs[i] = $event" [name]="'proxiedSumDB'+i" placeholder="sum.golang.org">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeProxiedSumDB(i)">×</button>
+                </div>
+              }
+              <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addProxiedSumDB()">+ 添加 SumDB</button>
+            </div>
+          </div>
+        }
       </div>
     </form>
   }

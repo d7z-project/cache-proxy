@@ -12,6 +12,7 @@ const (
 	ModeFile = "file"
 	ModeOCI  = "oci"
 	ModeNPM  = "npm"
+	ModeGo   = "go"
 
 	PolicyBypass     = "bypass"
 	PolicyImmutable  = "immutable"
@@ -52,6 +53,7 @@ type InstanceConfig struct {
 	Cache       CacheConfig      `json:"cache" yaml:"cache"`
 	OCI         *OCIConfig       `json:"oci,omitempty" yaml:"oci,omitempty"`
 	NPM         *NPMConfig       `json:"npm,omitempty" yaml:"npm,omitempty"`
+	Go          *GoConfig        `json:"go,omitempty" yaml:"go,omitempty"`
 	PassHeaders []string         `json:"passHeaders,omitempty" yaml:"pass_headers,omitempty"`
 	ExpireAfter Duration         `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
@@ -112,6 +114,17 @@ type NPMCacheRule struct {
 	Policy         string   `json:"policy" yaml:"policy"`
 	FreshFor       Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
 	ExpireAfter    Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+}
+
+type GoConfig struct {
+	SumDB                    string   `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
+	Private                  string   `json:"private,omitempty" yaml:"private,omitempty"`
+	NoProxy                  string   `json:"noProxy,omitempty" yaml:"no_proxy,omitempty"`
+	NoSumDB                  string   `json:"noSumDB,omitempty" yaml:"no_sumdb,omitempty"`
+	Direct                   bool     `json:"direct" yaml:"direct"`
+	MaxDirectFetches         int      `json:"maxDirectFetches,omitempty" yaml:"max_direct_fetches,omitempty"`
+	ProxiedSumDBs            []string `json:"proxiedSumDBs,omitempty" yaml:"proxied_sumdbs,omitempty"`
+	DisableModuleFetchHeader bool     `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
 }
 
 type Duration time.Duration

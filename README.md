@@ -6,7 +6,7 @@
 
 ## Features
 
-- File, OCI registry, and npm registry proxy modes.
+- File, OCI registry, npm registry, and Go module proxy modes.
 - Embedded Web UI for instance management.
 - Internal config stored in BlobFS as `_system/config.yaml`.
 - One main listener for the Web UI, Admin API, path-mounted proxies, and metrics.
@@ -19,7 +19,7 @@
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.25+
 - Node.js and npm
 
 ## Build
@@ -51,6 +51,12 @@ Path-mounted proxy instances are served on the same main listener:
 http://127.0.0.1:18080/files/
 ```
 
+Go modules can use a path-mounted instance directly:
+
+```bash
+GOPROXY=http://127.0.0.1:18080/go,direct go mod download
+```
+
 ## Options
 
 | Flag | Environment | Default | Description |
@@ -77,6 +83,10 @@ OCI mode proxies container registries. It uses a dedicated bind address because 
 ### npm
 
 npm mode proxies one npm registry upstream. Package metadata is rewritten so `dist.tarball` URLs point back to the proxy and tarball downloads stay cached.
+
+### Go
+
+Go mode implements the GOPROXY protocol through `github.com/goproxy/goproxy`. It uses configured HTTP upstream proxies such as `https://proxy.golang.org`, optional `direct` fallback, SumDB proxying, and BlobFS-backed persistent module cache.
 
 ## Cache Policies
 
@@ -125,6 +135,7 @@ go vet ./...
 ├── pkg/config
 ├── pkg/proxy
 ├── pkg/proxy/file
+├── pkg/proxy/gomod
 ├── pkg/proxy/oci
 ├── pkg/proxy/npm
 ├── pkg/server

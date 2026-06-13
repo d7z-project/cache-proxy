@@ -1,7 +1,8 @@
 export enum ProxyMode {
   File = 'file',
   Oci = 'oci',
-  Npm = 'npm'
+  Npm = 'npm',
+  Go = 'go'
 }
 
 export enum CachePolicy {
@@ -86,6 +87,7 @@ export interface InstanceConfig {
   cache: CacheConfig;
   oci?: OciConfig;
   npm?: NpmConfig;
+  go?: GoConfig;
   passHeaders?: string[];
   expireAfter?: string;
 }
@@ -139,6 +141,17 @@ export interface NpmCacheRule {
   policy: CachePolicy;
   freshFor?: string;
   expireAfter?: string;
+}
+
+export interface GoConfig {
+  sumdb?: string;
+  private?: string;
+  noProxy?: string;
+  noSumDB?: string;
+  direct: boolean;
+  maxDirectFetches?: number;
+  proxiedSumDBs?: string[];
+  disableModuleFetchHeader?: boolean;
 }
 
 export interface OciAuthConfig {

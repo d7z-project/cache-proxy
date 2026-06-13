@@ -12,6 +12,7 @@
           <button ngbDropdownItem (click)="startCreate('file')">文件代理</button>
           <button ngbDropdownItem (click)="startCreate('oci')">容器镜像代理</button>
           <button ngbDropdownItem (click)="startCreate('npm')">npm 包代理</button>
+          <button ngbDropdownItem (click)="startCreate('go')">Go 模块代理</button>
         </div>
       </div>
       <button type="button" class="btn btn-outline-secondary" (click)="showImportExport = true">导入导出</button>
@@ -77,6 +78,7 @@
                 @switch (lookupMode) {
                   @case (ProxyMode.Npm) { 包名 }
                   @case (ProxyMode.Oci) { 镜像名称 }
+                  @case (ProxyMode.Go) { Go 模块缓存路径 }
                   @default { 文件路径 }
                 }
               </label>
@@ -84,6 +86,7 @@
                 @switch (lookupMode) {
                   @case (ProxyMode.Npm) { 输入 npm 包名，如 @angular/core 或 lodash }
                   @case (ProxyMode.Oci) { 输入镜像名称，如 library/alpine:latest 或 nginx:1.25 }
+                  @case (ProxyMode.Go) { 输入 GOPROXY 路径，如 golang.org/x/mod/@v/list 或 golang.org/x/mod/@v/v0.36.0.mod }
                   @default { 输入代理时请求的文件路径，如 nginx.conf 或 assets/logo.png }
                 }
               </p>

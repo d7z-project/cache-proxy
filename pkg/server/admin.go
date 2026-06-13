@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -323,6 +324,13 @@ func (r *Runtime) cacheLookupAPI(resp http.ResponseWriter, req *http.Request) {
 			return
 		}
 		route, err = ociproxy.LookupRef(inst.OCI, lookupPath)
+	case config.ModeGo:
+		lookupPath = strings.TrimPrefix(path.Clean("/"+lookupPath), "/")
+		if lookupPath == "." || lookupPath == "" {
+			writeError(resp, http.StatusBadRequest, errors.New("path is required"))
+			return
+		}
+		route = proxy.Route{ObjectPath: "go/" + lookupPath, Policy: "goproxy"}
 	default:
 		resolver, resolveErr := newResolver(inst)
 		if resolveErr != nil {

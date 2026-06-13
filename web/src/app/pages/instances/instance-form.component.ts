@@ -42,6 +42,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   listenKind = ListenKind.Path;
   upstreams: string[] = [];
   passHeaders: string[] = [];
+  proxiedSumDBs: string[] = [];
 
   readonly cachePolicies = CACHE_POLICY_OPTIONS;
   readonly busyPolicies = BUSY_POLICY_OPTIONS;
@@ -73,6 +74,8 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   removeUpstream(index: number): void { if (this.upstreams.length > 1) this.upstreams.splice(index, 1); }
   addPassHeader(): void { this.passHeaders.push(''); }
   removePassHeader(index: number): void { this.passHeaders.splice(index, 1); }
+  addProxiedSumDB(): void { this.proxiedSumDBs.push(''); }
+  removeProxiedSumDB(index: number): void { this.proxiedSumDBs.splice(index, 1); }
 
   addRule(): void {
     this.draft?.cache.rules.push({ match: '**/*', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' });
@@ -134,6 +137,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
         this.listenKind = instance.listen.bind ? ListenKind.Bind : ListenKind.Path;
         this.upstreams = [...instance.upstreams];
         this.passHeaders = [...(instance.passHeaders ?? [])];
+        this.proxiedSumDBs = [...(instance.go?.proxiedSumDBs ?? [])];
         this.markSaved();
         this.toast.success(name + ' 已保存。');
         if (this.isCreate) {
@@ -192,13 +196,15 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
         return;
       }
     }
-    this.draftName = mode === ProxyMode.Oci ? 'dockerhub' : mode === ProxyMode.Npm ? 'npmjs' : 'files';
+    this.draftName = mode === ProxyMode.Oci ? 'dockerhub' : mode === ProxyMode.Npm ? 'npmjs' : mode === ProxyMode.Go ? 'golang' : 'files';
     this.listenKind = mode === ProxyMode.Oci ? ListenKind.Bind : ListenKind.Path;
     this.draft = this.defaultDraft(mode);
     this.upstreams = mode === ProxyMode.Oci ? ['https://registry-1.docker.io']
       : mode === ProxyMode.Npm ? ['https://registry.npmjs.org']
+      : mode === ProxyMode.Go ? ['https://proxy.golang.org']
       : ['https://example.com'];
     this.passHeaders = mode === ProxyMode.File ? ['Accept', 'Accept-Language'] : [];
+    this.proxiedSumDBs = mode === ProxyMode.Go ? ['sum.golang.org'] : [];
     this.markSaved();
   }
 
@@ -215,6 +221,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     this.listenKind = this.draft.listen.bind ? ListenKind.Bind : ListenKind.Path;
     this.upstreams = [...(this.draft.upstreams ?? [])];
     this.passHeaders = [...(this.draft.passHeaders ?? [])];
+    this.proxiedSumDBs = [...(this.draft.go?.proxiedSumDBs ?? [])];
     this.normalizeDraftDefaults();
     this.markSaved();
   }
@@ -225,7 +232,8 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       draft: this.draft,
       listenKind: this.listenKind,
       upstreams: this.upstreams,
-      passHeaders: this.passHeaders
+      passHeaders: this.passHeaders,
+      proxiedSumDBs: this.proxiedSumDBs
     });
   }
 
@@ -255,6 +263,12 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       this.draft.npm.defaultPolicy = this.draft.npm.defaultPolicy ?? CachePolicy.Revalidate;
       this.draft.npm.rules = this.draft.npm.rules ?? [];
     }
+    if (this.draft.mode === ProxyMode.Go) {
+      this.draft.go = this.draft.go ?? { sumdb: 'sum.golang.org', direct: true, maxDirectFetches: 8, proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true };
+      this.draft.go.sumdb = this.draft.go.sumdb ?? 'sum.golang.org';
+      this.draft.go.direct = this.draft.go.direct ?? true;
+      this.draft.go.proxiedSumDBs = this.draft.go.proxiedSumDBs ?? [];
+    }
   }
 
   private defaultDraft(mode: ProxyMode): InstanceConfig {
@@ -271,6 +285,14 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
         mode, listen: { path: '/npm' }, upstreams: ['https://registry.npmjs.org'], expireAfter: '720h',
         cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
         npm: { defaultPolicy: CachePolicy.Revalidate, rules: [] }, transport: {}
+      };
+    }
+    if (mode === ProxyMode.Go) {
+      return {
+        mode, listen: { path: '/go' }, upstreams: ['https://proxy.golang.org'], expireAfter: '8760h',
+        cache: { freshFor: '30s', busyPolicy: BusyPolicy.Bypass, rules: [] },
+        go: { sumdb: 'sum.golang.org', direct: true, maxDirectFetches: 8, proxiedSumDBs: ['sum.golang.org'], disableModuleFetchHeader: true },
+        transport: {}
       };
     }
     return {
@@ -302,14 +324,23 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       instance.oci = this.normalizeOci(instance.oci);
       delete instance.passHeaders;
       delete instance.npm;
+      delete instance.go;
     } else if (instance.mode === ProxyMode.Npm) {
       instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
       instance.npm = this.normalizeNpm(instance.npm);
       delete instance.oci;
       delete instance.passHeaders;
+      delete instance.go;
+    } else if (instance.mode === ProxyMode.Go) {
+      instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
+      instance.go = this.normalizeGo(instance.go);
+      delete instance.oci;
+      delete instance.npm;
+      delete instance.passHeaders;
     } else {
       delete instance.oci;
       delete instance.npm;
+      delete instance.go;
       instance.cache.defaultPolicy = instance.cache.defaultPolicy || CachePolicy.Bypass;
     }
     return instance;
@@ -351,6 +382,20 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (!npm) return { defaultPolicy: CachePolicy.Revalidate, rules: [] };
     npm.rules = this.normalizeRules(npm.rules);
     return npm;
+  }
+
+  private normalizeGo(go: InstanceConfig['go']): NonNullable<InstanceConfig['go']> {
+    const next = go ?? { direct: true };
+    next.sumdb = next.sumdb?.trim() || 'sum.golang.org';
+    next.private = next.private?.trim() || undefined;
+    next.noProxy = next.noProxy?.trim() || undefined;
+    next.noSumDB = next.noSumDB?.trim() || undefined;
+    next.maxDirectFetches = Number(next.maxDirectFetches || 0) > 0 ? Number(next.maxDirectFetches) : undefined;
+    next.proxiedSumDBs = this.proxiedSumDBs.map(s => s.trim()).filter(Boolean);
+    if (next.proxiedSumDBs.length === 0) delete next.proxiedSumDBs;
+    next.disableModuleFetchHeader = Boolean(next.disableModuleFetchHeader);
+    next.direct = Boolean(next.direct);
+    return next;
   }
 
   private normalizeTransport(t: InstanceConfig['transport']) {
@@ -426,6 +471,13 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
         if (!rule.match?.trim()) e.push(`包规则 #${i + 1} 的匹配模式不能为空。`);
         if (rule.freshFor?.trim() && !this.isValidDuration(rule.freshFor.trim())) e.push(`包规则 #${i + 1} 的快速命中时间格式无效。`);
         if (rule.expireAfter?.trim() && !this.isValidDuration(rule.expireAfter.trim())) e.push(`包规则 #${i + 1} 的缓存保留时间格式无效。`);
+      }
+    }
+    if (this.draft.mode === ProxyMode.Go && this.draft.go) {
+      if ((this.draft.go.maxDirectFetches ?? 0) < 0) e.push('Go 直连并发数不能为负数。');
+      if (this.draft.go.sumdb?.includes('\n') || this.draft.go.sumdb?.includes('\r')) e.push('Go SumDB 不能包含换行。');
+      for (const item of this.proxiedSumDBs.map(s => s.trim()).filter(Boolean)) {
+        if (item.includes('\n') || item.includes('\r')) e.push(`Go SumDB 代理项 ${item} 不能包含换行。`);
       }
     }
 

@@ -37,6 +37,7 @@ export class InstanceListComponent implements OnInit {
     switch (this.lookupMode) {
       case ProxyMode.Npm: return '@angular/core';
       case ProxyMode.Oci: return 'library/alpine:latest';
+      case ProxyMode.Go: return 'golang.org/x/mod/@v/list';
       default: return 'nginx.conf';
     }
   }
