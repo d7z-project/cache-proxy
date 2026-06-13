@@ -82,9 +82,9 @@ type CacheRule struct {
 }
 
 type OCIConfig struct {
-	DefaultPolicy string          `json:"defaultPolicy" yaml:"default_policy"`
-	Auth          *OCIAuthConfig  `json:"auth,omitempty" yaml:"auth,omitempty"`
-	Rules         []OCICacheRule  `json:"rules" yaml:"rules"`
+	DefaultPolicy string         `json:"defaultPolicy" yaml:"default_policy"`
+	Auth          *OCIAuthConfig `json:"auth,omitempty" yaml:"auth,omitempty"`
+	Rules         []OCICacheRule `json:"rules" yaml:"rules"`
 }
 
 type OCICacheRule struct {

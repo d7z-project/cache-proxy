@@ -8,10 +8,10 @@ import (
 )
 
 type metricsCollector struct {
-	requestsTotal        *prometheus.CounterVec
-	responseBytesTotal   *prometheus.CounterVec
+	requestsTotal         *prometheus.CounterVec
+	responseBytesTotal    *prometheus.CounterVec
 	upstreamRequestsTotal *prometheus.CounterVec
-	activeDownloads      *prometheus.GaugeVec
+	activeDownloads       *prometheus.GaugeVec
 }
 
 func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {

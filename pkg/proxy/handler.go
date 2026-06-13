@@ -84,17 +84,17 @@ func NewHandler(name string, cfg config.InstanceConfig, store *blobfs.Store, res
 		if !ok {
 			slog.Warn("cannot configure transport options, unexpected transport type", "instance", name)
 		} else {
-		if cfg.Transport.Proxy != "" {
-			proxyURL, err := url.Parse(cfg.Transport.Proxy)
-			if err == nil {
-				transport.Proxy = http.ProxyURL(proxyURL)
-			} else {
-				slog.Warn("invalid transport proxy URL", "instance", name, "proxy", cfg.Transport.Proxy, "err", err)
+			if cfg.Transport.Proxy != "" {
+				proxyURL, err := url.Parse(cfg.Transport.Proxy)
+				if err == nil {
+					transport.Proxy = http.ProxyURL(proxyURL)
+				} else {
+					slog.Warn("invalid transport proxy URL", "instance", name, "proxy", cfg.Transport.Proxy, "err", err)
+				}
 			}
-		}
-		if cfg.Transport.Timeout > 0 {
-			transport.DialContext = utils.DefaultDialContext(cfg.Transport.Timeout.Duration())
-		}
+			if cfg.Transport.Timeout > 0 {
+				transport.DialContext = utils.DefaultDialContext(cfg.Transport.Timeout.Duration())
+			}
 		}
 	}
 	return &Handler{name: name, cfg: cfg, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, ociTokens: map[string]ociToken{}}
@@ -291,9 +291,13 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
 	h.stats.AddActiveDownload(h.name, h.cfg.Mode, 1)
 	defer h.stats.AddActiveDownload(h.name, h.cfg.Mode, -1)
-	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{Record: true}, nil)
+	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.requestHeaders(req))
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Headers["X-Cache"] = "BYPASS"
+		return h.rewriteResponse(req, route, resp), nil
 	}
 	defer resp.Close()
 	tempFile, err := os.CreateTemp("", "cache-proxy-*")

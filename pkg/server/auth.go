@@ -144,29 +144,31 @@ func verifySession(password, token string) bool {
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
-	secure := r.TLS != nil || strings.HasPrefix(r.Host, "localhost") || strings.HasPrefix(r.Host, "127.")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(sessionMaxAge.Seconds()),
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	secure := r.TLS != nil || strings.HasPrefix(r.Host, "localhost") || strings.HasPrefix(r.Host, "127.")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+func requestIsHTTPS(req *http.Request) bool {
+	return req.TLS != nil || strings.EqualFold(req.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func extractSession(req *http.Request) string {

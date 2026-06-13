@@ -115,7 +115,8 @@ export class ImportExportModalComponent {
     }
     const invalid: string[] = [];
     for (const [name, inst] of Object.entries(instances)) {
-      if (!inst || typeof inst !== 'object' || !(inst as any).mode || !(inst as any).listen || !(inst as any).upstreams) {
+      const candidate = inst as Record<string, unknown> | null;
+      if (!candidate || typeof candidate !== 'object' || !candidate['mode'] || !candidate['listen'] || !candidate['upstreams']) {
         invalid.push(name);
       }
     }

@@ -9,7 +9,8 @@
 - File, OCI registry, and npm registry proxy modes.
 - Embedded Web UI for instance management.
 - Internal config stored in BlobFS as `_system/config.yaml`.
-- Separate admin, path-proxy, metrics, and instance bind listeners.
+- One main listener for the Web UI, Admin API, path-mounted proxies, and metrics.
+- Optional dedicated bind listeners per proxy instance.
 - Runtime instance create, update, delete, import, and export.
 - Cache policies: `bypass`, `immutable`, and `revalidate`.
 - Glob-based file cache rules using `github.com/bmatcuk/doublestar/v4`.
@@ -34,9 +35,8 @@ This builds the Angular UI first and embeds it into the Go binary.
 ```bash
 ./cache-proxy \
   -backend ./build/cache \
-  -admin 127.0.0.1:18080 \
-  -proxy-bind 127.0.0.1:18081 \
-  -metrics-bind 127.0.0.1:8911
+  -bind 127.0.0.1:18080 \
+  -metrics-path /-/metrics
 ```
 
 Open the admin UI:
@@ -45,10 +45,10 @@ Open the admin UI:
 http://127.0.0.1:18080/#/dashboard
 ```
 
-The shared path proxy listens on `-proxy-bind`:
+Path-mounted proxy instances are served on the same main listener:
 
 ```text
-http://127.0.0.1:18081/
+http://127.0.0.1:18080/files/
 ```
 
 ## Options
@@ -56,10 +56,10 @@ http://127.0.0.1:18081/
 | Flag | Environment | Default | Description |
 | --- | --- | --- | --- |
 | `-backend` | `CACHE_PROXY_BACKEND` | `/tmp/cache-proxy` | BlobFS backend directory. |
-| `-admin` | `CACHE_PROXY_ADMIN` | `127.0.0.1:18080` | Admin Web/API address. |
-| `-proxy-bind` | `CACHE_PROXY_PROXY_BIND` | `127.0.0.1:18081` | Shared path proxy address. |
-| `-metrics-bind` | `CACHE_PROXY_METRICS_BIND` | `127.0.0.1:8911` | Prometheus address. Empty disables metrics. |
-| `-metrics-path` | `CACHE_PROXY_METRICS_PATH` | `/metrics` | Prometheus path. |
+| `-bind` | `CACHE_PROXY_BIND` | `127.0.0.1:18080` | Main Web/API/path-proxy address. |
+| `-pass` | `CACHE_PROXY_PASS` | empty | Admin password. Empty disables authentication. |
+| `-metrics-token` | `CACHE_PROXY_METRICS_TOKEN` | empty | Metrics Bearer token. Empty disables metrics authentication. |
+| `-metrics-path` | `CACHE_PROXY_METRICS_PATH` | `/-/metrics` | Prometheus path on the main listener. |
 | `-gc-interval` | `CACHE_PROXY_GC_INTERVAL` | `24h` | BlobFS GC interval. |
 
 These are startup-only options. Runtime proxy instances are managed from the Web UI or Admin API.
@@ -95,16 +95,16 @@ npm mode proxies one npm registry upstream. Package metadata is rewritten so `di
 
 | Endpoint | Method | Description |
 | --- | --- | --- |
-| `/api/runtime` | `GET` | Runtime status. |
-| `/api/config` | `GET`, `PUT` | Read or replace config. |
-| `/api/config/validate` | `POST` | Validate config. |
-| `/api/config/reset` | `POST` | Reset config. |
-| `/api/instances` | `GET` | List instances. |
-| `/api/instances/export` | `GET` | Export instances. |
-| `/api/instances/import` | `POST` | Import instances. |
-| `/api/metrics/stats` | `GET` | JSON metrics snapshot. |
-| `/api/storage/stats` | `GET` | BlobFS stats. |
-| `/api/storage/gc` | `POST` | Run BlobFS GC. |
+| `/-/api/runtime` | `GET` | Runtime status. |
+| `/-/api/config` | `GET`, `PUT` | Read or replace config. |
+| `/-/api/config/validate` | `POST` | Validate config. |
+| `/-/api/config/reset` | `POST` | Reset config. |
+| `/-/api/instances` | `GET` | List instances. |
+| `/-/api/instances/export` | `GET` | Export instances. |
+| `/-/api/instances/import` | `POST` | Import instances. |
+| `/-/api/metrics/stats` | `GET` | JSON metrics snapshot. |
+| `/-/api/storage/stats` | `GET` | BlobFS stats. |
+| `/-/api/storage/gc` | `POST` | Run BlobFS GC. |
 
 ## Development
 

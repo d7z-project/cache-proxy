@@ -141,6 +141,9 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 	if options.MetricsPath == "" {
 		options.MetricsPath = DefaultMetricsPath
 	}
+	if err := validateMetricsPath(options.MetricsPath); err != nil {
+		return nil, err
+	}
 	if options.GCInterval <= 0 {
 		options.GCInterval = mustDefaultDuration("DefaultGCInterval", DefaultGCInterval)
 	}
@@ -391,7 +394,7 @@ func (r *Runtime) buildMainHandler(cfg *config.Config) error {
 	mux.HandleFunc("POST /-/api/login", r.loginHandler)
 	mux.HandleFunc("POST /-/api/logout", r.logoutHandler)
 	mux.HandleFunc("GET /-/api/public/instances", r.publicInstancesAPI)
-	mux.Handle("GET /-/metrics", metricsAuthMiddleware(r.metricsToken,
+	mux.Handle("GET "+r.metricsPath, metricsAuthMiddleware(r.metricsToken,
 		promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, r.metricsReg}, promhttp.HandlerOpts{})))
 	mux.Handle("/-/api/", adminAuthMiddleware(r.password, apiMux))
 	mux.HandleFunc("/", r.serveRoot)
@@ -604,7 +607,7 @@ func (r *Runtime) preserveMaskedCredentials(cfg *config.Config) {
 }
 
 func (r *Runtime) validateConfig(cfg *config.Config) error {
-	return validateConfig(cfg, r.bind)
+	return validateConfig(cfg, r.bind, r.metricsPath)
 }
 
 func newResolver(cfg config.InstanceConfig) (proxy.Resolver, error) {
@@ -644,6 +647,9 @@ func loadOrInitConfig(ctx context.Context, store *blobfs.Store) (*config.Config,
 	if err == nil {
 		return cfg, generation, nil
 	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, 0, err
+	}
 	cfg = DefaultConfig()
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -653,6 +659,17 @@ func loadOrInitConfig(ctx context.Context, store *blobfs.Store) (*config.Config,
 		return nil, 0, err
 	}
 	return loadConfig(ctx, store)
+}
+
+func validateMetricsPath(metricsPath string) error {
+	if !strings.HasPrefix(metricsPath, "/") || strings.Contains(metricsPath, "//") ||
+		strings.HasSuffix(metricsPath, "/") || strings.ContainsAny(metricsPath, " \t\r\n{}") {
+		return fmt.Errorf("invalid metrics path %q", metricsPath)
+	}
+	if metricsPath == "/" || metricsPath == "/-" || strings.HasPrefix(metricsPath, "/-/api/") {
+		return fmt.Errorf("metrics path %q conflicts with reserved routes", metricsPath)
+	}
+	return nil
 }
 
 func loadConfig(ctx context.Context, store *blobfs.Store) (*config.Config, uint64, error) {
@@ -713,9 +730,35 @@ func cloneConfig(cfg *config.Config) *config.Config {
 	next := *cfg
 	next.Instances = map[string]config.InstanceConfig{}
 	for name, instance := range cfg.Instances {
-		next.Instances[name] = instance
+		next.Instances[name] = cloneInstanceConfig(instance)
 	}
 	return &next
+}
+
+func cloneInstanceConfig(instance config.InstanceConfig) config.InstanceConfig {
+	clone := instance
+	clone.Upstreams = append([]string(nil), instance.Upstreams...)
+	clone.PassHeaders = append([]string(nil), instance.PassHeaders...)
+	clone.Cache.Rules = append([]config.CacheRule(nil), instance.Cache.Rules...)
+	if instance.Transport != nil {
+		transport := *instance.Transport
+		clone.Transport = &transport
+	}
+	if instance.OCI != nil {
+		oci := *instance.OCI
+		oci.Rules = append([]config.OCICacheRule(nil), instance.OCI.Rules...)
+		if instance.OCI.Auth != nil {
+			auth := *instance.OCI.Auth
+			oci.Auth = &auth
+		}
+		clone.OCI = &oci
+	}
+	if instance.NPM != nil {
+		npm := *instance.NPM
+		npm.Rules = append([]config.NPMCacheRule(nil), instance.NPM.Rules...)
+		clone.NPM = &npm
+	}
+	return clone
 }
 
 func ValidateConfig(cfg *config.Config, bind string) error {
@@ -723,10 +766,10 @@ func ValidateConfig(cfg *config.Config, bind string) error {
 		return errors.New("config is nil")
 	}
 	clone := cloneConfig(cfg)
-	return validateConfig(clone, bind)
+	return validateConfig(clone, bind, DefaultMetricsPath)
 }
 
-func validateConfig(cfg *config.Config, bind string) error {
+func validateConfig(cfg *config.Config, bind, metricsPath string) error {
 	if cfg == nil {
 		return errors.New("config is nil")
 	}
@@ -783,11 +826,17 @@ func validateConfig(cfg *config.Config, bind string) error {
 		}
 		if inst.Listen.Path != "" {
 			listenPath := "/" + strings.Trim(inst.Listen.Path, "/")
+			if listenPath == "/" {
+				return fmt.Errorf("listen path %q conflicts with web UI root", listenPath)
+			}
 			if owner := paths[listenPath]; owner != "" {
 				return fmt.Errorf("listen path %s conflicts between %s and %s", listenPath, owner, instanceName)
 			}
 			if listenPath == "/-" || strings.HasPrefix(listenPath, "/-/") {
 				return fmt.Errorf("listen path %q conflicts with admin API prefix /-/", listenPath)
+			}
+			if listenPath == metricsPath {
+				return fmt.Errorf("listen path %q conflicts with metrics path", listenPath)
 			}
 			paths[listenPath] = instanceName
 		}

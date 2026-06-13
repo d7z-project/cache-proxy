@@ -3,7 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
 import { forkJoin, Observable } from 'rxjs';
 import { ApiService } from '../../core/api.service';
-import { BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, ProxyMode, RuntimeInfo } from '../../core/api.models';
+import { AppConfig, BusyPolicy, CachePolicy, ConfigSnapshot, InstanceConfig, ListenKind, NpmResourcePolicy, OciAuthType, ProxyMode, RuntimeInfo } from '../../core/api.models';
 import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
@@ -11,6 +11,11 @@ import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 const CLEAR_SENTINEL = '-';
+const BLOCKED_PASS_HEADERS = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
+  'transfer-encoding', 'upgrade', 'host', 'authorization', 'x-forwarded-for',
+  'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-prefix', 'x-real-ip'
+]);
 
 @Component({
   selector: 'app-instance-form',
@@ -33,7 +38,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
 
   draftName = '';
   draft?: InstanceConfig;
-  private draftOriginal?: InstanceConfig;
+  private savedFormState = '';
   listenKind = ListenKind.Path;
   upstreams: string[] = [];
   passHeaders: string[] = [];
@@ -50,7 +55,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   ngOnInit(): void { this.load(); }
 
   get dirty(): boolean {
-    return JSON.stringify(this.draft) !== JSON.stringify(this.draftOriginal);
+    return this.formState() !== this.savedFormState;
   }
 
   isDirty(): boolean { return this.dirty; }
@@ -115,7 +120,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     });
   }
 
-  private doSave(name: string, instance: InstanceConfig, next: any): void {
+  private doSave(name: string, instance: InstanceConfig, next: AppConfig): void {
     const mode = this.draft!.mode;
     if ((mode === ProxyMode.Oci || mode === ProxyMode.Npm) && this.upstreams.filter(u => u.trim()).length > 1) {
       this.toast.success('已保存。注意：' + (mode === ProxyMode.Oci ? '镜像' : 'npm') + '代理仅使用第一个上游地址。');
@@ -124,8 +129,12 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       next: (snapshot) => {
         this.saving = false;
         this.snapshot = snapshot;
+        this.draftName = name;
         this.draft = structuredClone(instance);
-        this.draftOriginal = structuredClone(instance);
+        this.listenKind = instance.listen.bind ? ListenKind.Bind : ListenKind.Path;
+        this.upstreams = [...instance.upstreams];
+        this.passHeaders = [...(instance.passHeaders ?? [])];
+        this.markSaved();
         this.toast.success(name + ' 已保存。');
         if (this.isCreate) {
           this.isCreate = false;
@@ -190,7 +199,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       : mode === ProxyMode.Npm ? ['https://registry.npmjs.org']
       : ['https://example.com'];
     this.passHeaders = mode === ProxyMode.File ? ['Accept', 'Accept-Language'] : [];
-    this.draftOriginal = structuredClone(this.draft);
+    this.markSaved();
   }
 
   private initEdit(name: string): void {
@@ -207,7 +216,21 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     this.upstreams = [...(this.draft.upstreams ?? [])];
     this.passHeaders = [...(this.draft.passHeaders ?? [])];
     this.normalizeDraftDefaults();
-    this.draftOriginal = structuredClone(this.draft);
+    this.markSaved();
+  }
+
+  private formState(): string {
+    return JSON.stringify({
+      name: this.draftName,
+      draft: this.draft,
+      listenKind: this.listenKind,
+      upstreams: this.upstreams,
+      passHeaders: this.passHeaders
+    });
+  }
+
+  private markSaved(): void {
+    this.savedFormState = this.formState();
   }
 
   private normalizeDraftDefaults(): void {
@@ -226,8 +249,6 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
       this.draft.oci.defaultPolicy = this.draft.oci.defaultPolicy ?? CachePolicy.Revalidate;
       this.draft.oci.rules = this.draft.oci.rules ?? [];
       this.draft.oci.auth = this.draft.oci.auth ?? { type: OciAuthType.None };
-      if (this.draft.oci.auth.password === '***') this.draft.oci.auth.password = '';
-      if (this.draft.oci.auth.token === '***') this.draft.oci.auth.token = '';
     }
     if (this.draft.mode === ProxyMode.Npm) {
       this.draft.npm = this.draft.npm ?? { defaultPolicy: CachePolicy.Revalidate, rules: [] };
@@ -279,16 +300,16 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (instance.mode === ProxyMode.Oci) {
       instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
       instance.oci = this.normalizeOci(instance.oci);
-      delete (instance as any).passHeaders;
-      delete (instance as any).npm;
+      delete instance.passHeaders;
+      delete instance.npm;
     } else if (instance.mode === ProxyMode.Npm) {
       instance.cache = { freshFor: instance.cache.freshFor, busyPolicy: instance.cache.busyPolicy, rules: [] };
       instance.npm = this.normalizeNpm(instance.npm);
-      delete (instance as any).oci;
-      delete (instance as any).passHeaders;
+      delete instance.oci;
+      delete instance.passHeaders;
     } else {
-      delete (instance as any).oci;
-      delete (instance as any).npm;
+      delete instance.oci;
+      delete instance.npm;
       instance.cache.defaultPolicy = instance.cache.defaultPolicy || CachePolicy.Bypass;
     }
     return instance;
@@ -299,7 +320,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     return trimmed || undefined;
   }
 
-  private normalizeRules(rules: any[]): any[] {
+  private normalizeRules<T extends { match: string; freshFor?: string; expireAfter?: string }>(rules: T[] = []): T[] {
     return (rules ?? []).map(r => ({
       ...r,
       match: r.match?.trim(),
@@ -308,8 +329,8 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     }));
   }
 
-  private normalizeOci(oci: InstanceConfig['oci']) {
-    if (!oci) return { defaultPolicy: CachePolicy.Revalidate, rules: [] as any[] };
+  private normalizeOci(oci: InstanceConfig['oci']): NonNullable<InstanceConfig['oci']> {
+    if (!oci) return { defaultPolicy: CachePolicy.Revalidate, rules: [] };
     const auth = oci.auth;
     if (!auth || auth.type === OciAuthType.None) { delete oci.auth; return oci; }
     auth.username = auth.username?.trim() || undefined;
@@ -320,25 +341,15 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (auth.token === '' || auth.token === CLEAR_SENTINEL) {
       auth.token = CLEAR_SENTINEL;
     }
-    if (auth.type === OciAuthType.Basic) delete (auth as any).token;
-    if (auth.type === OciAuthType.Bearer) { delete (auth as any).username; delete (auth as any).password; }
-    oci.rules = (oci.rules ?? []).map(r => ({
-      ...r,
-      match: r.match?.trim(),
-      freshFor: this.normalizeDuration(r.freshFor),
-      expireAfter: this.normalizeDuration(r.expireAfter),
-    }));
+    if (auth.type === OciAuthType.Basic) delete auth.token;
+    if (auth.type === OciAuthType.Bearer) { delete auth.username; delete auth.password; }
+    oci.rules = this.normalizeRules(oci.rules);
     return oci;
   }
 
-  private normalizeNpm(npm: InstanceConfig['npm']) {
-    if (!npm) return { defaultPolicy: CachePolicy.Revalidate, rules: [] as any[] };
-    npm.rules = (npm.rules ?? []).map(r => ({
-      ...r,
-      match: r.match?.trim(),
-      freshFor: this.normalizeDuration(r.freshFor),
-      expireAfter: this.normalizeDuration(r.expireAfter),
-    }));
+  private normalizeNpm(npm: InstanceConfig['npm']): NonNullable<InstanceConfig['npm']> {
+    if (!npm) return { defaultPolicy: CachePolicy.Revalidate, rules: [] };
+    npm.rules = this.normalizeRules(npm.rules);
     return npm;
   }
 
@@ -365,7 +376,9 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (!listenValue) e.push(this.listenKind === ListenKind.Bind ? '监听地址不能为空。' : '路径前缀不能为空。');
     if (this.listenKind === ListenKind.Path && listenValue && !listenValue.startsWith('/')) e.push('路径前缀必须以 / 开头。');
     if (this.listenKind === ListenKind.Path && listenValue && /\s/.test(listenValue)) e.push('路径前缀不能包含空格。');
+    if (this.listenKind === ListenKind.Path && listenValue && listenValue.includes('//')) e.push('路径前缀不能包含连续 /。');
     if (this.listenKind === ListenKind.Path && listenValue && /[^a-zA-Z0-9/_\-]/.test(listenValue)) e.push('路径前缀只能包含字母、数字、/、_、-。');
+    if (this.listenKind === ListenKind.Path && listenValue && `/${listenValue.replace(/^\/+|\/+$/g, '')}` === '/') e.push('路径前缀不能使用根路径 /。');
     if (!Object.values(BusyPolicy).includes(this.draft.cache.busyPolicy ?? BusyPolicy.Bypass)) e.push('并发策略需要重新选择。');
     const validUpstreams = this.upstreams.map((u) => u.trim()).filter(Boolean);
     if (validUpstreams.length === 0) e.push('至少需要一个上游地址。');
@@ -384,6 +397,13 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     if (this.draft.expireAfter?.trim() && !this.isValidDuration(this.draft.expireAfter.trim())) e.push('缓存保留时间格式无效，示例：720h、168h。');
     if (this.draft.cache.freshFor?.trim() && !this.isValidDuration(this.draft.cache.freshFor.trim())) e.push('快速命中时间格式无效，示例：30s、5m。');
     if (this.draft.transport?.timeout?.trim() && !this.isValidDuration(this.draft.transport.timeout.trim())) e.push('连接超时格式无效，示例：3s、30s。');
+    if (this.draft.mode === ProxyMode.File) {
+      for (const header of this.passHeaders.map((h) => h.trim()).filter(Boolean)) {
+        const lower = header.toLowerCase();
+        if (/[\s\r\n:]/.test(header)) e.push(`请求头 ${header} 格式无效。`);
+        if (BLOCKED_PASS_HEADERS.has(lower)) e.push(`请求头 ${header} 不能透传。`);
+      }
+    }
     if (this.draft.mode === ProxyMode.File) {
       for (let i = 0; i < this.draft.cache.rules.length; i++) {
         const rule = this.draft.cache.rules[i];
@@ -416,15 +436,16 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
     for (const [iname, inst] of Object.entries(this.snapshot.config.instances)) {
       if (iname === currentName) continue;
       if (inst.listen.bind) bindOwners.set(inst.listen.bind, iname);
-      if (inst.listen.path) pathOwners.set(inst.listen.path, iname);
+      if (inst.listen.path) pathOwners.set('/' + inst.listen.path.replace(/^\/+|\/+$/g, ''), iname);
     }
     if (this.listenKind === ListenKind.Bind && listenValue) {
       const owner = bindOwners.get(listenValue);
       if (owner) e.push(`监听地址 ${listenValue} 已被 ${owner} 使用。`);
     }
     if (this.listenKind === ListenKind.Path && listenValue) {
-      const owner = pathOwners.get(listenValue);
-      if (owner) e.push(`路径前缀 ${listenValue} 已被 ${owner} 使用。`);
+      const normalizedPath = '/' + listenValue.replace(/^\/+|\/+$/g, '');
+      const owner = pathOwners.get(normalizedPath);
+      if (owner) e.push(`路径前缀 ${normalizedPath} 已被 ${owner} 使用。`);
     }
     if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Basic && !this.draft.oci.auth.username?.trim()) e.push('请填写镜像仓库用户名。');
     if (this.draft.mode === ProxyMode.Oci && this.draft.oci?.auth?.type === OciAuthType.Basic && !this.draft.oci.auth.password?.trim()) e.push('请填写镜像仓库密码。');
