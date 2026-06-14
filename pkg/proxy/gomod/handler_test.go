@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,7 +40,7 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
 		Route:  config.InstanceRoute{Path: "/go"},
 		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
-		Policy: mustPolicyJSON(t, &Policy{SumDB: "off"}),
+		Policy: mustPolicyJSON(t, &Policy{SumDB: &SumDBConfig{Enabled: false}}),
 	})
 	target := "/" + testModulePath + "/@v/" + testModuleVersion + ".mod"
 
@@ -69,7 +69,7 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
 		Route:  config.InstanceRoute{Path: "/go"},
 		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
-		Policy: mustPolicyJSON(t, &Policy{SumDB: "off", DisableModuleFetchHeader: true}),
+		Policy: mustPolicyJSON(t, &Policy{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true}),
 	}
 	handler := newTestHandler(t, store, cfg)
 
@@ -78,7 +78,7 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, blocked.Code)
 	require.Zero(t, upstreamRequests.Load())
 
-	cfg.Policy = mustPolicyJSON(t, &Policy{SumDB: "off", DisableModuleFetchHeader: false})
+	cfg.Policy = mustPolicyJSON(t, &Policy{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: false})
 	handler = newTestHandler(t, store, cfg)
 	allowed := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusOK, allowed.Code)
@@ -86,18 +86,51 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	require.Equal(t, int64(1), upstreamRequests.Load())
 }
 
-func TestGoFetcherEnvNeverEnablesLocalGoExecution(t *testing.T) {
-	env := goFetcherEnv([]string{"https://proxy.golang.org"}, &Policy{
-		SumDB:   "sum.golang.org",
-		NoSumDB: "*.corp.example.com",
+func TestGoModuleHandlerSkipsPrivateModules(t *testing.T) {
+	var upstreamRequests atomic.Int64
+	upstream := newGoProxyUpstream(t, &upstreamRequests)
+	defer upstream.Close()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, config.InstanceSpec{
+		Name:   "gomod",
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: "/go"},
+		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
+		Policy: mustPolicyJSON(t, &Policy{
+			SumDB:     &SumDBConfig{Enabled: false},
+			GOPrivate: []string{"example.com/cacheproxy/*"},
+		}),
 	})
-	require.Contains(t, env, "GOPROXY=https://proxy.golang.org")
-	require.Contains(t, env, "GOPRIVATE=")
-	require.Contains(t, env, "GONOPROXY=")
-	require.Contains(t, env, "GONOSUMDB=*.corp.example.com")
-	require.NotContains(t, strings.Join(env, "\n"), "direct")
-	require.NotContains(t, strings.Join(env, "\n"), "*.private.example.com")
-	require.NotContains(t, strings.Join(env, "\n"), "*.noproxy.example.com")
+
+	rec := requestGoProxy(t, handler, "/"+testModulePath+"/@v/list", false)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, upstreamRequests.Load())
+}
+
+func TestUpstreamProxyFetcherRejectsDirectRevisionQueries(t *testing.T) {
+	fetcher, err := newUpstreamProxyFetcher([]string{"https://proxy.golang.org"}, http.DefaultTransport)
+	require.NoError(t, err)
+
+	_, _, err = fetcher.Query(context.Background(), testModulePath, "main")
+	require.Error(t, err)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.Contains(t, err.Error(), "direct source resolution")
+}
+
+func TestProxiedSumDBsUsesConfiguredProxyEndpoint(t *testing.T) {
+	values := proxiedSumDBs(&Policy{
+		SumDB: &SumDBConfig{
+			Enabled: true,
+			Name:    "sum.golang.org",
+			URL:     "https://sum-proxy.example.com",
+		},
+	})
+	require.Equal(t, []string{"sum.golang.org https://sum-proxy.example.com"}, values)
+}
+
+func TestMatchesPrivateModule(t *testing.T) {
+	require.True(t, matchesPrivateModule(&Policy{GOPrivate: []string{"example.com/cacheproxy/*"}}, "example.com/cacheproxy/gomod"))
+	require.False(t, matchesPrivateModule(&Policy{GOPrivate: []string{"corp.example.com/*"}}, "example.com/cacheproxy/gomod"))
 }
 
 func newTestHandler(t *testing.T, store *blobfs.Store, cfg config.InstanceSpec) *Handler {

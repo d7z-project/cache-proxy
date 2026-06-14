@@ -9,10 +9,13 @@ import (
 )
 
 const (
-	ModeFile = "file"
-	ModeOCI  = "oci"
-	ModeNPM  = "npm"
-	ModeGo   = "go"
+	ModeFile  = "file"
+	ModeOCI   = "oci"
+	ModeNPM   = "npm"
+	ModeGo    = "go"
+	ModeMaven = "maven"
+	ModeCargo = "cargo"
+	ModePyPI  = "pypi"
 
 	PolicyBypass     = "bypass"
 	PolicyImmutable  = "immutable"

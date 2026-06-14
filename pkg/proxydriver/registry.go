@@ -1,7 +1,6 @@
 package proxydriver
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -138,10 +137,4 @@ func (r *Registry) ResolveFromYAML(spec config.InstanceSpec, policyData []byte) 
 
 func (r *Registry) EncodePolicyYAML(spec *ResolvedSpec) ([]byte, error) {
 	return spec.Driver.EncodeYAML(spec.Policy)
-}
-
-type ContextKey struct{}
-
-func WithRegistry(ctx context.Context, registry *Registry) context.Context {
-	return context.WithValue(ctx, ContextKey{}, registry)
 }

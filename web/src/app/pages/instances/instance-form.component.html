@@ -233,24 +233,88 @@
 
         @if (draft.meta.mode === ProxyMode.Go && goPolicy) {
           <div class="form-section">
-            <div class="section-heading"><span class="step-badge">4</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">SumDB 和缓存只读控制。</p></div></div>
-            <div class="row g-3">
-              <div class="col-md-6"><label class="form-label">GOSUMDB</label><input class="form-control" name="goSumdb" [(ngModel)]="goPolicy.sumdb" placeholder="sum.golang.org"></div>
-              <div class="col-md-6"><label class="form-label">GONOSUMDB</label><input class="form-control" name="goNoSumdb" [(ngModel)]="goPolicy.noSumDB" placeholder="*.corp.example.com"></div>
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">纯 GOPROXY 回源和 SumDB 代理，不允许本地 go 直连。</p></div></div>
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" name="sumdbEnabled" [(ngModel)]="goPolicy.sumdb!.enabled" id="sumdbEnabled">
+              <label class="form-check-label" for="sumdbEnabled">启用 SumDB 代理</label>
             </div>
+            @if (goPolicy.sumdb?.enabled !== false) {
+              <div class="row g-3">
+                <div class="col-md-6"><label class="form-label">SumDB 名称</label><input class="form-control" name="goSumdbName" [(ngModel)]="goPolicy.sumdb!.name" placeholder="sum.golang.org"></div>
+                <div class="col-md-6"><label class="form-label">SumDB 上游</label><input class="form-control" name="goSumdbUrl" [(ngModel)]="goPolicy.sumdb!.url" placeholder="https://sum.golang.org"></div>
+              </div>
+            }
             <div class="form-check mt-3">
               <input class="form-check-input" type="checkbox" name="disableFetch" [(ngModel)]="goPolicy.disableModuleFetchHeader" id="disableFetch">
               <label class="form-check-label" for="disableFetch">允许客户端通过 Disable-Module-Fetch 只读缓存</label>
             </div>
-            <label class="form-label mt-3">代理 SumDB</label>
+            <label class="form-label mt-3">GOPRIVATE 跳过规则</label>
             <div class="tag-field">
-              @for (value of proxiedSumDBs; track $index; let i = $index) {
+              @for (value of goPrivatePatterns; track $index; let i = $index) {
                 <div class="tag-row">
-                  <input class="form-control" [ngModel]="proxiedSumDBs[i]" (ngModelChange)="proxiedSumDBs[i] = $event" [name]="'proxiedSumDB' + i" placeholder="sum.golang.org">
-                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeProxiedSumDB(i)">×</button>
+                  <input class="form-control" [ngModel]="goPrivatePatterns[i]" (ngModelChange)="goPrivatePatterns[i] = $event" [name]="'goPrivatePattern' + i" placeholder="corp.example.com/*">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeGoPrivatePattern(i)">×</button>
                 </div>
               }
-              <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addProxiedSumDB()">+ 添加 SumDB</button>
+              <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addGoPrivatePattern()">+ 添加规则</button>
+            </div>
+            <p class="text-muted mt-2 mb-0">命中这些模块路径时，本代理直接返回不存在，让客户端按自己的 GOPROXY 链继续处理。</p>
+          </div>
+        }
+
+        @if (draft.meta.mode === ProxyMode.Maven && mavenPolicy) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>Maven/Gradle 策略</h3><p class="text-muted mb-0">区分元数据、SNAPSHOT 和发布件。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-4"><label class="form-label">元数据快速命中</label><input class="form-control" name="mavenMetadataFreshFor" [(ngModel)]="mavenPolicy.metadataFreshFor" placeholder="30s"></div>
+              <div class="col-md-4"><label class="form-label">元数据并发刷新</label><select class="form-select" name="mavenMetadataBusyPolicy" [(ngModel)]="mavenPolicy.metadataBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">发布件策略</label><select class="form-select" name="mavenReleasePolicy" [(ngModel)]="mavenPolicy.releasePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">SNAPSHOT 策略</label><select class="form-select" name="mavenSnapshotPolicy" [(ngModel)]="mavenPolicy.snapshotPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">SNAPSHOT 快速命中</label><input class="form-control" name="mavenSnapshotFreshFor" [(ngModel)]="mavenPolicy.snapshotFreshFor" placeholder="15s"></div>
+            </div>
+            <label class="form-label mt-3">路径规则</label>
+            <div class="rule-list">
+              @for (rule of mavenPolicy.rules; track $index; let i = $index) {
+                <div class="row-grid file-rule-row-grid">
+                  <input class="form-control form-control-sm" [name]="'mavenRuleMatch' + i" [(ngModel)]="rule.match" placeholder="**/maven-metadata.xml">
+                  <select class="form-select form-select-sm" [name]="'mavenRulePolicy' + i" [(ngModel)]="rule.policy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select>
+                  <input class="form-control form-control-sm" [name]="'mavenRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中">
+                  <input class="form-control form-control-sm" [name]="'mavenRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="缓存保留">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeMavenRule(i)">删除</button>
+                </div>
+              }
+            </div>
+            <button type="button" class="btn btn-link p-0" (click)="addMavenRule()">添加路径规则</button>
+          </div>
+        }
+
+        @if (draft.meta.mode === ProxyMode.Cargo && cargoPolicy) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>Cargo 策略</h3><p class="text-muted mb-0">仅支持 sparse registry 协议。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-4"><label class="form-label">索引快速命中</label><input class="form-control" name="cargoIndexFreshFor" [(ngModel)]="cargoPolicy.indexFreshFor" placeholder="30s"></div>
+              <div class="col-md-4"><label class="form-label">索引并发刷新</label><select class="form-select" name="cargoIndexBusyPolicy" [(ngModel)]="cargoPolicy.indexBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">crate 文件策略</label><select class="form-select" name="cargoCratePolicy" [(ngModel)]="cargoPolicy.cratePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+            </div>
+            <div class="form-check mt-3">
+              <input class="form-check-input" type="checkbox" name="cargoAuthRequired" [(ngModel)]="cargoPolicy.authRequired" id="cargoAuthRequired">
+              <label class="form-check-label" for="cargoAuthRequired">向客户端声明 registry 需要认证</label>
+            </div>
+          </div>
+        }
+
+        @if (draft.meta.mode === ProxyMode.PyPI && pypiPolicy) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>PyPI 策略</h3><p class="text-muted mb-0">代理 Simple API 并重写下载地址。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-4"><label class="form-label">Simple API 快速命中</label><input class="form-control" name="pypiSimpleFreshFor" [(ngModel)]="pypiPolicy.simpleFreshFor" placeholder="30s"></div>
+              <div class="col-md-4"><label class="form-label">Simple API 并发刷新</label><select class="form-select" name="pypiSimpleBusyPolicy" [(ngModel)]="pypiPolicy.simpleBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">分发文件策略</label><select class="form-select" name="pypiFilePolicy" [(ngModel)]="pypiPolicy.filePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+            </div>
+            <div class="row g-3 mt-1">
+              <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiProxyJson" [(ngModel)]="pypiPolicy.proxyJson" id="pypiProxyJson"><label class="form-check-label" for="pypiProxyJson">代理 JSON Simple API</label></div></div>
+              <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiCoreMetadata" [(ngModel)]="pypiPolicy.proxyCoreMetadata" id="pypiCoreMetadata"><label class="form-check-label" for="pypiCoreMetadata">保留 core metadata 链接</label></div></div>
+              <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiSignatures" [(ngModel)]="pypiPolicy.proxySignatures" id="pypiSignatures"><label class="form-check-label" for="pypiSignatures">保留签名链接</label></div></div>
             </div>
           </div>
         }

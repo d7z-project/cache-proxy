@@ -15,10 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	cargoproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/cargo"
 	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	gomodproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
+	mavenproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/maven"
 	npmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
 	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	pypiproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/pypi"
 )
 
 func requestBody(t *testing.T, handler http.Handler, method, target string) string {
@@ -159,6 +162,39 @@ func goSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec 
 		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
-		Policy: mustPolicyJSON(t, &gomodproxy.Policy{SumDB: "off", DisableModuleFetchHeader: true}),
+		Policy: mustPolicyJSON(t, &gomodproxy.Policy{SumDB: &gomodproxy.SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true}),
+	}
+}
+
+func mavenSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeMaven, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &mavenproxy.Policy{MetadataFreshFor: config.Duration(30 * time.Second), MetadataBusyPolicy: config.BusyPolicyStale, ReleasePolicy: config.PolicyImmutable, SnapshotPolicy: config.PolicyRevalidate, SnapshotFreshFor: config.Duration(15 * time.Second), Rules: []mavenproxy.Rule{}}),
+	}
+}
+
+func cargoSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeCargo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &cargoproxy.Policy{IndexFreshFor: config.Duration(30 * time.Second), IndexBusyPolicy: config.BusyPolicyStale, CratePolicy: config.PolicyImmutable}),
+	}
+}
+
+func pypiSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModePyPI, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &pypiproxy.Policy{SimpleFreshFor: config.Duration(30 * time.Second), SimpleBusyPolicy: config.BusyPolicyStale, FilePolicy: config.PolicyImmutable, ProxyJSON: true}),
 	}
 }

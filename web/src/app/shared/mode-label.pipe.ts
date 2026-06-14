@@ -6,7 +6,8 @@ PROXY_MODE_OPTIONS.forEach(o => { MODE_LABELS[o.value] = o.label; });
 
 const POLICY_LABELS: Record<string, string> = {};
 CACHE_POLICY_OPTIONS.forEach(o => { POLICY_LABELS[o.value] = o.label; });
-POLICY_LABELS['goproxy'] = '模块缓存';
+POLICY_LABELS['proxy-only'] = '模块缓存';
+POLICY_LABELS['private-bypass'] = '私有跳过';
 
 @Pipe({ name: 'modeLabel', pure: true })
 export class ModeLabelPipe implements PipeTransform {

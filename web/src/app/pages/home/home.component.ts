@@ -1,15 +1,17 @@
 import { Component, OnInit, inject } from '@angular/core';
 import { AsyncPipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { Observable, catchError, of } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { AuthService } from '../../core/auth.service';
 import { InstanceSummary } from '../../core/api.models';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
+import { InstanceGuide, buildInstanceGuide } from '../../shared/proxy-guides';
 
 @Component({
   selector: 'app-home',
-  imports: [AsyncPipe, RouterLink, ModeLabelPipe],
+  imports: [AsyncPipe, FormsModule, RouterLink, ModeLabelPipe],
   templateUrl: './home.component.html'
 })
 export class HomeComponent implements OnInit {
@@ -20,6 +22,7 @@ export class HomeComponent implements OnInit {
   error = '';
   isAuth$ = this.auth.isAuth$;
   authEnabled$ = this.auth.authEnabled$;
+  selectedGuides: Record<string, number> = {};
 
   ngOnInit(): void {
     this.instances$ = this.api.publicInstances().pipe(
@@ -28,5 +31,17 @@ export class HomeComponent implements OnInit {
         return of([]);
       })
     );
+  }
+
+  guideFor(instance: InstanceSummary): InstanceGuide {
+    return buildInstanceGuide(instance, window.location.origin);
+  }
+
+  selectedGuideIndex(instance: InstanceSummary): number {
+    return this.selectedGuides[instance.name] ?? 0;
+  }
+
+  setSelectedGuideIndex(instance: InstanceSummary, index: number): void {
+    this.selectedGuides[instance.name] = index;
   }
 }

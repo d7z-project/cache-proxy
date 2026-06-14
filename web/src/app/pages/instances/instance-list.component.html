@@ -1,11 +1,11 @@
-<section class="container-fluid" style="max-width: 1500px;">
-  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
+<section class="container-fluid page-shell">
+  <header class="page-header">
     <div>
       <p class="eyebrow">实例</p>
       <h2 class="fw-bold mb-1">代理实例</h2>
       <p class="text-muted mb-0">管理监听入口、上游连接和缓存策略。</p>
     </div>
-    <div class="d-flex gap-2">
+    <div class="card-actions">
       <div ngbDropdown>
         <button type="button" class="btn btn-primary" ngbDropdownToggle>新增实例</button>
         <div ngbDropdownMenu>
@@ -13,6 +13,9 @@
           <button ngbDropdownItem (click)="startCreate(ProxyMode.Oci)">容器镜像代理</button>
           <button ngbDropdownItem (click)="startCreate(ProxyMode.Npm)">npm 包代理</button>
           <button ngbDropdownItem (click)="startCreate(ProxyMode.Go)">Go 模块代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Maven)">Maven/Gradle 代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Cargo)">Cargo 包代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.PyPI)">PyPI 包代理</button>
         </div>
       </div>
       <button type="button" class="btn btn-outline-secondary" (click)="showImportExport = true">导入导出</button>
@@ -28,6 +31,14 @@
       <div class="text-center text-muted py-5">还没有实例，点击上方按钮创建。</div>
     } @else {
       <div class="card">
+        <div class="card-body border-bottom">
+          <div class="card-title-row">
+            <div>
+              <h5 class="card-title mb-1">实例清单</h5>
+              <p class="text-muted mb-0">管理代理入口、缓存查询和实例复制。</p>
+            </div>
+          </div>
+        </div>
         <div class="table-responsive">
           <table class="table table-hover mb-0">
             <thead>
@@ -79,6 +90,9 @@
                   @case (ProxyMode.Npm) { 包名 }
                   @case (ProxyMode.Oci) { 镜像名称 }
                   @case (ProxyMode.Go) { Go 模块缓存路径 }
+                  @case (ProxyMode.Maven) { Maven 仓库路径 }
+                  @case (ProxyMode.Cargo) { Cargo registry 路径 }
+                  @case (ProxyMode.PyPI) { PyPI Simple 或文件路径 }
                   @default { 文件路径 }
                 }
               </label>
@@ -87,6 +101,9 @@
                   @case (ProxyMode.Npm) { 输入 npm 包名，如 @angular/core 或 lodash }
                   @case (ProxyMode.Oci) { 输入镜像名称，如 library/alpine:latest 或 nginx:1.25 }
                   @case (ProxyMode.Go) { 输入 GOPROXY 路径，如 golang.org/x/mod/@v/list 或 golang.org/x/mod/@v/v0.36.0.mod }
+                  @case (ProxyMode.Maven) { 输入 Maven 仓库路径，如 com/google/guava/guava/maven-metadata.xml }
+                  @case (ProxyMode.Cargo) { 输入 sparse registry 路径，如 config.json 或 se/rd/serde }
+                  @case (ProxyMode.PyPI) { 输入 Simple API 或文件路径，如 simple/requests/ 或 files/编码后的上游地址 }
                   @default { 输入代理时请求的文件路径，如 nginx.conf 或 assets/logo.png }
                 }
               </p>

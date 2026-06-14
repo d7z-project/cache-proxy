@@ -9,7 +9,10 @@ export const PROXY_MODE_OPTIONS: SelectOption<ProxyMode>[] = [
   { value: ProxyMode.File, label: '文件代理' },
   { value: ProxyMode.Oci, label: '容器镜像代理' },
   { value: ProxyMode.Npm, label: 'npm 包代理' },
-  { value: ProxyMode.Go, label: 'Go 模块代理' }
+  { value: ProxyMode.Go, label: 'Go 模块代理' },
+  { value: ProxyMode.Maven, label: 'Maven/Gradle 代理' },
+  { value: ProxyMode.Cargo, label: 'Cargo 包代理' },
+  { value: ProxyMode.PyPI, label: 'PyPI 包代理' }
 ];
 
 export const CACHE_POLICY_OPTIONS: SelectOption<CachePolicy>[] = [

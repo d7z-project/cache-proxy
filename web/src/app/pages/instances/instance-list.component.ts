@@ -48,6 +48,9 @@ export class InstanceListComponent implements OnInit {
       case ProxyMode.Npm: return '@angular/core';
       case ProxyMode.Oci: return 'library/alpine:latest';
       case ProxyMode.Go: return 'golang.org/x/mod/@v/list';
+      case ProxyMode.Maven: return 'com/google/guava/guava/maven-metadata.xml';
+      case ProxyMode.Cargo: return 'config.json';
+      case ProxyMode.PyPI: return 'simple/requests/';
       default: return 'nginx.conf';
     }
   }

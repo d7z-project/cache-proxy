@@ -34,15 +34,14 @@ func NewHandler(name string, meta config.InstanceMeta, source config.InstanceSou
 		return nil, err
 	}
 	transport := &statsTransport{base: transportForConfig(name, source.Transport), stats: stats, instance: name}
-	env := goFetcherEnv(source.Upstreams, policy)
-	fetcher := &goproxy.GoFetcher{
-		Env:       env,
-		TempDir:   tempDir,
-		Transport: transport,
+	fetcher, err := newUpstreamProxyFetcher(source.Upstreams, transport)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, err
 	}
 	inner := &goproxy.Goproxy{
 		Fetcher:       fetcher,
-		ProxiedSumDBs: policy.ProxiedSumDBs,
+		ProxiedSumDBs: proxiedSumDBs(policy),
 		Cacher:        newBlobFSCacher(store, name, meta.ExpireAfter),
 		TempDir:       tempDir,
 		Transport:     transport,
@@ -56,6 +55,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
+		return
+	}
+	if modulePath, ok := modulePathFromTarget(strings.TrimPrefix(req.URL.Path, "/")); ok && matchesPrivateModule(h.policy, modulePath) {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, "PRIVATE", http.StatusNotFound, 0)
 		return
 	}
 	h.wait.Add(1)
@@ -115,20 +119,16 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-func goFetcherEnv(upstreams []string, cfg *Policy) []string {
-	proxies := append([]string(nil), upstreams...)
-	sumdb := strings.TrimSpace(cfg.SumDB)
-	if sumdb == "" {
-		sumdb = "sum.golang.org"
+func proxiedSumDBs(policy *Policy) []string {
+	if policy == nil || policy.SumDB == nil || !policy.SumDB.Enabled {
+		return nil
 	}
-	env := []string{
-		"GOPROXY=" + strings.Join(proxies, ","),
-		"GOSUMDB=" + sumdb,
-		"GOPRIVATE=",
-		"GONOPROXY=",
-		"GONOSUMDB=" + strings.TrimSpace(cfg.NoSumDB),
+	name := strings.TrimSpace(policy.SumDB.Name)
+	rawURL := strings.TrimSpace(policy.SumDB.URL)
+	if name == "" || rawURL == "" {
+		return nil
 	}
-	return env
+	return []string{name + " " + rawURL}
 }
 
 func transportForConfig(instance string, cfg *config.TransportConfig) http.RoundTripper {

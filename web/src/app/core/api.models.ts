@@ -2,7 +2,10 @@ export enum ProxyMode {
   File = 'file',
   Oci = 'oci',
   Npm = 'npm',
-  Go = 'go'
+  Go = 'go',
+  Maven = 'maven',
+  Cargo = 'cargo',
+  PyPI = 'pypi'
 }
 
 export enum CachePolicy {
@@ -107,7 +110,7 @@ export interface TransportConfig {
   timeout?: string;
 }
 
-export type ModePolicy = FilePolicy | OciPolicy | NpmPolicy | GoPolicy;
+export type ModePolicy = FilePolicy | OciPolicy | NpmPolicy | GoPolicy | MavenPolicy | CargoPolicy | PyPIPolicy;
 
 export interface FilePolicy {
   passHeaders?: string[];
@@ -162,10 +165,47 @@ export interface NpmRule {
 }
 
 export interface GoPolicy {
-  sumdb?: string;
-  noSumDB?: string;
-  proxiedSumDBs?: string[];
+  sumdb?: GoSumDBConfig;
+  goprivate?: string[];
   disableModuleFetchHeader?: boolean;
+}
+
+export interface MavenPolicy {
+  metadataFreshFor?: string;
+  metadataBusyPolicy?: BusyPolicy;
+  releasePolicy?: CachePolicy;
+  snapshotPolicy?: CachePolicy;
+  snapshotFreshFor?: string;
+  rules: MavenRule[];
+}
+
+export interface MavenRule {
+  match: string;
+  policy: CachePolicy;
+  freshFor?: string;
+  expireAfter?: string;
+}
+
+export interface CargoPolicy {
+  indexFreshFor?: string;
+  indexBusyPolicy?: BusyPolicy;
+  cratePolicy?: CachePolicy;
+  authRequired?: boolean;
+}
+
+export interface PyPIPolicy {
+  simpleFreshFor?: string;
+  simpleBusyPolicy?: BusyPolicy;
+  filePolicy?: CachePolicy;
+  proxyJson?: boolean;
+  proxyCoreMetadata?: boolean;
+  proxySignatures?: boolean;
+}
+
+export interface GoSumDBConfig {
+  enabled: boolean;
+  name?: string;
+  url?: string;
 }
 
 export interface ExportBundle {

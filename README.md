@@ -6,9 +6,9 @@
 
 ## Features
 
-- File, OCI registry, npm registry, and Go module proxy modes.
+- File, OCI registry, npm registry, Go module, Maven/Gradle, Cargo, and PyPI proxy modes.
 - Embedded Web UI for instance management.
-- Internal config stored in BlobFS as `_system/config.yaml`.
+- Internal config stored in BlobFS as sharded resources under the system tenant.
 - One main listener for the Web UI, Admin API, path-mounted proxies, and metrics.
 - Optional dedicated bind listeners per proxy instance.
 - Runtime instance create, update, delete, import, and export.
@@ -86,7 +86,29 @@ npm mode proxies one npm registry upstream. Package metadata is rewritten so `di
 
 ### Go
 
-Go mode implements the GOPROXY protocol through `github.com/goproxy/goproxy`. It only uses configured HTTP upstream proxies such as `https://proxy.golang.org`, SumDB proxying, and BlobFS-backed persistent module cache. It never performs direct module fetches, so the server runtime does not require a local `go` executable or VCS tools.
+Go mode implements a pure GOPROXY cache through `github.com/goproxy/goproxy` plus an internal upstream-only fetcher. It only talks to configured HTTP GOPROXY upstreams such as `https://proxy.golang.org` and an optional proxied SumDB endpoint.
+
+It does not:
+
+- execute a local `go` binary
+- fall back to direct VCS/source fetches
+- honor `GOPRIVATE`, `GONOPROXY`, or any other direct-fetch path
+
+That means the runtime has no dependency on local Go toolchains or VCS tools. It also means branch, commit, and other direct source queries are rejected unless an upstream GOPROXY can answer them through the standard module proxy protocol.
+
+Go instances also support `goprivate` match rules. When a module path matches one of those patterns, this proxy immediately returns `404 Not Found` for module requests so the client can continue along its own `GOPROXY` fallback chain.
+
+### Maven / Gradle
+
+Maven mode proxies Maven-compatible repositories and works for common Gradle `maven {}` usage. It treats metadata and SNAPSHOT paths differently from immutable release artifacts so repository metadata can refresh without disabling artifact caching.
+
+### Cargo
+
+Cargo mode implements the sparse registry protocol only. It proxies `config.json`, sparse index entries, and crate downloads, and rewrites the registry download template back to the proxy itself. It does not implement the legacy git index protocol or publish APIs.
+
+### PyPI
+
+PyPI mode proxies the Simple API and distribution files. It rewrites package file links back to the proxy so `pip` and other installers keep downloads inside the cache path.
 
 ## Cache Policies
 
@@ -106,12 +128,13 @@ Go mode implements the GOPROXY protocol through `github.com/goproxy/goproxy`. It
 | Endpoint | Method | Description |
 | --- | --- | --- |
 | `/-/api/runtime` | `GET` | Runtime status. |
-| `/-/api/config` | `GET`, `PUT` | Read or replace config. |
-| `/-/api/config/validate` | `POST` | Validate config. |
-| `/-/api/config/reset` | `POST` | Reset config. |
+| `/-/api/global-config` | `GET`, `PUT` | Read or update global config. |
 | `/-/api/instances` | `GET` | List instances. |
+| `/-/api/instances/:name` | `GET`, `PUT`, `DELETE` | Read, update, or delete one instance. |
+| `/-/api/instances` | `POST` | Create one instance. |
 | `/-/api/instances/export` | `GET` | Export instances. |
 | `/-/api/instances/import` | `POST` | Import instances. |
+| `/-/api/system/reset` | `POST` | Reset runtime state. |
 | `/-/api/metrics/stats` | `GET` | JSON metrics snapshot. |
 | `/-/api/storage/stats` | `GET` | BlobFS stats. |
 | `/-/api/storage/gc` | `POST` | Run BlobFS GC. |
@@ -136,8 +159,11 @@ go vet ./...
 ├── pkg/proxy
 ├── pkg/proxy/file
 ├── pkg/proxy/gomod
+├── pkg/proxy/maven
+├── pkg/proxy/cargo
 ├── pkg/proxy/oci
 ├── pkg/proxy/npm
+├── pkg/proxy/pypi
 ├── pkg/server
 ├── pkg/utils
 └── web

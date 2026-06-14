@@ -21,10 +21,13 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/cargo"
 	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/maven"
 	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
 	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/pypi"
 	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
 	"gopkg.d7z.net/cache-proxy/web"
 )
@@ -498,6 +501,12 @@ func closePreparedServers(servers map[string]preparedServer) {
 	}
 }
 
+func closeHandlers(handlers []closeableHandler) {
+	for _, handler := range handlers {
+		handler.Close()
+	}
+}
+
 func shutdownServerListWithTimeout(servers []*http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -525,50 +534,38 @@ func (r *Runtime) replaceState(ctx context.Context, generation uint64, global *c
 	}
 	addedServers, removedServers, err := r.prepareBindServers(state)
 	if err != nil {
-		for _, handler := range state.handlers {
-			handler.Close()
-		}
+		closeHandlers(state.handlers)
 		return 0, err
 	}
 
 	if err := writeYAMLObject(ctx, r.store, systemTenant, globalConfigPath, global); err != nil {
 		closePreparedServers(addedServers)
-		for _, handler := range state.handlers {
-			handler.Close()
-		}
+		closeHandlers(state.handlers)
 		return 0, err
 	}
 	for _, spec := range changed {
 		if err := writeInstanceSpec(ctx, r.store, r.registry, spec); err != nil {
 			closePreparedServers(addedServers)
-			for _, handler := range state.handlers {
-				handler.Close()
-			}
+			closeHandlers(state.handlers)
 			return 0, err
 		}
 	}
 	for _, name := range removed {
 		if err := deleteInstanceConfig(ctx, r.store, name); err != nil {
 			closePreparedServers(addedServers)
-			for _, handler := range state.handlers {
-				handler.Close()
-			}
+			closeHandlers(state.handlers)
 			return 0, err
 		}
 	}
 	if err := writeYAMLObject(ctx, r.store, systemTenant, instanceIndexPath, buildIndexDocument(instances)); err != nil {
 		closePreparedServers(addedServers)
-		for _, handler := range state.handlers {
-			handler.Close()
-		}
+		closeHandlers(state.handlers)
 		return 0, err
 	}
 	nextGeneration := currentGeneration + 1
 	if err := writeJSONObject(ctx, r.store, systemTenant, revisionStatePath, revisionState{Generation: nextGeneration}); err != nil {
 		closePreparedServers(addedServers)
-		for _, handler := range state.handlers {
-			handler.Close()
-		}
+		closeHandlers(state.handlers)
 		return 0, err
 	}
 
@@ -590,9 +587,7 @@ func (r *Runtime) replaceState(ctx context.Context, generation uint64, global *c
 	r.mu.Unlock()
 
 	shutdownServerListWithTimeout(removedServers)
-	for _, handler := range oldHandlers {
-		handler.Close()
-	}
+	closeHandlers(oldHandlers)
 	for _, name := range removed {
 		if err := r.store.DeleteTenant(ctx, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("delete instance tenant failed", "instance", name, "err", err)

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	modzip "golang.org/x/mod/zip"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	gomodproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
 )
 
 const testModulePath = "example.com/cacheproxy/runtime"
@@ -34,10 +36,131 @@ func TestGoProxyServesPathMountedRequests(t *testing.T) {
 	require.Equal(t, "v1.0.0", body)
 }
 
+func TestGoProxyRejectsDirectRevisionQueries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var upstreamRequests atomic.Int64
+	upstream := newGoProxyUpstreamWithCounter(t, &upstreamRequests, false)
+	defer upstream.Close()
+
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"gomod": goSpec(t, "gomod", "/go", upstream.URL)})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/go/"+testModulePath+"/@v/main.info", nil, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "direct source resolution")
+	require.Zero(t, upstreamRequests.Load())
+}
+
+func TestGoProxyServesConfiguredSumDBProxy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var sumdbRequests atomic.Int64
+	sumdb := newGoProxyUpstreamWithCounter(t, &sumdbRequests, true)
+	defer sumdb.Close()
+
+	spec := goSpec(t, "gomod", "/go", "https://proxy.golang.org")
+	spec.Policy = mustPolicyJSON(t, &gomodproxy.Policy{
+		SumDB: &gomodproxy.SumDBConfig{
+			Enabled: true,
+			Name:    "sum.corp.example",
+			URL:     sumdb.URL,
+		},
+		DisableModuleFetchHeader: true,
+	})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"gomod": spec})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/go/sumdb/sum.corp.example/latest", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "7", rec.Body.String())
+	require.Equal(t, int64(1), sumdbRequests.Load())
+}
+
+func TestGoProxySkipsConfiguredPrivateModules(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var upstreamRequests atomic.Int64
+	upstream := newGoProxyUpstreamWithCounter(t, &upstreamRequests, false)
+	defer upstream.Close()
+
+	spec := goSpec(t, "gomod", "/go", upstream.URL)
+	spec.Policy = mustPolicyJSON(t, &gomodproxy.Policy{
+		SumDB:     &gomodproxy.SumDBConfig{Enabled: false},
+		GOPrivate: []string{"example.com/cacheproxy/*"},
+	})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"gomod": spec})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/go/"+testModulePath+"/@v/list", nil, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, upstreamRequests.Load())
+}
+
+func TestGoProxyLookupMarksPrivateBypass(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	upstream := newGoProxyUpstream(t)
+	defer upstream.Close()
+
+	spec := goSpec(t, "gomod", "/go", upstream.URL)
+	spec.Policy = mustPolicyJSON(t, &gomodproxy.Policy{
+		SumDB:     &gomodproxy.SumDBConfig{Enabled: false},
+		GOPrivate: []string{"example.com/cacheproxy/*"},
+	})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"gomod": spec})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/-/api/cache/lookup?instance=gomod&path="+testModulePath+"/@v/list", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"policy":"private-bypass"`)
+}
+
+func TestGoProxyPrivateRulesDoNotAffectSumDBRequests(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var sumdbRequests atomic.Int64
+	sumdb := newGoProxyUpstreamWithCounter(t, &sumdbRequests, true)
+	defer sumdb.Close()
+
+	spec := goSpec(t, "gomod", "/go", "https://proxy.golang.org")
+	spec.Policy = mustPolicyJSON(t, &gomodproxy.Policy{
+		SumDB: &gomodproxy.SumDBConfig{
+			Enabled: true,
+			Name:    "sum.corp.example",
+			URL:     sumdb.URL,
+		},
+		GOPrivate: []string{"example.com/cacheproxy/*"},
+	})
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"gomod": spec})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/go/sumdb/sum.corp.example/latest", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "7", rec.Body.String())
+	require.Equal(t, int64(1), sumdbRequests.Load())
+}
+
 func newGoProxyUpstream(t *testing.T) *httptest.Server {
+	return newGoProxyUpstreamWithCounter(t, nil, false)
+}
+
+func newGoProxyUpstreamWithCounter(t *testing.T, requests *atomic.Int64, sumdbOnly bool) *httptest.Server {
 	t.Helper()
 	zipContent := testModuleZip(t)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if requests != nil {
+			requests.Add(1)
+		}
+		if sumdbOnly {
+			if req.URL.Path == "/latest" {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = io.WriteString(w, "7")
+				return
+			}
+			http.NotFound(w, req)
+			return
+		}
 		switch req.URL.Path {
 		case "/" + testModulePath + "/@v/list":
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
