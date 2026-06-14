@@ -1,11 +1,11 @@
 <section class="container-fluid page-shell">
   @if (loading) {
     <div class="placeholder-glow mb-4">
-      <span class="placeholder col-2 mb-2" style="height: 14px;"></span>
-      <span class="placeholder col-5 mb-2" style="height: 28px; display: block;"></span>
-      <span class="placeholder col-3" style="height: 14px;"></span>
+      <span class="placeholder page-placeholder page-placeholder-sm col-2 mb-2"></span>
+      <span class="placeholder page-placeholder page-placeholder-title col-5 mb-2 d-block"></span>
+      <span class="placeholder page-placeholder page-placeholder-sm col-3"></span>
     </div>
-    <div class="card"><div class="card-body placeholder-glow"><span class="placeholder col-12" style="height: 300px;"></span></div></div>
+    <div class="card"><div class="card-body placeholder-glow"><span class="placeholder page-placeholder page-placeholder-form col-12"></span></div></div>
   }
 
   @if (!loading && draft) {

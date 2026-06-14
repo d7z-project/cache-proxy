@@ -1,5 +1,6 @@
-import { Component, EventEmitter, Input, Output, inject } from '@angular/core';
+import { Component, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 import { ApiService } from '../core/api.service';
 import { ExportBundle, InstanceSpec } from '../core/api.models';
 import { ToastService } from './toast.service';
@@ -8,82 +9,71 @@ import { ToastService } from './toast.service';
   selector: 'app-import-export-modal',
   imports: [FormsModule],
   template: `
-    @if (show) {
-      <div class="modal-backdrop fade show" (click)="close()"></div>
-      <div class="modal d-block" tabindex="-1" (click)="close()">
-        <div class="modal-dialog modal-dialog-centered modal-lg" (click)="$event.stopPropagation()">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title">导入导出</h5>
-              <button type="button" class="btn-close" (click)="close()"></button>
-            </div>
-            <div class="modal-body">
-              <div class="d-flex flex-column gap-3">
-                <div class="p-3 rounded" style="background: #f1f5f9;">
-                  <div class="d-flex align-items-center gap-3 mb-3">
-                    <span class="d-inline-flex align-items-center justify-content-center rounded fw-bold" style="width:36px;height:36px;background:#eff6ff;color:#2563eb;font-size:18px;">↓</span>
-                    <div><h6 class="mb-0">导出实例</h6><p class="text-muted small mb-0">下载当前实例配置包</p></div>
-                  </div>
-                  <button type="button" class="btn btn-outline-primary w-100" (click)="exportInstances()">↓ 下载 JSON 文件</button>
-                </div>
+    <div class="modal-header">
+      <div>
+        <h5 class="modal-title mb-1">导入导出实例</h5>
+        <p class="text-muted small mb-0">导出当前实例配置包，或导入已有实例资源。</p>
+      </div>
+      <button type="button" class="btn-close" (click)="activeModal.dismiss()"></button>
+    </div>
 
-                <hr class="my-0">
+    <div class="modal-body">
+      <div class="row g-3">
+        <div class="col-lg-5">
+          <div class="border rounded-3 bg-body-tertiary p-3 h-100">
+            <h6 class="fw-semibold mb-1">导出实例</h6>
+            <p class="text-muted small mb-3">下载当前实例配置包，适合备份或迁移到另一套环境。</p>
+            <button type="button" class="btn btn-outline-primary w-100" (click)="exportInstances()">下载 JSON 文件</button>
+          </div>
+        </div>
 
-                <div class="p-3 rounded" style="background: #f1f5f9;">
-                  <div class="d-flex align-items-center gap-3 mb-3">
-                    <span class="d-inline-flex align-items-center justify-content-center rounded fw-bold" style="width:36px;height:36px;background:#ecfdf5;color:#065f46;font-size:18px;">↑</span>
-                    <div><h6 class="mb-0">导入实例</h6><p class="text-muted small mb-0">粘贴实例资源包或实例数组</p></div>
-                  </div>
-                  <textarea
-                    class="form-control font-monospace"
-                    style="min-height: 120px; resize: vertical;"
-                    name="importText"
-                    [(ngModel)]="importText"
-                    placeholder="粘贴导出的 JSON，支持 { &quot;instances&quot;: [...] } 或直接粘贴实例数组"
-                  ></textarea>
-                  <div class="form-check my-3">
-                    <input class="form-check-input" type="checkbox" name="importReplace" [(ngModel)]="importReplace" id="importReplace">
-                    <label class="form-check-label" for="importReplace">覆盖同名实例</label>
-                  </div>
-                  <button
-                    type="button"
-                    class="btn btn-primary w-100"
-                    [disabled]="!importText.trim() || saving"
-                    (click)="importInstances()"
-                  >
-                    @if (saving) {
-                      <span class="spinner-border spinner-border-sm me-1"></span>
-                      导入中...
-                    } @else {
-                      ↑ 导入实例
-                    }
-                  </button>
-                </div>
-              </div>
+        <div class="col-lg-7">
+          <div class="border rounded-3 bg-body-tertiary p-3 h-100">
+            <h6 class="fw-semibold mb-1">导入实例</h6>
+            <p class="text-muted small mb-3">支持导出包结构 <code>&#123; "instances": [...] &#125;</code>，也支持直接粘贴实例数组。</p>
+            <textarea
+              class="form-control font-monospace"
+              name="importText"
+              [(ngModel)]="importText"
+              placeholder="粘贴实例 JSON 内容"
+            ></textarea>
+            <div class="form-check mt-3">
+              <input class="form-check-input" type="checkbox" name="importReplace" [(ngModel)]="importReplace" id="importReplace">
+              <label class="form-check-label" for="importReplace">覆盖同名实例</label>
             </div>
           </div>
         </div>
       </div>
-    }
+    </div>
+
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary" (click)="activeModal.dismiss()">关闭</button>
+      <button
+        type="button"
+        class="btn btn-primary"
+        [disabled]="!importText.trim() || saving"
+        (click)="importInstances()"
+      >
+        @if (saving) {
+          <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
+          导入中...
+        } @else {
+          导入实例
+        }
+      </button>
+    </div>
   `
 })
 export class ImportExportModalComponent {
   private readonly api = inject(ApiService);
   private readonly toast = inject(ToastService);
 
-  @Input() show = false;
-  @Input() generation = 0;
-  @Output() showChange = new EventEmitter<boolean>();
-  @Output() imported = new EventEmitter<void>();
+  readonly activeModal = inject(NgbActiveModal);
 
+  generation = 0;
   importText = '';
   importReplace = false;
   saving = false;
-
-  close(): void {
-    this.show = false;
-    this.showChange.emit(false);
-  }
 
   exportInstances(): void {
     this.api.exportInstances().subscribe({
@@ -111,24 +101,25 @@ export class ImportExportModalComponent {
       this.toast.error('导入内容格式需要调整。');
       return;
     }
+
     const instances = Array.isArray(payload) ? payload : payload.instances;
     if (!Array.isArray(instances) || instances.length === 0) {
       this.toast.error('导入内容需要包含实例数组。');
       return;
     }
+
     const invalid = instances.filter((item) => !item?.name || !item?.meta?.mode || !item?.route || !item?.source || !item?.policy);
     if (invalid.length > 0) {
       this.toast.error('存在不完整的实例配置。');
       return;
     }
+
     this.saving = true;
     this.api.importInstances(this.generation, instances, this.importReplace).subscribe({
       next: () => {
         this.saving = false;
-        this.importText = '';
-        this.close();
         this.toast.success('实例已导入。');
-        this.imported.emit();
+        this.activeModal.close(true);
       },
       error: (err) => {
         this.saving = false;

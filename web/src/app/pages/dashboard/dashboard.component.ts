@@ -3,7 +3,6 @@ import { AsyncPipe } from '@angular/common';
 import { BehaviorSubject, Observable, forkJoin, of, catchError, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { InstanceMetrics, MetricsStats, RuntimeInfo, InstanceSummary } from '../../core/api.models';
-import { InstanceEntryComponent } from '../../shared/instance-entry.component';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 
 interface DashboardData {
@@ -16,7 +15,7 @@ interface ChartSlice { label: string; value: number; percent: number; }
 
 @Component({
   selector: 'app-dashboard',
-  imports: [AsyncPipe, ModeLabelPipe, InstanceEntryComponent],
+  imports: [AsyncPipe, ModeLabelPipe],
   templateUrl: './dashboard.component.html'
 })
 export class DashboardComponent {

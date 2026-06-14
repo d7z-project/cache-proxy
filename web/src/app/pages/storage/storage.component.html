@@ -19,7 +19,7 @@
     }
 
     <div class="row g-3 mb-3">
-      @for (card of statsCards(stats); track card.label) {
+      @for (card of statsCards(stats); track $index) {
         <div class="col-sm-6 col-xl-2">
           <div class="card h-100">
             <div class="card-body">
@@ -69,6 +69,6 @@
       </div>
     </div>
   } @else {
-    <article class="card placeholder-glow" style="min-height:240px"><span class="placeholder col-12 h-100"></span></article>
+    <article class="card placeholder-glow page-placeholder-card page-placeholder-card-lg"><span class="placeholder col-12 h-100"></span></article>
   }
 </section>

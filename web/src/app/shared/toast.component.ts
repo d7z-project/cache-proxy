@@ -7,7 +7,7 @@ import { ToastService } from './toast.service';
   selector: 'app-toast-container',
   imports: [AsyncPipe, NgbToast, NgbToastHeader],
   template: `
-    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999;">
+    <div class="toast-container position-fixed top-0 end-0 p-3 app-toast-container">
       @for (t of svc.toasts | async; track t.id) {
         <ngb-toast
           [class]="'text-bg-' + (t.type === 'error' ? 'danger' : t.type) + ' mb-2'"

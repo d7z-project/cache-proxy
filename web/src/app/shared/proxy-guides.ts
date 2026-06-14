@@ -1,7 +1,9 @@
 import { InstanceSummary, ProxyMode } from '../core/api.models';
 
 export interface InstanceGuideSnippet {
+  id: string;
   label: string;
+  description: string;
   code: string;
 }
 
@@ -19,7 +21,7 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'go', code: `GOPROXY=${entry.url} go mod download` }
+          guideSnippet('go', 'go', '临时指定 GOPROXY，适合先验证模块下载是否能正常经过当前代理。', `GOPROXY=${entry.url} go mod download`)
         ]
       };
     case ProxyMode.Maven:
@@ -27,8 +29,8 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'Maven', code: `<repository>\n  <id>${instance.name}</id>\n  <url>${entry.url}</url>\n</repository>` },
-          { label: 'Gradle', code: `repositories {\n  maven(url = "${entry.url}")\n}` }
+          guideSnippet('maven-xml', 'Maven', '将仓库片段加入 pom.xml 的 repositories 节点，用于常规 Maven 依赖下载。', `<repository>\n  <id>${instance.name}</id>\n  <url>${entry.url}</url>\n</repository>`),
+          guideSnippet('gradle', 'Gradle', '将仓库片段加入 build.gradle 或 settings.gradle 的 repositories 块。', `repositories {\n  maven(url = "${entry.url}")\n}`)
         ]
       };
     case ProxyMode.Cargo:
@@ -36,7 +38,7 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'Cargo', code: `[registries.${instance.name}]\nprotocol = "sparse"\nindex = "${entry.url}"` }
+          guideSnippet('cargo-config', 'Cargo', '写入 .cargo/config.toml，使用 sparse registry 通过当前代理下载 crate。', `[registries.${instance.name}]\nprotocol = "sparse"\nindex = "${entry.url}"`)
         ]
       };
     case ProxyMode.PyPI:
@@ -44,8 +46,8 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: joinUrlPath(entry.url, 'simple'),
         snippets: [
-          { label: 'pip', code: `pip install -i ${joinUrlPath(entry.url, 'simple')} requests` },
-          { label: 'pip.conf', code: `[global]\nindex-url = ${joinUrlPath(entry.url, 'simple')}` }
+          guideSnippet('pip', 'pip', '单次安装时临时指定 index-url，适合先验证请求是否命中当前代理。', `pip install -i ${joinUrlPath(entry.url, 'simple')} requests`),
+          guideSnippet('pip-conf', 'pip.conf', '写入 pip.conf 后，后续 pip install 会默认通过当前代理访问 Simple API。', `[global]\nindex-url = ${joinUrlPath(entry.url, 'simple')}`)
         ]
       };
     case ProxyMode.Npm:
@@ -53,7 +55,7 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'npm', code: `npm config set registry ${entry.url}` }
+          guideSnippet('npm', 'npm', '设置 registry 后，npm、pnpm、yarn 的包元数据和下载请求都会先经过当前代理。', `npm config set registry ${entry.url}`)
         ]
       };
     case ProxyMode.Oci:
@@ -61,7 +63,7 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'Docker', code: `docker pull ${joinUrlPath(stripScheme(entry.url), 'library/alpine:latest')}` }
+          guideSnippet('docker', 'Docker', '直接从当前镜像代理拉取示例镜像，适合验证客户端到代理的链路是否正常。', `docker pull ${joinUrlPath(stripScheme(entry.url), 'library/alpine:latest')}`)
         ]
       };
     default:
@@ -69,10 +71,14 @@ export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'curl', code: `curl ${joinUrlPath(entry.url, 'example.tar.gz')}` }
+          guideSnippet('curl', 'curl', '使用一个普通文件路径验证当前实例的入口是否可访问。', `curl ${joinUrlPath(entry.url, 'example.tar.gz')}`)
         ]
       };
   }
+}
+
+function guideSnippet(id: string, label: string, description: string, code: string): InstanceGuideSnippet {
+  return { id, label, description, code };
 }
 
 function proxyEntry(instance: InstanceSummary): { label: string; url: string } {

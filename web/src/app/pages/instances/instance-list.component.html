@@ -3,7 +3,7 @@
     <div>
       <p class="eyebrow">实例</p>
       <h2 class="fw-bold mb-1">代理实例</h2>
-      <p class="text-muted mb-0">管理监听入口、上游连接和缓存策略。</p>
+      <p class="text-muted mb-0">管理代理模式、上游连接和缓存策略。</p>
     </div>
     <div class="card-actions">
       <div ngbDropdown>
@@ -18,34 +18,39 @@
           <button ngbDropdownItem (click)="startCreate(ProxyMode.PyPI)">PyPI 包代理</button>
         </div>
       </div>
-      <button type="button" class="btn btn-outline-secondary" (click)="showImportExport = true">导入导出</button>
+      <button type="button" class="btn btn-outline-secondary" (click)="openImportExport()">导入导出</button>
     </div>
   </header>
 
   @if (loading) {
-    <div class="card placeholder-glow"><span class="placeholder col-12" style="height: 200px;"></span></div>
+    <div class="card placeholder-glow">
+      <div class="card-body">
+        <span class="placeholder page-placeholder page-placeholder-lg w-100"></span>
+      </div>
+    </div>
   }
 
   @if (!loading) {
     @if (instances.length === 0) {
-      <div class="text-center text-muted py-5">还没有实例，点击上方按钮创建。</div>
+      <div class="card">
+        <div class="card-body text-center text-muted py-5">还没有实例，点击上方按钮创建。</div>
+      </div>
     } @else {
       <div class="card">
-      <div class="card-body border-bottom">
-        <div class="card-title-row">
-          <div>
-            <h5 class="card-title mb-1">实例清单</h5>
-            <p class="text-muted mb-0">查看每个实例的实际入口地址，并进入编辑、复制或缓存查询。</p>
+        <div class="card-header bg-body-tertiary border-0 py-3">
+          <div class="card-title-row">
+            <div>
+              <h5 class="card-title mb-1">实例清单</h5>
+              <p class="text-muted mb-0">查看实例模式，并进入编辑、复制或缓存查询。</p>
+            </div>
           </div>
         </div>
-      </div>
         <div class="table-responsive">
           <table class="table table-hover mb-0">
             <thead>
               <tr>
                 <th>名称</th>
                 <th>模式</th>
-                <th>入口</th>
                 <th class="text-end">操作</th>
               </tr>
             </thead>
@@ -54,12 +59,6 @@
                 <tr>
                   <td><strong>{{ item.name }}</strong></td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
-                  <td style="max-width: 320px;">
-                    <app-instance-entry
-                      [label]="item.entryLabel || (item.path ? '路径入口' : '独立端口')"
-                      [url]="item.entryUrl || item.publicUrl || item.path || item.bind || ''">
-                    </app-instance-entry>
-                  </td>
                   <td class="text-end text-nowrap">
                     <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
                     <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="copyInstance(item.name)">复制</button>
@@ -74,79 +73,4 @@
       </div>
     }
   }
-
-  @if (showLookupModal) {
-    <div class="modal-backdrop fade show" (click)="closeLookupModal()"></div>
-    <div class="modal d-block" tabindex="-1" (click)="closeLookupModal()">
-      <div class="modal-dialog modal-dialog-centered" (click)="$event.stopPropagation()">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h5 class="modal-title">缓存查询</h5>
-            <button type="button" class="btn-close" (click)="closeLookupModal()"></button>
-          </div>
-          <div class="modal-body">
-            <div class="mb-3">
-              <label class="form-label">实例名称</label>
-              <input class="form-control" name="lookupInstanceName" [value]="lookupInstanceName" disabled>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">
-                @switch (lookupMode) {
-                  @case (ProxyMode.Npm) { 包名 }
-                  @case (ProxyMode.Oci) { 镜像名称 }
-                  @case (ProxyMode.Go) { Go 模块缓存路径 }
-                  @case (ProxyMode.Maven) { Maven 仓库路径 }
-                  @case (ProxyMode.Cargo) { Cargo registry 路径 }
-                  @case (ProxyMode.PyPI) { PyPI Simple 或文件路径 }
-                  @default { 文件路径 }
-                }
-              </label>
-              <p class="text-muted small mb-1">
-                @switch (lookupMode) {
-                  @case (ProxyMode.Npm) { 输入 npm 包名，如 @angular/core 或 lodash }
-                  @case (ProxyMode.Oci) { 输入镜像名称，如 library/alpine:latest 或 nginx:1.25 }
-                  @case (ProxyMode.Go) { 输入 GOPROXY 路径，如 golang.org/x/mod/@v/list 或 golang.org/x/mod/@v/v0.36.0.mod }
-                  @case (ProxyMode.Maven) { 输入 Maven 仓库路径，如 com/google/guava/guava/maven-metadata.xml }
-                  @case (ProxyMode.Cargo) { 输入 sparse registry 路径，如 config.json 或 se/rd/serde }
-                  @case (ProxyMode.PyPI) { 输入 Simple API 或文件路径，如 simple/requests/ 或 files/编码后的上游地址 }
-                  @default { 输入代理时请求的文件路径，如 nginx.conf 或 assets/logo.png }
-                }
-              </p>
-              <input class="form-control" name="lookupPath" [(ngModel)]="lookupPath" [placeholder]="lookupPlaceholder" (keyup.enter)="lookupCache()">
-            </div>
-            <button type="button" class="btn btn-primary" (click)="lookupCache()" [disabled]="!lookupPath.trim() || lookupRunning">
-              {{ lookupRunning ? '查询中...' : '查询缓存状态' }}
-            </button>
-
-            @if (lookupResult) {
-              <div class="lookup-result mt-3" [class.cached]="lookupResult.cached" [class.fresh]="lookupResult.fresh">
-                <div class="d-flex align-items-center gap-3 mb-3">
-                  <strong>{{ lookupResult.cached ? '已缓存' : '未缓存' }}</strong>
-                  @if (lookupResult.cached) {
-                    <span class="badge" [class.bg-success-subtle]="lookupResult.fresh" [class.text-success-emphasis]="lookupResult.fresh" [class.bg-warning-subtle]="!lookupResult.fresh" [class.text-warning-emphasis]="!lookupResult.fresh">
-                      {{ lookupResult.fresh ? '有效' : '可刷新' }}
-                    </span>
-                  }
-                </div>
-                <dl class="kv-list">
-                  <div><dt>缓存策略</dt><dd>{{ lookupResult.policy | modeLabel:'policy' }}</dd></div>
-                  <div><dt>快速命中</dt><dd>{{ lookupResult.freshFor || '未设置' }}</dd></div>
-                  <div><dt>过期时间</dt><dd>{{ lookupResult.expireAfter || '未设置' }}</dd></div>
-                  @if (lookupResult.cached) {
-                    <div><dt>缓存时间</dt><dd>{{ lookupResult.cachedAt }}</dd></div>
-                    <div><dt>过期时间</dt><dd>{{ lookupResult.expiresAt }}</dd></div>
-                  }
-                </dl>
-              </div>
-            }
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-outline-secondary" (click)="closeLookupModal()">关闭</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  }
-
-  <app-import-export-modal [(show)]="showImportExport" [generation]="generation" (imported)="load()"></app-import-export-modal>
 </section>
