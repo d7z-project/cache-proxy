@@ -87,3 +87,34 @@ func TestPyPIProxyRewritesSimpleJSONAndNormalizesProjectName(t *testing.T) {
 	fileBody := requestBody(t, http.HandlerFunc(rt.serveMain), http.MethodGet, downloadPath)
 	require.Equal(t, "wheel-json-bytes", strings.TrimSpace(fileBody))
 }
+
+func TestPyPIProxyRewriteAvoidsDoubleSlashFileURLs(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var filesURL string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/simple/requests/":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, `<html><body><a href="`+filesURL+`">requests.whl</a></body></html>`)
+		case "/packages/requests.whl":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = io.WriteString(w, "wheel-bytes")
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer upstream.Close()
+	filesURL = upstream.URL + "/packages/requests.whl"
+
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"pypi": pypiSpec(t, "pypi", "/pypi/", upstream.URL)})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/pypi/simple/requests/", nil, map[string]string{
+		"X-Forwarded-Host":     "localhost:11112",
+		"X-Cache-Proxy-Prefix": "/",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `href="http://localhost:11112/pypi/files/`)
+	require.NotContains(t, rec.Body.String(), `//files/`)
+}

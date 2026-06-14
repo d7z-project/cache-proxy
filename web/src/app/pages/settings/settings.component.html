@@ -1,13 +1,13 @@
-<section class="container-fluid" style="max-width: 1200px;">
-  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
+<section class="container-fluid page-shell">
+  <header class="page-header">
     <div>
       <p class="eyebrow">设置</p>
-      <h2 class="fw-bold mb-0">全局配置</h2>
+      <h2 class="fw-bold mb-1">运行信息</h2>
+      <p class="text-muted mb-0">进程级参数只读展示；实例与缓存策略在各自页面管理。</p>
     </div>
-    <div class="d-flex gap-2">
+    <div class="card-actions">
       <button type="button" class="btn btn-outline-secondary" (click)="load()">重新载入</button>
       <button type="button" class="btn btn-outline-danger" (click)="promptReset()">恢复默认</button>
-      <button type="button" class="btn btn-primary" (click)="save()" [disabled]="saving || !draft">{{ saving ? '保存中...' : '保存' }}</button>
     </div>
   </header>
 
@@ -18,43 +18,36 @@
     </div>
   }
 
-  @if (!loading && draft && runtime) {
+  @if (!loading && runtime) {
     <div class="row g-3">
       <div class="col-md-6">
-        <form class="card h-100">
-          <div class="card-body d-flex flex-column gap-3">
-            <div>
-              <h5 class="card-title mb-1">持久化配置</h5>
-              <p class="text-muted small mb-0">配置仓库中的全局项。</p>
-            </div>
-            <div>
-              <label class="form-label">Metrics 路径</label>
-              <input class="form-control" name="metricsPath" [(ngModel)]="draft.metrics.path" placeholder="/-/metrics">
-            </div>
-            <div>
-              <label class="form-label">Blob GC 周期</label>
-              <input class="form-control" name="blobGc" [(ngModel)]="draft.storage.gc.blob" placeholder="24h">
-            </div>
-            <div>
-              <label class="form-label">配置版本</label>
-              <input class="form-control" [ngModel]="draft.version" name="version" disabled>
-            </div>
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title mb-1">当前运行参数</h5>
+            <p class="text-muted small mb-3">以下参数由部署和启动方式决定，不在前端修改。</p>
+            <dl class="kv-list">
+              <div><dt>主监听</dt><dd>{{ runtime.bind }}</dd></div>
+              <div><dt>存储目录</dt><dd>{{ runtime.backend }}</dd></div>
+              <div><dt>Metrics 路径</dt><dd>{{ runtime.metricsPath }}</dd></div>
+              <div><dt>Blob GC 周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
+              <div><dt>配置版本</dt><dd>{{ runtime.configVersion }}</dd></div>
+            </dl>
           </div>
-        </form>
+        </div>
       </div>
 
       <div class="col-md-6">
         <div class="card h-100">
           <div class="card-body">
-            <h5 class="card-title mb-1">运行时状态</h5>
-            <p class="text-muted small mb-3">当前进程和配置代次。</p>
+            <h5 class="card-title mb-1">当前状态</h5>
+            <p class="text-muted small mb-3">当前进程已加载的运行时统计。</p>
             <dl class="kv-list">
-              <div><dt>主监听</dt><dd>{{ runtime.bind }}</dd></div>
-              <div><dt>存储目录</dt><dd>{{ runtime.backend }}</dd></div>
-              <div><dt>当前 Metrics</dt><dd>{{ runtime.metricsPath }}</dd></div>
-              <div><dt>当前 GC 周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
-              <div><dt>配置代次</dt><dd>{{ global?.generation }}</dd></div>
+              <div><dt>配置代次</dt><dd>{{ runtime.generation }}</dd></div>
               <div><dt>实例数量</dt><dd>{{ runtime.instances }}</dd></div>
+              <div><dt>活动处理器</dt><dd>{{ runtime.handlers }}</dd></div>
+              <div><dt>累计请求</dt><dd>{{ runtime.requests }}</dd></div>
+              <div><dt>累计错误</dt><dd>{{ runtime.errors }}</dd></div>
+              <div><dt>上游请求</dt><dd>{{ runtime.upstreams }}</dd></div>
             </dl>
           </div>
         </div>

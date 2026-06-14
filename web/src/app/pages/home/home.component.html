@@ -3,7 +3,7 @@
     <div>
       <p class="eyebrow">Cache Proxy</p>
       <h2 class="fw-bold mb-1">可用代理实例</h2>
-      <p class="text-muted mb-0">按每个实例的真实入口直接接入客户端，登录后可继续管理配置。</p>
+      <p class="text-muted mb-0">展开任意实例即可查看它的实际入口地址和对应客户端配置片段，直接复制即可接入。</p>
     </div>
     @if ((authEnabled$ | async) && (isAuth$ | async) === false) {
       <a routerLink="/login" class="btn btn-outline-secondary">登录管理</a>

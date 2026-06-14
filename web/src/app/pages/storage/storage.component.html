@@ -1,10 +1,11 @@
-<section class="container-fluid" style="max-width: 1500px;">
-  <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
+<section class="container-fluid page-shell">
+  <header class="page-header">
     <div>
       <p class="eyebrow">存储</p>
-      <h2 class="fw-bold mb-0">存储状态</h2>
+      <h2 class="fw-bold mb-1">存储状态</h2>
+      <p class="text-muted mb-0">展示当前 BlobFS 使用情况和最近一次 GC 状态。</p>
     </div>
-    <div class="d-flex gap-2">
+    <div class="card-actions">
       <button type="button" class="btn btn-outline-secondary" (click)="refresh()">刷新</button>
       <button type="button" class="btn btn-primary" (click)="runGc()" [disabled]="gcRunning">
         {{ gcRunning ? '清理中...' : '运行 GC' }}
@@ -12,38 +13,62 @@
     </div>
   </header>
 
-  <div class="row g-3">
-    <div class="col-md-6">
-      @if (stats$ | async; as stats) {
+  @if (stats$ | async; as stats) {
+    @if (gcNotice) {
+      <div class="alert alert-info">{{ gcNotice }}</div>
+    }
+
+    <div class="row g-3 mb-3">
+      @for (card of statsCards(stats); track card.label) {
+        <div class="col-sm-6 col-xl-2">
+          <div class="card h-100">
+            <div class="card-body">
+              <div class="stat-label mb-2">{{ card.label }}</div>
+              <div class="fw-bold fs-5">{{ card.value }}</div>
+            </div>
+          </div>
+        </div>
+      }
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-6">
         <article class="card h-100">
           <div class="card-body">
-            <h5 class="card-title">当前状态</h5>
+            <h5 class="card-title mb-1">对象状态</h5>
+            <p class="text-muted small mb-3">当前逻辑对象和底层块使用情况。</p>
             <dl class="kv-list">
-              @for (item of stats | keyvalue; track item.key) {
-                <div><dt>{{ labelText(item.key) }}</dt><dd>{{ valueText(item.value) }}</dd></div>
-              }
+              <div><dt>索引节点</dt><dd>{{ stats.Inodes }}</dd></div>
+              <div><dt>活跃清单</dt><dd>{{ stats.Manifests.Active }}</dd></div>
+              <div><dt>已删除清单</dt><dd>{{ stats.Manifests.Deleted }}</dd></div>
+              <div><dt>活跃数据块</dt><dd>{{ stats.Chunks.Active }}</dd></div>
+              <div><dt>待清理数据块</dt><dd>{{ stats.Chunks.GarbageCandidate }}</dd></div>
+              <div><dt>异常数据块</dt><dd>{{ stats.Chunks.Corrupt }}</dd></div>
+              <div><dt>可用数据段</dt><dd>{{ stats.Segments.Sealed }}</dd></div>
+              <div><dt>整理中数据段</dt><dd>{{ stats.Segments.Compacting }}</dd></div>
             </dl>
           </div>
         </article>
-      } @else {
-        <article class="card placeholder-glow" style="min-height:200px"><span class="placeholder col-12 h-100"></span></article>
-      }
-    </div>
-    <div class="col-md-6">
-      <article class="card h-100">
-        <div class="card-body">
-          <h5 class="card-title">最近 GC</h5>
-          @if (gcResult) {
+      </div>
+
+      <div class="col-lg-6">
+        <article class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title mb-1">最近 GC</h5>
+            <p class="text-muted small mb-3">这里始终显示最近一次后台或手动 GC 的稳定状态。</p>
             <dl class="kv-list">
-              @for (item of gcResult | keyvalue; track item.key) {
-                <div><dt>{{ labelText(item.key) }}</dt><dd>{{ valueText(item.value) }}</dd></div>
-              }
+              <div><dt>运行次数</dt><dd>{{ stats.GC.Runs }}</dd></div>
+              <div><dt>最近批次</dt><dd>{{ stats.GC.LastEpoch }}</dd></div>
+              <div><dt>最近状态</dt><dd>{{ stateText(stats.GC.LastRunState) }}</dd></div>
+              <div><dt>最近后台时间</dt><dd>{{ timeText(stats.GC.LastBackgroundAt) }}</dd></div>
+              <div><dt>最近后台批次</dt><dd>{{ stats.GC.LastBackgroundEpoch }}</dd></div>
+              <div><dt>最近后台错误</dt><dd>{{ errorText(stats.GC.LastBackgroundError) }}</dd></div>
             </dl>
-          } @else {
-            <p class="text-muted mb-0">运行清理后显示结果。</p>
-          }
-        </div>
-      </article>
+          </div>
+        </article>
+      </div>
     </div>
-  </div>
+  } @else {
+    <article class="card placeholder-glow" style="min-height:240px"><span class="placeholder col-12 h-100"></span></article>
+  }
 </section>

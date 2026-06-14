@@ -79,7 +79,8 @@
 
     <div class="card">
       <div class="card-body">
-        <h5 class="card-title">实例摘要</h5>
+        <h5 class="card-title mb-1">实例摘要</h5>
+        <p class="text-muted small mb-3">快速查看各实例的入口、请求量和当前活动下载。</p>
         <div class="table-responsive">
           <table class="table table-hover mb-0">
             <thead><tr><th>名称</th><th>模式</th><th>入口</th><th>请求</th><th>流量</th><th>下载</th></tr></thead>
@@ -88,7 +89,10 @@
                 <tr>
                   <td>{{ item.name }}</td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
-                  <td class="text-truncate" style="max-width: 200px;">{{ item.path || item.bind }}</td>
+                  <td style="max-width: 280px;">
+                    <div class="small text-muted mb-1">{{ item.entryLabel || (item.path ? '路径入口' : '独立端口') }}</div>
+                    <code class="instance-entry">{{ item.entryUrl || item.publicUrl || item.path || item.bind }}</code>
+                  </td>
                   <td>
                     <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>
                     <div class="mini-track"><div class="mini-bar" [style.width.%]="requestPercent(data.metrics.instances, item.name)"></div></div>

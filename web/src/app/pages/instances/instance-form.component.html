@@ -1,4 +1,4 @@
-<section class="container-fluid" style="max-width: 1400px;">
+<section class="container-fluid page-shell">
   @if (loading) {
     <div class="placeholder-glow mb-4">
       <span class="placeholder col-2 mb-2" style="height: 14px;"></span>
@@ -9,13 +9,13 @@
   }
 
   @if (!loading && draft) {
-    <header class="d-flex justify-content-between align-items-start gap-3 mb-4 flex-wrap">
+    <header class="page-header">
       <div>
         <p class="eyebrow">{{ isCreate ? '新增实例' : '编辑实例' }}</p>
         <h2 class="fw-bold mb-1">{{ draft.name || '未命名实例' }}</h2>
-        <p class="text-muted mb-0">{{ draft.meta.mode | modeLabel }} · {{ listenKind === ListenKind.Bind ? '独立端口' : '路径访问' }}</p>
+        <p class="text-muted mb-0">{{ draft.meta.mode | modeLabel }} · {{ listenKind === ListenKind.Bind ? '独立端口入口' : '路径入口' }}</p>
       </div>
-      <div class="d-flex gap-2">
+      <div class="card-actions">
         <button type="button" class="btn btn-outline-secondary" (click)="back()">取消</button>
         <button class="btn btn-primary" type="button" (click)="save()" [disabled]="saving">{{ saving ? '保存中...' : '保存' }}</button>
       </div>
@@ -35,17 +35,34 @@
         <div class="form-section">
           <div class="section-heading"><span class="step-badge">1</span><div><h3>基础信息</h3><p class="text-muted mb-0">实例标识和运行模式。</p></div></div>
           <div class="row g-3">
-            <div class="col-md-4"><label class="form-label">实例名称</label><input class="form-control" name="name" [(ngModel)]="draft.name" [disabled]="!isCreate" placeholder="my-proxy"></div>
-            <div class="col-md-4"><label class="form-label">代理模式</label><input class="form-control" [ngModel]="draft.meta.mode | modeLabel" name="modeDisplay" disabled></div>
+            <div class="col-md-4">
+              <label class="form-label">实例名称</label>
+              <input class="form-control" name="name" [(ngModel)]="draft.name" [disabled]="!isCreate" placeholder="my-proxy">
+              <div class="form-text">用于区分不同代理实例，创建后名称保持不变。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">代理模式</label>
+              <input class="form-control" [ngModel]="draft.meta.mode | modeLabel" name="modeDisplay" disabled>
+              <div class="form-text">模式决定客户端接入方式和可配置策略。</div>
+            </div>
             <div class="col-md-4">
               <label class="form-label">状态</label>
               <div class="form-check mt-2">
                 <input class="form-check-input" type="checkbox" name="enabled" [(ngModel)]="draft.meta.enabled" id="instanceEnabled">
                 <label class="form-check-label" for="instanceEnabled">启用实例</label>
               </div>
+              <div class="form-text">关闭后保留配置，但不会继续对外提供代理服务。</div>
             </div>
-            <div class="col-md-6"><label class="form-label">说明</label><input class="form-control" name="description" [(ngModel)]="draft.meta.description" placeholder="可选说明"></div>
-            <div class="col-md-6"><label class="form-label">缓存保留时间</label><input class="form-control" name="expireAfter" [(ngModel)]="draft.meta.expireAfter" placeholder="720h"></div>
+            <div class="col-md-6">
+              <label class="form-label">说明</label>
+              <input class="form-control" name="description" [(ngModel)]="draft.meta.description" placeholder="例如：团队内网 PyPI 代理">
+              <div class="form-text">用于帮助团队识别实例用途。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">缓存保留时间</label>
+              <input class="form-control" name="expireAfter" [(ngModel)]="draft.meta.expireAfter" placeholder="720h">
+              <div class="form-text">控制缓存对象最长保留多久，常用写法如 `24h`、`720h`。</div>
+            </div>
           </div>
         </div>
 
@@ -57,12 +74,26 @@
               <select class="form-select" name="listenKind" [(ngModel)]="listenKind" [disabled]="draft.meta.mode === ProxyMode.Oci">
                 @for (kind of listenKinds; track kind.value) { <option [ngValue]="kind.value">{{ kind.label }}</option> }
               </select>
+              <div class="form-text">{{ listenKindDescription() }}</div>
             </div>
             @if (listenKind === ListenKind.Path) {
-              <div class="col-md-8"><label class="form-label">路径前缀</label><input class="form-control" name="routePath" [(ngModel)]="draft.route.path" placeholder="/files"></div>
+              <div class="col-md-8">
+                <label class="form-label">路径前缀</label>
+                <input class="form-control" name="routePath" [(ngModel)]="draft.route.path" placeholder="/files">
+                <div class="form-text">客户端将通过主站地址加这个路径访问代理，例如 `/npm`、`/go`。</div>
+              </div>
             }
             @if (listenKind === ListenKind.Bind) {
-              <div class="col-md-8"><label class="form-label">监听地址</label><input class="form-control" name="routeBind" [(ngModel)]="draft.route.bind" placeholder="127.0.0.1:5000"></div>
+              <div class="col-md-6">
+                <label class="form-label">监听地址</label>
+                <input class="form-control" name="routeBind" [(ngModel)]="draft.route.bind" placeholder="127.0.0.1:5000">
+                <div class="form-text">服务真正监听的地址，常用于镜像仓库或需要独立端口的客户端。</div>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">公开地址</label>
+                <input class="form-control" name="routePublicUrl" [(ngModel)]="draft.route.publicUrl" placeholder="https://registry.example.com">
+                <div class="form-text">用于首页接入引导和复制命令，建议填写用户实际访问的地址。</div>
+              </div>
             }
           </div>
         </div>
@@ -70,19 +101,32 @@
         <div class="form-section">
           <div class="section-heading"><span class="step-badge">3</span><div><h3>上游连接</h3><p class="text-muted mb-0">上游地址和连接参数。</p></div></div>
           <label class="form-label">上游地址</label>
+          <div class="form-text mb-2">按顺序尝试上游，通常填写官方仓库或团队内部源站。</div>
           <div class="tag-field">
             @for (upstream of upstreams; track $index; let i = $index) {
               <div class="tag-row">
-                <input class="form-control" [ngModel]="upstreams[i]" (ngModelChange)="upstreams[i] = $event" [name]="'upstream' + i" placeholder="https://">
+                <input class="form-control" [ngModel]="upstreams[i]" (ngModelChange)="upstreams[i] = $event" [name]="'upstream' + i" placeholder="https://mirror.example.com">
                 <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeUpstream(i)" [disabled]="upstreams.length <= 1">×</button>
               </div>
             }
             <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addUpstream()">+ 添加上游</button>
           </div>
           <div class="row g-3">
-            <div class="col-md-4"><label class="form-label">上游代理</label><input class="form-control" name="proxy" [(ngModel)]="draft.source.transport!.proxy" placeholder="http://127.0.0.1:7890"></div>
-            <div class="col-md-4"><label class="form-label">User-Agent</label><input class="form-control" name="ua" [(ngModel)]="draft.source.transport!.ua" placeholder="cache-proxy"></div>
-            <div class="col-md-4"><label class="form-label">连接超时</label><input class="form-control" name="timeout" [(ngModel)]="draft.source.transport!.timeout" placeholder="3s"></div>
+            <div class="col-md-4">
+              <label class="form-label">上游代理</label>
+              <input class="form-control" name="proxy" [(ngModel)]="draft.source.transport!.proxy" placeholder="http://127.0.0.1:7890">
+              <div class="form-text">仅在访问上游需要走企业代理时填写。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">User-Agent</label>
+              <input class="form-control" name="ua" [(ngModel)]="draft.source.transport!.ua" placeholder="cache-proxy">
+              <div class="form-text">少数上游会根据这个值区分客户端，通常留空即可。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">连接超时</label>
+              <input class="form-control" name="timeout" [(ngModel)]="draft.source.transport!.timeout" placeholder="3s">
+              <div class="form-text">控制连接上游的最长等待时间。</div>
+            </div>
           </div>
         </div>
 
@@ -95,6 +139,7 @@
                 <select class="form-select" name="fileDefaultPolicy" [(ngModel)]="filePolicy.defaultPolicy">
                   @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
+                <div class="form-text">{{ cachePolicyDescription(filePolicy.defaultPolicy) }}</div>
               </div>
               <div class="col-md-4">
                 <label class="form-label">快速命中时间</label>
@@ -105,9 +150,11 @@
                 <select class="form-select" name="fileBusyPolicy" [(ngModel)]="filePolicy.busyPolicy">
                   @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
+                <div class="form-text">{{ busyPolicyDescription(filePolicy.busyPolicy) }}</div>
               </div>
             </div>
             <label class="form-label mt-3">透传请求头</label>
+            <div class="form-text mb-2">只在上游需要感知客户端头部时添加，例如语言或格式协商。</div>
             <div class="tag-field">
               @for (header of passHeaders; track $index; let i = $index) {
                 <div class="tag-row">
@@ -144,6 +191,7 @@
                 <select class="form-select" name="ociDefaultPolicy" [(ngModel)]="ociPolicy.defaultPolicy">
                   @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
+                <div class="form-text">{{ cachePolicyDescription(ociPolicy.defaultPolicy) }}</div>
               </div>
               <div class="col-md-4">
                 <label class="form-label">快速命中时间</label>
@@ -154,6 +202,7 @@
                 <select class="form-select" name="ociBusyPolicy" [(ngModel)]="ociPolicy.busyPolicy">
                   @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
+                <div class="form-text">{{ busyPolicyDescription(ociPolicy.busyPolicy) }}</div>
               </div>
             </div>
             <div class="row g-3 mt-1">
@@ -162,6 +211,7 @@
                 <select class="form-select" name="ociAuthType" [(ngModel)]="ociPolicy.auth!.type">
                   @for (option of ociAuthOptions; track option.value) { <option [ngValue]="option.value">{{ option.label }}</option> }
                 </select>
+                <div class="form-text">{{ ociAuthDescription(ociPolicy.auth?.type) }}</div>
               </div>
               @if (ociPolicy.auth?.type === OciAuthType.Basic) {
                 <div class="col-md-4"><label class="form-label">用户名</label><input class="form-control" name="ociUser" [(ngModel)]="ociPolicy.auth!.username"></div>
@@ -198,6 +248,7 @@
                 <select class="form-select" name="npmDefaultPolicy" [(ngModel)]="npmPolicy.defaultPolicy">
                   @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
+                <div class="form-text">{{ cachePolicyDescription(npmPolicy.defaultPolicy) }}</div>
               </div>
               <div class="col-md-4">
                 <label class="form-label">快速命中时间</label>
@@ -208,9 +259,11 @@
                 <select class="form-select" name="npmBusyPolicy" [(ngModel)]="npmPolicy.busyPolicy">
                   @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
+                <div class="form-text">{{ busyPolicyDescription(npmPolicy.busyPolicy) }}</div>
               </div>
             </div>
             <label class="form-label mt-3">包规则</label>
+            <div class="form-text mb-2">按包名或路径调整包信息与下载文件的缓存方式。</div>
             <div class="rule-list">
               @for (rule of npmPolicy.rules; track $index; let i = $index) {
                 <div class="row-grid header-row-grid">
@@ -233,11 +286,12 @@
 
         @if (draft.meta.mode === ProxyMode.Go && goPolicy) {
           <div class="form-section">
-            <div class="section-heading"><span class="step-badge">4</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">纯 GOPROXY 回源和 SumDB 代理，不允许本地 go 直连。</p></div></div>
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">适合团队内统一接入 Go Modules、校验服务和私有模块跳过规则。</p></div></div>
             <div class="form-check mb-3">
               <input class="form-check-input" type="checkbox" name="sumdbEnabled" [(ngModel)]="goPolicy.sumdb!.enabled" id="sumdbEnabled">
               <label class="form-check-label" for="sumdbEnabled">启用 SumDB 代理</label>
             </div>
+            <div class="form-text mb-3">用于让 Go 客户端通过当前代理访问校验数据库。</div>
             @if (goPolicy.sumdb?.enabled !== false) {
               <div class="row g-3">
                 <div class="col-md-6"><label class="form-label">SumDB 名称</label><input class="form-control" name="goSumdbName" [(ngModel)]="goPolicy.sumdb!.name" placeholder="sum.golang.org"></div>
@@ -248,6 +302,7 @@
               <input class="form-check-input" type="checkbox" name="disableFetch" [(ngModel)]="goPolicy.disableModuleFetchHeader" id="disableFetch">
               <label class="form-check-label" for="disableFetch">允许客户端通过 Disable-Module-Fetch 只读缓存</label>
             </div>
+            <div class="form-text">开启后，客户端可以要求当前代理只读缓存、不再访问上游。</div>
             <label class="form-label mt-3">GOPRIVATE 跳过规则</label>
             <div class="tag-field">
               @for (value of goPrivatePatterns; track $index; let i = $index) {
@@ -258,7 +313,7 @@
               }
               <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addGoPrivatePattern()">+ 添加规则</button>
             </div>
-            <p class="text-muted mt-2 mb-0">命中这些模块路径时，本代理直接返回不存在，让客户端按自己的 GOPROXY 链继续处理。</p>
+            <p class="text-muted mt-2 mb-0">命中这些模块路径时，当前代理直接返回不存在，让客户端继续尝试后续代理链。</p>
           </div>
         }
 
@@ -266,10 +321,10 @@
           <div class="form-section">
             <div class="section-heading"><span class="step-badge">4</span><div><h3>Maven/Gradle 策略</h3><p class="text-muted mb-0">区分元数据、SNAPSHOT 和发布件。</p></div></div>
             <div class="row g-3">
-              <div class="col-md-4"><label class="form-label">元数据快速命中</label><input class="form-control" name="mavenMetadataFreshFor" [(ngModel)]="mavenPolicy.metadataFreshFor" placeholder="30s"></div>
-              <div class="col-md-4"><label class="form-label">元数据并发刷新</label><select class="form-select" name="mavenMetadataBusyPolicy" [(ngModel)]="mavenPolicy.metadataBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
-              <div class="col-md-4"><label class="form-label">发布件策略</label><select class="form-select" name="mavenReleasePolicy" [(ngModel)]="mavenPolicy.releasePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
-              <div class="col-md-4"><label class="form-label">SNAPSHOT 策略</label><select class="form-select" name="mavenSnapshotPolicy" [(ngModel)]="mavenPolicy.snapshotPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">元数据快速命中</label><input class="form-control" name="mavenMetadataFreshFor" [(ngModel)]="mavenPolicy.metadataFreshFor" placeholder="30s"><div class="form-text">控制 `maven-metadata.xml` 多久内直接命中缓存。</div></div>
+              <div class="col-md-4"><label class="form-label">元数据并发刷新</label><select class="form-select" name="mavenMetadataBusyPolicy" [(ngModel)]="mavenPolicy.metadataBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ busyPolicyDescription(mavenPolicy.metadataBusyPolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">发布件策略</label><select class="form-select" name="mavenReleasePolicy" [(ngModel)]="mavenPolicy.releasePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(mavenPolicy.releasePolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">SNAPSHOT 策略</label><select class="form-select" name="mavenSnapshotPolicy" [(ngModel)]="mavenPolicy.snapshotPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(mavenPolicy.snapshotPolicy) }}</div></div>
               <div class="col-md-4"><label class="form-label">SNAPSHOT 快速命中</label><input class="form-control" name="mavenSnapshotFreshFor" [(ngModel)]="mavenPolicy.snapshotFreshFor" placeholder="15s"></div>
             </div>
             <label class="form-label mt-3">路径规则</label>
@@ -290,16 +345,17 @@
 
         @if (draft.meta.mode === ProxyMode.Cargo && cargoPolicy) {
           <div class="form-section">
-            <div class="section-heading"><span class="step-badge">4</span><div><h3>Cargo 策略</h3><p class="text-muted mb-0">仅支持 sparse registry 协议。</p></div></div>
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>Cargo 策略</h3><p class="text-muted mb-0">适合 Rust sparse registry 和 crate 下载缓存。</p></div></div>
             <div class="row g-3">
-              <div class="col-md-4"><label class="form-label">索引快速命中</label><input class="form-control" name="cargoIndexFreshFor" [(ngModel)]="cargoPolicy.indexFreshFor" placeholder="30s"></div>
-              <div class="col-md-4"><label class="form-label">索引并发刷新</label><select class="form-select" name="cargoIndexBusyPolicy" [(ngModel)]="cargoPolicy.indexBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
-              <div class="col-md-4"><label class="form-label">crate 文件策略</label><select class="form-select" name="cargoCratePolicy" [(ngModel)]="cargoPolicy.cratePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">索引快速命中</label><input class="form-control" name="cargoIndexFreshFor" [(ngModel)]="cargoPolicy.indexFreshFor" placeholder="30s"><div class="form-text">控制 sparse index 文本文件的缓存命中时间。</div></div>
+              <div class="col-md-4"><label class="form-label">索引并发刷新</label><select class="form-select" name="cargoIndexBusyPolicy" [(ngModel)]="cargoPolicy.indexBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ busyPolicyDescription(cargoPolicy.indexBusyPolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">crate 文件策略</label><select class="form-select" name="cargoCratePolicy" [(ngModel)]="cargoPolicy.cratePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(cargoPolicy.cratePolicy) }}</div></div>
             </div>
             <div class="form-check mt-3">
               <input class="form-check-input" type="checkbox" name="cargoAuthRequired" [(ngModel)]="cargoPolicy.authRequired" id="cargoAuthRequired">
               <label class="form-check-label" for="cargoAuthRequired">向客户端声明 registry 需要认证</label>
             </div>
+            <div class="form-text">如果你的上游 sparse registry 需要登录或访问令牌，请开启此项。</div>
           </div>
         }
 
@@ -307,15 +363,16 @@
           <div class="form-section">
             <div class="section-heading"><span class="step-badge">4</span><div><h3>PyPI 策略</h3><p class="text-muted mb-0">代理 Simple API 并重写下载地址。</p></div></div>
             <div class="row g-3">
-              <div class="col-md-4"><label class="form-label">Simple API 快速命中</label><input class="form-control" name="pypiSimpleFreshFor" [(ngModel)]="pypiPolicy.simpleFreshFor" placeholder="30s"></div>
-              <div class="col-md-4"><label class="form-label">Simple API 并发刷新</label><select class="form-select" name="pypiSimpleBusyPolicy" [(ngModel)]="pypiPolicy.simpleBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
-              <div class="col-md-4"><label class="form-label">分发文件策略</label><select class="form-select" name="pypiFilePolicy" [(ngModel)]="pypiPolicy.filePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">Simple API 快速命中</label><input class="form-control" name="pypiSimpleFreshFor" [(ngModel)]="pypiPolicy.simpleFreshFor" placeholder="30s"><div class="form-text">控制包索引页多久内直接命中缓存。</div></div>
+              <div class="col-md-4"><label class="form-label">Simple API 并发刷新</label><select class="form-select" name="pypiSimpleBusyPolicy" [(ngModel)]="pypiPolicy.simpleBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ busyPolicyDescription(pypiPolicy.simpleBusyPolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">分发文件策略</label><select class="form-select" name="pypiFilePolicy" [(ngModel)]="pypiPolicy.filePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(pypiPolicy.filePolicy) }}</div></div>
             </div>
             <div class="row g-3 mt-1">
               <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiProxyJson" [(ngModel)]="pypiPolicy.proxyJson" id="pypiProxyJson"><label class="form-check-label" for="pypiProxyJson">代理 JSON Simple API</label></div></div>
               <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiCoreMetadata" [(ngModel)]="pypiPolicy.proxyCoreMetadata" id="pypiCoreMetadata"><label class="form-check-label" for="pypiCoreMetadata">保留 core metadata 链接</label></div></div>
               <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiSignatures" [(ngModel)]="pypiPolicy.proxySignatures" id="pypiSignatures"><label class="form-check-label" for="pypiSignatures">保留签名链接</label></div></div>
             </div>
+            <div class="form-text">这些选项决定客户端下载时看到的索引格式以及是否保留附加元数据链接。</div>
           </div>
         }
       </div>

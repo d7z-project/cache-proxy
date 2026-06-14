@@ -11,8 +11,8 @@ export interface InstanceGuide {
   snippets: InstanceGuideSnippet[];
 }
 
-export function buildInstanceGuide(instance: InstanceSummary, origin: string): InstanceGuide {
-  const entry = proxyEntry(instance, origin);
+export function buildInstanceGuide(instance: InstanceSummary): InstanceGuide {
+  const entry = proxyEntry(instance);
   switch (instance.mode) {
     case ProxyMode.Go:
       return {
@@ -42,10 +42,10 @@ export function buildInstanceGuide(instance: InstanceSummary, origin: string): I
     case ProxyMode.PyPI:
       return {
         entryLabel: entry.label,
-        entryUrl: `${entry.url}/simple`,
+        entryUrl: joinUrlPath(entry.url, 'simple'),
         snippets: [
-          { label: 'pip', code: `pip install -i ${entry.url}/simple requests` },
-          { label: 'pip.conf', code: `[global]\nindex-url = ${entry.url}/simple` }
+          { label: 'pip', code: `pip install -i ${joinUrlPath(entry.url, 'simple')} requests` },
+          { label: 'pip.conf', code: `[global]\nindex-url = ${joinUrlPath(entry.url, 'simple')}` }
         ]
       };
     case ProxyMode.Npm:
@@ -61,7 +61,7 @@ export function buildInstanceGuide(instance: InstanceSummary, origin: string): I
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'Docker', code: `docker pull ${stripScheme(entry.url)}/library/alpine:latest` }
+          { label: 'Docker', code: `docker pull ${joinUrlPath(stripScheme(entry.url), 'library/alpine:latest')}` }
         ]
       };
     default:
@@ -69,34 +69,40 @@ export function buildInstanceGuide(instance: InstanceSummary, origin: string): I
         entryLabel: entry.label,
         entryUrl: entry.url,
         snippets: [
-          { label: 'curl', code: `curl ${entry.url}/example.tar.gz` }
+          { label: 'curl', code: `curl ${joinUrlPath(entry.url, 'example.tar.gz')}` }
         ]
       };
   }
 }
 
-function proxyEntry(instance: InstanceSummary, origin: string): { label: string; url: string } {
-  if (instance.path) {
-    return { label: '路径入口', url: origin + instance.path };
-  }
-  return { label: '独立端口', url: bindEntryURL(instance.bind ?? '', origin) };
+function proxyEntry(instance: InstanceSummary): { label: string; url: string } {
+  return {
+    label: instance.entryLabel || (instance.entryKind === 'path' ? '路径入口' : '独立端口'),
+    url: instance.entryUrl || instance.publicUrl || fallbackEntryURL(instance)
+  };
 }
 
 function stripScheme(value: string): string {
   return value.replace(/^https?:\/\//, '');
 }
 
-function bindEntryURL(bind: string, origin: string): string {
+function joinUrlPath(base: string, suffix: string): string {
+  const cleanBase = base.replace(/\/+$/, '');
+  const cleanSuffix = suffix.replace(/^\/+/, '');
+  return `${cleanBase}/${cleanSuffix}`;
+}
+
+function fallbackEntryURL(instance: InstanceSummary): string {
+  if (instance.path) {
+    return instance.path;
+  }
+  return bindEntryURL(instance.bind ?? '');
+}
+
+function bindEntryURL(bind: string): string {
   if (bind.startsWith('http://') || bind.startsWith('https://')) return bind;
   const parsed = parseBind(bind);
   if (!parsed) return `http://${bind}`;
-  const base = new URL(origin);
-  if (parsed.host === '0.0.0.0' || parsed.host === '::' || parsed.host === '[::]') {
-    return `${base.protocol}//${base.hostname}:${parsed.port}`;
-  }
-  if (parsed.host === '127.0.0.1' || parsed.host === 'localhost') {
-    return `http://${parsed.host}:${parsed.port}`;
-  }
   const host = parsed.host.includes(':') && !parsed.host.startsWith('[') ? `[${parsed.host}]` : parsed.host;
   return `http://${host}:${parsed.port}`;
 }

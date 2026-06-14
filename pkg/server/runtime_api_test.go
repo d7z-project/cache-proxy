@@ -69,7 +69,7 @@ func TestInstanceCollectionCRUDAndTenantCleanup(t *testing.T) {
 	require.True(t, errors.Is(err, fs.ErrNotExist))
 }
 
-func TestGlobalConfigAndImportExportAPIs(t *testing.T) {
+func TestGlobalConfigIsReadOnlyAndImportExportAPIs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{})
@@ -80,14 +80,7 @@ func TestGlobalConfigAndImportExportAPIs(t *testing.T) {
 	require.Equal(t, http.StatusOK, globalResp.Code)
 	var globalDoc globalConfigResponse
 	require.NoError(t, json.Unmarshal(globalResp.Body.Bytes(), &globalDoc))
-	globalDoc.Config.Metrics.Path = "/metrics-alt"
-
-	saveGlobal := performRequest(t, handler, http.MethodPut, "/-/api/global-config", mustJSONReader(t, saveGlobalRequest{
-		Generation: globalDoc.Generation,
-		Config:     globalDoc.Config,
-	}), map[string]string{"Content-Type": "application/json"})
-	require.Equal(t, http.StatusOK, saveGlobal.Code, saveGlobal.Body.String())
-	require.NoError(t, json.Unmarshal(saveGlobal.Body.Bytes(), &globalDoc))
+	require.Equal(t, http.StatusMethodNotAllowed, performRequest(t, handler, http.MethodPut, "/-/api/global-config", strings.NewReader(`{}`), map[string]string{"Content-Type": "application/json"}).Code)
 
 	importResp := performRequest(t, handler, http.MethodPost, "/-/api/instances/import", mustJSONReader(t, importInstancesRequest{
 		Generation: globalDoc.Generation,
@@ -103,8 +96,66 @@ func TestGlobalConfigAndImportExportAPIs(t *testing.T) {
 	require.Equal(t, http.StatusOK, exportResp.Code)
 	var exported exportResponse
 	require.NoError(t, json.Unmarshal(exportResp.Body.Bytes(), &exported))
-	require.Equal(t, "/metrics-alt", exported.Global.Metrics.Path)
+	require.Equal(t, DefaultMetricsPath, exported.Global.Metrics.Path)
 	require.Len(t, exported.Instances, 2)
+}
+
+func TestPublicInstancesExposeResolvedEntryURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{
+		"oci": {
+			Name:   "oci",
+			Meta:   config.InstanceMeta{Mode: config.ModeOCI, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+			Route:  config.InstanceRoute{Bind: "0.0.0.0:5000", PublicURL: "https://registry.example.com/"},
+			Source: config.InstanceSource{Upstreams: []string{"https://registry-1.docker.io"}},
+			Policy: mustPolicyJSON(t, map[string]any{"defaultPolicy": "revalidate", "busyPolicy": "bypass", "rules": []any{}}),
+		},
+		"files": fileSpec(t, "files", "/files", "https://example.com"),
+	})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/-/api/public/instances", nil, map[string]string{
+		"X-Forwarded-Proto": "https",
+		"X-Forwarded-Host":  "cache.example.com",
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var items []config.InstanceSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &items))
+	require.Len(t, items, 2)
+
+	require.Equal(t, "https://cache.example.com/files", items[0].EntryURL)
+	require.Equal(t, "https://registry.example.com", items[1].EntryURL)
+	require.Equal(t, "public_url", items[1].EntryKind)
+}
+
+func TestPathRoutesAreNormalizedBeforePersistenceAndDisplay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{
+		"files": fileSpec(t, "files", "/files/", "https://example.com"),
+	})
+	defer closeRuntime(t, rt)
+
+	runtimeHandler := http.HandlerFunc(rt.serveMain)
+
+	docResp := performRequest(t, runtimeHandler, http.MethodGet, "/-/api/instances/files", nil, nil)
+	require.Equal(t, http.StatusOK, docResp.Code)
+
+	var doc instanceDocumentResponse
+	require.NoError(t, json.Unmarshal(docResp.Body.Bytes(), &doc))
+	require.Equal(t, "/files", doc.Spec.Route.Path)
+
+	publicResp := performRequest(t, runtimeHandler, http.MethodGet, "/-/api/public/instances", nil, map[string]string{
+		"X-Forwarded-Proto": "https",
+		"X-Forwarded-Host":  "cache.example.com",
+	})
+	require.Equal(t, http.StatusOK, publicResp.Code)
+
+	var items []config.InstanceSummary
+	require.NoError(t, json.Unmarshal(publicResp.Body.Bytes(), &items))
+	require.Len(t, items, 1)
+	require.Equal(t, "https://cache.example.com/files", items[0].EntryURL)
 }
 
 func TestConflictingPathIsRejected(t *testing.T) {

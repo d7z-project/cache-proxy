@@ -30,11 +30,6 @@ type exportResponse struct {
 	Instances  []config.InstanceSpec `json:"instances"`
 }
 
-type saveGlobalRequest struct {
-	Generation uint64               `json:"generation"`
-	Config     *config.GlobalConfig `json:"config"`
-}
-
 type saveInstanceRequest struct {
 	Generation uint64               `json:"generation"`
 	Spec       *config.InstanceSpec `json:"spec"`
@@ -83,7 +78,7 @@ func (r *Runtime) publicInstancesAPI(w http.ResponseWriter, req *http.Request) {
 	r.mu.RLock()
 	instances := config.CloneInstances(r.instances)
 	r.mu.RUnlock()
-	writeJSON(w, listInstanceSummaries(instances), nil)
+	writeJSON(w, listInstanceSummaries(req, instances), nil)
 }
 
 func (r *Runtime) runtimeAPI(w http.ResponseWriter, req *http.Request) {
@@ -94,17 +89,18 @@ func (r *Runtime) runtimeAPI(w http.ResponseWriter, req *http.Request) {
 	stats := r.stats.Snapshot()
 	r.mu.RLock()
 	response := map[string]any{
-		"bind":        r.bind,
-		"backend":     r.backend,
-		"authEnabled": r.password != "",
-		"metricsPath": r.global.Metrics.Path,
-		"gcInterval":  r.global.Storage.GC.Blob.String(),
-		"generation":  r.generation,
-		"instances":   len(r.instances),
-		"handlers":    len(r.handlers),
-		"requests":    stats.Total.Requests,
-		"errors":      stats.Total.Errors,
-		"upstreams":   stats.Total.UpstreamRequests,
+		"bind":          r.bind,
+		"backend":       r.backend,
+		"authEnabled":   r.password != "",
+		"metricsPath":   r.global.Metrics.Path,
+		"gcInterval":    r.global.Storage.GC.Blob.String(),
+		"configVersion": r.global.Version,
+		"generation":    r.generation,
+		"instances":     len(r.instances),
+		"handlers":      len(r.handlers),
+		"requests":      stats.Total.Requests,
+		"errors":        stats.Total.Errors,
+		"upstreams":     stats.Total.UpstreamRequests,
 	}
 	r.mu.RUnlock()
 	writeJSON(w, response, nil)
@@ -117,25 +113,6 @@ func (r *Runtime) globalConfigAPI(w http.ResponseWriter, req *http.Request) {
 		response := globalConfigResponse{Generation: r.generation, Config: config.CloneGlobal(r.global)}
 		r.mu.RUnlock()
 		writeJSON(w, response, nil)
-	case http.MethodPut:
-		var input saveGlobalRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, int64(defaultConfigLimit))).Decode(&input); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		if input.Config == nil {
-			writeError(w, http.StatusBadRequest, errors.New("config is required"))
-			return
-		}
-		r.mu.RLock()
-		instances := config.CloneInstances(r.instances)
-		r.mu.RUnlock()
-		nextGeneration, err := r.replaceState(req.Context(), input.Generation, input.Config, instances, nil, nil)
-		if err != nil {
-			writeConfigError(w, err)
-			return
-		}
-		writeJSON(w, globalConfigResponse{Generation: nextGeneration, Config: config.CloneGlobal(input.Config)}, nil)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -148,7 +125,7 @@ func (r *Runtime) instancesCollectionAPI(w http.ResponseWriter, req *http.Reques
 		instances := config.CloneInstances(r.instances)
 		generation := r.generation
 		r.mu.RUnlock()
-		writeJSON(w, map[string]any{"generation": generation, "items": listInstanceSummaries(instances)}, nil)
+		writeJSON(w, map[string]any{"generation": generation, "items": listInstanceSummaries(req, instances)}, nil)
 	case http.MethodPost:
 		var input saveInstanceRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, int64(defaultConfigLimit))).Decode(&input); err != nil {

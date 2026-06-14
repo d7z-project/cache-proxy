@@ -31,14 +31,14 @@
       <div class="text-center text-muted py-5">还没有实例，点击上方按钮创建。</div>
     } @else {
       <div class="card">
-        <div class="card-body border-bottom">
-          <div class="card-title-row">
-            <div>
-              <h5 class="card-title mb-1">实例清单</h5>
-              <p class="text-muted mb-0">管理代理入口、缓存查询和实例复制。</p>
-            </div>
+      <div class="card-body border-bottom">
+        <div class="card-title-row">
+          <div>
+            <h5 class="card-title mb-1">实例清单</h5>
+            <p class="text-muted mb-0">查看每个实例的实际入口地址，并进入编辑、复制或缓存查询。</p>
           </div>
         </div>
+      </div>
         <div class="table-responsive">
           <table class="table table-hover mb-0">
             <thead>
@@ -54,7 +54,10 @@
                 <tr>
                   <td><strong>{{ item.name }}</strong></td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
-                  <td class="text-truncate" style="max-width: 200px;">{{ item.path || item.bind }}</td>
+                  <td style="max-width: 320px;">
+                    <div class="small text-muted mb-1">{{ item.entryLabel || (item.path ? '路径入口' : '独立端口') }}</div>
+                    <code class="instance-entry">{{ item.entryUrl || item.publicUrl || item.path || item.bind }}</code>
+                  </td>
                   <td class="text-end text-nowrap">
                     <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
                     <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="copyInstance(item.name)">复制</button>

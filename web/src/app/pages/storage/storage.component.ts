@@ -1,23 +1,13 @@
 import { Component, inject, OnInit } from '@angular/core';
-import { AsyncPipe, KeyValuePipe } from '@angular/common';
+import { AsyncPipe } from '@angular/common';
 import { BehaviorSubject, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { StorageStats } from '../../core/api.models';
 import { ToastService } from '../../shared/toast.service';
 
-const LABELS: Record<string, string> = {
-  TxID: '版本', Tenants: '租户', Inodes: '索引节点', Objects: '对象', Directories: '目录',
-  Manifests: '清单', Chunks: '数据块', Segments: '数据段', Bytes: '容量', GC: '清理',
-  GeneratedAt: '统计时间', Active: '活跃', Deleted: '已清理', GarbageCandidate: '待清理',
-  Corrupt: '异常', Sealed: '可用', Compacting: '整理中', LogicalObjectBytes: '对象大小',
-  RawChunkBytes: '原始大小', StoredChunkBytes: '存储大小', Runs: '运行次数', LastEpoch: '最近批次',
-  LastRunState: '最近状态', LastBackgroundAt: '最近后台时间', LastBackgroundEpoch: '最近后台批次',
-  LastBackgroundError: '最近后台状态'
-};
-
 @Component({
   selector: 'app-storage',
-  imports: [AsyncPipe, KeyValuePipe],
+  imports: [AsyncPipe],
   templateUrl: './storage.component.html'
 })
 export class StorageComponent implements OnInit {
@@ -27,8 +17,8 @@ export class StorageComponent implements OnInit {
   private readonly refreshTrigger = new BehaviorSubject<void>(undefined);
   readonly stats$ = this.refreshTrigger.pipe(switchMap(() => this.api.storageStats()));
 
-  gcResult?: StorageStats;
   gcRunning = false;
+  gcNotice = '';
 
   ngOnInit(): void {
     this.refreshTrigger.next();
@@ -39,8 +29,8 @@ export class StorageComponent implements OnInit {
   runGc(): void {
     this.gcRunning = true;
     this.api.runGc().subscribe({
-      next: (result) => {
-        this.gcResult = result;
+      next: () => {
+        this.gcNotice = '已触发一次手动 GC，并刷新当前状态。';
         this.toast.success('GC 清理已完成。');
         this.gcRunning = false;
         this.refresh();
@@ -52,21 +42,38 @@ export class StorageComponent implements OnInit {
     });
   }
 
-  labelText(key: string): string { return LABELS[key] ?? key; }
-
-  valueText(value: unknown): string {
-    if (value === null || value === undefined) return '-';
-    if (typeof value === 'object') return this.objectText(value as Record<string, unknown>, 0);
-    return String(value);
+  bytesText(value: number): string {
+    if (!value) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let next = value;
+    let index = 0;
+    while (next >= 1024 && index < units.length - 1) {
+      next /= 1024;
+      index++;
+    }
+    return `${next.toFixed(next >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
   }
 
-  private objectText(value: Record<string, unknown>, depth: number): string {
-    if (depth > 2) return '...';
-    const entries = Object.entries(value).filter(([, v]) => v !== null && v !== undefined && v !== '');
-    if (entries.length === 0) return '-';
-    return entries.map(([k, v]) => {
-      const text = typeof v === 'object' ? this.objectText(v as Record<string, unknown>, depth + 1) : String(v);
-      return `${this.labelText(k)}: ${text}`;
-    }).join(' · ');
+  timeText(value?: string): string {
+    return value || '暂无记录';
+  }
+
+  stateText(value?: string): string {
+    return value || 'none';
+  }
+
+  errorText(value?: string): string {
+    return value || '无';
+  }
+
+  statsCards(stats: StorageStats): Array<{ label: string; value: string }> {
+    return [
+      { label: '租户', value: String(stats.Tenants) },
+      { label: '对象', value: String(stats.Objects) },
+      { label: '目录', value: String(stats.Directories) },
+      { label: '逻辑容量', value: this.bytesText(stats.Bytes.LogicalObjectBytes) },
+      { label: '存储容量', value: this.bytesText(stats.Bytes.StoredChunkBytes) },
+      { label: '元数据版本', value: String(stats.TxID) }
+    ];
   }
 }

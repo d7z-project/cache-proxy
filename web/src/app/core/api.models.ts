@@ -42,17 +42,13 @@ export interface RuntimeInfo {
   authEnabled: boolean;
   metricsPath: string;
   gcInterval: string;
+  configVersion: number;
   generation: number;
   instances: number;
   handlers: number;
   requests: number;
   errors: number;
   upstreams: number;
-}
-
-export interface GlobalConfigResponse {
-  generation: number;
-  config: GlobalConfig;
 }
 
 export interface GlobalConfig {
@@ -72,6 +68,10 @@ export interface InstanceSummary {
   enabled: boolean;
   path?: string;
   bind?: string;
+  publicUrl?: string;
+  entryKind?: string;
+  entryLabel?: string;
+  entryUrl?: string;
 }
 
 export interface InstanceDocumentResponse {
@@ -97,6 +97,7 @@ export interface InstanceMeta {
 export interface InstanceRoute {
   path?: string;
   bind?: string;
+  publicUrl?: string;
 }
 
 export interface InstanceSource {
@@ -214,7 +215,26 @@ export interface ExportBundle {
   instances: InstanceSpec[];
 }
 
-export type StorageStats = Record<string, unknown>;
+export interface StorageStats {
+  TxID: number;
+  Tenants: number;
+  Inodes: number;
+  Objects: number;
+  Directories: number;
+  Manifests: { Active: number; Deleted: number };
+  Chunks: { Active: number; GarbageCandidate: number; Deleted: number; Corrupt: number };
+  Segments: { Sealed: number; Compacting: number; Deleted: number; Corrupt: number };
+  Bytes: { LogicalObjectBytes: number; RawChunkBytes: number; StoredChunkBytes: number };
+  GC: {
+    Runs: number;
+    LastEpoch: number;
+    LastRunState: string;
+    LastBackgroundAt?: string;
+    LastBackgroundEpoch: number;
+    LastBackgroundError?: string;
+  };
+  GeneratedAt?: string;
+}
 
 export interface MetricsStats {
   total: InstanceMetrics;

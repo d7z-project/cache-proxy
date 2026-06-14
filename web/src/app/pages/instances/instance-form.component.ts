@@ -22,7 +22,7 @@ import {
   ProxyMode,
   RuntimeInfo
 } from '../../core/api.models';
-import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS, OCI_AUTH_OPTIONS } from '../../core/config-options';
+import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, SelectOption } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
@@ -101,6 +101,30 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   removeNpmRule(index: number): void { this.npmPolicy?.rules.splice(index, 1); }
   addMavenRule(): void { this.mavenPolicy?.rules.push({ match: '**/maven-metadata.xml', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' }); }
   removeMavenRule(index: number): void { this.mavenPolicy?.rules.splice(index, 1); }
+
+  optionDescription<T extends string>(options: Array<SelectOption<T>>, value: T | undefined): string {
+    return options.find((option) => option.value === value)?.description ?? '';
+  }
+
+  listenKindDescription(): string {
+    return this.optionDescription(this.listenKinds, this.listenKind);
+  }
+
+  cachePolicyDescription(value: CachePolicy | undefined): string {
+    return this.optionDescription(this.cachePolicies, value);
+  }
+
+  busyPolicyDescription(value: BusyPolicy | undefined): string {
+    return this.optionDescription(this.busyPolicies, value);
+  }
+
+  ociAuthDescription(value: OciAuthType | undefined): string {
+    return this.optionDescription(this.ociAuthOptions, value);
+  }
+
+  npmResourceDescription(value: NpmResourcePolicy | undefined): string {
+    return this.optionDescription(this.npmResourcePolicies, value);
+  }
 
   back(): void {
     if (!this.dirty) {
@@ -196,7 +220,7 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   }
 
   private loadDraftState(spec: InstanceSpec): void {
-    this.listenKind = spec.route.bind ? ListenKind.Bind : ListenKind.Path;
+    this.listenKind = spec.meta.mode === ProxyMode.Oci || spec.route.bind ? ListenKind.Bind : ListenKind.Path;
     const lists = extractDraftLists(spec);
     this.upstreams = lists.upstreams;
     this.passHeaders = lists.passHeaders;

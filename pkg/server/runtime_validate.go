@@ -91,16 +91,31 @@ func validateInstanceSpec(spec config.InstanceSpec, registry *proxydriver.Regist
 	if spec.Name == "" || strings.ContainsAny(spec.Name, `/\`) || spec.Name == "." || spec.Name == ".." {
 		return config.InstanceSpec{}, nil, fmt.Errorf("invalid instance name %q", spec.Name)
 	}
+	spec.Route.Path = normalizeRoutePath(spec.Route.Path)
 	if (spec.Route.Path == "") == (spec.Route.Bind == "") {
 		return config.InstanceSpec{}, nil, errors.New("must set exactly one route path or bind")
 	}
-	if spec.Route.Path != "" && (!strings.HasPrefix(spec.Route.Path, "/") || strings.Contains(spec.Route.Path, "//")) {
+	if spec.Route.Path != "" && (!strings.HasPrefix(spec.Route.Path, "/") || strings.Contains(spec.Route.Path, "//") || strings.HasSuffix(spec.Route.Path, "/")) {
 		return config.InstanceSpec{}, nil, fmt.Errorf("invalid listen path %q", spec.Route.Path)
 	}
 	if spec.Route.Bind != "" {
 		if err := validateBindAddress(spec.Route.Bind); err != nil {
 			return config.InstanceSpec{}, nil, err
 		}
+	}
+	spec.Route.PublicURL = strings.TrimSpace(spec.Route.PublicURL)
+	if spec.Route.PublicURL != "" {
+		if spec.Route.Bind == "" {
+			return config.InstanceSpec{}, nil, errors.New("public url requires bind route")
+		}
+		parsed, err := url.Parse(spec.Route.PublicURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return config.InstanceSpec{}, nil, fmt.Errorf("invalid public url %q", spec.Route.PublicURL)
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return config.InstanceSpec{}, nil, fmt.Errorf("invalid public url %q", spec.Route.PublicURL)
+		}
+		spec.Route.PublicURL = normalizePublicURL(parsed)
 	}
 	if len(spec.Source.Upstreams) == 0 {
 		return config.InstanceSpec{}, nil, errors.New("at least one upstream is required")
@@ -122,6 +137,36 @@ func validateInstanceSpec(spec config.InstanceSpec, registry *proxydriver.Regist
 		return config.InstanceSpec{}, nil, err
 	}
 	return next, resolved, nil
+}
+
+func normalizeRoutePath(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = "/" + strings.Trim(trimmed, "/")
+	if trimmed == "/" {
+		return ""
+	}
+	return trimmed
+}
+
+func normalizePublicURL(parsed *url.URL) string {
+	clone := *parsed
+	clone.Path = normalizeURLPath(parsed.EscapedPath())
+	clone.RawPath = ""
+	return strings.TrimRight(clone.String(), "/")
+}
+
+func normalizeURLPath(value string) string {
+	if value == "" || value == "/" {
+		return ""
+	}
+	cleaned := "/" + strings.Trim(strings.TrimSpace(value), "/")
+	if cleaned == "/" {
+		return ""
+	}
+	return cleaned
 }
 
 func validateBindAddress(bind string) error {

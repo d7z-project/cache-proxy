@@ -75,3 +75,29 @@ func TestCargoProxyConfigCanRequireAuth(t *testing.T) {
 	configBody := requestBody(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/cargo/config.json")
 	require.Contains(t, configBody, `"auth-required":true`)
 }
+
+func TestCargoProxyConfigAvoidsDoubleSlashDownloadURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/config.json" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"dl":"`+upstream.URL+`/api/v1/crates/{crate}/{version}/download"}`)
+			return
+		}
+		http.NotFound(w, req)
+	}))
+	defer upstream.Close()
+
+	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"cargo": cargoSpec(t, "cargo", "/cargo/", upstream.URL)})
+	defer closeRuntime(t, rt)
+
+	rec := performRequest(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/cargo/config.json", nil, map[string]string{
+		"X-Forwarded-Host":     "localhost:11112",
+		"X-Cache-Proxy-Prefix": "/",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"dl":"http://localhost:11112/cargo/api/v1/crates/{crate}/{version}/download"`)
+	require.NotContains(t, rec.Body.String(), `//api/v1/crates/`)
+}

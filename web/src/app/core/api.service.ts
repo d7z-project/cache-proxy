@@ -4,8 +4,6 @@ import { Observable, map } from 'rxjs';
 import {
   CacheLookupResult,
   ExportBundle,
-  GlobalConfig,
-  GlobalConfigResponse,
   InstanceCollectionResponse,
   InstanceDocumentResponse,
   InstanceSpec,
@@ -30,14 +28,6 @@ export class ApiService {
 
   metricsStats(): Observable<MetricsStats> {
     return this.http.get<MetricsStats>(`${this.base}/metrics/stats`, { withCredentials: true });
-  }
-
-  globalConfig(): Observable<GlobalConfigResponse> {
-    return this.http.get<GlobalConfigResponse>(`${this.base}/global-config`, { withCredentials: true });
-  }
-
-  saveGlobalConfig(generation: number, config: GlobalConfig): Observable<GlobalConfigResponse> {
-    return this.http.put<GlobalConfigResponse>(`${this.base}/global-config`, { generation, config }, { withCredentials: true });
   }
 
   instancesCollection(): Observable<InstanceCollectionResponse> {

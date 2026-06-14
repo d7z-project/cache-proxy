@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	stdpath "path"
 	"strings"
 	"sync"
 	"time"
@@ -251,7 +252,7 @@ func (h *handler) rewriteConfig(req *http.Request, data []byte) ([]byte, error) 
 			return nil, err
 		}
 	}
-	cfg.DL = externalBaseURL(req) + "/api/v1/crates/{crate}/{version}/download"
+	cfg.DL = joinBaseAndPath(externalBaseURL(req), "/api/v1/crates/{crate}/{version}/download")
 	if h.policy.AuthRequired {
 		cfg.AuthRequired = true
 	}
@@ -351,15 +352,41 @@ func cloneHeaders(source map[string]string) map[string]string {
 }
 
 func externalBaseURL(req *http.Request) string {
-	scheme := "http"
-	if req.TLS != nil {
-		scheme = "https"
+	scheme := req.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if req.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
 	}
-	prefix := strings.TrimRight(req.Header.Get("X-Cache-Proxy-Prefix"), "/")
+	host := req.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = req.Host
+	}
+	prefix := normalizedProxyPrefix(req.Header.Get("X-Cache-Proxy-Prefix"))
 	if prefix == "" {
-		prefix = strings.TrimSuffix(req.URL.Path, "/config.json")
+		prefix = normalizedProxyPrefix(strings.TrimSuffix(req.URL.Path, "/config.json"))
 	}
-	return scheme + "://" + req.Host + prefix
+	return scheme + "://" + host + prefix
+}
+
+func normalizedProxyPrefix(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	cleaned := stdpath.Clean("/" + strings.TrimPrefix(trimmed, "/"))
+	if cleaned == "." || cleaned == "/" {
+		return ""
+	}
+	return cleaned
+}
+
+func joinBaseAndPath(base, suffix string) string {
+	cleanBase := strings.TrimRight(base, "/")
+	cleanSuffix := "/" + strings.TrimLeft(suffix, "/")
+	return cleanBase + cleanSuffix
 }
 
 func transportForConfig(instance string, cfg *config.TransportConfig) http.RoundTripper {

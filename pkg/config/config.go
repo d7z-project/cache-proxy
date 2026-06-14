@@ -44,11 +44,15 @@ type GCConfig struct {
 }
 
 type InstanceSummary struct {
-	Name    string `json:"name" yaml:"name"`
-	Mode    string `json:"mode" yaml:"mode"`
-	Enabled bool   `json:"enabled" yaml:"enabled"`
-	Path    string `json:"path,omitempty" yaml:"path,omitempty"`
-	Bind    string `json:"bind,omitempty" yaml:"bind,omitempty"`
+	Name       string `json:"name" yaml:"name"`
+	Mode       string `json:"mode" yaml:"mode"`
+	Enabled    bool   `json:"enabled" yaml:"enabled"`
+	Path       string `json:"path,omitempty" yaml:"path,omitempty"`
+	Bind       string `json:"bind,omitempty" yaml:"bind,omitempty"`
+	PublicURL  string `json:"publicUrl,omitempty" yaml:"public_url,omitempty"`
+	EntryKind  string `json:"entryKind,omitempty" yaml:"entry_kind,omitempty"`
+	EntryLabel string `json:"entryLabel,omitempty" yaml:"entry_label,omitempty"`
+	EntryURL   string `json:"entryUrl,omitempty" yaml:"entry_url,omitempty"`
 }
 
 type InstanceSpec struct {
@@ -67,8 +71,9 @@ type InstanceMeta struct {
 }
 
 type InstanceRoute struct {
-	Path string `json:"path,omitempty" yaml:"path,omitempty"`
-	Bind string `json:"bind,omitempty" yaml:"bind,omitempty"`
+	Path      string `json:"path,omitempty" yaml:"path,omitempty"`
+	Bind      string `json:"bind,omitempty" yaml:"bind,omitempty"`
+	PublicURL string `json:"publicUrl,omitempty" yaml:"public_url,omitempty"`
 }
 
 type InstanceSource struct {
@@ -155,10 +160,11 @@ func CloneInstances(instances map[string]InstanceSpec) map[string]InstanceSpec {
 
 func (s InstanceSpec) Summary() InstanceSummary {
 	return InstanceSummary{
-		Name:    s.Name,
-		Mode:    s.Meta.Mode,
-		Enabled: s.Meta.Enabled,
-		Path:    s.Route.Path,
-		Bind:    s.Route.Bind,
+		Name:      s.Name,
+		Mode:      s.Meta.Mode,
+		Enabled:   s.Meta.Enabled,
+		Path:      s.Route.Path,
+		Bind:      s.Route.Bind,
+		PublicURL: s.Route.PublicURL,
 	}
 }

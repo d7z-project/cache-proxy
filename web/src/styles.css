@@ -21,12 +21,19 @@ body { font-size: 0.875rem; }
 main { padding: 1.5rem; }
 .page-shell { max-width: 1500px; }
 .page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.page-header p,
+.page-header h2 {
+  max-width: 72ch;
+}
 
 /* Card */
 .card {
   border-radius: 0.875rem;
   box-shadow: 0 1px 3px rgba(15,23,42,.08), 0 4px 12px rgba(15,23,42,.04);
   border-color: #e2e8f0;
+}
+.card-title {
+  font-size: 1rem;
 }
 
 /* Navbar */
@@ -219,6 +226,22 @@ h2 { font-size: 1.5rem; font-weight: 800; word-break: break-word; }
 /* Form controls */
 select, input, textarea, .form-control, .form-select { color: #0f172a; }
 select option { color: #0f172a; background: #fff; }
+.form-text {
+  color: #64748b;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.form-label {
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+.form-control,
+.form-select {
+  min-height: 40px;
+}
+textarea.form-control {
+  min-height: 88px;
+}
 
 /* Table */
 .table th {
@@ -228,6 +251,13 @@ select option { color: #0f172a; background: #fff; }
   text-transform: uppercase;
   letter-spacing: .04em;
   white-space: nowrap;
+}
+.table td {
+  vertical-align: middle;
+}
+
+.instance-entry {
+  min-height: 40px;
 }
 
 /* Responsive - mobile */
@@ -250,6 +280,10 @@ select option { color: #0f172a; background: #fff; }
   .table th, .table td { padding: 0.5rem; }
   .btn-sm { padding: 0.2rem 0.5rem; font-size: 0.75rem; }
   .guide-grid { grid-template-columns: 1fr; }
+  .instance-entry {
+    font-size: 0.75rem;
+    padding: 0.625rem 0.75rem;
+  }
 }
 
 @media (max-width: 600px) {

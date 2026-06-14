@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	stdpath "path"
 	"regexp"
 	"strings"
 	"sync"
@@ -257,7 +258,7 @@ func (h *handler) rewriteSimpleJSON(req *http.Request, upstreamPageURL string, d
 			continue
 		}
 		if rawURL, ok := obj["url"].(string); ok && rawURL != "" {
-			obj["url"] = base + "/files/" + encodeSourceURL(resolveURL(upstreamPageURL, rawURL))
+			obj["url"] = joinBaseAndPath(base, "/files/"+encodeSourceURL(resolveURL(upstreamPageURL, rawURL)))
 		}
 	}
 	return json.Marshal(payload)
@@ -273,7 +274,7 @@ func rewriteSimpleHTML(base, upstreamPageURL string, data []byte) []byte {
 		}
 		rawURL := string(parts[1])
 		resolved := resolveURL(upstreamPageURL, rawURL)
-		return []byte(`href="` + base + `/files/` + encodeSourceURL(resolved) + `"`)
+		return []byte(`href="` + joinBaseAndPath(base, "/files/"+encodeSourceURL(resolved)) + `"`)
 	})
 }
 
@@ -369,18 +370,45 @@ func cloneHeaders(source map[string]string) map[string]string {
 }
 
 func proxyBaseURL(req *http.Request) string {
-	scheme := "http"
-	if req.TLS != nil {
-		scheme = "https"
+	scheme := req.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if req.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
 	}
-	prefix := strings.TrimRight(req.Header.Get("X-Cache-Proxy-Prefix"), "/")
+	host := req.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = req.Host
+	}
+	prefix := normalizedProxyPrefix(req.Header.Get("X-Cache-Proxy-Prefix"))
 	if prefix == "" {
 		prefix = req.URL.Path
 		if idx := strings.Index(prefix, "/simple/"); idx >= 0 {
 			prefix = prefix[:idx]
 		}
+		prefix = normalizedProxyPrefix(prefix)
 	}
-	return scheme + "://" + req.Host + strings.TrimSuffix(prefix, "/")
+	return scheme + "://" + host + prefix
+}
+
+func normalizedProxyPrefix(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	cleaned := stdpath.Clean("/" + strings.TrimPrefix(trimmed, "/"))
+	if cleaned == "." || cleaned == "/" {
+		return ""
+	}
+	return cleaned
+}
+
+func joinBaseAndPath(base, suffix string) string {
+	cleanBase := strings.TrimRight(base, "/")
+	cleanSuffix := "/" + strings.TrimLeft(suffix, "/")
+	return cleanBase + cleanSuffix
 }
 
 func transportForConfig(cfg *config.TransportConfig) http.RoundTripper {

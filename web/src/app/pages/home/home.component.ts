@@ -34,7 +34,7 @@ export class HomeComponent implements OnInit {
   }
 
   guideFor(instance: InstanceSummary): InstanceGuide {
-    return buildInstanceGuide(instance, window.location.origin);
+    return buildInstanceGuide(instance);
   }
 
   selectedGuideIndex(instance: InstanceSummary): number {

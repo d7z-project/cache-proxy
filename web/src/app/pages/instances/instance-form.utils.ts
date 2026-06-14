@@ -186,7 +186,7 @@ export function normalizeSpec(draft: InstanceSpec, listenKind: ListenKind, lists
   spec.meta.description = spec.meta.description?.trim() || undefined;
   spec.meta.expireAfter = normalizeDuration(spec.meta.expireAfter);
   spec.route = listenKind === ListenKind.Bind
-    ? { bind: spec.route.bind?.trim() || undefined }
+    ? { bind: spec.route.bind?.trim() || undefined, publicUrl: spec.route.publicUrl?.trim() || undefined }
     : { path: spec.route.path?.trim() || undefined };
   spec.source.upstreams = lists.upstreams.map((value) => value.trim()).filter(Boolean);
   spec.source.transport = normalizeTransport(spec.source.transport);
@@ -405,6 +405,17 @@ function validateTransport(errors: string[], draft: InstanceSpec): void {
 }
 
 function validateModePolicy(errors: string[], draft: InstanceSpec, listenKind: ListenKind, lists: DraftLists): void {
+  if (listenKind === ListenKind.Path && draft.route.publicUrl?.trim()) {
+    errors.push('公开地址仅用于独立端口实例。');
+  }
+  if (listenKind === ListenKind.Bind && draft.route.publicUrl?.trim()) {
+    try {
+      const url = new URL(draft.route.publicUrl.trim());
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') errors.push('公开地址必须是 HTTP/HTTPS。');
+    } catch {
+      errors.push('公开地址格式需要调整。');
+    }
+  }
   switch (draft.meta.mode) {
     case ProxyMode.File:
       validateFilePolicy(errors, asFilePolicy(draft.policy), lists.passHeaders);
