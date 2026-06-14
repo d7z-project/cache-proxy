@@ -90,8 +90,10 @@
                   <td>{{ item.name }}</td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
                   <td style="max-width: 280px;">
-                    <div class="small text-muted mb-1">{{ item.entryLabel || (item.path ? '路径入口' : '独立端口') }}</div>
-                    <code class="instance-entry">{{ item.entryUrl || item.publicUrl || item.path || item.bind }}</code>
+                    <app-instance-entry
+                      [label]="item.entryLabel || (item.path ? '路径入口' : '独立端口')"
+                      [url]="item.entryUrl || item.publicUrl || item.path || item.bind || ''">
+                    </app-instance-entry>
                   </td>
                   <td>
                     <strong>{{ getMetrics(data.metrics.instances, item.name).requests }}</strong>

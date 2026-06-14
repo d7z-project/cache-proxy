@@ -35,7 +35,7 @@
                 </div>
                 <div class="instance-guide-meta">
                   <span class="badge text-bg-light">{{ guide.snippets[selected].label }}</span>
-                  <code class="instance-entry">{{ guide.entryUrl }}</code>
+                  <app-instance-entry [url]="guide.entryUrl || ''"></app-instance-entry>
                 </div>
               </div>
             </summary>

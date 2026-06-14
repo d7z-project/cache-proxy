@@ -6,12 +6,13 @@ import { Observable, catchError, of } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { AuthService } from '../../core/auth.service';
 import { InstanceSummary } from '../../core/api.models';
+import { InstanceEntryComponent } from '../../shared/instance-entry.component';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 import { InstanceGuide, buildInstanceGuide } from '../../shared/proxy-guides';
 
 @Component({
   selector: 'app-home',
-  imports: [AsyncPipe, FormsModule, RouterLink, ModeLabelPipe],
+  imports: [AsyncPipe, FormsModule, RouterLink, ModeLabelPipe, InstanceEntryComponent],
   templateUrl: './home.component.html'
 })
 export class HomeComponent implements OnInit {

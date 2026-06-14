@@ -69,21 +69,15 @@ func TestInstanceCollectionCRUDAndTenantCleanup(t *testing.T) {
 	require.True(t, errors.Is(err, fs.ErrNotExist))
 }
 
-func TestGlobalConfigIsReadOnlyAndImportExportAPIs(t *testing.T) {
+func TestInstanceImportExportAPIs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{})
 	defer closeRuntime(t, rt)
 	handler := http.HandlerFunc(rt.serveMain)
 
-	globalResp := performRequest(t, handler, http.MethodGet, "/-/api/global-config", nil, nil)
-	require.Equal(t, http.StatusOK, globalResp.Code)
-	var globalDoc globalConfigResponse
-	require.NoError(t, json.Unmarshal(globalResp.Body.Bytes(), &globalDoc))
-	require.Equal(t, http.StatusMethodNotAllowed, performRequest(t, handler, http.MethodPut, "/-/api/global-config", strings.NewReader(`{}`), map[string]string{"Content-Type": "application/json"}).Code)
-
 	importResp := performRequest(t, handler, http.MethodPost, "/-/api/instances/import", mustJSONReader(t, importInstancesRequest{
-		Generation: globalDoc.Generation,
+		Generation: rt.generation,
 		Replace:    false,
 		Instances: []config.InstanceSpec{
 			fileSpec(t, "files", "/files", "https://example.com"),

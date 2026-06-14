@@ -6,12 +6,13 @@ import { ApiService } from '../../core/api.service';
 import { CacheLookupResult, InstanceCollectionResponse, InstanceSummary, ProxyMode } from '../../core/api.models';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
+import { InstanceEntryComponent } from '../../shared/instance-entry.component';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 import { ImportExportModalComponent } from '../../shared/import-export-modal.component';
 
 @Component({
   selector: 'app-instance-list',
-  imports: [FormsModule, ModeLabelPipe, NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem, ImportExportModalComponent],
+  imports: [FormsModule, ModeLabelPipe, NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem, ImportExportModalComponent, InstanceEntryComponent],
   templateUrl: './instance-list.component.html'
 })
 export class InstanceListComponent implements OnInit {
