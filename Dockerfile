@@ -16,13 +16,9 @@ RUN CGO_ENABLED=0 go build -v \
 # Minimal runtime image
 # ============================================
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata
-WORKDIR /app
+COPY --from=builder /src/cache-proxy /app/
 ENV CACHE_PROXY_BACKEND=/data
 ENV CACHE_PROXY_BIND=0.0.0.0:8080
-RUN mkdir /data && chown -R nobody:nobody /data
-USER nobody
-COPY --from=builder /src/cache-proxy /app/
 EXPOSE 8080
 VOLUME ["/data"]
 ENTRYPOINT ["/app/cache-proxy"]
