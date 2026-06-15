@@ -126,7 +126,7 @@ func fileSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpe
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModeFile, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeFile, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
 		Policy: mustPolicyJSON(t, &fileproxy.Policy{DefaultPolicy: config.PolicyBypass, BusyPolicy: config.BusyPolicyBypass, Rules: []fileproxy.Rule{}}),
@@ -137,7 +137,7 @@ func npmSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModeNPM, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeNPM, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
 		Policy: mustPolicyJSON(t, &npmproxy.Policy{DefaultPolicy: config.PolicyRevalidate, BusyPolicy: config.BusyPolicyBypass, Rules: []npmproxy.Rule{}}),
@@ -148,7 +148,7 @@ func ociSpec(t *testing.T, name, bind, upstream string) config.InstanceSpec {
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModeOCI, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeOCI, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Bind: bind},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
 		Policy: mustPolicyJSON(t, &ociproxy.Policy{DefaultPolicy: config.PolicyRevalidate, BusyPolicy: config.BusyPolicyBypass, Rules: []ociproxy.Rule{}}),
@@ -159,7 +159,7 @@ func goSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec 
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
 		Policy: mustPolicyJSON(t, &gomodproxy.Policy{SumDB: &gomodproxy.SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true}),
@@ -170,10 +170,10 @@ func mavenSpec(t *testing.T, name, routePath, upstream string) config.InstanceSp
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModeMaven, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeMaven, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
-		Policy: mustPolicyJSON(t, &mavenproxy.Policy{MetadataFreshFor: config.Duration(30 * time.Second), MetadataBusyPolicy: config.BusyPolicyStale, ReleasePolicy: config.PolicyImmutable, SnapshotPolicy: config.PolicyRevalidate, SnapshotFreshFor: config.Duration(15 * time.Second), Rules: []mavenproxy.Rule{}}),
+		Policy: mustPolicyJSON(t, &mavenproxy.Policy{MetadataFreshFor: config.Freshness(30 * time.Second), MetadataBusyPolicy: config.BusyPolicyStale, ReleasePolicy: config.PolicyImmutable, SnapshotPolicy: config.PolicyRevalidate, SnapshotFreshFor: config.Freshness(15 * time.Second), Rules: []mavenproxy.Rule{}}),
 	}
 }
 
@@ -181,10 +181,10 @@ func cargoSpec(t *testing.T, name, routePath, upstream string) config.InstanceSp
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModeCargo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeCargo, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
-		Policy: mustPolicyJSON(t, &cargoproxy.Policy{IndexFreshFor: config.Duration(30 * time.Second), IndexBusyPolicy: config.BusyPolicyStale, CratePolicy: config.PolicyImmutable}),
+		Policy: mustPolicyJSON(t, &cargoproxy.Policy{IndexFreshFor: config.Freshness(30 * time.Second), IndexBusyPolicy: config.BusyPolicyStale, CratePolicy: config.PolicyImmutable}),
 	}
 }
 
@@ -192,9 +192,9 @@ func pypiSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpe
 	t.Helper()
 	return config.InstanceSpec{
 		Name:   name,
-		Meta:   config.InstanceMeta{Mode: config.ModePyPI, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModePyPI, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
-		Policy: mustPolicyJSON(t, &pypiproxy.Policy{SimpleFreshFor: config.Duration(30 * time.Second), SimpleBusyPolicy: config.BusyPolicyStale, FilePolicy: config.PolicyImmutable, ProxyJSON: true}),
+		Policy: mustPolicyJSON(t, &pypiproxy.Policy{SimpleFreshFor: config.Freshness(30 * time.Second), SimpleBusyPolicy: config.BusyPolicyStale, FilePolicy: config.PolicyImmutable, ProxyJSON: true}),
 	}
 }

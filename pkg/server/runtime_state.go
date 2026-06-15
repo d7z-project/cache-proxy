@@ -82,7 +82,7 @@ func DefaultInstances() map[string]config.InstanceSpec {
 		DefaultPolicy: config.PolicyBypass,
 		BusyPolicy:    config.BusyPolicyBypass,
 		Rules: []fileproxy.Rule{
-			{Match: "**/*.iso", Policy: config.PolicyImmutable, ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))},
+			{Match: "**/*.iso", Policy: config.PolicyImmutable, ExpireAfter: config.Expiration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))},
 			{Match: "**/repodata/**", Policy: config.PolicyRevalidate},
 		},
 	})
@@ -93,7 +93,7 @@ func DefaultInstances() map[string]config.InstanceSpec {
 				Mode:        config.ModeFile,
 				Enabled:     true,
 				Description: "Example file proxy",
-				ExpireAfter: config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter)),
+				ExpireAfter: config.Expiration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter)),
 			},
 			Route:  config.InstanceRoute{Path: "/files"},
 			Source: config.InstanceSource{Upstreams: []string{"https://example.com"}},

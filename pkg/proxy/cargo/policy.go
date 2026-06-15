@@ -25,10 +25,10 @@ import (
 )
 
 type Policy struct {
-	IndexFreshFor   config.Duration `json:"indexFreshFor,omitempty" yaml:"index_fresh_for,omitempty"`
-	IndexBusyPolicy string          `json:"indexBusyPolicy,omitempty" yaml:"index_busy_policy,omitempty"`
-	CratePolicy     string          `json:"cratePolicy,omitempty" yaml:"crate_policy,omitempty"`
-	AuthRequired    bool            `json:"authRequired,omitempty" yaml:"auth_required,omitempty"`
+	IndexFreshFor   config.Freshness `json:"indexFreshFor,omitempty" yaml:"index_fresh_for,omitempty"`
+	IndexBusyPolicy string           `json:"indexBusyPolicy,omitempty" yaml:"index_busy_policy,omitempty"`
+	CratePolicy     string           `json:"cratePolicy,omitempty" yaml:"crate_policy,omitempty"`
+	AuthRequired    bool             `json:"authRequired,omitempty" yaml:"auth_required,omitempty"`
 }
 
 type Driver struct{}
@@ -87,7 +87,7 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Duration {
+func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
 	return 0
 }
 
@@ -317,13 +317,13 @@ func (h *handler) openCached(ctx context.Context, objectPath string) (io.ReadClo
 	return reader, cloneHeaders(reader.Info().Options), nil
 }
 
-func (h *handler) openFreshCached(ctx context.Context, objectPath string, freshFor config.Duration) (io.ReadCloser, map[string]string, bool, error) {
+func (h *handler) openFreshCached(ctx context.Context, objectPath string, freshFor config.Freshness) (io.ReadCloser, map[string]string, bool, error) {
 	reader, headers, err := h.openCached(ctx, objectPath)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if freshFor <= 0 {
-		return reader, headers, false, nil
+	if freshFor.IsUnset() || freshFor.IsForever() {
+		return reader, headers, freshFor.IsForever(), nil
 	}
 	fetchedAt, err := utils.ParseFetchedAt(headers["fetched-at"])
 	if err != nil {

@@ -110,8 +110,8 @@ func parseOCIRef(ref string) (string, error) {
 
 type ociMatch struct {
 	policy      string
-	freshFor    config.Duration
-	expireAfter config.Duration
+	freshFor    config.Freshness
+	expireAfter config.Expiration
 }
 
 func (r *Resolver) resolveRepo(repoName string) ociMatch {

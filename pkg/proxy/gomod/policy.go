@@ -132,7 +132,7 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Duration {
+func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
 	return 0
 }
 

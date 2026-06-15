@@ -29,7 +29,7 @@ type Driver interface {
 	EncodeYAML(policy any) ([]byte, error)
 	ApplyDefaults(spec *ResolvedSpec)
 	Validate(spec *ResolvedSpec) error
-	DefaultFreshFor(spec *ResolvedSpec) config.Duration
+	DefaultFreshFor(spec *ResolvedSpec) config.Freshness
 	NewHandler(name string, spec *ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error)
 	Lookup(spec *ResolvedSpec, lookupPath string) (proxy.Route, error)
 }

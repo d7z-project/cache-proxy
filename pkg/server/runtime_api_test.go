@@ -100,7 +100,7 @@ func TestPublicInstancesExposeResolvedEntryURL(t *testing.T) {
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{
 		"oci": {
 			Name:   "oci",
-			Meta:   config.InstanceMeta{Mode: config.ModeOCI, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+			Meta:   config.InstanceMeta{Mode: config.ModeOCI, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 			Route:  config.InstanceRoute{Bind: "0.0.0.0:5000", PublicURL: "https://registry.example.com/"},
 			Source: config.InstanceSource{Upstreams: []string{"https://registry-1.docker.io"}},
 			Policy: mustPolicyJSON(t, map[string]any{"defaultPolicy": "revalidate", "busyPolicy": "bypass", "rules": []any{}}),

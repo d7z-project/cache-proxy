@@ -5,13 +5,105 @@
       <h2 class="fw-bold mb-1">可用代理实例</h2>
       <p class="text-muted mb-0">展开任意实例即可查看它的实际入口地址和对应客户端配置片段，直接复制即可接入。</p>
     </div>
-    @if ((authEnabled$ | async) && (isAuth$ | async) === false) {
-      <a routerLink="/login" class="btn btn-outline-secondary">登录管理</a>
-    }
+    <div class="d-flex gap-2 flex-wrap">
+      <div ngbDropdown>
+        <button type="button" class="btn btn-outline-secondary" ngbDropdownToggle>配置指南</button>
+        <div ngbDropdownMenu class="guide-menu">
+          <div class="px-3 py-2">
+            <p class="mb-1 fw-bold small">过期时间语义</p>
+            <hr class="my-2">
+          </div>
+          <div class="px-3 pb-2">
+            <p class="mb-1 fw-bold small text-primary">ExpireAfter（过期时间）</p>
+            <ul class="list-unstyled mb-3 small text-muted">
+              <li><code>不配置</code>：使用默认值 720h（30天）</li>
+              <li><code>720h</code>：720小时后过期</li>
+              <li><code>never</code> 或 <code>0</code>：永不过期</li>
+              <li><code>-1</code>：不允许（负数报错）</li>
+            </ul>
+
+            <p class="mb-1 fw-bold small text-primary">FreshFor（新鲜度窗口）</p>
+            <ul class="list-unstyled mb-3 small text-muted">
+              <li><code>不配置</code>：不进行新鲜度检查，内容始终视为过期</li>
+              <li><code>1h</code>：1小时内视为新鲜</li>
+              <li><code>forever</code> 或 <code>0</code>：永远新鲜</li>
+            </ul>
+
+            <hr class="my-2">
+            <p class="mb-1 fw-bold small">各模块配置说明</p>
+            <hr class="my-2">
+          </div>
+
+          <div class="px-3 pb-2">
+            <p class="mb-1 fw-bold small text-primary">npm 包代理</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>expire_after</code>: 缓存过期时间，默认 720h</li>
+              <li><code>fresh_for</code>: 新鲜度窗口，forever=永远新鲜</li>
+              <li><code>policy</code>: bypass/immutable/revalidate</li>
+            </ul>
+
+            <p class="mb-1 fw-bold small text-primary">PyPI 包代理</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>expire_after</code>: 缓存过期时间，默认 720h</li>
+              <li><code>simple_fresh_for</code>: 简单索引新鲜度</li>
+              <li>支持 pip、pip.conf 两种配置片段</li>
+            </ul>
+
+            <p class="mb-1 fw-bold small text-primary">Go 模块代理</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>GOPROXY</code>: 设置代理地址即可</li>
+              <li><code>GONOSUMDB</code>: 跳过校验的和</li>
+              <li>支持私有 GOPROXY 场景</li>
+            </ul>
+
+            <p class="mb-1 fw-bold small text-primary">Maven/Gradle 代理</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>expire_after</code>: 缓存过期时间，默认 720h</li>
+              <li><code>metadata_fresh_for</code>: 元数据新鲜度</li>
+              <li><code>snapshot_fresh_for</code>: SNAPSHOT 版本新鲜度</li>
+              <li>支持 pom.xml 和 Gradle 两种配置</li>
+            </ul>
+
+            <p class="mb-1 fw-bold small text-primary">Cargo 包代理</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>index_fresh_for</code>: 索引新鲜度</li>
+              <li><code>sparse registry</code> 协议支持</li>
+              <li>自动配置 protocol 和 index</li>
+            </ul>
+
+            <p class="mb-1 fw-bold small text-primary">OCI 容器镜像代理</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>expire_after</code>: 镜像缓存过期时间</li>
+              <li><code>fresh_for</code>: 清单新鲜度</li>
+              <li>支持 docker pull 直接配置</li>
+            </ul>
+
+            <hr class="my-2">
+            <p class="mb-1 fw-bold small text-primary">主动清理配置</p>
+            <ul class="list-unstyled mb-2 small text-muted">
+              <li><code>enabled</code>: 是否启用主动清理，默认 false</li>
+              <li><code>interval</code>: 清理扫描间隔，默认 6h</li>
+              <li><code>dry_run</code>: true=只记录不删除</li>
+              <li><code>batch_size</code>: 每批删除对象数，默认 500</li>
+              <li><code>workers</code>: 并行清理工作数，默认 CPU 数</li>
+            </ul>
+
+            <hr class="my-2">
+            <p class="mb-1 fw-bold small text-primary">GC 配置</p>
+            <ul class="list-unstyled small text-muted">
+              <li><code>blob</code>: Blob GC 间隔，默认 24h，0=使用默认值</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      @if ((authEnabled$ | async) && (isAuth$ | async) === false) {
+        <a routerLink="/login" class="btn btn-outline-secondary">登录管理</a>
+      }
+    </div>
   </header>
 
   @if (error) {
-    <div class="alert alert-info">{{ error }}</div>
+    <div class="alert alert-danger">{{ error }}</div>
   }
 
   @if (items$ | async; as items) {
@@ -32,17 +124,9 @@
             class="accordion-item">
             <div ngbAccordionHeader>
               <button ngbAccordionButton class="guide-accordion-button">
-                <div class="guide-row">
-                  <div class="guide-row-main">
-                    <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
-                      <strong class="fs-5">{{ item.name }}</strong>
-                      <span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span>
-                    </div>
-                    <div class="text-muted small">展开后查看可直接复制的客户端接入配置。</div>
-                  </div>
-                  <div class="guide-row-meta">
-                    <app-instance-entry [url]="guide.entryUrl || ''"></app-instance-entry>
-                  </div>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                  <strong>{{ item.name }}</strong>
+                  <span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span>
                 </div>
               </button>
             </div>
@@ -53,16 +137,11 @@
                   @for (snippet of guide.snippets; track snippet?.id || $index) {
                     @if (snippet?.code) {
                       <section class="guide-snippet-block">
-                        <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap">
-                          <div class="guide-snippet-meta">
-                            <span class="badge text-bg-light mb-2">{{ snippet.label || '示例' }}</span>
-                            <p class="text-muted small mb-0">{{ snippet.description || '可直接复制到对应客户端配置中。' }}</p>
-                          </div>
-                          <button type="button" class="btn btn-sm btn-outline-secondary" (click)="copySnippet(snippet.code)">
-                            复制
-                          </button>
+                        <div class="guide-snippet-meta">
+                          <strong class="guide-snippet-label">{{ snippet.label || '示例' }}</strong>
+                          <p class="text-muted mb-0">{{ snippet.description || '可直接复制到对应客户端配置中。' }}</p>
                         </div>
-                        <pre class="guide-snippet"><code>{{ snippet.code }}</code></pre>
+                        <app-code-block [code]="snippet.code" [lang]="snippet.id"></app-code-block>
                       </section>
                     }
                   }

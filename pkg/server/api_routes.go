@@ -23,6 +23,8 @@ func (r *Runtime) serveAPI(w http.ResponseWriter, req *http.Request) {
 		r.storageStatsAPI(w, req)
 	case req.URL.Path == "/-/api/storage/gc":
 		r.storageGCAPI(w, req)
+	case req.URL.Path == "/-/api/storage/cleanup":
+		r.storageCleanupAPI(w, req)
 	case req.URL.Path == "/-/api/cache/lookup":
 		r.cacheLookupAPI(w, req)
 	case req.URL.Path == "/-/api/system/reset":

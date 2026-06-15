@@ -54,8 +54,8 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 
 type npmMatch struct {
 	policy      string
-	freshFor    config.Duration
-	expireAfter config.Duration
+	freshFor    config.Freshness
+	expireAfter config.Expiration
 }
 
 func (r *Resolver) resolveResource(packageName, resourceType string) npmMatch {

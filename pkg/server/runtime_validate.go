@@ -129,8 +129,8 @@ func validateInstanceSpec(spec config.InstanceSpec, registry *proxydriver.Regist
 	if err := validateTransport(spec.Source.Transport); err != nil {
 		return config.InstanceSpec{}, nil, err
 	}
-	if spec.Meta.ExpireAfter <= 0 {
-		spec.Meta.ExpireAfter = config.Duration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))
+	if spec.Meta.ExpireAfter.IsUnset() {
+		spec.Meta.ExpireAfter = config.Expiration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))
 	}
 	next, resolved, err := registry.Canonicalize(spec)
 	if err != nil {

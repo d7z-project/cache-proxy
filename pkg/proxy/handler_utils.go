@@ -26,10 +26,10 @@ func redactedURL(rawURL string) string {
 
 func (h *Handler) expired(route Route, options map[string]string) bool {
 	expireAfter := route.ExpireAfter
-	if expireAfter <= 0 {
+	if expireAfter.IsUnset() {
 		expireAfter = h.config.ExpireAfter
 	}
-	if expireAfter <= 0 {
+	if expireAfter.IsNever() || expireAfter.IsUnset() {
 		return false
 	}
 	fetchedAt, err := utils.ParseFetchedAt(options["fetched-at"])
@@ -38,11 +38,14 @@ func (h *Handler) expired(route Route, options map[string]string) bool {
 
 func (h *Handler) fresh(route Route, headers map[string]string) bool {
 	freshFor := route.FreshFor
-	if freshFor <= 0 {
+	if freshFor.IsUnset() {
 		freshFor = h.config.DefaultFreshFor
 	}
-	if freshFor <= 0 {
+	if freshFor.IsUnset() {
 		return false
+	}
+	if freshFor.IsForever() {
+		return true
 	}
 	fetchedAt, err := utils.ParseFetchedAt(headers["fetched-at"])
 	return err == nil && time.Since(fetchedAt) <= freshFor.Duration()

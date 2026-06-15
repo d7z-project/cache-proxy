@@ -18,8 +18,8 @@ type Route struct {
 	ObjectPath         string
 	UpstreamPath       string
 	Policy             string
-	FreshFor           config.Duration
-	ExpireAfter        config.Duration
+	FreshFor           config.Freshness
+	ExpireAfter        config.Expiration
 	RewriteNPMMetadata bool
 }
 
@@ -36,11 +36,11 @@ type OCIAuthConfig struct {
 
 type RuntimeConfig struct {
 	Mode            string
-	ExpireAfter     config.Duration
+	ExpireAfter     config.Expiration
 	Upstreams       []string
 	Transport       *config.TransportConfig
 	BusyPolicy      string
-	DefaultFreshFor config.Duration
+	DefaultFreshFor config.Freshness
 	PassHeaders     []string
 	OCIAuth         *OCIAuthConfig
 }

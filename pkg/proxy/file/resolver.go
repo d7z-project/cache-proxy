@@ -39,8 +39,8 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 
 type fileMatch struct {
 	policy      string
-	freshFor    config.Duration
-	expireAfter config.Duration
+	freshFor    config.Freshness
+	expireAfter config.Expiration
 }
 
 func (r *Resolver) match(cleanPath string) fileMatch {

@@ -17,19 +17,19 @@ import (
 )
 
 type Policy struct {
-	MetadataFreshFor   config.Duration `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy string          `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	ReleasePolicy      string          `json:"releasePolicy,omitempty" yaml:"release_policy,omitempty"`
-	SnapshotPolicy     string          `json:"snapshotPolicy,omitempty" yaml:"snapshot_policy,omitempty"`
-	SnapshotFreshFor   config.Duration `json:"snapshotFreshFor,omitempty" yaml:"snapshot_fresh_for,omitempty"`
-	Rules              []Rule          `json:"rules" yaml:"rules"`
+	MetadataFreshFor   config.Freshness  `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
+	MetadataBusyPolicy string            `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
+	ReleasePolicy      string            `json:"releasePolicy,omitempty" yaml:"release_policy,omitempty"`
+	SnapshotPolicy     string            `json:"snapshotPolicy,omitempty" yaml:"snapshot_policy,omitempty"`
+	SnapshotFreshFor   config.Freshness  `json:"snapshotFreshFor,omitempty" yaml:"snapshot_fresh_for,omitempty"`
+	Rules              []Rule            `json:"rules" yaml:"rules"`
 }
 
 type Rule struct {
-	Match       string          `json:"match" yaml:"match"`
-	Policy      string          `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor    config.Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	ExpireAfter config.Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	Match       string             `json:"match" yaml:"match"`
+	Policy      string             `json:"policy,omitempty" yaml:"policy,omitempty"`
+	FreshFor    config.Freshness   `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter config.Expiration  `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type Driver struct{}
@@ -113,7 +113,7 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Duration {
+func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
 	return 0
 }
 

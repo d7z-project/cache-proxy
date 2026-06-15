@@ -17,10 +17,10 @@ import (
 type blobFSCacher struct {
 	store       *blobfs.Store
 	tenant      string
-	expireAfter config.Duration
+	expireAfter config.Expiration
 }
 
-func newBlobFSCacher(store *blobfs.Store, tenant string, expireAfter config.Duration) *blobFSCacher {
+func newBlobFSCacher(store *blobfs.Store, tenant string, expireAfter config.Expiration) *blobFSCacher {
 	return &blobFSCacher{store: store, tenant: tenant, expireAfter: expireAfter}
 }
 
@@ -34,7 +34,7 @@ func (c *blobFSCacher) Get(ctx context.Context, name string) (io.ReadCloser, err
 		return nil, err
 	}
 	info := reader.Info()
-	if c.expireAfter > 0 && time.Since(info.UpdatedAt) > c.expireAfter.Duration() {
+	if !c.expireAfter.IsNever() && !c.expireAfter.IsUnset() && time.Since(info.UpdatedAt) > c.expireAfter.Duration() {
 		_ = reader.Close()
 		_ = c.store.DeleteObject(ctx, c.tenant, objectPath)
 		return nil, fs.ErrNotExist

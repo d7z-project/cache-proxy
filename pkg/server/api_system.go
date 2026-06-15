@@ -89,17 +89,17 @@ func (r *Runtime) cacheLookupAPI(w http.ResponseWriter, req *http.Request) {
 		objectPath: route.ObjectPath,
 	}
 	freshFor := route.FreshFor
-	if freshFor <= 0 {
+	if freshFor.IsUnset() {
 		freshFor = resolved.Driver.DefaultFreshFor(resolved)
 	}
-	if freshFor > 0 {
+	if !freshFor.IsUnset() && !freshFor.IsForever() {
 		result.FreshFor = freshFor.String()
 	}
 	expireAfter := route.ExpireAfter
-	if expireAfter <= 0 {
+	if expireAfter.IsUnset() {
 		expireAfter = spec.Meta.ExpireAfter
 	}
-	if expireAfter > 0 {
+	if !expireAfter.IsUnset() && !expireAfter.IsNever() {
 		result.ExpireAfter = expireAfter.String()
 	}
 	cached, cachedAt, expiresAt, fresh := r.checkCacheStatus(req.Context(), instanceName, result.objectPath, freshFor, expireAfter)
@@ -114,7 +114,7 @@ func (r *Runtime) cacheLookupAPI(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, result, nil)
 }
 
-func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath string, freshFor, expireAfter config.Duration) (bool, time.Time, time.Time, bool) {
+func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath string, freshFor config.Freshness, expireAfter config.Expiration) (bool, time.Time, time.Time, bool) {
 	reader, err := r.store.OpenObject(ctx, instanceName, objectPath)
 	if err != nil {
 		return false, time.Time{}, time.Time{}, false
@@ -126,12 +126,27 @@ func (r *Runtime) checkCacheStatus(ctx context.Context, instanceName, objectPath
 		return false, time.Time{}, time.Time{}, false
 	}
 	var expiresAt time.Time
-	if expireAfter > 0 {
+	if !expireAfter.IsUnset() && !expireAfter.IsNever() {
 		expiresAt = fetchedAt.Add(expireAfter.Duration())
 	}
 	fresh := false
-	if freshFor > 0 {
+	if !freshFor.IsUnset() && !freshFor.IsForever() {
 		fresh = time.Since(fetchedAt) <= freshFor.Duration()
 	}
 	return true, fetchedAt, expiresAt, fresh
+}
+
+func (r *Runtime) storageCleanupAPI(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !r.cleanupConfig().Enabled {
+		http.Error(w, "cleanup is not enabled", http.StatusBadRequest)
+		return
+	}
+
+	go r.runCleanup()
+	w.WriteHeader(http.StatusAccepted)
 }

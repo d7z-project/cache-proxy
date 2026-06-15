@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
 	_ "gopkg.d7z.net/cache-proxy/pkg/proxy/pypi"
 	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 	"gopkg.d7z.net/cache-proxy/web"
 )
 
@@ -79,6 +81,7 @@ type Runtime struct {
 	closed            atomic.Bool
 	gcStop            chan struct{}
 	gcDone            chan struct{}
+	cleanupDone       chan struct{}
 }
 
 type serverState struct {
@@ -189,6 +192,7 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 		defaultGCInterval: options.GCInterval,
 		gcStop:            make(chan struct{}),
 		gcDone:            make(chan struct{}),
+		cleanupDone:       make(chan struct{}),
 	}
 	state, err := runtime.buildServerState(instances)
 	if err != nil {
@@ -198,6 +202,7 @@ func OpenWithOptions(ctx context.Context, options Options) (*Runtime, error) {
 	runtime.applyServerState(state)
 	runtime.mainSrv = &http.Server{Addr: runtime.bind, Handler: http.HandlerFunc(runtime.serveMain)}
 	go runtime.gcLoop()
+	go runtime.cleanupLoop()
 	return runtime, nil
 }
 
@@ -266,6 +271,13 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 	close(r.gcStop)
 	<-r.gcDone
+
+	select {
+	case <-r.cleanupDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	r.loginLimiter.close()
 
 	var joined error
@@ -365,6 +377,198 @@ func (r *Runtime) gcLoop() {
 			}
 		}
 	}
+}
+
+func (r *Runtime) cleanupConfig() config.CleanupConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.global.Storage.Cleanup
+}
+
+func (r *Runtime) cleanupInterval() time.Duration {
+	cfg := r.cleanupConfig()
+	if cfg.Interval <= 0 {
+		return 6 * time.Hour
+	}
+	return cfg.Interval.Duration()
+}
+
+func (r *Runtime) cleanupLoop() {
+	defer close(r.cleanupDone)
+	for {
+		interval := r.cleanupInterval()
+		timer := time.NewTimer(interval)
+		select {
+		case <-r.gcStop:
+			timer.Stop()
+			return
+		case <-timer.C:
+			if r.cleanupConfig().Enabled {
+				r.runCleanup()
+			}
+		}
+	}
+}
+
+func (r *Runtime) runCleanup() {
+	cfg := r.cleanupConfig()
+	if !cfg.Enabled {
+		return
+	}
+
+	workers := cfg.Workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	batchSize := cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+
+	r.mu.RLock()
+	instances := make([]string, 0, len(r.instances))
+	for name, spec := range r.instances {
+		if spec.Meta.Enabled {
+			instances = append(instances, name)
+		}
+	}
+	r.mu.RUnlock()
+
+	var totalScanned, totalDeleted int64
+	var mu sync.Mutex
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, workers)
+
+	for _, name := range instances {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(name string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			scanned, deleted, _ := r.cleanupInstance(name, cfg.DryRun, batchSize)
+
+			mu.Lock()
+			totalScanned += scanned
+			totalDeleted += deleted
+			mu.Unlock()
+		}(name)
+	}
+
+	wg.Wait()
+
+	slog.Info("cache cleanup finished",
+		"scanned", totalScanned,
+		"deleted", totalDeleted,
+		"dry_run", cfg.DryRun)
+}
+
+func (r *Runtime) cleanupInstance(name string, dryRun bool, batchSize int) (scanned, deleted int64, _ error) {
+	r.mu.RLock()
+	spec := r.instances[name]
+	r.mu.RUnlock()
+
+	if spec.Meta.ExpireAfter.IsNever() {
+		return 0, 0, nil
+	}
+
+	expireAfter := spec.Meta.ExpireAfter.Duration()
+	if expireAfter <= 0 {
+		expireAfter = time.Duration(spec.Meta.ExpireAfter)
+		if expireAfter <= 0 {
+			return 0, 0, nil
+		}
+	}
+
+	tenantFS := r.store.TenantFS(name)
+	var batch []string
+
+	err := fs.WalkDir(tenantFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+
+		info, statErr := r.store.StatObject(context.Background(), name, path)
+		if statErr != nil {
+			return nil
+		}
+		if info.State != "ACTIVE" {
+			return nil
+		}
+
+		expired, age, parseErr := isExpiredByOptions(info.Options, expireAfter)
+		if parseErr != nil {
+			slog.Debug("cleanup: parse fetched-at failed",
+				"instance", name,
+				"path", path,
+				"err", parseErr)
+		}
+
+		if !expired {
+			return nil
+		}
+
+		scanned++
+
+		if dryRun {
+			slog.Info("cleanup: would delete (dry-run)",
+				"instance", name,
+				"path", path,
+				"fetched_at", info.Options["fetched-at"],
+				"expired_for", age.Round(time.Second))
+			return nil
+		}
+
+		batch = append(batch, path)
+		if len(batch) >= batchSize {
+			n := int64(len(batch))
+			r.deleteBatch(name, batch)
+			deleted += n
+			batch = batch[:0]
+		}
+		return nil
+	})
+
+	if len(batch) > 0 {
+		deleted += int64(len(batch))
+		r.deleteBatch(name, batch)
+	}
+
+	return scanned, deleted, err
+}
+
+func (r *Runtime) deleteBatch(tenantID string, paths []string) {
+	for _, p := range paths {
+		if err := r.store.DeleteObject(context.Background(), tenantID, p); err != nil {
+			slog.Warn("cleanup: delete failed",
+				"instance", tenantID,
+				"path", p,
+				"err", err)
+		}
+	}
+}
+
+func isExpiredByOptions(options map[string]string, expireAfter time.Duration) (expired bool, age time.Duration, err error) {
+	fetchedAtStr, ok := options["fetched-at"]
+	if !ok || fetchedAtStr == "" {
+		return true, 0, nil
+	}
+
+	fetchedAt, parseErr := utils.ParseFetchedAt(fetchedAtStr)
+	if parseErr != nil {
+		return true, 0, parseErr
+	}
+
+	if expireAfter <= 0 {
+		return false, 0, nil
+	}
+
+	expiredAt := fetchedAt.Add(expireAfter)
+	if now := time.Now(); now.After(expiredAt) {
+		return true, now.Sub(expiredAt), nil
+	}
+	return false, 0, nil
 }
 
 func (r *Runtime) buildServerState(instances map[string]config.InstanceSpec) (*serverState, error) {

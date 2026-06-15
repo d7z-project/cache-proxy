@@ -36,11 +36,30 @@ type MetricsConfig struct {
 }
 
 type StorageConfig struct {
-	GC GCConfig `json:"gc" yaml:"gc"`
+	GC      GCConfig      `yaml:"gc"`
+	Cleanup CleanupConfig `yaml:"cleanup"`
 }
 
 type GCConfig struct {
-	Blob Duration `json:"blob" yaml:"blob"`
+	Blob Duration `yaml:"blob"`
+}
+
+type CleanupConfig struct {
+	Enabled   bool     `yaml:"enabled"`
+	Interval  Duration `yaml:"interval"`
+	DryRun    bool     `yaml:"dry_run"`
+	BatchSize int      `yaml:"batch_size"`
+	Workers   int      `yaml:"workers"`
+}
+
+func DefaultCleanupConfig() CleanupConfig {
+	return CleanupConfig{
+		Enabled:   false,
+		Interval:  Duration(6 * time.Hour),
+		DryRun:    false,
+		BatchSize: 500,
+		Workers:   0,
+	}
 }
 
 type InstanceSummary struct {
@@ -64,10 +83,10 @@ type InstanceSpec struct {
 }
 
 type InstanceMeta struct {
-	Mode        string   `json:"mode" yaml:"mode"`
-	Enabled     bool     `json:"enabled" yaml:"enabled"`
-	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
-	ExpireAfter Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	Mode        string      `json:"mode" yaml:"mode"`
+	Enabled     bool        `json:"enabled" yaml:"enabled"`
+	Description string      `json:"description,omitempty" yaml:"description,omitempty"`
+	ExpireAfter Expiration `json:"expireAfter" yaml:"expire_after"`
 }
 
 type InstanceRoute struct {
@@ -124,6 +143,144 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*d = Duration(parsed)
 	return nil
+}
+
+type Expiration time.Duration
+
+const ExpirationNever Expiration = -1
+
+func (e Expiration) Duration() time.Duration { return time.Duration(e) }
+
+func (e Expiration) IsNever() bool  { return e == ExpirationNever }
+func (e Expiration) IsUnset() bool  { return e == 0 }
+func (e Expiration) IsDefault() bool { return e == 0 }
+
+func (e Expiration) String() string {
+	if e == ExpirationNever {
+		return "never"
+	}
+	if e == 0 {
+		return ""
+	}
+	return time.Duration(e).String()
+}
+
+func (e Expiration) MarshalJSON() ([]byte, error) { return json.Marshal(e.String()) }
+
+func (e *Expiration) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	return e.unmarshal(text)
+}
+
+func (e *Expiration) unmarshal(text string) error {
+	if text == "" {
+		*e = 0
+		return nil
+	}
+	switch text {
+	case "never", "0", "none", "infinite":
+		*e = ExpirationNever
+	default:
+		parsed, err := time.ParseDuration(text)
+		if err != nil {
+			return fmt.Errorf("invalid expiration %q: %w", text, err)
+		}
+		if parsed < 0 {
+			return fmt.Errorf("expiration must not be negative: %q", text)
+		}
+		*e = Expiration(parsed)
+	}
+	return nil
+}
+
+func (e Expiration) MarshalYAML() (any, error) {
+	if e == ExpirationNever {
+		return "never", nil
+	}
+	if e == 0 {
+		return nil, nil
+	}
+	return time.Duration(e).String(), nil
+}
+
+func (e *Expiration) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil || value.Value == "" {
+		*e = 0
+		return nil
+	}
+	return e.unmarshal(value.Value)
+}
+
+type Freshness time.Duration
+
+const FreshnessForever Freshness = -1
+
+func (f Freshness) Duration() time.Duration { return time.Duration(f) }
+
+func (f Freshness) IsForever() bool { return f == FreshnessForever }
+func (f Freshness) IsUnset() bool   { return f == 0 }
+func (f Freshness) IsDefault() bool  { return f == 0 }
+
+func (f Freshness) String() string {
+	if f == FreshnessForever {
+		return "forever"
+	}
+	if f == 0 {
+		return ""
+	}
+	return time.Duration(f).String()
+}
+
+func (f Freshness) MarshalJSON() ([]byte, error) { return json.Marshal(f.String()) }
+
+func (f *Freshness) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	return f.unmarshal(text)
+}
+
+func (f *Freshness) unmarshal(text string) error {
+	if text == "" {
+		*f = 0
+		return nil
+	}
+	switch text {
+	case "forever", "0", "always", "infinite":
+		*f = FreshnessForever
+	default:
+		parsed, err := time.ParseDuration(text)
+		if err != nil {
+			return fmt.Errorf("invalid freshness %q: %w", text, err)
+		}
+		if parsed < 0 {
+			return fmt.Errorf("freshness must not be negative: %q", text)
+		}
+		*f = Freshness(parsed)
+	}
+	return nil
+}
+
+func (f Freshness) MarshalYAML() (any, error) {
+	if f == FreshnessForever {
+		return "forever", nil
+	}
+	if f == 0 {
+		return nil, nil
+	}
+	return time.Duration(f).String(), nil
+}
+
+func (f *Freshness) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil || value.Value == "" {
+		*f = 0
+		return nil
+	}
+	return f.unmarshal(value.Value)
 }
 
 func CloneGlobal(cfg *GlobalConfig) *GlobalConfig {

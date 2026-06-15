@@ -22,11 +22,13 @@
     </header>
 
     @if (errors.length > 0) {
-      <div class="alert alert-danger">
-        <strong>请修正以下问题</strong>
-        <ul class="mb-0 mt-1">
-          @for (error of errors; track error) { <li>{{ error }}</li> }
-        </ul>
+      <div class="alert alert-danger mb-3">
+        <div class="d-flex align-items-start gap-2">
+          <strong class="text-nowrap">请修正以下问题：</strong>
+          <ul class="mb-0 flex-grow-1">
+            @for (error of errors; track error) { <li>{{ error }}</li> }
+          </ul>
+        </div>
       </div>
     }
 

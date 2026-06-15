@@ -8,9 +8,9 @@ require (
 	github.com/goproxy/goproxy v0.26.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/mod v0.36.0
+	golang.org/x/mod v0.37.0
 	golang.org/x/sync v0.21.0
-	gopkg.d7z.net/blobfs v0.0.0-20260612062820-4d64b24f1228
+	gopkg.d7z.net/blobfs v0.0.0-20260615134803-92c40351c8f4
 	gopkg.in/yaml.v3 v3.0.1
 )
 

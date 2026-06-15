@@ -17,18 +17,18 @@ import (
 )
 
 type Policy struct {
-	DefaultPolicy string          `json:"defaultPolicy,omitempty" yaml:"default_policy,omitempty"`
-	FreshFor      config.Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	BusyPolicy    string          `json:"busyPolicy,omitempty" yaml:"busy_policy,omitempty"`
-	Rules         []Rule          `json:"rules" yaml:"rules"`
+	DefaultPolicy string             `json:"defaultPolicy,omitempty" yaml:"default_policy,omitempty"`
+	FreshFor      config.Freshness   `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	BusyPolicy    string             `json:"busyPolicy,omitempty" yaml:"busy_policy,omitempty"`
+	Rules         []Rule             `json:"rules" yaml:"rules"`
 }
 
 type Rule struct {
-	Match          string          `json:"match" yaml:"match"`
-	ResourcePolicy string          `json:"resourcePolicy,omitempty" yaml:"resource_policy,omitempty"`
-	Policy         string          `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor       config.Duration `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	ExpireAfter    config.Duration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	Match          string             `json:"match" yaml:"match"`
+	ResourcePolicy string             `json:"resourcePolicy,omitempty" yaml:"resource_policy,omitempty"`
+	Policy         string             `json:"policy,omitempty" yaml:"policy,omitempty"`
+	FreshFor       config.Freshness   `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter    config.Expiration  `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type Driver struct{}
@@ -112,7 +112,7 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Duration {
+func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
 	return spec.Policy.(*Policy).FreshFor
 }
 

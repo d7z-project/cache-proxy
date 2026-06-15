@@ -26,12 +26,12 @@ import (
 )
 
 type Policy struct {
-	SimpleFreshFor    config.Duration `json:"simpleFreshFor,omitempty" yaml:"simple_fresh_for,omitempty"`
-	SimpleBusyPolicy  string          `json:"simpleBusyPolicy,omitempty" yaml:"simple_busy_policy,omitempty"`
-	FilePolicy        string          `json:"filePolicy,omitempty" yaml:"file_policy,omitempty"`
-	ProxyJSON         bool            `json:"proxyJson,omitempty" yaml:"proxy_json,omitempty"`
-	ProxyCoreMetadata bool            `json:"proxyCoreMetadata,omitempty" yaml:"proxy_core_metadata,omitempty"`
-	ProxySignatures   bool            `json:"proxySignatures,omitempty" yaml:"proxy_signatures,omitempty"`
+	SimpleFreshFor    config.Freshness `json:"simpleFreshFor,omitempty" yaml:"simple_fresh_for,omitempty"`
+	SimpleBusyPolicy  string           `json:"simpleBusyPolicy,omitempty" yaml:"simple_busy_policy,omitempty"`
+	FilePolicy        string           `json:"filePolicy,omitempty" yaml:"file_policy,omitempty"`
+	ProxyJSON         bool             `json:"proxyJson,omitempty" yaml:"proxy_json,omitempty"`
+	ProxyCoreMetadata bool             `json:"proxyCoreMetadata,omitempty" yaml:"proxy_core_metadata,omitempty"`
+	ProxySignatures   bool             `json:"proxySignatures,omitempty" yaml:"proxy_signatures,omitempty"`
 }
 
 type Driver struct{}
@@ -91,7 +91,7 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Duration { return 0 }
+func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness { return 0 }
 
 func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
 	handler := &handler{
@@ -335,13 +335,13 @@ func (h *handler) openCached(ctx context.Context, objectPath string) (io.ReadClo
 	return reader, cloneHeaders(reader.Info().Options), nil
 }
 
-func (h *handler) openFreshCached(ctx context.Context, objectPath string, freshFor config.Duration) (io.ReadCloser, map[string]string, bool, error) {
+func (h *handler) openFreshCached(ctx context.Context, objectPath string, freshFor config.Freshness) (io.ReadCloser, map[string]string, bool, error) {
 	reader, headers, err := h.openCached(ctx, objectPath)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if freshFor <= 0 {
-		return reader, headers, false, nil
+	if freshFor.IsUnset() || freshFor.IsForever() {
+		return reader, headers, freshFor.IsForever(), nil
 	}
 	fetchedAt, err := utils.ParseFetchedAt(headers["fetched-at"])
 	if err != nil {

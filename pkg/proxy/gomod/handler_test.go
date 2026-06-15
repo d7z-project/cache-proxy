@@ -37,7 +37,7 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, config.InstanceSpec{
 		Name:   "gomod",
-		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: "/go"},
 		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
 		Policy: mustPolicyJSON(t, &Policy{SumDB: &SumDBConfig{Enabled: false}}),
@@ -66,7 +66,7 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	store := newTestStore(t)
 	cfg := config.InstanceSpec{
 		Name:   "gomod",
-		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: "/go"},
 		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
 		Policy: mustPolicyJSON(t, &Policy{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true}),
@@ -93,7 +93,7 @@ func TestGoModuleHandlerSkipsPrivateModules(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, config.InstanceSpec{
 		Name:   "gomod",
-		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Duration(time.Hour)},
+		Meta:   config.InstanceMeta{Mode: config.ModeGo, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: "/go"},
 		Source: config.InstanceSource{Upstreams: []string{upstream.URL}},
 		Policy: mustPolicyJSON(t, &Policy{

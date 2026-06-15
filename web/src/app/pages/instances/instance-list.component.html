@@ -60,10 +60,24 @@
                   <td><strong>{{ item.name }}</strong></td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
                   <td class="text-end text-nowrap">
-                    <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
-                    <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="copyInstance(item.name)">复制</button>
-                    <button type="button" class="btn btn-sm btn-outline-secondary ms-1" (click)="openLookupModal(item.name)">查询缓存</button>
-                    <button type="button" class="btn btn-sm btn-outline-danger ms-1" (click)="promptDelete(item.name)">删除</button>
+                    <!-- 大屏幕：展开按钮组 -->
+                    <div class="btn-group d-none d-md-inline-flex" role="group" aria-label="实例操作">
+                      <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" (click)="copyInstance(item.name)">复制</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" (click)="openLookupModal(item.name)">查询缓存</button>
+                      <button type="button" class="btn btn-sm btn-outline-danger" (click)="promptDelete(item.name)">删除</button>
+                    </div>
+                    <!-- 小屏幕：折叠下拉菜单 -->
+                    <div class="d-md-none" ngbDropdown container="body">
+                      <button type="button" class="btn btn-sm btn-outline-secondary" ngbDropdownToggle>操作</button>
+                      <div ngbDropdownMenu>
+                        <button ngbDropdownItem (click)="startEdit(item.name)">编辑</button>
+                        <button ngbDropdownItem (click)="copyInstance(item.name)">复制</button>
+                        <button ngbDropdownItem (click)="openLookupModal(item.name)">查询缓存</button>
+                        <div class="dropdown-divider"></div>
+                        <button ngbDropdownItem class="text-danger" (click)="promptDelete(item.name)">删除</button>
+                      </div>
+                    </div>
                   </td>
                 </tr>
               }

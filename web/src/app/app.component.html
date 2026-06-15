@@ -20,8 +20,11 @@
     </button>
 
     <div class="collapse navbar-collapse order-lg-2" id="mainNav" [ngbCollapse]="!menuOpen">
-      @if (isAuth$ | async) {
-        <ul class="navbar-nav me-auto">
+      <ul class="navbar-nav me-auto">
+        <li class="nav-item">
+          <a class="nav-link" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }" (click)="menuOpen = false">首页</a>
+        </li>
+        @if (isAuth$ | async) {
           <li class="nav-item">
             <a class="nav-link" routerLink="/dashboard" routerLinkActive="active" (click)="menuOpen = false">仪表盘</a>
           </li>
@@ -34,8 +37,8 @@
           <li class="nav-item">
             <a class="nav-link" routerLink="/storage" routerLinkActive="active" (click)="menuOpen = false">存储</a>
           </li>
-        </ul>
-      }
+        }
+      </ul>
     </div>
   </div>
 </nav>
