@@ -32,4 +32,5 @@ RUN mkdir /data && chown -R nobody:nobody /data
 USER nobody
 COPY --from=builder /src/cache-proxy /app/
 EXPOSE 8080
+VOLUME ["/data"]
 ENTRYPOINT ["/app/cache-proxy"]

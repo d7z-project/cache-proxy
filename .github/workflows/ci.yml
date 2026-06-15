@@ -35,7 +35,7 @@ jobs:
 
       - name: Build backend
         run: |
-          CGO_ENABLED=0 go build -v -ldflags "-X gopkg.d7z.net/cache-proxy/pkg/server.DefaultBackend=/data -X gopkg.d7z.net/cache-proxy/pkg/server.DefaultBind=0.0.0.0:8080" -o cache-proxy .
+          CGO_ENABLED=0 go build -v -ldflags "-X gopkg.d7z.net/cache-proxy/pkg/server.DefaultBackend=./data -X gopkg.d7z.net/cache-proxy/pkg/server.DefaultBind=0.0.0.0:8080" -o cache-proxy .
 
       - name: Run tests
         run: go test ./...
