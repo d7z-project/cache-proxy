@@ -7,7 +7,7 @@ import { Component, computed, input } from '@angular/core';
     @if (displayLabel()) {
       <div class="small text-muted mb-1">{{ displayLabel() }}</div>
     }
-    <div class="form-control instance-entry font-monospace">{{ url() }}</div>
+    <div class="form-control instance-entry font-monospace text-break">{{ url() }}</div>
   `
 })
 export class InstanceEntryComponent {

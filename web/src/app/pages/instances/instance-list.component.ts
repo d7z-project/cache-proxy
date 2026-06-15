@@ -1,4 +1,5 @@
 import { Component, OnInit, inject } from '@angular/core';
+import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem, NgbModal } from '@ng-bootstrap/ng-bootstrap';
 import { ApiService } from '../../core/api.service';
@@ -7,11 +8,11 @@ import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 import { ImportExportModalComponent } from '../../shared/import-export-modal.component';
-import { CacheLookupModalComponent } from './cache-lookup-modal.component';
+import { CacheLookupModalComponent } from '../../shared/cache-lookup-modal.component';
 
 @Component({
   selector: 'app-instance-list',
-  imports: [ModeLabelPipe, NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem],
+  imports: [FormsModule, ModeLabelPipe, NgbDropdown, NgbDropdownToggle, NgbDropdownMenu, NgbDropdownItem],
   templateUrl: './instance-list.component.html'
 })
 export class InstanceListComponent implements OnInit {
@@ -23,13 +24,25 @@ export class InstanceListComponent implements OnInit {
 
   collection?: InstanceCollectionResponse;
   loading = true;
+  searchText = '';
+  filterMode: ProxyMode | '' = '';
 
   readonly ProxyMode = ProxyMode;
+  readonly allModes: (ProxyMode | '')[] = ['', ProxyMode.File, ProxyMode.Oci, ProxyMode.Npm, ProxyMode.Go, ProxyMode.Maven, ProxyMode.Cargo, ProxyMode.PyPI];
 
   ngOnInit(): void { this.load(); }
 
   get instances(): InstanceSummary[] {
-    return this.collection?.items ?? [];
+    const items = this.collection?.items ?? [];
+    let filtered = items;
+    if (this.searchText.trim()) {
+      const q = this.searchText.toLowerCase();
+      filtered = filtered.filter((item) => item.name.toLowerCase().includes(q));
+    }
+    if (this.filterMode) {
+      filtered = filtered.filter((item) => item.mode === this.filterMode);
+    }
+    return filtered;
   }
 
   get generation(): number {
@@ -45,7 +58,7 @@ export class InstanceListComponent implements OnInit {
   }
 
   copyInstance(name: string): void {
-    const item = this.instances.find((instance) => instance.name === name);
+    const item = this.collection?.items.find((instance) => instance.name === name);
     if (!item) return;
     this.router.navigate(['/instances/new'], { queryParams: { mode: item.mode, copy: name } });
   }
@@ -69,7 +82,7 @@ export class InstanceListComponent implements OnInit {
   }
 
   openLookupModal(instanceName: string): void {
-    const item = this.instances.find((instance) => instance.name === instanceName);
+    const item = this.collection?.items.find((instance) => instance.name === instanceName);
     const ref = this.ngbModal.open(CacheLookupModalComponent, { centered: true, size: 'lg' });
     ref.componentInstance.instanceName = instanceName;
     ref.componentInstance.mode = item?.mode ?? ProxyMode.File;
@@ -82,6 +95,11 @@ export class InstanceListComponent implements OnInit {
       (imported) => { if (imported) this.load(); },
       () => undefined
     );
+  }
+
+  clearFilters(): void {
+    this.searchText = '';
+    this.filterMode = '';
   }
 
   load(): void {

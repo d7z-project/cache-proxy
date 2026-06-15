@@ -1,7 +1,7 @@
 import { Component, OnInit, inject } from '@angular/core';
 import { AsyncPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
-import { NgbAccordionModule, NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap';
+import { NgbAccordionModule } from '@ng-bootstrap/ng-bootstrap';
 import { Observable, catchError, map, of } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { AuthService } from '../../core/auth.service';
@@ -17,7 +17,7 @@ interface HomeGuideItem {
 
 @Component({
   selector: 'app-home',
-  imports: [AsyncPipe, RouterLink, NgbAccordionModule, NgbDropdownModule, ModeLabelPipe, CodeBlockComponent],
+  imports: [AsyncPipe, RouterLink, NgbAccordionModule, ModeLabelPipe, CodeBlockComponent],
   templateUrl: './home.component.html'
 })
 export class HomeComponent implements OnInit {

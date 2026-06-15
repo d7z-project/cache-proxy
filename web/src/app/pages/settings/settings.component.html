@@ -1,12 +1,12 @@
 <section class="container-fluid page-shell">
   <header class="page-header">
     <div>
-      <p class="eyebrow">设置</p>
-      <h2 class="fw-bold mb-1">运行信息</h2>
-      <p class="text-muted mb-0">进程级参数只读展示；实例与缓存策略在各自页面管理。</p>
+      <p class="eyebrow">系统</p>
+      <h2 class="fw-bold mb-1">系统信息</h2>
+      <p class="text-muted mb-0">运行时状态和存储统计。</p>
     </div>
     <div class="card-actions">
-      <button type="button" class="btn btn-outline-secondary" (click)="load()">重新载入</button>
+      <button type="button" class="btn btn-outline-secondary" (click)="refreshStorageStats()">刷新</button>
       <button type="button" class="btn btn-outline-danger" (click)="promptReset()">恢复默认</button>
     </div>
   </header>
@@ -19,39 +19,94 @@
   }
 
   @if (!loading && runtime) {
-    <div class="row g-3">
-      <div class="col-md-6">
+    <div class="row g-3 mb-3">
+      <div class="col-lg-4">
         <div class="card h-100">
           <div class="card-body">
-            <h5 class="card-title mb-1">当前运行参数</h5>
-            <p class="text-muted small mb-3">以下参数由部署和启动方式决定，不在前端修改。</p>
-            <dl class="kv-list">
-              <div><dt>主监听</dt><dd>{{ runtime.bind }}</dd></div>
-              <div><dt>存储目录</dt><dd>{{ runtime.backend }}</dd></div>
+            <h5 class="card-title mb-2">运行时参数</h5>
+            <dl class="kv-list kv-list-sm">
+              <div><dt>主监听</dt><dd class="text-break">{{ runtime.bind }}</dd></div>
+              <div><dt>存储目录</dt><dd class="text-break">{{ runtime.backend }}</dd></div>
               <div><dt>Metrics 路径</dt><dd>{{ runtime.metricsPath }}</dd></div>
-              <div><dt>Blob GC 周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
-              <div><dt>配置版本</dt><dd>{{ runtime.configVersion }}</dd></div>
+              <div><dt>GC 周期</dt><dd>{{ runtime.gcInterval }}</dd></div>
             </dl>
           </div>
         </div>
       </div>
 
-      <div class="col-md-6">
+      <div class="col-lg-4">
         <div class="card h-100">
           <div class="card-body">
-            <h5 class="card-title mb-1">当前状态</h5>
-            <p class="text-muted small mb-3">当前进程已加载的运行时统计。</p>
-            <dl class="kv-list">
+            <h5 class="card-title mb-2">运行时状态</h5>
+            <dl class="kv-list kv-list-sm">
               <div><dt>配置代次</dt><dd>{{ runtime.generation }}</dd></div>
               <div><dt>实例数量</dt><dd>{{ runtime.instances }}</dd></div>
               <div><dt>活动处理器</dt><dd>{{ runtime.handlers }}</dd></div>
-              <div><dt>累计请求</dt><dd>{{ runtime.requests }}</dd></div>
-              <div><dt>累计错误</dt><dd>{{ runtime.errors }}</dd></div>
-              <div><dt>上游请求</dt><dd>{{ runtime.upstreams }}</dd></div>
+              <div><dt>累计请求</dt><dd>{{ runtime.requests | number }}</dd></div>
+            </dl>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card h-100">
+          <div class="card-body">
+            <h5 class="card-title mb-2">存储容量</h5>
+            <dl class="kv-list kv-list-sm">
+              <div><dt>对象</dt><dd>{{ storageStats?.Objects | number }}</dd></div>
+              <div><dt>目录</dt><dd>{{ storageStats?.Directories | number }}</dd></div>
+              <div><dt>逻辑容量</dt><dd>{{ bytesText(storageStats?.Bytes?.LogicalObjectBytes) }}</dd></div>
+              <div><dt>存储容量</dt><dd>{{ bytesText(storageStats?.Bytes?.StoredChunkBytes) }}</dd></div>
             </dl>
           </div>
         </div>
       </div>
     </div>
+
+    @if (gcNotice) {
+      <div class="alert alert-info mb-3">{{ gcNotice }}</div>
+    }
+
+    @if (storageStats$ | async; as stats) {
+      <div class="row g-3">
+        <div class="col-lg-6">
+          <article class="card h-100">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="card-title mb-0">对象状态</h5>
+              </div>
+              <dl class="kv-list kv-list-sm">
+                <div><dt>活跃清单</dt><dd>{{ stats.Manifests.Active | number }}</dd></div>
+                <div><dt>已删除清单</dt><dd>{{ stats.Manifests.Deleted | number }}</dd></div>
+                <div><dt>活跃数据块</dt><dd>{{ stats.Chunks.Active | number }}</dd></div>
+                <div><dt>待清理数据块</dt><dd>{{ stats.Chunks.GarbageCandidate | number }}</dd></div>
+                <div><dt>异常数据块</dt><dd>{{ stats.Chunks.Corrupt | number }}</dd></div>
+                <div><dt>可用数据段</dt><dd>{{ stats.Segments.Sealed | number }}</dd></div>
+              </dl>
+            </div>
+          </article>
+        </div>
+
+        <div class="col-lg-6">
+          <article class="card h-100">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="card-title mb-0">GC 状态</h5>
+                <button type="button" class="btn btn-sm btn-primary" (click)="runGc()" [disabled]="gcRunning">
+                  {{ gcRunning ? '清理中...' : '运行 GC' }}
+                </button>
+              </div>
+              <dl class="kv-list kv-list-sm">
+                <div><dt>运行次数</dt><dd>{{ stats.GC.Runs | number }}</dd></div>
+                <div><dt>最近批次</dt><dd>{{ stats.GC.LastEpoch | number }}</dd></div>
+                <div><dt>最近状态</dt><dd>{{ stateText(stats.GC.LastRunState) }}</dd></div>
+                <div><dt>最近后台时间</dt><dd>{{ timeText(stats.GC.LastBackgroundAt) }}</dd></div>
+                <div><dt>最近后台错误</dt><dd>{{ errorText(stats.GC.LastBackgroundError) }}</dd></div>
+              </dl>
+            </div>
+          </article>
+        </div>
+      </div>
+    }
   }
 </section>

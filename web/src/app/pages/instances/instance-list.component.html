@@ -6,6 +6,7 @@
       <p class="text-muted mb-0">管理代理模式、上游连接和缓存策略。</p>
     </div>
     <div class="card-actions">
+      <button type="button" class="btn btn-outline-secondary" (click)="openImportExport()">导入导出</button>
       <div ngbDropdown>
         <button type="button" class="btn btn-primary" ngbDropdownToggle>新增实例</button>
         <div ngbDropdownMenu>
@@ -18,7 +19,6 @@
           <button ngbDropdownItem (click)="startCreate(ProxyMode.PyPI)">PyPI 包代理</button>
         </div>
       </div>
-      <button type="button" class="btn btn-outline-secondary" (click)="openImportExport()">导入导出</button>
     </div>
   </header>
 
@@ -31,20 +31,38 @@
   }
 
   @if (!loading) {
-    @if (instances.length === 0) {
+    @if ((collection?.items?.length ?? 0) === 0) {
       <div class="card">
         <div class="card-body text-center text-muted py-5">还没有实例，点击上方按钮创建。</div>
       </div>
     } @else {
-      <div class="card">
-        <div class="card-header bg-body-tertiary border-0 py-3">
-          <div class="card-title-row">
-            <div>
-              <h5 class="card-title mb-1">实例清单</h5>
-              <p class="text-muted mb-0">查看实例模式，并进入编辑、复制或缓存查询。</p>
+      <div class="card mb-3">
+        <div class="card-body py-2">
+          <div class="d-flex gap-2 align-items-center">
+            <input type="text" class="form-control" style="max-width: 180px;" placeholder="搜索..." [(ngModel)]="searchText">
+            <div ngbDropdown class="d-flex">
+              <button type="button" class="btn btn-outline-secondary" ngbDropdownToggle>
+                {{ filterMode ? (filterMode | modeLabel) : '全部' }}
+              </button>
+              <div ngbDropdownMenu>
+                <button ngbDropdownItem (click)="filterMode = ''">全部</button>
+                <div ngbDropdownDivider></div>
+                @for (mode of allModes; track mode) {
+                  @if (mode) {
+                    <button ngbDropdownItem (click)="filterMode = mode">{{ mode | modeLabel }}</button>
+                  }
+                }
+              </div>
             </div>
+            @if (searchText || filterMode) {
+              <button type="button" class="btn btn-link text-decoration-none p-0" (click)="clearFilters()">清除</button>
+            }
+            <span class="text-muted small ms-auto">{{ instances.length }} / {{ collection?.items?.length ?? 0 }}</span>
           </div>
         </div>
+      </div>
+
+      <div class="card">
         <div class="table-responsive">
           <table class="table table-hover mb-0">
             <thead>
@@ -60,25 +78,28 @@
                   <td><strong>{{ item.name }}</strong></td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
                   <td class="text-end text-nowrap">
-                    <!-- 大屏幕：展开按钮组 -->
-                    <div class="btn-group d-none d-md-inline-flex" role="group" aria-label="实例操作">
+                    <div class="btn-group d-none d-md-inline-flex" role="group">
                       <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
                       <button type="button" class="btn btn-sm btn-outline-secondary" (click)="copyInstance(item.name)">复制</button>
-                      <button type="button" class="btn btn-sm btn-outline-secondary" (click)="openLookupModal(item.name)">查询缓存</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary" (click)="openLookupModal(item.name)">查询</button>
                       <button type="button" class="btn btn-sm btn-outline-danger" (click)="promptDelete(item.name)">删除</button>
                     </div>
-                    <!-- 小屏幕：折叠下拉菜单 -->
                     <div class="d-md-none" ngbDropdown container="body">
                       <button type="button" class="btn btn-sm btn-outline-secondary" ngbDropdownToggle>操作</button>
                       <div ngbDropdownMenu>
                         <button ngbDropdownItem (click)="startEdit(item.name)">编辑</button>
                         <button ngbDropdownItem (click)="copyInstance(item.name)">复制</button>
-                        <button ngbDropdownItem (click)="openLookupModal(item.name)">查询缓存</button>
+                        <button ngbDropdownItem (click)="openLookupModal(item.name)">查询</button>
                         <div class="dropdown-divider"></div>
                         <button ngbDropdownItem class="text-danger" (click)="promptDelete(item.name)">删除</button>
                       </div>
                     </div>
                   </td>
+                </tr>
+              }
+              @if (instances.length === 0) {
+                <tr>
+                  <td colspan="3" class="text-center text-muted py-4">没有匹配的实例。</td>
                 </tr>
               }
             </tbody>

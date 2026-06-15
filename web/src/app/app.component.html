@@ -2,7 +2,7 @@
 
 <nav class="navbar navbar-expand-lg bg-white border-bottom">
   <div class="container-fluid">
-    <a class="navbar-brand" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Cache Proxy</a>
+    <a class="navbar-brand text-break" routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Cache Proxy</a>
 
     @if ({ enabled: authEnabled$ | async, loggedIn: isAuth$ | async }; as authState) {
       <div class="d-flex align-items-center gap-2 order-lg-3">
@@ -32,10 +32,7 @@
             <a class="nav-link" routerLink="/instances" routerLinkActive="active" (click)="menuOpen = false">实例</a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" routerLink="/settings" routerLinkActive="active" (click)="menuOpen = false">设置</a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link" routerLink="/storage" routerLinkActive="active" (click)="menuOpen = false">存储</a>
+            <a class="nav-link" routerLink="/system" routerLinkActive="active" (click)="menuOpen = false">系统信息</a>
           </li>
         }
       </ul>

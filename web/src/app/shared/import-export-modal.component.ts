@@ -32,7 +32,8 @@ import { ToastService } from './toast.service';
             <h6 class="fw-semibold mb-1">导入实例</h6>
             <p class="text-muted small mb-3">支持导出包结构 <code>&#123; "instances": [...] &#125;</code>，也支持直接粘贴实例数组。</p>
             <textarea
-              class="form-control font-monospace"
+              class="form-control font-monospace text-break"
+              style="min-height: 120px;"
               name="importText"
               [(ngModel)]="importText"
               placeholder="粘贴实例 JSON 内容"

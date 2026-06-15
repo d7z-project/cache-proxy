@@ -1,5 +1,5 @@
 import { Component, inject } from '@angular/core';
-import { AsyncPipe } from '@angular/common';
+import { AsyncPipe, DecimalPipe } from '@angular/common';
 import { BehaviorSubject, Observable, forkJoin, of, catchError, switchMap } from 'rxjs';
 import { ApiService } from '../../core/api.service';
 import { InstanceMetrics, MetricsStats, RuntimeInfo, InstanceSummary } from '../../core/api.models';
@@ -15,7 +15,7 @@ interface ChartSlice { label: string; value: number; percent: number; }
 
 @Component({
   selector: 'app-dashboard',
-  imports: [AsyncPipe, ModeLabelPipe],
+  imports: [AsyncPipe, DecimalPipe, ModeLabelPipe],
   templateUrl: './dashboard.component.html'
 })
 export class DashboardComponent {
