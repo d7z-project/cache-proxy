@@ -17,19 +17,22 @@ import (
 )
 
 type Policy struct {
-	MetadataFreshFor   config.Freshness  `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy string            `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	ReleasePolicy      string            `json:"releasePolicy,omitempty" yaml:"release_policy,omitempty"`
-	SnapshotPolicy     string            `json:"snapshotPolicy,omitempty" yaml:"snapshot_policy,omitempty"`
-	SnapshotFreshFor   config.Freshness  `json:"snapshotFreshFor,omitempty" yaml:"snapshot_fresh_for,omitempty"`
-	Rules              []Rule            `json:"rules" yaml:"rules"`
+	MetadataFreshFor    config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
+	MetadataBusyPolicy  string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
+	AuxiliaryPolicy     string           `json:"auxiliaryPolicy,omitempty" yaml:"auxiliary_policy,omitempty"`
+	AuxiliaryFreshFor   config.Freshness `json:"auxiliaryFreshFor,omitempty" yaml:"auxiliary_fresh_for,omitempty"`
+	AuxiliaryBusyPolicy string           `json:"auxiliaryBusyPolicy,omitempty" yaml:"auxiliary_busy_policy,omitempty"`
+	ReleasePolicy       string           `json:"releasePolicy,omitempty" yaml:"release_policy,omitempty"`
+	SnapshotPolicy      string           `json:"snapshotPolicy,omitempty" yaml:"snapshot_policy,omitempty"`
+	SnapshotFreshFor    config.Freshness `json:"snapshotFreshFor,omitempty" yaml:"snapshot_fresh_for,omitempty"`
+	Rules               []Rule           `json:"rules" yaml:"rules"`
 }
 
 type Rule struct {
-	Match       string             `json:"match" yaml:"match"`
-	Policy      string             `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor    config.Freshness   `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	ExpireAfter config.Expiration  `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	Match       string            `json:"match" yaml:"match"`
+	Policy      string            `json:"policy,omitempty" yaml:"policy,omitempty"`
+	FreshFor    config.Freshness  `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
 type Driver struct{}
@@ -76,6 +79,12 @@ func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
 	if policy.ReleasePolicy == "" {
 		policy.ReleasePolicy = config.PolicyImmutable
 	}
+	if policy.AuxiliaryPolicy == "" {
+		policy.AuxiliaryPolicy = config.PolicyRevalidate
+	}
+	if policy.AuxiliaryBusyPolicy == "" {
+		policy.AuxiliaryBusyPolicy = config.BusyPolicyStale
+	}
 	if policy.SnapshotPolicy == "" {
 		policy.SnapshotPolicy = config.PolicyRevalidate
 	}
@@ -92,8 +101,14 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	if !validPolicy(policy.SnapshotPolicy) {
 		return fmt.Errorf("invalid maven snapshot policy %q", policy.SnapshotPolicy)
 	}
+	if !validPolicy(policy.AuxiliaryPolicy) {
+		return fmt.Errorf("invalid maven auxiliary policy %q", policy.AuxiliaryPolicy)
+	}
 	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
 		return fmt.Errorf("invalid maven metadata busy policy %q", policy.MetadataBusyPolicy)
+	}
+	if policy.AuxiliaryBusyPolicy != config.BusyPolicyBypass && policy.AuxiliaryBusyPolicy != config.BusyPolicyStale {
+		return fmt.Errorf("invalid maven auxiliary busy policy %q", policy.AuxiliaryBusyPolicy)
 	}
 	for i, rule := range policy.Rules {
 		if strings.TrimSpace(rule.Match) == "" {
@@ -148,13 +163,18 @@ func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		UpstreamPath: lookupPath,
 		Policy:       r.defaultPolicy(lookupPath),
 	}
-	if strings.HasSuffix(lookupPath, "maven-metadata.xml") {
+	if isMetadataPath(lookupPath) {
 		route.Policy = config.PolicyRevalidate
 		route.FreshFor = r.policy.MetadataFreshFor
+		route.BusyPolicy = r.policy.MetadataBusyPolicy
 		route.ExpireAfter = 0
 		return route, nil
 	}
-	if isSnapshotPath(lookupPath) {
+	if isAuxiliaryPath(lookupPath) {
+		route.Policy = r.policy.AuxiliaryPolicy
+		route.FreshFor = r.policy.AuxiliaryFreshFor
+		route.BusyPolicy = r.policy.AuxiliaryBusyPolicy
+	} else if isSnapshotPath(lookupPath) {
 		route.Policy = r.policy.SnapshotPolicy
 		route.FreshFor = r.policy.SnapshotFreshFor
 	}
@@ -181,6 +201,22 @@ func isSnapshotPath(lookupPath string) bool {
 
 func validPolicy(policy string) bool {
 	return policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
+}
+
+func isMetadataPath(lookupPath string) bool {
+	return strings.HasSuffix(lookupPath, "maven-metadata.xml")
+}
+
+func isAuxiliaryPath(lookupPath string) bool {
+	if strings.Contains(lookupPath, "maven-metadata.xml.") {
+		return true
+	}
+	for _, suffix := range []string{".sha1", ".sha256", ".sha512", ".md5", ".asc", ".sig"} {
+		if strings.HasSuffix(lookupPath, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

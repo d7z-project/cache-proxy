@@ -86,7 +86,7 @@ npm mode proxies one npm registry upstream. Package metadata is rewritten so `di
 
 ### Go
 
-Go mode implements a pure GOPROXY cache through `github.com/goproxy/goproxy` plus an internal upstream-only fetcher. It only talks to configured HTTP GOPROXY upstreams such as `https://proxy.golang.org` and an optional proxied SumDB endpoint.
+Go mode implements a pure GOPROXY cache with an in-repo HTTP-only fetcher and SumDB proxy. It only talks to configured HTTP GOPROXY upstreams such as `https://proxy.golang.org` and an optional proxied SumDB endpoint.
 
 It does not:
 

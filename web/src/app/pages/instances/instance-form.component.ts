@@ -10,6 +10,8 @@ import {
   GoPolicy,
   MavenPolicy,
   CargoPolicy,
+  PackageRepoPolicy,
+  PackageResourceKind,
   PyPIPolicy,
   InstanceCollectionResponse,
   InstanceDocumentResponse,
@@ -22,7 +24,7 @@ import {
   ProxyMode,
   RuntimeInfo
 } from '../../core/api.models';
-import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, SelectOption } from '../../core/config-options';
+import { BUSY_POLICY_OPTIONS, CACHE_POLICY_OPTIONS, LISTEN_KIND_OPTIONS, NPM_RESOURCE_POLICY_OPTIONS, OCI_AUTH_OPTIONS, PACKAGE_RESOURCE_KIND_OPTIONS, SelectOption } from '../../core/config-options';
 import { ToastService } from '../../shared/toast.service';
 import { ModalService } from '../../shared/modal.service';
 import { CanComponentDeactivate } from '../../core/form-deactivate.guard';
@@ -61,14 +63,27 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   readonly listenKinds = LISTEN_KIND_OPTIONS;
   readonly ociAuthOptions = OCI_AUTH_OPTIONS;
   readonly npmResourcePolicies = NPM_RESOURCE_POLICY_OPTIONS;
+  readonly packageResourceKinds = PACKAGE_RESOURCE_KIND_OPTIONS;
   readonly ProxyMode = ProxyMode;
   readonly ListenKind = ListenKind;
   readonly OciAuthType = OciAuthType;
+  readonly PackageResourceKind = PackageResourceKind;
 
   ngOnInit(): void { this.load(); }
 
   get dirty(): boolean { return this.formState() !== this.savedFormState; }
   get filePolicy(): FilePolicy | undefined { return this.draft?.meta.mode === ProxyMode.File ? this.draft.policy as FilePolicy : undefined; }
+  get packageRepoPolicy(): PackageRepoPolicy | undefined {
+    switch (this.draft?.meta.mode) {
+      case ProxyMode.Apk:
+      case ProxyMode.Deb:
+      case ProxyMode.Rpm:
+      case ProxyMode.Pacman:
+        return this.draft.policy as PackageRepoPolicy;
+      default:
+        return undefined;
+    }
+  }
   get ociPolicy(): OciPolicy | undefined { return this.draft?.meta.mode === ProxyMode.Oci ? this.draft.policy as OciPolicy : undefined; }
   get npmPolicy(): NpmPolicy | undefined { return this.draft?.meta.mode === ProxyMode.Npm ? this.draft.policy as NpmPolicy : undefined; }
   get goPolicy(): GoPolicy | undefined { return this.draft?.meta.mode === ProxyMode.Go ? this.draft.policy as GoPolicy : undefined; }
@@ -93,8 +108,10 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
   removePassHeader(index: number): void { this.passHeaders.splice(index, 1); }
   addGoPrivatePattern(): void { this.goPrivatePatterns.push(''); }
   removeGoPrivatePattern(index: number): void { this.goPrivatePatterns.splice(index, 1); }
-  addFileRule(): void { this.filePolicy?.rules.push({ match: '**/*', policy: CachePolicy.Revalidate, freshFor: '', expireAfter: '' }); }
+  addFileRule(): void { this.filePolicy?.rules.push({ match: '**/*', resourceClass: PackageResourceKind.All, policy: CachePolicy.Revalidate, busyPolicy: BusyPolicy.Bypass, freshFor: '', expireAfter: '' }); }
   removeFileRule(index: number): void { this.filePolicy?.rules.splice(index, 1); }
+  addPackageRepoRule(): void { this.packageRepoPolicy?.rules.push({ match: '**', resourceClass: PackageResourceKind.All, policy: CachePolicy.Revalidate, busyPolicy: BusyPolicy.Stale, freshFor: '', expireAfter: '' }); }
+  removePackageRepoRule(index: number): void { this.packageRepoPolicy?.rules.splice(index, 1); }
   addOciRule(): void { this.ociPolicy?.rules.push({ match: 'library/*', policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' }); }
   removeOciRule(index: number): void { this.ociPolicy?.rules.splice(index, 1); }
   addNpmRule(): void { this.npmPolicy?.rules.push({ match: '**', resourcePolicy: NpmResourcePolicy.All, policy: CachePolicy.Immutable, freshFor: '', expireAfter: '' }); }
@@ -124,6 +141,10 @@ export class InstanceFormComponent implements OnInit, CanComponentDeactivate {
 
   npmResourceDescription(value: NpmResourcePolicy | undefined): string {
     return this.optionDescription(this.npmResourcePolicies, value);
+  }
+
+  packageResourceDescription(value: PackageResourceKind | undefined): string {
+    return this.optionDescription(this.packageResourceKinds, value);
   }
 
   back(): void {

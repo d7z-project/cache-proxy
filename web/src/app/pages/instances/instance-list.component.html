@@ -11,6 +11,10 @@
         <button type="button" class="btn btn-primary" ngbDropdownToggle>新增实例</button>
         <div ngbDropdownMenu>
           <button ngbDropdownItem (click)="startCreate(ProxyMode.File)">文件代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Apk)">APK 仓库代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Deb)">DEB 仓库代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Rpm)">RPM 仓库代理</button>
+          <button ngbDropdownItem (click)="startCreate(ProxyMode.Pacman)">Pacman 仓库代理</button>
           <button ngbDropdownItem (click)="startCreate(ProxyMode.Oci)">容器镜像代理</button>
           <button ngbDropdownItem (click)="startCreate(ProxyMode.Npm)">npm 包代理</button>
           <button ngbDropdownItem (click)="startCreate(ProxyMode.Go)">Go 模块代理</button>
@@ -69,14 +73,21 @@
               <tr>
                 <th>名称</th>
                 <th>模式</th>
+                <th>入口</th>
                 <th class="text-end">操作</th>
               </tr>
             </thead>
             <tbody>
               @for (item of instances; track item.name) {
                 <tr>
-                  <td><strong>{{ item.name }}</strong></td>
+                  <td>
+                    <strong>{{ item.name }}</strong>
+                    @if (item.enabled === false) {
+                      <span class="badge text-bg-light border ms-2">已停用</span>
+                    }
+                  </td>
                   <td><span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span></td>
+                  <td class="small text-muted font-monospace text-break">{{ entryFor(item) || '未配置' }}</td>
                   <td class="text-end text-nowrap">
                     <div class="btn-group d-none d-md-inline-flex" role="group">
                       <button type="button" class="btn btn-sm btn-outline-secondary" (click)="startEdit(item.name)">编辑</button>
@@ -99,7 +110,7 @@
               }
               @if (instances.length === 0) {
                 <tr>
-                  <td colspan="3" class="text-center text-muted py-4">没有匹配的实例。</td>
+                  <td colspan="4" class="text-center text-muted py-4">没有匹配的实例。</td>
                 </tr>
               }
             </tbody>

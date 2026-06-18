@@ -1,171 +1,188 @@
 package gomod
 
 import (
-	"log/slog"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
-	"os"
+	"path"
 	"strings"
-	"sync"
 
-	"github.com/goproxy/goproxy"
+	"golang.org/x/mod/module"
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
+)
+
+const disableModuleFetchHeader = "Disable-Module-Fetch"
+
+type moduleRequestKind uint8
+
+const (
+	moduleRequestInvalid moduleRequestKind = iota
+	moduleRequestList
+	moduleRequestLatest
+	moduleRequestInfo
+	moduleRequestMod
+	moduleRequestZip
 )
 
 type Handler struct {
 	name   string
-	meta   config.InstanceMeta
 	policy *Policy
-	inner  http.Handler
-	stats  *proxy.Stats
-	wait   sync.WaitGroup
+	store  *blobfs.Store
+	base   *proxy.Handler
+}
+
+type moduleRequest struct {
+	kind       moduleRequestKind
+	modulePath string
+	version    string
+	cacheKey   string
 }
 
 func NewHandler(name string, meta config.InstanceMeta, source config.InstanceSource, policy *Policy, store *blobfs.Store, stats *proxy.Stats) (*Handler, error) {
 	if policy == nil {
 		policy = &Policy{}
 	}
-	tempDir, err := os.MkdirTemp("", "cache-proxy-go-*")
-	if err != nil {
-		return nil, err
-	}
-	transport := &statsTransport{base: transportForConfig(name, source.Transport), stats: stats, instance: name}
-	fetcher, err := newUpstreamProxyFetcher(source.Upstreams, transport)
-	if err != nil {
-		_ = os.RemoveAll(tempDir)
-		return nil, err
-	}
-	inner := &goproxy.Goproxy{
-		Fetcher:       fetcher,
-		ProxiedSumDBs: proxiedSumDBs(policy),
-		Cacher:        newBlobFSCacher(store, name, meta.ExpireAfter),
-		TempDir:       tempDir,
-		Transport:     transport,
-		Logger:        slog.Default().With("instance", name, "mode", config.ModeGo),
-	}
-	return &Handler{name: name, meta: meta, policy: policy, inner: closeableTempHandler{Handler: inner, tempDir: tempDir}, stats: stats}, nil
+	applyDefaults(policy)
+	base := proxy.NewHandler(name, proxy.RuntimeConfig{
+		Mode:            config.ModeGo,
+		ExpireAfter:     meta.ExpireAfter,
+		Upstreams:       append([]string(nil), source.Upstreams...),
+		Transport:       source.Transport,
+		BusyPolicy:      policy.MetadataBusyPolicy,
+		DefaultFreshFor: policy.MetadataFreshFor,
+	}, store, &resolver{policy: policy}, stats)
+	return &Handler{name: name, policy: policy, store: store, base: base}, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
+	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if modulePath, ok := modulePathFromTarget(target); ok && matchesPrivateModule(h.policy, modulePath) {
+		http.NotFound(w, req)
 		return
 	}
-	if modulePath, ok := modulePathFromTarget(strings.TrimPrefix(req.URL.Path, "/")); ok && matchesPrivateModule(h.policy, modulePath) {
-		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-		h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, "PRIVATE", http.StatusNotFound, 0)
+	route, err := (&resolver{policy: h.policy}).Resolve(req)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return
 	}
-	h.wait.Add(1)
-	defer h.wait.Done()
-
-	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	next := req
-	if h.policy == nil || !h.policy.DisableModuleFetchHeader {
-		next = req.Clone(req.Context())
-		next.Header = req.Header.Clone()
-		next.Header.Del("Disable-Module-Fetch")
+	if req.Header.Get(disableModuleFetchHeader) != "" && h.policy.DisableModuleFetchHeader {
+		if _, err := h.store.OpenObject(req.Context(), h.name, route.ObjectPath); err != nil {
+			http.NotFound(w, req)
+			return
+		}
 	}
-	h.inner.ServeHTTP(rec, next)
-	cache := rec.Header().Get("X-Cache")
-	if cache == "" {
-		cache = "GO"
-	}
-	h.stats.RecordRequest(h.name, h.meta.Mode, req.Method, cache, rec.status, uint64(rec.bytes))
+	h.base.ServeHTTP(w, req)
 }
 
 func (h *Handler) Close() {
-	h.wait.Wait()
-	if closer, ok := h.inner.(interface{ Close() }); ok {
-		closer.Close()
+	h.base.Close()
+}
+
+type resolver struct {
+	policy *Policy
+}
+
+func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
+	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if strings.HasPrefix(target, "sumdb/") {
+		return r.resolveSumDB(target)
 	}
-}
-
-type closeableTempHandler struct {
-	http.Handler
-	tempDir string
-}
-
-func (h closeableTempHandler) Close() {
-	_ = os.RemoveAll(h.tempDir)
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
-	r.ResponseWriter.WriteHeader(status)
-}
-
-func (r *statusRecorder) Write(p []byte) (int, error) {
-	n, err := r.ResponseWriter.Write(p)
-	r.bytes += n
-	return n, err
-}
-
-func (r *statusRecorder) Flush() {
-	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
+	moduleReq, err := parseModuleRequest(target)
+	if err != nil {
+		return proxy.Route{}, err
 	}
+	route := proxy.Route{
+		ObjectPath:   "go/" + moduleReq.cacheKey,
+		UpstreamPath: moduleReq.cacheKey,
+		Policy:       r.policy.MetadataPolicy,
+		FreshFor:     r.policy.MetadataFreshFor,
+		BusyPolicy:   r.policy.MetadataBusyPolicy,
+	}
+	if moduleReq.kind == moduleRequestZip {
+		route.Policy = r.policy.ArtifactPolicy
+		route.BusyPolicy = config.BusyPolicyBypass
+	}
+	return route, nil
 }
 
-func proxiedSumDBs(policy *Policy) []string {
-	if policy == nil || policy.SumDB == nil || !policy.SumDB.Enabled {
-		return nil
+func (r *resolver) resolveSumDB(target string) (proxy.Route, error) {
+	if r.policy == nil || r.policy.SumDB == nil || !r.policy.SumDB.Enabled {
+		return proxy.Route{}, fs.ErrNotExist
 	}
-	name := strings.TrimSpace(policy.SumDB.Name)
-	rawURL := strings.TrimSpace(policy.SumDB.URL)
-	if name == "" || rawURL == "" {
-		return nil
+	name := strings.TrimSpace(r.policy.SumDB.Name)
+	prefix := "sumdb/" + name + "/"
+	if name == "" || !strings.HasPrefix(target, prefix) {
+		return proxy.Route{}, fs.ErrNotExist
 	}
-	return []string{name + " " + rawURL}
+	baseURL, err := url.Parse(strings.TrimSpace(r.policy.SumDB.URL))
+	if err != nil {
+		return proxy.Route{}, err
+	}
+	return proxy.Route{
+		ObjectPath: "go/" + target,
+		TargetURL:  baseURL.JoinPath(strings.TrimPrefix(target, prefix)).String(),
+		Policy:     config.PolicyRevalidate,
+		FreshFor:   r.policy.SumDBFreshFor,
+		BusyPolicy: r.policy.SumDBBusyPolicy,
+	}, nil
 }
 
-func transportForConfig(instance string, cfg *config.TransportConfig) http.RoundTripper {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if cfg == nil {
-		return transport
+func parseModuleRequest(target string) (moduleRequest, error) {
+	target = strings.TrimPrefix(path.Clean("/"+target), "/")
+	if target == "." || target == "" || strings.HasPrefix(target, "sumdb/") {
+		return moduleRequest{}, fs.ErrNotExist
 	}
-	if cfg.Proxy != "" {
-		proxyURL, err := url.Parse(cfg.Proxy)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-		} else {
-			slog.Warn("invalid Go module transport proxy URL", "instance", instance, "proxy", cfg.Proxy, "err", err)
+	modulePath, suffix, ok := strings.Cut(target, "/@")
+	if !ok || modulePath == "" {
+		return moduleRequest{}, fs.ErrNotExist
+	}
+	unescapedModulePath, err := module.UnescapePath(modulePath)
+	if err != nil || unescapedModulePath == "" {
+		return moduleRequest{}, fs.ErrNotExist
+	}
+	switch suffix {
+	case "v/list":
+		return moduleRequest{kind: moduleRequestList, modulePath: unescapedModulePath, cacheKey: target, version: "list"}, nil
+	case "latest":
+		return moduleRequest{kind: moduleRequestLatest, modulePath: unescapedModulePath, cacheKey: target, version: "latest"}, nil
+	}
+	if !strings.HasPrefix(suffix, "v/") {
+		return moduleRequest{}, fs.ErrNotExist
+	}
+	versionFile := strings.TrimPrefix(suffix, "v/")
+	for _, candidate := range []struct {
+		kind   moduleRequestKind
+		suffix string
+	}{
+		{kind: moduleRequestInfo, suffix: ".info"},
+		{kind: moduleRequestMod, suffix: ".mod"},
+		{kind: moduleRequestZip, suffix: ".zip"},
+	} {
+		if strings.HasSuffix(versionFile, candidate.suffix) {
+			version := strings.TrimSuffix(versionFile, candidate.suffix)
+			if version == "" || strings.Contains(version, "/") {
+				return moduleRequest{}, errors.New("invalid go module version")
+			}
+			if candidate.kind != moduleRequestList && candidate.kind != moduleRequestLatest {
+				if normalized := module.CanonicalVersion(version); normalized == "" || normalized != version {
+					return moduleRequest{}, unsupportedQueryError(version)
+				}
+			}
+			return moduleRequest{kind: candidate.kind, modulePath: unescapedModulePath, version: version, cacheKey: target}, nil
 		}
 	}
-	if cfg.Timeout > 0 {
-		transport.DialContext = utils.DefaultDialContext(cfg.Timeout.Duration())
-	}
-	return transport
+	return moduleRequest{}, fs.ErrNotExist
 }
 
-type statsTransport struct {
-	base     http.RoundTripper
-	stats    *proxy.Stats
-	instance string
-}
-
-func (t *statsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	resp, err := base.RoundTrip(req)
-	if err != nil {
-		t.stats.RecordUpstream(t.instance, config.ModeGo, req.Method, 0)
-		return nil, err
-	}
-	t.stats.RecordUpstream(t.instance, config.ModeGo, req.Method, resp.StatusCode)
-	return resp, nil
+func unsupportedQueryError(query string) error {
+	return fmt.Errorf("go module query %q requires direct source resolution, which this proxy disables: %w", query, fs.ErrNotExist)
 }

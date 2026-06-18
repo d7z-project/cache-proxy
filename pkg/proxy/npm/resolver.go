@@ -43,12 +43,12 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 	}
 	match := r.resolveResource(packageName, "metadata")
 	return proxy.Route{
-		ObjectPath:         "npm/metadata/" + proxy.HashKey(objectPath),
-		UpstreamPath:       upstreamPath,
-		Policy:             match.policy,
-		FreshFor:           match.freshFor,
-		ExpireAfter:        match.expireAfter,
-		RewriteNPMMetadata: true,
+		ObjectPath:   "npm/metadata/" + proxy.HashKey(objectPath),
+		UpstreamPath: upstreamPath,
+		Policy:       match.policy,
+		FreshFor:     match.freshFor,
+		ExpireAfter:  match.expireAfter,
+		RewriteKind:  "npm-metadata",
 	}, nil
 }
 

@@ -8,6 +8,7 @@ import { AuthService } from '../../core/auth.service';
 import { InstanceSummary } from '../../core/api.models';
 import { ModeLabelPipe } from '../../shared/mode-label.pipe';
 import { CodeBlockComponent } from '../../shared/code-block.component';
+import { InstanceEntryComponent } from '../../shared/instance-entry.component';
 import { InstanceGuide, buildInstanceGuide } from '../../shared/proxy-guides';
 
 interface HomeGuideItem {
@@ -17,7 +18,7 @@ interface HomeGuideItem {
 
 @Component({
   selector: 'app-home',
-  imports: [AsyncPipe, RouterLink, NgbAccordionModule, ModeLabelPipe, CodeBlockComponent],
+  imports: [AsyncPipe, RouterLink, NgbAccordionModule, ModeLabelPipe, CodeBlockComponent, InstanceEntryComponent],
   templateUrl: './home.component.html'
 })
 export class HomeComponent implements OnInit {
@@ -29,10 +30,14 @@ export class HomeComponent implements OnInit {
   isAuth$ = this.auth.isAuth$;
   authEnabled$ = this.auth.authEnabled$;
   expandedInstance = '';
+  activeCount = 0;
 
   ngOnInit(): void {
     this.items$ = this.api.publicInstances().pipe(
-      map((instances) => instances.map((instance) => ({ instance, guide: buildInstanceGuide(instance) }))),
+      map((instances) => {
+        this.activeCount = instances.length;
+        return instances.map((instance) => ({ instance, guide: buildInstanceGuide(instance) }));
+      }),
       catchError((err) => {
         this.error = err.status === 0 ? '无法连接到服务。' : '实例列表加载失败。';
         return of([]);

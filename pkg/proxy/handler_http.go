@@ -91,6 +91,35 @@ func publicBaseURL(req *http.Request) string {
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	var lastErr error
+	if target := headers[""]; target != "" {
+		requestHeaders := mapsCloneWithoutEmptyKey(headers)
+		request, err := http.NewRequestWithContext(ctx, method, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("User-Agent", h.client.UserAgent)
+		for key, value := range requestHeaders {
+			request.Header.Set(key, value)
+		}
+		if auth := h.staticAuthorization(); auth != "" && request.Header.Get("Authorization") == "" {
+			request.Header.Set("Authorization", auth)
+		}
+		response, err := h.client.Do(request)
+		if err != nil {
+			if options.Record {
+				h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
+			}
+			return nil, err
+		}
+		if options.Record {
+			h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
+		}
+		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
+			_ = response.Body.Close()
+			return nil, fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
+		}
+		return responseFromHTTP(response), nil
+	}
 	for _, baseURL := range h.config.Upstreams {
 		pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
 		targetURL := strings.TrimRight(baseURL, "/") + "/" + EscapePath(pathPart)
@@ -155,7 +184,7 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 	if h.config.Mode == config.ModeOCI {
 		headers["Accept"] = ociManifestAccept
 	}
-	if h.config.Mode != config.ModeFile {
+	if len(h.config.PassHeaders) == 0 {
 		return headers
 	}
 	for _, name := range h.passHeaders() {
@@ -167,6 +196,34 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 		}
 	}
 	return headers
+}
+
+func (h *Handler) remoteHeaders(req *http.Request, route Route, extra map[string]string) map[string]string {
+	headers := map[string]string{}
+	if req != nil {
+		headers = h.requestHeaders(req)
+	}
+	for key, value := range route.RequestHeaders {
+		headers[key] = value
+	}
+	for key, value := range extra {
+		headers[key] = value
+	}
+	if route.TargetURL != "" {
+		headers[""] = route.TargetURL
+	}
+	return headers
+}
+
+func mapsCloneWithoutEmptyKey(headers map[string]string) map[string]string {
+	clone := make(map[string]string, len(headers))
+	for key, value := range headers {
+		if key == "" {
+			continue
+		}
+		clone[key] = value
+	}
+	return clone
 }
 
 func (h *Handler) passHeaders() []string {

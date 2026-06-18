@@ -79,11 +79,11 @@ func DefaultGlobalConfig(metricsPath string, gcInterval time.Duration) *config.G
 
 func DefaultInstances() map[string]config.InstanceSpec {
 	policy, _ := json.Marshal(&fileproxy.Policy{
-		DefaultPolicy: config.PolicyBypass,
-		BusyPolicy:    config.BusyPolicyBypass,
+		AuxiliaryPolicy:     config.PolicyBypass,
+		AuxiliaryBusyPolicy: config.BusyPolicyBypass,
 		Rules: []fileproxy.Rule{
 			{Match: "**/*.iso", Policy: config.PolicyImmutable, ExpireAfter: config.Expiration(mustDefaultDuration("DefaultExpireAfter", DefaultExpireAfter))},
-			{Match: "**/repodata/**", Policy: config.PolicyRevalidate},
+			{Match: "**/repodata/**", ResourceClass: "metadata", Policy: config.PolicyRevalidate},
 		},
 	})
 	return map[string]config.InstanceSpec{

@@ -5,7 +5,11 @@ export enum ProxyMode {
   Go = 'go',
   Maven = 'maven',
   Cargo = 'cargo',
-  PyPI = 'pypi'
+  PyPI = 'pypi',
+  Apk = 'apk',
+  Deb = 'deb',
+  Rpm = 'rpm',
+  Pacman = 'pacman'
 }
 
 export enum CachePolicy {
@@ -33,6 +37,13 @@ export enum OciAuthType {
 export enum NpmResourcePolicy {
   Metadata = 'metadata',
   Tarball = 'tarball',
+  All = '*'
+}
+
+export enum PackageResourceKind {
+  Metadata = 'metadata',
+  Artifact = 'artifact',
+  Auxiliary = 'auxiliary',
   All = '*'
 }
 
@@ -111,19 +122,30 @@ export interface TransportConfig {
   timeout?: string;
 }
 
-export type ModePolicy = FilePolicy | OciPolicy | NpmPolicy | GoPolicy | MavenPolicy | CargoPolicy | PyPIPolicy;
+export type ModePolicy = FilePolicy | OciPolicy | NpmPolicy | GoPolicy | MavenPolicy | CargoPolicy | PyPIPolicy | PackageRepoPolicy;
 
 export interface FilePolicy {
   passHeaders?: string[];
-  defaultPolicy?: CachePolicy;
-  freshFor?: string;
-  busyPolicy?: BusyPolicy;
+  metadataPolicy?: CachePolicy;
+  metadataFreshFor?: string;
+  metadataBusyPolicy?: BusyPolicy;
+  metadataExpireAfter?: string;
+  artifactPolicy?: CachePolicy;
+  artifactFreshFor?: string;
+  artifactBusyPolicy?: BusyPolicy;
+  artifactExpireAfter?: string;
+  auxiliaryPolicy?: CachePolicy;
+  auxiliaryFreshFor?: string;
+  auxiliaryBusyPolicy?: BusyPolicy;
+  auxiliaryExpireAfter?: string;
   rules: FileRule[];
 }
 
 export interface FileRule {
   match: string;
-  policy: CachePolicy;
+  resourceClass?: PackageResourceKind;
+  policy?: CachePolicy;
+  busyPolicy?: BusyPolicy;
   freshFor?: string;
   expireAfter?: string;
 }
@@ -169,11 +191,20 @@ export interface GoPolicy {
   sumdb?: GoSumDBConfig;
   goprivate?: string[];
   disableModuleFetchHeader?: boolean;
+  metadataPolicy?: CachePolicy;
+  metadataFreshFor?: string;
+  metadataBusyPolicy?: BusyPolicy;
+  artifactPolicy?: CachePolicy;
+  sumdbFreshFor?: string;
+  sumdbBusyPolicy?: BusyPolicy;
 }
 
 export interface MavenPolicy {
   metadataFreshFor?: string;
   metadataBusyPolicy?: BusyPolicy;
+  auxiliaryPolicy?: CachePolicy;
+  auxiliaryFreshFor?: string;
+  auxiliaryBusyPolicy?: BusyPolicy;
   releasePolicy?: CachePolicy;
   snapshotPolicy?: CachePolicy;
   snapshotFreshFor?: string;
@@ -195,12 +226,42 @@ export interface CargoPolicy {
 }
 
 export interface PyPIPolicy {
-  simpleFreshFor?: string;
-  simpleBusyPolicy?: BusyPolicy;
-  filePolicy?: CachePolicy;
+  metadataPolicy?: CachePolicy;
+  metadataFreshFor?: string;
+  metadataBusyPolicy?: BusyPolicy;
+  artifactPolicy?: CachePolicy;
+  auxiliaryPolicy?: CachePolicy;
+  auxiliaryFreshFor?: string;
+  auxiliaryBusyPolicy?: BusyPolicy;
   proxyJson?: boolean;
   proxyCoreMetadata?: boolean;
   proxySignatures?: boolean;
+}
+
+export interface PackageRepoPolicy {
+  passHeaders?: string[];
+  metadataPolicy?: CachePolicy;
+  metadataFreshFor?: string;
+  metadataBusyPolicy?: BusyPolicy;
+  metadataExpireAfter?: string;
+  artifactPolicy?: CachePolicy;
+  artifactFreshFor?: string;
+  artifactBusyPolicy?: BusyPolicy;
+  artifactExpireAfter?: string;
+  auxiliaryPolicy?: CachePolicy;
+  auxiliaryFreshFor?: string;
+  auxiliaryBusyPolicy?: BusyPolicy;
+  auxiliaryExpireAfter?: string;
+  rules: PackageRepoRule[];
+}
+
+export interface PackageRepoRule {
+  match: string;
+  resourceClass?: PackageResourceKind;
+  policy?: CachePolicy;
+  busyPolicy?: BusyPolicy;
+  freshFor?: string;
+  expireAfter?: string;
 }
 
 export interface GoSumDBConfig {

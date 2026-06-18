@@ -18,6 +18,9 @@ import {
   OciAuthType,
   OciPolicy,
   OciRule,
+  PackageRepoPolicy,
+  PackageRepoRule,
+  PackageResourceKind,
   ProxyMode,
   PyPIPolicy
 } from '../../core/api.models';
@@ -35,9 +38,10 @@ export const BLOCKED_PASS_HEADERS = new Set([
 ]);
 
 export function extractDraftLists(spec: InstanceSpec): DraftLists {
+  const packagePolicy = asPackageRepoPolicy(spec.policy);
   return {
     upstreams: [...(spec.source.upstreams ?? [])],
-    passHeaders: [...(asFilePolicy(spec.policy)?.passHeaders ?? [])],
+    passHeaders: [...(asFilePolicy(spec.policy)?.passHeaders ?? packagePolicy?.passHeaders ?? [])],
     goPrivatePatterns: [...(asGoPolicy(spec.policy)?.goprivate ?? [])]
   };
 }
@@ -49,12 +53,36 @@ export function applyDraftDefaults(spec: InstanceSpec): InstanceSpec {
   switch (draft.meta.mode) {
     case ProxyMode.File:
       draft.policy = {
-        defaultPolicy: asFilePolicy(draft.policy)?.defaultPolicy ?? CachePolicy.Bypass,
-        freshFor: asFilePolicy(draft.policy)?.freshFor ?? '30s',
-        busyPolicy: asFilePolicy(draft.policy)?.busyPolicy ?? BusyPolicy.Bypass,
+        metadataPolicy: asFilePolicy(draft.policy)?.metadataPolicy ?? CachePolicy.Bypass,
+        metadataFreshFor: asFilePolicy(draft.policy)?.metadataFreshFor ?? '',
+        metadataBusyPolicy: asFilePolicy(draft.policy)?.metadataBusyPolicy ?? BusyPolicy.Bypass,
+        artifactPolicy: asFilePolicy(draft.policy)?.artifactPolicy ?? CachePolicy.Bypass,
+        artifactFreshFor: asFilePolicy(draft.policy)?.artifactFreshFor ?? '',
+        artifactBusyPolicy: asFilePolicy(draft.policy)?.artifactBusyPolicy ?? BusyPolicy.Bypass,
+        auxiliaryPolicy: asFilePolicy(draft.policy)?.auxiliaryPolicy ?? CachePolicy.Bypass,
+        auxiliaryFreshFor: asFilePolicy(draft.policy)?.auxiliaryFreshFor ?? '',
+        auxiliaryBusyPolicy: asFilePolicy(draft.policy)?.auxiliaryBusyPolicy ?? BusyPolicy.Bypass,
         passHeaders: asFilePolicy(draft.policy)?.passHeaders ?? [],
         rules: asFilePolicy(draft.policy)?.rules ?? []
       } as FilePolicy;
+      break;
+    case ProxyMode.Apk:
+    case ProxyMode.Deb:
+    case ProxyMode.Rpm:
+    case ProxyMode.Pacman:
+      draft.policy = {
+        metadataPolicy: asPackageRepoPolicy(draft.policy)?.metadataPolicy ?? CachePolicy.Revalidate,
+        metadataFreshFor: asPackageRepoPolicy(draft.policy)?.metadataFreshFor ?? (draft.meta.mode === ProxyMode.Deb ? '2m' : '1m'),
+        metadataBusyPolicy: asPackageRepoPolicy(draft.policy)?.metadataBusyPolicy ?? BusyPolicy.Stale,
+        artifactPolicy: asPackageRepoPolicy(draft.policy)?.artifactPolicy ?? CachePolicy.Immutable,
+        artifactFreshFor: asPackageRepoPolicy(draft.policy)?.artifactFreshFor ?? '',
+        artifactBusyPolicy: asPackageRepoPolicy(draft.policy)?.artifactBusyPolicy ?? BusyPolicy.Bypass,
+        auxiliaryPolicy: asPackageRepoPolicy(draft.policy)?.auxiliaryPolicy ?? CachePolicy.Revalidate,
+        auxiliaryFreshFor: asPackageRepoPolicy(draft.policy)?.auxiliaryFreshFor ?? '30s',
+        auxiliaryBusyPolicy: asPackageRepoPolicy(draft.policy)?.auxiliaryBusyPolicy ?? BusyPolicy.Stale,
+        passHeaders: asPackageRepoPolicy(draft.policy)?.passHeaders ?? [],
+        rules: asPackageRepoPolicy(draft.policy)?.rules ?? []
+      } as PackageRepoPolicy;
       break;
     case ProxyMode.Oci:
       draft.policy = {
@@ -81,6 +109,12 @@ export function applyDraftDefaults(spec: InstanceSpec): InstanceSpec {
       };
       goPolicy.sumdb = normalizeGoSumDB(goPolicy.sumdb) ?? { enabled: false };
       goPolicy.goprivate = goPolicy.goprivate ?? [];
+      goPolicy.metadataPolicy = goPolicy.metadataPolicy ?? CachePolicy.Revalidate;
+      goPolicy.metadataFreshFor = goPolicy.metadataFreshFor ?? '1m';
+      goPolicy.metadataBusyPolicy = goPolicy.metadataBusyPolicy ?? BusyPolicy.Stale;
+      goPolicy.artifactPolicy = goPolicy.artifactPolicy ?? CachePolicy.Immutable;
+      goPolicy.sumdbFreshFor = goPolicy.sumdbFreshFor ?? '30s';
+      goPolicy.sumdbBusyPolicy = goPolicy.sumdbBusyPolicy ?? BusyPolicy.Stale;
       draft.policy = goPolicy;
       break;
     }
@@ -88,6 +122,9 @@ export function applyDraftDefaults(spec: InstanceSpec): InstanceSpec {
       draft.policy = {
         metadataFreshFor: asMavenPolicy(draft.policy)?.metadataFreshFor ?? '30s',
         metadataBusyPolicy: asMavenPolicy(draft.policy)?.metadataBusyPolicy ?? BusyPolicy.Stale,
+        auxiliaryPolicy: asMavenPolicy(draft.policy)?.auxiliaryPolicy ?? CachePolicy.Revalidate,
+        auxiliaryFreshFor: asMavenPolicy(draft.policy)?.auxiliaryFreshFor ?? '30s',
+        auxiliaryBusyPolicy: asMavenPolicy(draft.policy)?.auxiliaryBusyPolicy ?? BusyPolicy.Stale,
         releasePolicy: asMavenPolicy(draft.policy)?.releasePolicy ?? CachePolicy.Immutable,
         snapshotPolicy: asMavenPolicy(draft.policy)?.snapshotPolicy ?? CachePolicy.Revalidate,
         snapshotFreshFor: asMavenPolicy(draft.policy)?.snapshotFreshFor ?? '15s',
@@ -104,9 +141,13 @@ export function applyDraftDefaults(spec: InstanceSpec): InstanceSpec {
       break;
     case ProxyMode.PyPI:
       draft.policy = {
-        simpleFreshFor: asPyPIPolicy(draft.policy)?.simpleFreshFor ?? '30s',
-        simpleBusyPolicy: asPyPIPolicy(draft.policy)?.simpleBusyPolicy ?? BusyPolicy.Stale,
-        filePolicy: asPyPIPolicy(draft.policy)?.filePolicy ?? CachePolicy.Immutable,
+        metadataPolicy: asPyPIPolicy(draft.policy)?.metadataPolicy ?? CachePolicy.Revalidate,
+        metadataFreshFor: asPyPIPolicy(draft.policy)?.metadataFreshFor ?? '1m',
+        metadataBusyPolicy: asPyPIPolicy(draft.policy)?.metadataBusyPolicy ?? BusyPolicy.Stale,
+        artifactPolicy: asPyPIPolicy(draft.policy)?.artifactPolicy ?? CachePolicy.Immutable,
+        auxiliaryPolicy: asPyPIPolicy(draft.policy)?.auxiliaryPolicy ?? CachePolicy.Revalidate,
+        auxiliaryFreshFor: asPyPIPolicy(draft.policy)?.auxiliaryFreshFor ?? '30s',
+        auxiliaryBusyPolicy: asPyPIPolicy(draft.policy)?.auxiliaryBusyPolicy ?? BusyPolicy.Stale,
         proxyJson: asPyPIPolicy(draft.policy)?.proxyJson !== false,
         proxyCoreMetadata: Boolean(asPyPIPolicy(draft.policy)?.proxyCoreMetadata),
         proxySignatures: Boolean(asPyPIPolicy(draft.policy)?.proxySignatures)
@@ -150,7 +191,7 @@ export function buildDefaultDraft(mode: ProxyMode): InstanceSpec {
       meta: { mode, enabled: true, expireAfter: '8760h' },
       route: { path: '/maven' },
       source: { upstreams: ['https://repo1.maven.org/maven2'], transport: {} },
-      policy: { metadataFreshFor: '30s', metadataBusyPolicy: BusyPolicy.Stale, releasePolicy: CachePolicy.Immutable, snapshotPolicy: CachePolicy.Revalidate, snapshotFreshFor: '15s', rules: [] } as MavenPolicy
+      policy: { metadataFreshFor: '30s', metadataBusyPolicy: BusyPolicy.Stale, auxiliaryPolicy: CachePolicy.Revalidate, auxiliaryFreshFor: '30s', auxiliaryBusyPolicy: BusyPolicy.Stale, releasePolicy: CachePolicy.Immutable, snapshotPolicy: CachePolicy.Revalidate, snapshotFreshFor: '15s', rules: [] } as MavenPolicy
     };
   }
   if (mode === ProxyMode.Cargo) {
@@ -168,7 +209,35 @@ export function buildDefaultDraft(mode: ProxyMode): InstanceSpec {
       meta: { mode, enabled: true, expireAfter: '8760h' },
       route: { path: '/pypi' },
       source: { upstreams: ['https://pypi.org'], transport: {} },
-      policy: { simpleFreshFor: '30s', simpleBusyPolicy: BusyPolicy.Stale, filePolicy: CachePolicy.Immutable, proxyJson: true, proxyCoreMetadata: false, proxySignatures: false } as PyPIPolicy
+      policy: { metadataPolicy: CachePolicy.Revalidate, metadataFreshFor: '1m', metadataBusyPolicy: BusyPolicy.Stale, artifactPolicy: CachePolicy.Immutable, auxiliaryPolicy: CachePolicy.Revalidate, auxiliaryFreshFor: '30s', auxiliaryBusyPolicy: BusyPolicy.Stale, proxyJson: true, proxyCoreMetadata: false, proxySignatures: false } as PyPIPolicy
+    };
+  }
+  if (mode === ProxyMode.Apk || mode === ProxyMode.Deb || mode === ProxyMode.Rpm || mode === ProxyMode.Pacman) {
+    const defaults = mode === ProxyMode.Deb
+      ? { name: 'debian', path: '/deb', upstream: 'https://deb.debian.org/debian', freshFor: '2m' }
+      : mode === ProxyMode.Apk
+        ? { name: 'alpine', path: '/apk', upstream: 'https://dl-cdn.alpinelinux.org/alpine', freshFor: '1m' }
+        : mode === ProxyMode.Rpm
+          ? { name: 'rpm-repo', path: '/rpm', upstream: 'https://download.example.com/rpm', freshFor: '1m' }
+          : { name: 'pacman', path: '/pacman', upstream: 'https://mirror.example.com/archlinux', freshFor: '1m' };
+    return {
+      name: defaults.name,
+      meta: { mode, enabled: true, expireAfter: '8760h' },
+      route: { path: defaults.path },
+      source: { upstreams: [defaults.upstream], transport: {} },
+      policy: {
+        metadataPolicy: CachePolicy.Revalidate,
+        metadataFreshFor: defaults.freshFor,
+        metadataBusyPolicy: BusyPolicy.Stale,
+        artifactPolicy: CachePolicy.Immutable,
+        artifactFreshFor: '',
+        artifactBusyPolicy: BusyPolicy.Bypass,
+        auxiliaryPolicy: CachePolicy.Revalidate,
+        auxiliaryFreshFor: '30s',
+        auxiliaryBusyPolicy: BusyPolicy.Stale,
+        passHeaders: ['Accept', 'Accept-Language'],
+        rules: []
+      } as PackageRepoPolicy
     };
   }
   return {
@@ -176,7 +245,7 @@ export function buildDefaultDraft(mode: ProxyMode): InstanceSpec {
     meta: { mode, enabled: true, expireAfter: '720h' },
     route: { path: '/files' },
     source: { upstreams: ['https://example.com'], transport: {} },
-    policy: { defaultPolicy: CachePolicy.Bypass, freshFor: '30s', busyPolicy: BusyPolicy.Bypass, passHeaders: ['Accept', 'Accept-Language'], rules: [] } as FilePolicy
+    policy: { metadataPolicy: CachePolicy.Bypass, metadataBusyPolicy: BusyPolicy.Bypass, artifactPolicy: CachePolicy.Bypass, artifactBusyPolicy: BusyPolicy.Bypass, auxiliaryPolicy: CachePolicy.Bypass, auxiliaryBusyPolicy: BusyPolicy.Bypass, passHeaders: ['Accept', 'Accept-Language'], rules: [] } as FilePolicy
   };
 }
 
@@ -194,6 +263,12 @@ export function normalizeSpec(draft: InstanceSpec, listenKind: ListenKind, lists
   switch (spec.meta.mode) {
     case ProxyMode.File:
       spec.policy = normalizeFilePolicy(asFilePolicy(spec.policy), lists.passHeaders);
+      break;
+    case ProxyMode.Apk:
+    case ProxyMode.Deb:
+    case ProxyMode.Rpm:
+    case ProxyMode.Pacman:
+      spec.policy = normalizePackageRepoPolicy(asPackageRepoPolicy(spec.policy), lists.passHeaders, spec.meta.mode);
       break;
     case ProxyMode.Oci:
       spec.policy = normalizeOciPolicy(asOciPolicy(spec.policy));
@@ -256,9 +331,15 @@ function normalizeDuration(value?: string): string | undefined {
 function normalizeFilePolicy(policy: FilePolicy | undefined, passHeaders: string[]): FilePolicy {
   const next: FilePolicy = {
     ...policy,
-    defaultPolicy: policy?.defaultPolicy ?? CachePolicy.Bypass,
-    freshFor: normalizeDuration(policy?.freshFor),
-    busyPolicy: policy?.busyPolicy ?? BusyPolicy.Bypass,
+    metadataPolicy: policy?.metadataPolicy ?? CachePolicy.Bypass,
+    metadataFreshFor: normalizeDuration(policy?.metadataFreshFor),
+    metadataBusyPolicy: policy?.metadataBusyPolicy ?? BusyPolicy.Bypass,
+    artifactPolicy: policy?.artifactPolicy ?? CachePolicy.Bypass,
+    artifactFreshFor: normalizeDuration(policy?.artifactFreshFor),
+    artifactBusyPolicy: policy?.artifactBusyPolicy ?? BusyPolicy.Bypass,
+    auxiliaryPolicy: policy?.auxiliaryPolicy ?? CachePolicy.Bypass,
+    auxiliaryFreshFor: normalizeDuration(policy?.auxiliaryFreshFor),
+    auxiliaryBusyPolicy: policy?.auxiliaryBusyPolicy ?? BusyPolicy.Bypass,
     passHeaders: passHeaders.map((header) => header.trim()).filter(Boolean),
     rules: (policy?.rules ?? []).map(normalizeRule)
   };
@@ -298,7 +379,13 @@ function normalizeGoPolicy(policy: GoPolicy | undefined, goPrivatePatterns: stri
     ...policy,
     sumdb: normalizeGoSumDB(policy?.sumdb),
     goprivate: goPrivatePatterns.map((value) => value.trim()).filter(Boolean),
-    disableModuleFetchHeader: Boolean(policy?.disableModuleFetchHeader)
+    disableModuleFetchHeader: Boolean(policy?.disableModuleFetchHeader),
+    metadataPolicy: policy?.metadataPolicy ?? CachePolicy.Revalidate,
+    metadataFreshFor: normalizeDuration(policy?.metadataFreshFor) ?? '1m',
+    metadataBusyPolicy: policy?.metadataBusyPolicy ?? BusyPolicy.Stale,
+    artifactPolicy: policy?.artifactPolicy ?? CachePolicy.Immutable,
+    sumdbFreshFor: normalizeDuration(policy?.sumdbFreshFor) ?? '30s',
+    sumdbBusyPolicy: policy?.sumdbBusyPolicy ?? BusyPolicy.Stale
   };
 }
 
@@ -307,6 +394,9 @@ function normalizeMavenPolicy(policy?: MavenPolicy): MavenPolicy {
     ...policy,
     metadataFreshFor: normalizeDuration(policy?.metadataFreshFor),
     metadataBusyPolicy: policy?.metadataBusyPolicy ?? BusyPolicy.Stale,
+    auxiliaryPolicy: policy?.auxiliaryPolicy ?? CachePolicy.Revalidate,
+    auxiliaryFreshFor: normalizeDuration(policy?.auxiliaryFreshFor),
+    auxiliaryBusyPolicy: policy?.auxiliaryBusyPolicy ?? BusyPolicy.Stale,
     releasePolicy: policy?.releasePolicy ?? CachePolicy.Immutable,
     snapshotPolicy: policy?.snapshotPolicy ?? CachePolicy.Revalidate,
     snapshotFreshFor: normalizeDuration(policy?.snapshotFreshFor),
@@ -327,13 +417,36 @@ function normalizeCargoPolicy(policy?: CargoPolicy): CargoPolicy {
 function normalizePyPIPolicy(policy?: PyPIPolicy): PyPIPolicy {
   return {
     ...policy,
-    simpleFreshFor: normalizeDuration(policy?.simpleFreshFor),
-    simpleBusyPolicy: policy?.simpleBusyPolicy ?? BusyPolicy.Stale,
-    filePolicy: policy?.filePolicy ?? CachePolicy.Immutable,
+    metadataPolicy: policy?.metadataPolicy ?? CachePolicy.Revalidate,
+    metadataFreshFor: normalizeDuration(policy?.metadataFreshFor) ?? '1m',
+    metadataBusyPolicy: policy?.metadataBusyPolicy ?? BusyPolicy.Stale,
+    artifactPolicy: policy?.artifactPolicy ?? CachePolicy.Immutable,
+    auxiliaryPolicy: policy?.auxiliaryPolicy ?? CachePolicy.Revalidate,
+    auxiliaryFreshFor: normalizeDuration(policy?.auxiliaryFreshFor) ?? '30s',
+    auxiliaryBusyPolicy: policy?.auxiliaryBusyPolicy ?? BusyPolicy.Stale,
     proxyJson: policy?.proxyJson !== false,
     proxyCoreMetadata: Boolean(policy?.proxyCoreMetadata),
     proxySignatures: Boolean(policy?.proxySignatures)
   };
+}
+
+function normalizePackageRepoPolicy(policy: PackageRepoPolicy | undefined, passHeaders: string[], mode: ProxyMode): PackageRepoPolicy {
+  const next: PackageRepoPolicy = {
+    ...policy,
+    metadataPolicy: policy?.metadataPolicy ?? CachePolicy.Revalidate,
+    metadataFreshFor: normalizeDuration(policy?.metadataFreshFor) ?? (mode === ProxyMode.Deb ? '2m' : '1m'),
+    metadataBusyPolicy: policy?.metadataBusyPolicy ?? BusyPolicy.Stale,
+    artifactPolicy: policy?.artifactPolicy ?? CachePolicy.Immutable,
+    artifactFreshFor: normalizeDuration(policy?.artifactFreshFor),
+    artifactBusyPolicy: policy?.artifactBusyPolicy ?? BusyPolicy.Bypass,
+    auxiliaryPolicy: policy?.auxiliaryPolicy ?? CachePolicy.Revalidate,
+    auxiliaryFreshFor: normalizeDuration(policy?.auxiliaryFreshFor) ?? '30s',
+    auxiliaryBusyPolicy: policy?.auxiliaryBusyPolicy ?? BusyPolicy.Stale,
+    passHeaders: passHeaders.map((header) => header.trim()).filter(Boolean),
+    rules: (policy?.rules ?? []).map(normalizeRule)
+  };
+  if ((next.passHeaders?.length ?? 0) === 0) delete next.passHeaders;
+  return next;
 }
 
 function normalizeGoSumDB(sumdb?: GoSumDBConfig): GoSumDBConfig | undefined {
@@ -346,7 +459,7 @@ function normalizeGoSumDB(sumdb?: GoSumDBConfig): GoSumDBConfig | undefined {
   };
 }
 
-function normalizeRule<T extends FileRule | OciRule | NpmRule | MavenRule>(rule: T): T {
+function normalizeRule<T extends FileRule | OciRule | NpmRule | MavenRule | PackageRepoRule>(rule: T): T {
   return {
     ...rule,
     match: rule.match.trim(),
@@ -420,6 +533,12 @@ function validateModePolicy(errors: string[], draft: InstanceSpec, listenKind: L
     case ProxyMode.File:
       validateFilePolicy(errors, asFilePolicy(draft.policy), lists.passHeaders);
       break;
+    case ProxyMode.Apk:
+    case ProxyMode.Deb:
+    case ProxyMode.Rpm:
+    case ProxyMode.Pacman:
+      validatePackageRepoPolicy(errors, asPackageRepoPolicy(draft.policy), lists.passHeaders, draft.meta.mode);
+      break;
     case ProxyMode.Oci:
       validateOciPolicy(errors, asOciPolicy(draft.policy), listenKind);
       break;
@@ -443,7 +562,9 @@ function validateModePolicy(errors: string[], draft: InstanceSpec, listenKind: L
 
 function validateFilePolicy(errors: string[], policy: FilePolicy | undefined, passHeaders: string[]): void {
   if (!policy) return;
-  if (policy.freshFor?.trim() && !isValidDuration(policy.freshFor.trim())) errors.push('文件模式快速命中时间格式无效。');
+  if (policy.metadataFreshFor?.trim() && !isValidDuration(policy.metadataFreshFor.trim())) errors.push('文件模式元数据快速命中时间格式无效。');
+  if (policy.artifactFreshFor?.trim() && !isValidDuration(policy.artifactFreshFor.trim())) errors.push('文件模式制品快速命中时间格式无效。');
+  if (policy.auxiliaryFreshFor?.trim() && !isValidDuration(policy.auxiliaryFreshFor.trim())) errors.push('文件模式辅助文件快速命中时间格式无效。');
   for (const header of passHeaders.map((item) => item.trim()).filter(Boolean)) {
     if (/[\s\r\n:]/.test(header)) errors.push(`请求头 ${header} 格式无效。`);
     if (BLOCKED_PASS_HEADERS.has(header.toLowerCase())) errors.push(`请求头 ${header} 不能透传。`);
@@ -477,6 +598,8 @@ function validateNpmPolicy(errors: string[], policy?: NpmPolicy): void {
 
 function validateGoPolicy(errors: string[], policy: GoPolicy | undefined, goPrivatePatterns: string[]): void {
   if (!policy) return;
+  if (policy.metadataFreshFor?.trim() && !isValidDuration(policy.metadataFreshFor.trim())) errors.push('Go 元数据快速命中时间格式无效。');
+  if (policy.sumdbFreshFor?.trim() && !isValidDuration(policy.sumdbFreshFor.trim())) errors.push('Go SumDB 快速命中时间格式无效。');
   const sumdb = policy.sumdb;
   if (sumdb?.enabled !== false) {
     if (sumdb?.name?.includes('\n') || sumdb?.name?.includes('\r') || sumdb?.name?.includes(' ')) errors.push('Go SumDB 名称不能包含空白字符。');
@@ -498,6 +621,7 @@ function validateGoPolicy(errors: string[], policy: GoPolicy | undefined, goPriv
 function validateMavenPolicy(errors: string[], policy?: MavenPolicy): void {
   if (!policy) return;
   if (policy.metadataFreshFor?.trim() && !isValidDuration(policy.metadataFreshFor.trim())) errors.push('Maven 元数据快速命中时间格式无效。');
+  if (policy.auxiliaryFreshFor?.trim() && !isValidDuration(policy.auxiliaryFreshFor.trim())) errors.push('Maven 辅助文件快速命中时间格式无效。');
   if (policy.snapshotFreshFor?.trim() && !isValidDuration(policy.snapshotFreshFor.trim())) errors.push('Maven SNAPSHOT 快速命中时间格式无效。');
   for (const [index, rule] of policy.rules.entries()) {
     if (!rule.match.trim()) errors.push(`Maven 规则 #${index + 1} 的匹配模式不能为空。`);
@@ -511,7 +635,25 @@ function validateCargoPolicy(errors: string[], policy?: CargoPolicy): void {
 
 function validatePyPIPolicy(errors: string[], policy?: PyPIPolicy): void {
   if (!policy) return;
-  if (policy.simpleFreshFor?.trim() && !isValidDuration(policy.simpleFreshFor.trim())) errors.push('PyPI Simple API 快速命中时间格式无效。');
+  if (policy.metadataFreshFor?.trim() && !isValidDuration(policy.metadataFreshFor.trim())) errors.push('PyPI 元数据快速命中时间格式无效。');
+  if (policy.auxiliaryFreshFor?.trim() && !isValidDuration(policy.auxiliaryFreshFor.trim())) errors.push('PyPI 辅助文件快速命中时间格式无效。');
+}
+
+function validatePackageRepoPolicy(errors: string[], policy: PackageRepoPolicy | undefined, passHeaders: string[], mode: ProxyMode): void {
+  if (!policy) return;
+  const label = mode === ProxyMode.Apk ? 'APK' : mode === ProxyMode.Deb ? 'DEB' : mode === ProxyMode.Rpm ? 'RPM' : 'Pacman';
+  if (policy.metadataFreshFor?.trim() && !isValidDuration(policy.metadataFreshFor.trim())) errors.push(`${label} 元数据快速命中时间格式无效。`);
+  if (policy.artifactFreshFor?.trim() && !isValidDuration(policy.artifactFreshFor.trim())) errors.push(`${label} 制品快速命中时间格式无效。`);
+  if (policy.auxiliaryFreshFor?.trim() && !isValidDuration(policy.auxiliaryFreshFor.trim())) errors.push(`${label} 辅助文件快速命中时间格式无效。`);
+  for (const header of passHeaders.map((item) => item.trim()).filter(Boolean)) {
+    if (/[\s\r\n:]/.test(header)) errors.push(`请求头 ${header} 格式无效。`);
+    if (BLOCKED_PASS_HEADERS.has(header.toLowerCase())) errors.push(`请求头 ${header} 不能透传。`);
+  }
+  for (const [index, rule] of policy.rules.entries()) {
+    if (!rule.match.trim()) errors.push(`${label} 规则 #${index + 1} 的匹配模式不能为空。`);
+    if (rule.freshFor?.trim() && !isValidDuration(rule.freshFor.trim())) errors.push(`${label} 规则 #${index + 1} 的快速命中时间格式无效。`);
+    if (rule.expireAfter?.trim() && !isValidDuration(rule.expireAfter.trim())) errors.push(`${label} 规则 #${index + 1} 的缓存保留时间格式无效。`);
+  }
 }
 
 function isValidDuration(value: string): boolean {
@@ -525,3 +667,4 @@ function asGoPolicy(policy: ModePolicy): GoPolicy | undefined { return policy as
 function asMavenPolicy(policy: ModePolicy): MavenPolicy | undefined { return policy as MavenPolicy | undefined; }
 function asCargoPolicy(policy: ModePolicy): CargoPolicy | undefined { return policy as CargoPolicy | undefined; }
 function asPyPIPolicy(policy: ModePolicy): PyPIPolicy | undefined { return policy as PyPIPolicy | undefined; }
+function asPackageRepoPolicy(policy: ModePolicy): PackageRepoPolicy | undefined { return policy as PackageRepoPolicy | undefined; }

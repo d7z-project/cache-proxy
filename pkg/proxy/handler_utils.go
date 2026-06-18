@@ -51,6 +51,13 @@ func (h *Handler) fresh(route Route, headers map[string]string) bool {
 	return err == nil && time.Since(fetchedAt) <= freshFor.Duration()
 }
 
+func (h *Handler) busyPolicy(route Route) string {
+	if route.BusyPolicy != "" {
+		return route.BusyPolicy
+	}
+	return h.config.BusyPolicy
+}
+
 func setContentType(headers map[string]string, objectPath string) {
 	if headers["Content-Type"] == "" {
 		headers["Content-Type"] = mime.TypeByExtension(path.Ext(objectPath))

@@ -71,7 +71,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 }
 
 func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	if h.config.BusyPolicy == config.BusyPolicyStale && req.Header.Get("Range") == "" {
+	if h.busyPolicy(route) == config.BusyPolicyStale && req.Header.Get("Range") == "" {
 		cached, err := h.openCached(ctx, route)
 		if err == nil {
 			cached.Headers["X-Cache"] = "STALE"
@@ -89,7 +89,7 @@ func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) 
 }
 
 func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.requestHeaders(req))
+	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.remoteHeaders(req, route, nil))
 	if response != nil {
 		response.Headers["X-Cache"] = "BYPASS"
 		response = h.rewriteResponse(req, route, response)
@@ -146,7 +146,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 	if lastModified := cached["Last-Modified"]; lastModified != "" {
 		headers["If-Modified-Since"] = lastModified
 	}
-	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true}, headers)
+	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true}, h.remoteHeaders(nil, route, headers))
 	if err != nil {
 		return false, err
 	}
@@ -173,7 +173,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
 	h.stats.AddActiveDownload(h.name, h.config.Mode, 1)
 	defer h.stats.AddActiveDownload(h.name, h.config.Mode, -1)
-	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.requestHeaders(req))
+	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.remoteHeaders(req, route, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route 
 }
 
 func (h *Handler) rewriteResponse(req *http.Request, route Route, response *utils.ResponseWrapper) *utils.ResponseWrapper {
-	if !route.RewriteNPMMetadata || req.Method == http.MethodHead || response.Body == nil {
+	if route.RewriteKind == "" || req.Method == http.MethodHead || response.Body == nil {
 		return response
 	}
 	const maxRewriteBody = 50 << 20
@@ -234,15 +234,31 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 		return errorResponse(http.StatusBadGateway, err)
 	}
 	if len(body) > maxRewriteBody {
-		return errorResponse(http.StatusBadGateway, errors.New("npm metadata too large to rewrite"))
+		return errorResponse(http.StatusBadGateway, errors.New("response body too large to rewrite"))
 	}
-	var document any
-	if err := json.Unmarshal(body, &document); err != nil {
-		response.Body = io.NopCloser(bytes.NewReader(body))
-		return response
-	}
-	if rewriteNPMTarballs(document, h.config.Upstreams, publicBaseURL(req)) {
-		body, err = json.Marshal(document)
+	switch route.RewriteKind {
+	case "npm-metadata":
+		var document any
+		if err := json.Unmarshal(body, &document); err != nil {
+			response.Body = io.NopCloser(bytes.NewReader(body))
+			return response
+		}
+		if rewriteNPMTarballs(document, h.config.Upstreams, publicBaseURL(req)) {
+			body, err = json.Marshal(document)
+			if err != nil {
+				return errorResponse(http.StatusBadGateway, err)
+			}
+			response.Headers["Content-Length"] = strconv.Itoa(len(body))
+		}
+	case "cargo-config":
+		body, err = rewriteCargoConfig(req, body)
+		if err != nil {
+			return errorResponse(http.StatusBadGateway, err)
+		}
+		response.Headers["Content-Type"] = "application/json"
+		response.Headers["Content-Length"] = strconv.Itoa(len(body))
+	case "pypi-simple":
+		body, response.Headers, err = rewritePyPISimple(req, h.config.Upstreams, route, response.Headers, body)
 		if err != nil {
 			return errorResponse(http.StatusBadGateway, err)
 		}

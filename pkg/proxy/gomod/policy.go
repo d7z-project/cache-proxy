@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/module"
 	"gopkg.d7z.net/blobfs"
@@ -25,9 +26,15 @@ type SumDBConfig struct {
 }
 
 type Policy struct {
-	SumDB                    *SumDBConfig `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
-	GOPrivate                []string     `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
-	DisableModuleFetchHeader bool         `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
+	SumDB                    *SumDBConfig     `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
+	GOPrivate                []string         `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
+	DisableModuleFetchHeader bool             `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
+	MetadataPolicy           string           `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
+	MetadataFreshFor         config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
+	MetadataBusyPolicy       string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
+	ArtifactPolicy           string           `json:"artifactPolicy,omitempty" yaml:"artifact_policy,omitempty"`
+	SumDBFreshFor            config.Freshness `json:"sumdbFreshFor,omitempty" yaml:"sumdb_fresh_for,omitempty"`
+	SumDBBusyPolicy          string           `json:"sumdbBusyPolicy,omitempty" yaml:"sumdb_busy_policy,omitempty"`
 }
 
 type Driver struct{}
@@ -68,6 +75,7 @@ func (Driver) EncodeYAML(policy any) ([]byte, error) { return yaml.Marshal(polic
 
 func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
 	policy := spec.Policy.(*Policy)
+	applyDefaults(policy)
 	if policy.SumDB == nil {
 		policy.SumDB = &SumDBConfig{
 			Enabled: true,
@@ -86,6 +94,27 @@ func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
 	}
 	if strings.TrimSpace(policy.SumDB.URL) == "" {
 		policy.SumDB.URL = "https://sum.golang.org"
+	}
+}
+
+func applyDefaults(policy *Policy) {
+	if policy.MetadataPolicy == "" {
+		policy.MetadataPolicy = config.PolicyRevalidate
+	}
+	if policy.MetadataFreshFor == 0 {
+		policy.MetadataFreshFor = config.Freshness(time.Minute)
+	}
+	if policy.MetadataBusyPolicy == "" {
+		policy.MetadataBusyPolicy = config.BusyPolicyStale
+	}
+	if policy.ArtifactPolicy == "" {
+		policy.ArtifactPolicy = config.PolicyImmutable
+	}
+	if policy.SumDBFreshFor == 0 {
+		policy.SumDBFreshFor = config.Freshness(30 * time.Second)
+	}
+	if policy.SumDBBusyPolicy == "" {
+		policy.SumDBBusyPolicy = config.BusyPolicyStale
 	}
 }
 
@@ -129,11 +158,21 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 			return fmt.Errorf("go goprivate %d must not contain line breaks", i)
 		}
 	}
+	for _, value := range []string{policy.MetadataPolicy, policy.ArtifactPolicy} {
+		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
+			return fmt.Errorf("invalid go cache policy %q", value)
+		}
+	}
+	for _, value := range []string{policy.MetadataBusyPolicy, policy.SumDBBusyPolicy} {
+		if value != config.BusyPolicyBypass && value != config.BusyPolicyStale {
+			return fmt.Errorf("invalid go busy policy %q", value)
+		}
+	}
 	return nil
 }
 
 func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
-	return 0
+	return spec.Policy.(*Policy).MetadataFreshFor
 }
 
 func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
@@ -152,7 +191,8 @@ func (Driver) Lookup(spec *proxydriver.ResolvedSpec, lookupPath string) (proxy.R
 	if modulePath, ok := modulePathFromTarget(lookupPath); ok && matchesPrivateModule(spec.Policy.(*Policy), modulePath) {
 		return proxy.Route{Policy: "private-bypass"}, nil
 	}
-	return proxy.Route{ObjectPath: "go/" + lookupPath, Policy: "proxy-only"}, nil
+	req, _ := http.NewRequest(http.MethodGet, "/"+lookupPath, nil)
+	return (&resolver{policy: spec.Policy.(*Policy)}).Resolve(req)
 }
 
 func matchesPrivateModule(policy *Policy, modulePath string) bool {

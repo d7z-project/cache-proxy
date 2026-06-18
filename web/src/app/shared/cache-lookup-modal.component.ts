@@ -98,6 +98,10 @@ export class CacheLookupModalComponent {
 
   lookupLabel(): string {
     switch (this.mode) {
+      case ProxyMode.Apk: return 'APK 仓库路径';
+      case ProxyMode.Deb: return 'DEB 仓库路径';
+      case ProxyMode.Rpm: return 'RPM 仓库路径';
+      case ProxyMode.Pacman: return 'Pacman 仓库路径';
       case ProxyMode.Npm: return '包名';
       case ProxyMode.Oci: return '镜像名称';
       case ProxyMode.Go: return 'Go 模块缓存路径';
@@ -110,6 +114,10 @@ export class CacheLookupModalComponent {
 
   lookupHint(): string {
     switch (this.mode) {
+      case ProxyMode.Apk: return '输入 APK 仓库路径，例如 main/x86_64/APKINDEX.tar.gz。';
+      case ProxyMode.Deb: return '输入 DEB 仓库路径，例如 dists/stable/InRelease 或 pool/main/h/hello/hello_1.0_amd64.deb。';
+      case ProxyMode.Rpm: return '输入 RPM 仓库路径，例如 repodata/repomd.xml。';
+      case ProxyMode.Pacman: return '输入 Pacman 仓库路径，例如 core/os/x86_64/core.db。';
       case ProxyMode.Npm: return '输入 npm 包名，例如 @angular/core 或 lodash。';
       case ProxyMode.Oci: return '输入镜像名称，例如 library/alpine:latest 或 nginx:1.25。';
       case ProxyMode.Go: return '输入 GOPROXY 路径，例如 golang.org/x/mod/@v/list。';
@@ -122,6 +130,10 @@ export class CacheLookupModalComponent {
 
   lookupPlaceholder(): string {
     switch (this.mode) {
+      case ProxyMode.Apk: return 'main/x86_64/APKINDEX.tar.gz';
+      case ProxyMode.Deb: return 'dists/stable/InRelease';
+      case ProxyMode.Rpm: return 'repodata/repomd.xml';
+      case ProxyMode.Pacman: return 'core/os/x86_64/core.db';
       case ProxyMode.Npm: return '@angular/core';
       case ProxyMode.Oci: return 'library/alpine:latest';
       case ProxyMode.Go: return 'golang.org/x/mod/@v/list';

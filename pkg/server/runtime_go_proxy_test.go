@@ -33,7 +33,7 @@ func TestGoProxyServesPathMountedRequests(t *testing.T) {
 	defer closeRuntime(t, rt)
 
 	body := requestBody(t, http.HandlerFunc(rt.serveMain), http.MethodGet, "/go/"+testModulePath+"/@v/list")
-	require.Equal(t, "v1.0.0", body)
+	require.Equal(t, "v1.0.0\n", body)
 }
 
 func TestGoProxyRejectsDirectRevisionQueries(t *testing.T) {

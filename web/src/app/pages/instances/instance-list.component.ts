@@ -28,7 +28,7 @@ export class InstanceListComponent implements OnInit {
   filterMode: ProxyMode | '' = '';
 
   readonly ProxyMode = ProxyMode;
-  readonly allModes: (ProxyMode | '')[] = ['', ProxyMode.File, ProxyMode.Oci, ProxyMode.Npm, ProxyMode.Go, ProxyMode.Maven, ProxyMode.Cargo, ProxyMode.PyPI];
+  readonly allModes: (ProxyMode | '')[] = ['', ProxyMode.File, ProxyMode.Apk, ProxyMode.Deb, ProxyMode.Rpm, ProxyMode.Pacman, ProxyMode.Oci, ProxyMode.Npm, ProxyMode.Go, ProxyMode.Maven, ProxyMode.Cargo, ProxyMode.PyPI];
 
   ngOnInit(): void { this.load(); }
 
@@ -43,6 +43,10 @@ export class InstanceListComponent implements OnInit {
       filtered = filtered.filter((item) => item.mode === this.filterMode);
     }
     return filtered;
+  }
+
+  entryFor(item: InstanceSummary): string {
+    return item.entryUrl || item.publicUrl || item.path || item.bind || '';
   }
 
   get generation(): number {

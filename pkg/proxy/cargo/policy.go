@@ -181,8 +181,10 @@ func (h *handler) resolve(ctx context.Context, req *http.Request, route proxy.Ro
 	}
 	data, headers, err := h.fetchUpstream(ctx, req, route)
 	if err != nil {
-		if body, cachedHeaders, cacheErr := h.openCached(ctx, route.ObjectPath); cacheErr == nil && strings.HasPrefix(route.ObjectPath, "cargo/index/") {
-			return body, http.StatusOK, cachedHeaders, "STALE", nil
+		if route.BusyPolicy == config.BusyPolicyStale {
+			if body, cachedHeaders, cacheErr := h.openCached(ctx, route.ObjectPath); cacheErr == nil {
+				return body, http.StatusOK, cachedHeaders, "STALE", nil
+			}
 		}
 		return nil, 0, nil, "", err
 	}
@@ -260,21 +262,42 @@ func (h *handler) rewriteConfig(req *http.Request, data []byte) ([]byte, error) 
 }
 
 func (h *handler) fetchConfig(ctx context.Context) (cargoConfig, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(h.source.Upstreams[0], "/")+"/config.json", nil)
-	if err != nil {
-		return cargoConfig{}, err
+	route := proxy.Route{
+		ObjectPath:   "cargo/internal/config.json",
+		UpstreamPath: "config.json",
+		Policy:       config.PolicyRevalidate,
+		FreshFor:     h.policy.IndexFreshFor,
+		BusyPolicy:   h.policy.IndexBusyPolicy,
 	}
-	resp, err := h.client.Do(request)
-	if err != nil {
-		return cargoConfig{}, err
+	if body, _, fresh, err := h.openFreshCached(ctx, route.ObjectPath, route.FreshFor); err == nil && fresh {
+		defer body.Close()
+		var cfg cargoConfig
+		err = json.NewDecoder(body).Decode(&cfg)
+		return cfg, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return cargoConfig{}, fmt.Errorf("cargo upstream config returned %d", resp.StatusCode)
+	data, _, err := h.fetchRawConfig(ctx)
+	if err != nil {
+		if route.BusyPolicy == config.BusyPolicyStale {
+			if body, _, _, openErr := h.openFreshCached(ctx, route.ObjectPath, config.FreshnessForever); openErr == nil {
+				defer body.Close()
+				var cfg cargoConfig
+				decodeErr := json.NewDecoder(body).Decode(&cfg)
+				return cfg, decodeErr
+			}
+		}
+		return cargoConfig{}, err
 	}
 	var cfg cargoConfig
-	err = json.NewDecoder(resp.Body).Decode(&cfg)
-	return cfg, err
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cargoConfig{}, err
+	}
+	if err := h.putCached(ctx, route.ObjectPath, data, map[string]string{
+		"Content-Type": "application/json",
+		"fetched-at":   time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		return cargoConfig{}, err
+	}
+	return cfg, nil
 }
 
 func cargoRoute(policy *Policy, lookupPath string) (proxy.Route, error) {
@@ -283,12 +306,32 @@ func cargoRoute(policy *Policy, lookupPath string) (proxy.Route, error) {
 	}
 	switch {
 	case lookupPath == "config.json":
-		return proxy.Route{ObjectPath: "cargo/index/config.json", UpstreamPath: "config.json", Policy: config.PolicyRevalidate, FreshFor: policy.IndexFreshFor}, nil
+		return proxy.Route{ObjectPath: "cargo/index/config.json", UpstreamPath: "config.json", Policy: config.PolicyRevalidate, FreshFor: policy.IndexFreshFor, BusyPolicy: policy.IndexBusyPolicy, RewriteKind: "cargo-config"}, nil
 	case strings.HasPrefix(lookupPath, "api/v1/crates/") && strings.HasSuffix(lookupPath, "/download"):
-		return proxy.Route{ObjectPath: "cargo/crates/" + strings.TrimPrefix(lookupPath, "api/v1/crates/"), UpstreamPath: lookupPath, Policy: policy.CratePolicy}, nil
+		return proxy.Route{ObjectPath: "cargo/crates/" + strings.TrimPrefix(lookupPath, "api/v1/crates/"), UpstreamPath: lookupPath, Policy: policy.CratePolicy, BusyPolicy: config.BusyPolicyBypass}, nil
 	default:
-		return proxy.Route{ObjectPath: "cargo/index/" + lookupPath, UpstreamPath: lookupPath, Policy: config.PolicyRevalidate, FreshFor: policy.IndexFreshFor}, nil
+		return proxy.Route{ObjectPath: "cargo/index/" + lookupPath, UpstreamPath: lookupPath, Policy: config.PolicyRevalidate, FreshFor: policy.IndexFreshFor, BusyPolicy: policy.IndexBusyPolicy}, nil
 	}
+}
+
+func (h *handler) fetchRawConfig(ctx context.Context) ([]byte, map[string]string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(h.source.Upstreams[0], "/")+"/config.json", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := h.client.Do(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, fmt.Errorf("cargo upstream config returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, map[string]string{"Content-Type": "application/json"}, nil
 }
 
 func parseCargoDownloadPath(objectPath string) (string, string, error) {

@@ -9,13 +9,17 @@ import (
 )
 
 const (
-	ModeFile  = "file"
-	ModeOCI   = "oci"
-	ModeNPM   = "npm"
-	ModeGo    = "go"
-	ModeMaven = "maven"
-	ModeCargo = "cargo"
-	ModePyPI  = "pypi"
+	ModeFile   = "file"
+	ModeOCI    = "oci"
+	ModeNPM    = "npm"
+	ModeGo     = "go"
+	ModeMaven  = "maven"
+	ModeCargo  = "cargo"
+	ModePyPI   = "pypi"
+	ModeAPK    = "apk"
+	ModeDEB    = "deb"
+	ModeRPM    = "rpm"
+	ModePacman = "pacman"
 
 	PolicyBypass     = "bypass"
 	PolicyImmutable  = "immutable"
@@ -83,9 +87,9 @@ type InstanceSpec struct {
 }
 
 type InstanceMeta struct {
-	Mode        string      `json:"mode" yaml:"mode"`
-	Enabled     bool        `json:"enabled" yaml:"enabled"`
-	Description string      `json:"description,omitempty" yaml:"description,omitempty"`
+	Mode        string     `json:"mode" yaml:"mode"`
+	Enabled     bool       `json:"enabled" yaml:"enabled"`
+	Description string     `json:"description,omitempty" yaml:"description,omitempty"`
 	ExpireAfter Expiration `json:"expireAfter" yaml:"expire_after"`
 }
 
@@ -151,8 +155,8 @@ const ExpirationNever Expiration = -1
 
 func (e Expiration) Duration() time.Duration { return time.Duration(e) }
 
-func (e Expiration) IsNever() bool  { return e == ExpirationNever }
-func (e Expiration) IsUnset() bool  { return e == 0 }
+func (e Expiration) IsNever() bool   { return e == ExpirationNever }
+func (e Expiration) IsUnset() bool   { return e == 0 }
 func (e Expiration) IsDefault() bool { return e == 0 }
 
 func (e Expiration) String() string {
@@ -222,7 +226,7 @@ func (f Freshness) Duration() time.Duration { return time.Duration(f) }
 
 func (f Freshness) IsForever() bool { return f == FreshnessForever }
 func (f Freshness) IsUnset() bool   { return f == 0 }
-func (f Freshness) IsDefault() bool  { return f == 0 }
+func (f Freshness) IsDefault() bool { return f == 0 }
 
 func (f Freshness) String() string {
 	if f == FreshnessForever {

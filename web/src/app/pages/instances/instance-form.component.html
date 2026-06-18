@@ -134,25 +134,57 @@
 
         @if (draft.meta.mode === ProxyMode.File && filePolicy) {
           <div class="form-section">
-            <div class="section-heading"><span class="step-badge">4</span><div><h3>文件策略</h3><p class="text-muted mb-0">缓存规则和透传请求头。</p></div></div>
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>文件策略</h3><p class="text-muted mb-0">统一配置元数据、制品和辅助文件的缓存行为。</p></div></div>
             <div class="row g-3">
               <div class="col-md-4">
-                <label class="form-label">默认策略</label>
-                <select class="form-select" name="fileDefaultPolicy" [(ngModel)]="filePolicy.defaultPolicy">
+                <label class="form-label">元数据策略</label>
+                <select class="form-select" name="fileMetadataPolicy" [(ngModel)]="filePolicy.metadataPolicy">
                   @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
-                <div class="form-text">{{ cachePolicyDescription(filePolicy.defaultPolicy) }}</div>
+                <div class="form-text">用于目录清单、索引和动态描述文件。</div>
               </div>
               <div class="col-md-4">
-                <label class="form-label">快速命中时间</label>
-                <input class="form-control" name="fileFreshFor" [(ngModel)]="filePolicy.freshFor" placeholder="30s">
+                <label class="form-label">元数据快速命中</label>
+                <input class="form-control" name="fileMetadataFreshFor" [(ngModel)]="filePolicy.metadataFreshFor" placeholder="可选">
               </div>
               <div class="col-md-4">
-                <label class="form-label">并发刷新策略</label>
-                <select class="form-select" name="fileBusyPolicy" [(ngModel)]="filePolicy.busyPolicy">
+                <label class="form-label">元数据并发刷新</label>
+                <select class="form-select" name="fileMetadataBusyPolicy" [(ngModel)]="filePolicy.metadataBusyPolicy">
                   @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                 </select>
-                <div class="form-text">{{ busyPolicyDescription(filePolicy.busyPolicy) }}</div>
+                <div class="form-text">{{ busyPolicyDescription(filePolicy.metadataBusyPolicy) }}</div>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">制品策略</label>
+                <select class="form-select" name="fileArtifactPolicy" [(ngModel)]="filePolicy.artifactPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">制品快速命中</label>
+                <input class="form-control" name="fileArtifactFreshFor" [(ngModel)]="filePolicy.artifactFreshFor" placeholder="可选">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">制品并发刷新</label>
+                <select class="form-select" name="fileArtifactBusyPolicy" [(ngModel)]="filePolicy.artifactBusyPolicy">
+                  @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">辅助文件策略</label>
+                <select class="form-select" name="fileAuxiliaryPolicy" [(ngModel)]="filePolicy.auxiliaryPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">辅助文件快速命中</label>
+                <input class="form-control" name="fileAuxiliaryFreshFor" [(ngModel)]="filePolicy.auxiliaryFreshFor" placeholder="可选">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">辅助文件并发刷新</label>
+                <select class="form-select" name="fileAuxiliaryBusyPolicy" [(ngModel)]="filePolicy.auxiliaryBusyPolicy">
+                  @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
               </div>
             </div>
             <label class="form-label mt-3">透传请求头</label>
@@ -169,10 +201,16 @@
             <label class="form-label mt-3">缓存规则</label>
             <div class="rule-list">
               @for (rule of filePolicy.rules; track $index; let i = $index) {
-                <div class="row-grid file-rule-row-grid">
+                <div class="row-grid header-row-grid">
                   <input class="form-control form-control-sm" [name]="'fileRuleMatch' + i" [(ngModel)]="rule.match" placeholder="**/*.rpm">
+                  <select class="form-select form-select-sm" [name]="'fileRuleClass' + i" [(ngModel)]="rule.resourceClass">
+                    @for (kind of packageResourceKinds; track kind.value) { <option [ngValue]="kind.value">{{ kind.label }}</option> }
+                  </select>
                   <select class="form-select form-select-sm" [name]="'fileRulePolicy' + i" [(ngModel)]="rule.policy">
                     @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                  </select>
+                  <select class="form-select form-select-sm" [name]="'fileRuleBusyPolicy' + i" [(ngModel)]="rule.busyPolicy">
+                    @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
                   </select>
                   <input class="form-control form-control-sm" [name]="'fileRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中">
                   <input class="form-control form-control-sm" [name]="'fileRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="缓存保留">
@@ -181,6 +219,98 @@
               }
             </div>
             <button type="button" class="btn btn-link p-0" (click)="addFileRule()">添加路径规则</button>
+          </div>
+        }
+
+        @if (packageRepoPolicy) {
+          <div class="form-section">
+            <div class="section-heading"><span class="step-badge">4</span><div><h3>仓库文件策略</h3><p class="text-muted mb-0">按元数据、制品和辅助 sidecar 文件设置缓存策略。</p></div></div>
+            <div class="row g-3">
+              <div class="col-md-3">
+                <label class="form-label">元数据策略</label>
+                <select class="form-select" name="repoMetadataPolicy" [(ngModel)]="packageRepoPolicy.metadataPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+                <div class="form-text">{{ cachePolicyDescription(packageRepoPolicy.metadataPolicy) }}</div>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">元数据快速命中</label>
+                <input class="form-control" name="repoMetadataFreshFor" [(ngModel)]="packageRepoPolicy.metadataFreshFor" placeholder="1m">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">元数据并发刷新</label>
+                <select class="form-select" name="repoMetadataBusyPolicy" [(ngModel)]="packageRepoPolicy.metadataBusyPolicy">
+                  @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+                <div class="form-text">{{ busyPolicyDescription(packageRepoPolicy.metadataBusyPolicy) }}</div>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">制品策略</label>
+                <select class="form-select" name="repoArtifactPolicy" [(ngModel)]="packageRepoPolicy.artifactPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+                <div class="form-text">{{ cachePolicyDescription(packageRepoPolicy.artifactPolicy) }}</div>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">制品快速命中</label>
+                <input class="form-control" name="repoArtifactFreshFor" [(ngModel)]="packageRepoPolicy.artifactFreshFor" placeholder="可选">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">制品并发刷新</label>
+                <select class="form-select" name="repoArtifactBusyPolicy" [(ngModel)]="packageRepoPolicy.artifactBusyPolicy">
+                  @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">辅助文件策略</label>
+                <select class="form-select" name="repoAuxiliaryPolicy" [(ngModel)]="packageRepoPolicy.auxiliaryPolicy">
+                  @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">辅助文件快速命中</label>
+                <input class="form-control" name="repoAuxiliaryFreshFor" [(ngModel)]="packageRepoPolicy.auxiliaryFreshFor" placeholder="30s">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">辅助文件并发刷新</label>
+                <select class="form-select" name="repoAuxiliaryBusyPolicy" [(ngModel)]="packageRepoPolicy.auxiliaryBusyPolicy">
+                  @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                </select>
+              </div>
+            </div>
+            <label class="form-label mt-3">透传请求头</label>
+            <div class="form-text mb-2">只在上游需要感知客户端协商头时填写，例如 `Accept`。</div>
+            <div class="tag-field">
+              @for (header of passHeaders; track $index; let i = $index) {
+                <div class="tag-row">
+                  <input class="form-control" [ngModel]="passHeaders[i]" (ngModelChange)="passHeaders[i] = $event" [name]="'repoPassHeader' + i" placeholder="Accept">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removePassHeader(i)">×</button>
+                </div>
+              }
+              <button type="button" class="btn btn-link p-0 justify-self-start" (click)="addPassHeader()">+ 添加请求头</button>
+            </div>
+            <label class="form-label mt-3">路径规则</label>
+            <div class="form-text mb-2">按资源类型覆盖默认分类策略，例如只改元数据路径或只改单个目录下的包文件。</div>
+            <div class="rule-list">
+              @for (rule of packageRepoPolicy.rules; track $index; let i = $index) {
+                <div class="row-grid header-row-grid">
+                  <input class="form-control form-control-sm" [name]="'repoRuleMatch' + i" [(ngModel)]="rule.match" placeholder="repodata/**">
+                  <select class="form-select form-select-sm" [name]="'repoRuleKind' + i" [(ngModel)]="rule.resourceClass">
+                    @for (kind of packageResourceKinds; track kind.value) { <option [ngValue]="kind.value">{{ kind.label }}</option> }
+                  </select>
+                  <select class="form-select form-select-sm" [name]="'repoRulePolicy' + i" [(ngModel)]="rule.policy">
+                    @for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                  </select>
+                  <select class="form-select form-select-sm" [name]="'repoRuleBusyPolicy' + i" [(ngModel)]="rule.busyPolicy">
+                    @for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }
+                  </select>
+                  <input class="form-control form-control-sm" [name]="'repoRuleFreshFor' + i" [(ngModel)]="rule.freshFor" placeholder="快速命中">
+                  <input class="form-control form-control-sm" [name]="'repoRuleExpireAfter' + i" [(ngModel)]="rule.expireAfter" placeholder="缓存保留">
+                  <button type="button" class="btn btn-outline-danger btn-sm" (click)="removePackageRepoRule(i)">删除</button>
+                </div>
+              }
+            </div>
+            <button type="button" class="btn btn-link p-0" (click)="addPackageRepoRule()">添加路径规则</button>
           </div>
         }
 
@@ -289,6 +419,12 @@
         @if (draft.meta.mode === ProxyMode.Go && goPolicy) {
           <div class="form-section">
             <div class="section-heading"><span class="step-badge">4</span><div><h3>Go 模块设置</h3><p class="text-muted mb-0">适合团队内统一接入 Go Modules、校验服务和私有模块跳过规则。</p></div></div>
+            <div class="row g-3 mb-3">
+              <div class="col-md-4"><label class="form-label">模块元数据策略</label><select class="form-select" name="goMetadataPolicy" [(ngModel)]="goPolicy.metadataPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">模块元数据快速命中</label><input class="form-control" name="goMetadataFreshFor" [(ngModel)]="goPolicy.metadataFreshFor" placeholder="1m"></div>
+              <div class="col-md-4"><label class="form-label">模块元数据并发刷新</label><select class="form-select" name="goMetadataBusyPolicy" [(ngModel)]="goPolicy.metadataBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">模块压缩包策略</label><select class="form-select" name="goArtifactPolicy" [(ngModel)]="goPolicy.artifactPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+            </div>
             <div class="form-check mb-3">
               <input class="form-check-input" type="checkbox" name="sumdbEnabled" [(ngModel)]="goPolicy.sumdb!.enabled" id="sumdbEnabled">
               <label class="form-check-label" for="sumdbEnabled">启用 SumDB 代理</label>
@@ -298,6 +434,8 @@
               <div class="row g-3">
                 <div class="col-md-6"><label class="form-label">SumDB 名称</label><input class="form-control" name="goSumdbName" [(ngModel)]="goPolicy.sumdb!.name" placeholder="sum.golang.org"></div>
                 <div class="col-md-6"><label class="form-label">SumDB 上游</label><input class="form-control" name="goSumdbUrl" [(ngModel)]="goPolicy.sumdb!.url" placeholder="https://sum.golang.org"></div>
+                <div class="col-md-6"><label class="form-label">SumDB 快速命中</label><input class="form-control" name="goSumdbFreshFor" [(ngModel)]="goPolicy.sumdbFreshFor" placeholder="30s"></div>
+                <div class="col-md-6"><label class="form-label">SumDB 并发刷新</label><select class="form-select" name="goSumdbBusyPolicy" [(ngModel)]="goPolicy.sumdbBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
               </div>
             }
             <div class="form-check mt-3">
@@ -326,6 +464,9 @@
               <div class="col-md-4"><label class="form-label">元数据快速命中</label><input class="form-control" name="mavenMetadataFreshFor" [(ngModel)]="mavenPolicy.metadataFreshFor" placeholder="30s"><div class="form-text">控制 `maven-metadata.xml` 多久内直接命中缓存。</div></div>
               <div class="col-md-4"><label class="form-label">元数据并发刷新</label><select class="form-select" name="mavenMetadataBusyPolicy" [(ngModel)]="mavenPolicy.metadataBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ busyPolicyDescription(mavenPolicy.metadataBusyPolicy) }}</div></div>
               <div class="col-md-4"><label class="form-label">发布件策略</label><select class="form-select" name="mavenReleasePolicy" [(ngModel)]="mavenPolicy.releasePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(mavenPolicy.releasePolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">辅助文件策略</label><select class="form-select" name="mavenAuxiliaryPolicy" [(ngModel)]="mavenPolicy.auxiliaryPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">辅助文件快速命中</label><input class="form-control" name="mavenAuxiliaryFreshFor" [(ngModel)]="mavenPolicy.auxiliaryFreshFor" placeholder="30s"></div>
+              <div class="col-md-4"><label class="form-label">辅助文件并发刷新</label><select class="form-select" name="mavenAuxiliaryBusyPolicy" [(ngModel)]="mavenPolicy.auxiliaryBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
               <div class="col-md-4"><label class="form-label">SNAPSHOT 策略</label><select class="form-select" name="mavenSnapshotPolicy" [(ngModel)]="mavenPolicy.snapshotPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(mavenPolicy.snapshotPolicy) }}</div></div>
               <div class="col-md-4"><label class="form-label">SNAPSHOT 快速命中</label><input class="form-control" name="mavenSnapshotFreshFor" [(ngModel)]="mavenPolicy.snapshotFreshFor" placeholder="15s"></div>
             </div>
@@ -365,11 +506,15 @@
           <div class="form-section">
             <div class="section-heading"><span class="step-badge">4</span><div><h3>PyPI 策略</h3><p class="text-muted mb-0">代理 Simple API 并重写下载地址。</p></div></div>
             <div class="row g-3">
-              <div class="col-md-4"><label class="form-label">Simple API 快速命中</label><input class="form-control" name="pypiSimpleFreshFor" [(ngModel)]="pypiPolicy.simpleFreshFor" placeholder="30s"><div class="form-text">控制包索引页多久内直接命中缓存。</div></div>
-              <div class="col-md-4"><label class="form-label">Simple API 并发刷新</label><select class="form-select" name="pypiSimpleBusyPolicy" [(ngModel)]="pypiPolicy.simpleBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ busyPolicyDescription(pypiPolicy.simpleBusyPolicy) }}</div></div>
-              <div class="col-md-4"><label class="form-label">分发文件策略</label><select class="form-select" name="pypiFilePolicy" [(ngModel)]="pypiPolicy.filePolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ cachePolicyDescription(pypiPolicy.filePolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">Simple API / 元数据策略</label><select class="form-select" name="pypiMetadataPolicy" [(ngModel)]="pypiPolicy.metadataPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">元数据快速命中</label><input class="form-control" name="pypiMetadataFreshFor" [(ngModel)]="pypiPolicy.metadataFreshFor" placeholder="1m"><div class="form-text">控制包索引页多久内直接命中缓存。</div></div>
+              <div class="col-md-4"><label class="form-label">元数据并发刷新</label><select class="form-select" name="pypiMetadataBusyPolicy" [(ngModel)]="pypiPolicy.metadataBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select><div class="form-text">{{ busyPolicyDescription(pypiPolicy.metadataBusyPolicy) }}</div></div>
+              <div class="col-md-4"><label class="form-label">分发文件策略</label><select class="form-select" name="pypiArtifactPolicy" [(ngModel)]="pypiPolicy.artifactPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">辅助文件策略</label><select class="form-select" name="pypiAuxiliaryPolicy" [(ngModel)]="pypiPolicy.auxiliaryPolicy">@for (policy of cachePolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
+              <div class="col-md-4"><label class="form-label">辅助文件快速命中</label><input class="form-control" name="pypiAuxiliaryFreshFor" [(ngModel)]="pypiPolicy.auxiliaryFreshFor" placeholder="30s"></div>
             </div>
             <div class="row g-3 mt-1">
+              <div class="col-md-4"><label class="form-label">辅助文件并发刷新</label><select class="form-select" name="pypiAuxiliaryBusyPolicy" [(ngModel)]="pypiPolicy.auxiliaryBusyPolicy">@for (policy of busyPolicies; track policy.value) { <option [ngValue]="policy.value">{{ policy.label }}</option> }</select></div>
               <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiProxyJson" [(ngModel)]="pypiPolicy.proxyJson" id="pypiProxyJson"><label class="form-check-label" for="pypiProxyJson">代理 JSON Simple API</label></div></div>
               <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiCoreMetadata" [(ngModel)]="pypiPolicy.proxyCoreMetadata" id="pypiCoreMetadata"><label class="form-check-label" for="pypiCoreMetadata">保留 core metadata 链接</label></div></div>
               <div class="col-md-4"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="pypiSignatures" [(ngModel)]="pypiPolicy.proxySignatures" id="pypiSignatures"><label class="form-check-label" for="pypiSignatures">保留签名链接</label></div></div>

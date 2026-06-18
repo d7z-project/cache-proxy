@@ -27,9 +27,9 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 
 	spec := fileSpec(t, "files", "/files", upstream.URL)
 	spec.Policy = mustPolicyJSON(t, &fileproxy.Policy{
-		DefaultPolicy: config.PolicyImmutable,
-		BusyPolicy:    config.BusyPolicyBypass,
-		Rules:         []fileproxy.Rule{},
+		AuxiliaryPolicy:     config.PolicyImmutable,
+		AuxiliaryBusyPolicy: config.BusyPolicyBypass,
+		Rules:               []fileproxy.Rule{},
 	})
 	rt := newTestRuntime(t, ctx, map[string]config.InstanceSpec{"files": spec})
 	defer closeRuntime(t, rt)

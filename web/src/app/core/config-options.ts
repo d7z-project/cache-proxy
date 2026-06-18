@@ -1,4 +1,4 @@
-import { BusyPolicy, CachePolicy, ListenKind, NpmResourcePolicy, OciAuthType, ProxyMode } from './api.models';
+import { BusyPolicy, CachePolicy, ListenKind, NpmResourcePolicy, OciAuthType, PackageResourceKind, ProxyMode } from './api.models';
 
 export interface SelectOption<T extends string> {
   value: T;
@@ -13,7 +13,11 @@ export const PROXY_MODE_OPTIONS: SelectOption<ProxyMode>[] = [
   { value: ProxyMode.Go, label: 'Go 模块代理', description: '适合 Go Modules 的 GOPROXY 和 SumDB 代理。' },
   { value: ProxyMode.Maven, label: 'Maven/Gradle 代理', description: '适合 Java 依赖仓库、Maven Central 和 Gradle Maven 仓库。' },
   { value: ProxyMode.Cargo, label: 'Cargo 包代理', description: '适合 Rust sparse registry 和 crate 下载缓存。' },
-  { value: ProxyMode.PyPI, label: 'PyPI 包代理', description: '适合 Python Simple API、wheel 和 sdist 下载缓存。' }
+  { value: ProxyMode.PyPI, label: 'PyPI 包代理', description: '适合 Python Simple API、wheel 和 sdist 下载缓存。' },
+  { value: ProxyMode.Apk, label: 'APK 仓库代理', description: '适合 Alpine APKINDEX 和 .apk 下载缓存。' },
+  { value: ProxyMode.Deb, label: 'DEB 仓库代理', description: '适合 Debian/Ubuntu dists 元数据和 pool 制品缓存。' },
+  { value: ProxyMode.Rpm, label: 'RPM 仓库代理', description: '适合 YUM/DNF repodata 和 RPM 包下载缓存。' },
+  { value: ProxyMode.Pacman, label: 'Pacman 仓库代理', description: '适合 Arch Linux 数据库和包文件缓存。' }
 ];
 
 export const CACHE_POLICY_OPTIONS: SelectOption<CachePolicy>[] = [
@@ -42,4 +46,11 @@ export const NPM_RESOURCE_POLICY_OPTIONS: SelectOption<NpmResourcePolicy>[] = [
   { value: NpmResourcePolicy.All, label: '全部资源', description: '同时作用于包元数据和 tarball 下载文件。' },
   { value: NpmResourcePolicy.Metadata, label: '包信息', description: '仅作用于包清单和版本元数据。' },
   { value: NpmResourcePolicy.Tarball, label: '下载文件', description: '仅作用于 tgz 下载文件。' }
+];
+
+export const PACKAGE_RESOURCE_KIND_OPTIONS: SelectOption<PackageResourceKind>[] = [
+  { value: PackageResourceKind.All, label: '全部资源', description: '同时作用于元数据、制品和关联辅助文件。' },
+  { value: PackageResourceKind.Metadata, label: '元数据', description: '适合索引、仓库描述和校验清单。' },
+  { value: PackageResourceKind.Artifact, label: '制品文件', description: '适合作为版本化下载对象长期复用。' },
+  { value: PackageResourceKind.Auxiliary, label: '辅助文件', description: '适合签名、摘要和随主文件变化的 sidecar 元数据。' }
 ];

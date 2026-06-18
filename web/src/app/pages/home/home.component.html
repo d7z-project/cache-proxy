@@ -3,9 +3,10 @@
     <div>
       <p class="eyebrow">Cache Proxy</p>
       <h2 class="fw-bold mb-1">可用代理实例</h2>
-      <p class="text-muted mb-0">展开任意实例即可查看它的实际入口地址和对应客户端配置片段，直接复制即可接入。</p>
+      <p class="text-muted mb-0">按实际入口地址接入客户端。展开实例后可直接复制命令、配置片段和仓库根路径。</p>
     </div>
     <div class="d-flex gap-2 flex-wrap">
+      <span class="badge text-bg-light border home-stat">已发布 {{ activeCount }} 个入口</span>
       @if ((authEnabled$ | async) && (isAuth$ | async) === false) {
         <a routerLink="/login" class="btn btn-outline-secondary">登录管理</a>
       }
@@ -21,6 +22,23 @@
       <div class="text-center text-muted py-5">没有配置任何代理实例。</div>
     }
     @if (items.length > 0) {
+      <div class="home-guide-grid mb-4">
+        @for (entry of items; track entry.instance.name) {
+          <article class="card home-guide-card">
+            <div class="card-body">
+              <div class="card-title-row mb-2">
+                <div>
+                  <p class="eyebrow mb-1">{{ entry.instance.mode | modeLabel }}</p>
+                  <h3 class="home-guide-title">{{ entry.instance.name }}</h3>
+                </div>
+                <span class="badge bg-primary-subtle text-primary-emphasis">{{ entry.guide.entryLabel }}</span>
+              </div>
+              <p class="text-muted home-guide-copy">{{ entry.guide.entryDescription }}</p>
+              <app-instance-entry [label]="entry.guide.entryLabel" [url]="entry.guide.entryUrl || ''" [normalizeBindLabel]="true"></app-instance-entry>
+            </div>
+          </article>
+        }
+      </div>
       <div ngbAccordion class="accordion guide-accordion" [closeOthers]="true">
         @for (entry of items; track entry.instance.name) {
           @let item = entry.instance;
@@ -34,15 +52,25 @@
             class="accordion-item">
             <div ngbAccordionHeader>
               <button ngbAccordionButton class="guide-accordion-button">
-                <div class="d-flex align-items-center gap-2 flex-wrap">
-                  <strong>{{ item.name }}</strong>
-                  <span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span>
+                <div class="guide-accordion-head">
+                  <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <strong>{{ item.name }}</strong>
+                    <span class="badge bg-primary-subtle text-primary-emphasis">{{ item.mode | modeLabel }}</span>
+                  </div>
+                  <small class="text-muted">{{ guide.entryDescription }}</small>
                 </div>
               </button>
             </div>
 
             <div ngbAccordionCollapse>
               <div ngbAccordionBody class="guide-accordion-body">
+                <section class="guide-entry-block">
+                  <div class="guide-snippet-meta">
+                    <strong class="guide-snippet-label">客户端入口</strong>
+                    <p class="text-muted mb-0">按这个入口接入客户端，避免把根域名或错误路径发给使用方。</p>
+                  </div>
+                  <app-instance-entry [label]="guide.entryLabel" [url]="guide.entryUrl || ''" [normalizeBindLabel]="true"></app-instance-entry>
+                </section>
                 <div class="guide-snippet-list">
                   @for (snippet of guide.snippets; track snippet?.id || $index) {
                     @if (snippet?.code) {

@@ -15,12 +15,15 @@ import (
 )
 
 type Route struct {
-	ObjectPath         string
-	UpstreamPath       string
-	Policy             string
-	FreshFor           config.Freshness
-	ExpireAfter        config.Expiration
-	RewriteNPMMetadata bool
+	ObjectPath     string
+	UpstreamPath   string
+	TargetURL      string
+	Policy         string
+	FreshFor       config.Freshness
+	BusyPolicy     string
+	ExpireAfter    config.Expiration
+	RequestHeaders map[string]string
+	RewriteKind    string
 }
 
 type Resolver interface {

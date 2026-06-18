@@ -15,13 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	apkproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/apk"
 	cargoproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/cargo"
+	debproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/deb"
 	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	gomodproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
 	mavenproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/maven"
 	npmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
 	ociproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	pacmanproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/pacman"
 	pypiproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/pypi"
+	rpmproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/rpm"
 )
 
 func requestBody(t *testing.T, handler http.Handler, method, target string) string {
@@ -129,7 +133,7 @@ func fileSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpe
 		Meta:   config.InstanceMeta{Mode: config.ModeFile, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
-		Policy: mustPolicyJSON(t, &fileproxy.Policy{DefaultPolicy: config.PolicyBypass, BusyPolicy: config.BusyPolicyBypass, Rules: []fileproxy.Rule{}}),
+		Policy: mustPolicyJSON(t, &fileproxy.Policy{AuxiliaryPolicy: config.PolicyBypass, AuxiliaryBusyPolicy: config.BusyPolicyBypass, Rules: []fileproxy.Rule{}}),
 	}
 }
 
@@ -195,6 +199,50 @@ func pypiSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpe
 		Meta:   config.InstanceMeta{Mode: config.ModePyPI, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
 		Route:  config.InstanceRoute{Path: routePath},
 		Source: config.InstanceSource{Upstreams: []string{upstream}},
-		Policy: mustPolicyJSON(t, &pypiproxy.Policy{SimpleFreshFor: config.Freshness(30 * time.Second), SimpleBusyPolicy: config.BusyPolicyStale, FilePolicy: config.PolicyImmutable, ProxyJSON: true}),
+		Policy: mustPolicyJSON(t, &pypiproxy.Policy{MetadataFreshFor: config.Freshness(30 * time.Second), MetadataBusyPolicy: config.BusyPolicyStale, ArtifactPolicy: config.PolicyImmutable, AuxiliaryPolicy: config.PolicyRevalidate, AuxiliaryFreshFor: config.Freshness(30 * time.Second), AuxiliaryBusyPolicy: config.BusyPolicyStale, ProxyJSON: true}),
+	}
+}
+
+func apkSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeAPK, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &apkproxy.Policy{MetadataFreshFor: config.Freshness(time.Minute), MetadataBusyPolicy: config.BusyPolicyStale, ArtifactPolicy: config.PolicyImmutable, AuxiliaryPolicy: config.PolicyBypass, AuxiliaryBusyPolicy: config.BusyPolicyBypass}),
+	}
+}
+
+func debSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeDEB, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &debproxy.Policy{MetadataFreshFor: config.Freshness(2 * time.Minute), MetadataBusyPolicy: config.BusyPolicyStale, ArtifactPolicy: config.PolicyImmutable, AuxiliaryPolicy: config.PolicyBypass, AuxiliaryBusyPolicy: config.BusyPolicyBypass}),
+	}
+}
+
+func rpmSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModeRPM, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &rpmproxy.Policy{MetadataFreshFor: config.Freshness(time.Minute), MetadataBusyPolicy: config.BusyPolicyStale, ArtifactPolicy: config.PolicyImmutable, AuxiliaryPolicy: config.PolicyBypass, AuxiliaryBusyPolicy: config.BusyPolicyBypass}),
+	}
+}
+
+func pacmanSpec(t *testing.T, name, routePath, upstream string) config.InstanceSpec {
+	t.Helper()
+	return config.InstanceSpec{
+		Name:   name,
+		Meta:   config.InstanceMeta{Mode: config.ModePacman, Enabled: true, ExpireAfter: config.Expiration(time.Hour)},
+		Route:  config.InstanceRoute{Path: routePath},
+		Source: config.InstanceSource{Upstreams: []string{upstream}},
+		Policy: mustPolicyJSON(t, &pacmanproxy.Policy{MetadataFreshFor: config.Freshness(time.Minute), MetadataBusyPolicy: config.BusyPolicyStale, ArtifactPolicy: config.PolicyImmutable, AuxiliaryPolicy: config.PolicyBypass, AuxiliaryBusyPolicy: config.BusyPolicyBypass}),
 	}
 }
