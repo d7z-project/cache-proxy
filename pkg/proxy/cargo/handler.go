@@ -20,13 +20,14 @@ import (
 )
 
 type handler struct {
-	name     string
-	upstream string
-	policy   *Policy
-	store    *blobfs.Store
-	stats    *httpcache.Stats
-	client   *http.Client
-	wait     sync.WaitGroup
+	name        string
+	upstream    string
+	policy      *Policy
+	store       *blobfs.Store
+	stats       *httpcache.Stats
+	client      *http.Client
+	expireAfter config.Expiration
+	wait        sync.WaitGroup
 }
 
 type cargoConfig struct {
@@ -34,13 +35,14 @@ type cargoConfig struct {
 	AuthRequired bool   `json:"auth-required,omitempty"`
 }
 
-func newHandler(name, upstream string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats) (*handler, error) {
+func newHandler(name, upstream string, transport *config.TransportConfig, policy *Policy, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) (*handler, error) {
 	return &handler{
-		name:     name,
-		upstream: upstream,
-		policy:   policy,
-		store:    store,
-		stats:    stats,
+		name:        name,
+		upstream:    upstream,
+		policy:      policy,
+		store:       store,
+		stats:       stats,
+		expireAfter: expireAfter,
 		client: &http.Client{Transport: &statsTransport{
 			base:     transportForConfig(transport),
 			stats:    stats,
@@ -89,6 +91,13 @@ func (h *handler) Start(context.Context) error { return nil }
 func (h *handler) Stop(context.Context) error {
 	h.wait.Wait()
 	return nil
+}
+
+func (h *handler) Cleanup(ctx context.Context) error {
+	if h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
+		return nil
+	}
+	return httpcache.CleanupStoreTenant(ctx, h.store, h.name, h.expireAfter.Duration())
 }
 
 func (h *handler) resolve(ctx context.Context, req *http.Request, route httpcache.Route) (io.ReadCloser, int, map[string]string, string, error) {

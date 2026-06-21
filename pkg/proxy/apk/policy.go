@@ -49,8 +49,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	handler := filerepo.NewHandler(plan.Name(), config.ModeAPK, config.ModeAPK, config.Freshness(time.Minute), classify, block.Upstreams, block.Transport, expireAfter, &block.Policy, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
-		Handler: handler,
-		Close:   func() error { handler.Close(); return nil },
+		Handler:   handler,
+		Close:     func() error { handler.Close(); return nil },
+		CleanupFn: handler.Cleanup,
 	})
 }
 

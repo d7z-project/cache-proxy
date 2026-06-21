@@ -10,7 +10,6 @@ import (
 	containername "github.com/google/go-containerregistry/pkg/name"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -37,10 +36,11 @@ type AuthConfig struct {
 }
 
 type Block struct {
-	Bind      string                  `yaml:"bind"`
-	Upstream  string                  `yaml:"upstream"`
-	Transport *config.TransportConfig `yaml:"transport,omitempty"`
-	Policy    `yaml:",inline"`
+	ExpireAfter config.Expiration       `yaml:"expire_after"`
+	Bind        string                  `yaml:"bind"`
+	Upstream    string                  `yaml:"upstream"`
+	Transport   *config.TransportConfig `yaml:"transport,omitempty"`
+	Policy      `yaml:",inline"`
 }
 
 type Driver struct{}
@@ -65,30 +65,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := validate(block.Upstream, &block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	var auth *httpcache.OCIAuthConfig
-	if block.Auth != nil {
-		auth = &httpcache.OCIAuthConfig{
-			Type:     block.Auth.Type,
-			Username: block.Auth.Username,
-			Password: block.Auth.Password,
-			Token:    block.Auth.Token,
-		}
-	}
 	expireAfter := config.DefaultExpireAfter
-	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
-		Mode:            config.ModeOCI,
-		ExpireAfter:     expireAfter,
-		Upstreams:       []string{block.Upstream},
-		Transport:       block.Transport,
-		BusyPolicy:      block.BusyPolicy,
-		DefaultFreshFor: block.FreshFor,
-		OCIAuth:         auth,
-	}, plan.Store(), New(&block.Policy), plan.Stats())
+	if !block.ExpireAfter.IsUnset() {
+		expireAfter = block.ExpireAfter
+	}
+	handler := newHandler(plan.Name(), block, expireAfter, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindAddr(block.Bind, expireAfter, proxyruntime.HandlerInstance{
-		Handler: handler,
-		Close:   func() error { handler.Close(); return nil },
-	})
+	return plan.BindAddr(block.Bind, expireAfter, handler)
 }
 
 func validate(upstream string, policy *Policy) error {

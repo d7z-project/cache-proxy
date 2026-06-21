@@ -1,14 +1,11 @@
 package httpcache
 
 import (
+	"gopkg.d7z.net/blobfs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
-	"time"
-
-	"golang.org/x/sync/singleflight"
-	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
@@ -30,13 +27,6 @@ type Resolver interface {
 	Resolve(req *http.Request) (Route, error)
 }
 
-type OCIAuthConfig struct {
-	Type     string
-	Username string
-	Password string
-	Token    string
-}
-
 type RuntimeConfig struct {
 	Mode            string
 	ExpireAfter     config.Expiration
@@ -45,7 +35,6 @@ type RuntimeConfig struct {
 	BusyPolicy      string
 	DefaultFreshFor config.Freshness
 	PassHeaders     []string
-	OCIAuth         *OCIAuthConfig
 }
 
 type Handler struct {
@@ -57,29 +46,12 @@ type Handler struct {
 	resolver Resolver
 	stats    *Stats
 	wait     sync.WaitGroup
-
-	ociTokenMu sync.Mutex
-	ociTokens  map[string]ociToken
-	ociGroup   singleflight.Group
 }
 
 type remoteOptions struct {
 	AcceptErrors bool
 	Record       bool
 }
-
-type ociToken struct {
-	value  string
-	expire time.Time
-}
-
-type ociChallenge struct {
-	scheme string
-	realm  string
-	params map[string]string
-}
-
-const ociManifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v1+json, application/json"
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats) *Handler {
 	client := utils.DefaultHttpClientWrapper()
@@ -104,7 +76,7 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 			}
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, ociTokens: map[string]ociToken{}}
+	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats}
 }
 
 func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {

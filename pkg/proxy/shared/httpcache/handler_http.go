@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strings"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -101,9 +100,6 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		for key, value := range requestHeaders {
 			request.Header.Set(key, value)
 		}
-		if auth := h.staticAuthorization(); auth != "" && request.Header.Get("Authorization") == "" {
-			request.Header.Set("Authorization", auth)
-		}
 		response, err := h.client.Do(request)
 		if err != nil {
 			if options.Record {
@@ -136,9 +132,6 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		for key, value := range headers {
 			request.Header.Set(key, value)
 		}
-		if auth := h.staticAuthorization(); auth != "" && request.Header.Get("Authorization") == "" {
-			request.Header.Set("Authorization", auth)
-		}
 		response, err := h.client.Do(request)
 		if err != nil {
 			if options.Record {
@@ -149,17 +142,6 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 			continue
 		}
 		slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
-		if h.config.Mode == config.ModeOCI && response.StatusCode == http.StatusUnauthorized {
-			retry, retryErr := h.retryOCIChallenge(ctx, method, targetURL, headers, response)
-			if retryErr != nil {
-				lastErr = retryErr
-				continue
-			}
-			if retry != nil {
-				response = retry
-				slog.Debug("upstream response received after oci auth", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
-			}
-		}
 		if options.Record {
 			h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
 		}
@@ -180,9 +162,6 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 	headers := map[string]string{}
 	if value := req.Header.Get("Range"); value != "" {
 		headers["Range"] = value
-	}
-	if h.config.Mode == config.ModeOCI {
-		headers["Accept"] = ociManifestAccept
 	}
 	if len(h.config.PassHeaders) == 0 {
 		return headers

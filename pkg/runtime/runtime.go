@@ -20,11 +20,13 @@ type Instance interface {
 	http.Handler
 	Start(context.Context) error
 	Stop(context.Context) error
+	Cleanup(context.Context) error
 }
 
 type HandlerInstance struct {
-	Handler http.Handler
-	Close   func() error
+	Handler   http.Handler
+	Close     func() error
+	CleanupFn func(context.Context) error
 }
 
 func (h HandlerInstance) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -36,6 +38,13 @@ func (h HandlerInstance) Start(context.Context) error { return nil }
 func (h HandlerInstance) Stop(context.Context) error {
 	if h.Close != nil {
 		return h.Close()
+	}
+	return nil
+}
+
+func (h HandlerInstance) Cleanup(ctx context.Context) error {
+	if h.CleanupFn != nil {
+		return h.CleanupFn(ctx)
 	}
 	return nil
 }

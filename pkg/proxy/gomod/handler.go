@@ -1,6 +1,7 @@
 package gomod
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -85,6 +86,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) Close() {
 	h.base.Close()
+}
+
+func (h *Handler) Cleanup(ctx context.Context) error {
+	return h.base.Cleanup(ctx)
 }
 
 type resolver struct {
