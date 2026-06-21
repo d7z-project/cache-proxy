@@ -1,22 +1,18 @@
 package gomod
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
 
 	"golang.org/x/mod/module"
-	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 type SumDBConfig struct {
@@ -25,7 +21,7 @@ type SumDBConfig struct {
 	URL     string `json:"url,omitempty" yaml:"url,omitempty"`
 }
 
-type Policy struct {
+type Config struct {
 	SumDB                    *SumDBConfig     `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
 	GOPrivate                []string         `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
 	DisableModuleFetchHeader bool             `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
@@ -37,93 +33,88 @@ type Policy struct {
 	SumDBBusyPolicy          string           `json:"sumdbBusyPolicy,omitempty" yaml:"sumdb_busy_policy,omitempty"`
 }
 
+type Policy = Config
+
+type Block struct {
+	ExpireAfter config.Expiration `yaml:"expire_after"`
+	Route       struct {
+		Path string `yaml:"path"`
+	} `yaml:"route"`
+	Upstreams []string                `yaml:"upstreams"`
+	Transport *config.TransportConfig `yaml:"transport,omitempty"`
+	Config    `yaml:",inline"`
+}
+
 type Driver struct{}
 
-func (Driver) Mode() string { return config.ModeGo }
+func NewDriver() proxyruntime.ModeDriver { return Driver{} }
+func (Driver) Mode() string              { return config.ModeGo }
 
-func (Driver) DecodeJSON(data json.RawMessage) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 || string(data) == "null" {
-		return policy, nil
+func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	var block Block
+	if err := plan.Decode(&block); err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, err
+	applyDefaults(&block.Config)
+	if err := validateBlock(block.Upstreams, &block.Config); err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	return policy, nil
-}
-
-func (Driver) EncodeJSON(policy any) (json.RawMessage, error) {
-	data, err := json.Marshal(policy)
+	expireAfter := block.ExpireAfter
+	if expireAfter.IsUnset() {
+		expireAfter = config.DefaultExpireAfter
+	}
+	handler, err := NewHandler(plan.Name(), expireAfter, block.Upstreams, block.Transport, &block.Config, plan.Store(), plan.Stats())
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	return json.RawMessage(data), nil
+	plan.SetHomeSnippet(plan.RenderSnippet())
+	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
+		Handler: handler,
+		Close:   func() error { handler.Close(); return nil },
+	})
 }
 
-func (Driver) DecodeYAML(data []byte) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 {
-		return policy, nil
+func applyDefaults(cfg *Config) {
+	if cfg.MetadataPolicy == "" {
+		cfg.MetadataPolicy = config.PolicyRevalidate
 	}
-	if err := yaml.Unmarshal(data, policy); err != nil {
-		return nil, err
+	if cfg.MetadataFreshFor == 0 {
+		cfg.MetadataFreshFor = config.Freshness(time.Minute)
 	}
-	return policy, nil
-}
-
-func (Driver) EncodeYAML(policy any) ([]byte, error) { return yaml.Marshal(policy) }
-
-func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
-	policy := spec.Policy.(*Policy)
-	applyDefaults(policy)
-	if policy.SumDB == nil {
-		policy.SumDB = &SumDBConfig{
-			Enabled: true,
-			Name:    "sum.golang.org",
-			URL:     "https://sum.golang.org",
-		}
+	if cfg.MetadataBusyPolicy == "" {
+		cfg.MetadataBusyPolicy = config.BusyPolicyStale
+	}
+	if cfg.ArtifactPolicy == "" {
+		cfg.ArtifactPolicy = config.PolicyImmutable
+	}
+	if cfg.SumDBFreshFor == 0 {
+		cfg.SumDBFreshFor = config.Freshness(30 * time.Second)
+	}
+	if cfg.SumDBBusyPolicy == "" {
+		cfg.SumDBBusyPolicy = config.BusyPolicyStale
+	}
+	if cfg.SumDB == nil {
+		cfg.SumDB = &SumDBConfig{Enabled: true, Name: "sum.golang.org", URL: "https://sum.golang.org"}
 		return
 	}
-	if !policy.SumDB.Enabled {
-		policy.SumDB.Name = ""
-		policy.SumDB.URL = ""
+	if !cfg.SumDB.Enabled {
+		cfg.SumDB.Name = ""
+		cfg.SumDB.URL = ""
 		return
 	}
-	if strings.TrimSpace(policy.SumDB.Name) == "" {
-		policy.SumDB.Name = "sum.golang.org"
+	if strings.TrimSpace(cfg.SumDB.Name) == "" {
+		cfg.SumDB.Name = "sum.golang.org"
 	}
-	if strings.TrimSpace(policy.SumDB.URL) == "" {
-		policy.SumDB.URL = "https://sum.golang.org"
-	}
-}
-
-func applyDefaults(policy *Policy) {
-	if policy.MetadataPolicy == "" {
-		policy.MetadataPolicy = config.PolicyRevalidate
-	}
-	if policy.MetadataFreshFor == 0 {
-		policy.MetadataFreshFor = config.Freshness(time.Minute)
-	}
-	if policy.MetadataBusyPolicy == "" {
-		policy.MetadataBusyPolicy = config.BusyPolicyStale
-	}
-	if policy.ArtifactPolicy == "" {
-		policy.ArtifactPolicy = config.PolicyImmutable
-	}
-	if policy.SumDBFreshFor == 0 {
-		policy.SumDBFreshFor = config.Freshness(30 * time.Second)
-	}
-	if policy.SumDBBusyPolicy == "" {
-		policy.SumDBBusyPolicy = config.BusyPolicyStale
+	if strings.TrimSpace(cfg.SumDB.URL) == "" {
+		cfg.SumDB.URL = "https://sum.golang.org"
 	}
 }
 
-func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
-	policy := spec.Policy.(*Policy)
-	if len(spec.Source.Upstreams) == 0 {
+func validateBlock(upstreams []string, cfg *Config) error {
+	if len(upstreams) == 0 {
 		return errors.New("go proxy requires at least one GOPROXY upstream")
 	}
-	for i, raw := range spec.Source.Upstreams {
+	for i, raw := range upstreams {
 		u, err := url.Parse(strings.TrimSpace(raw))
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return fmt.Errorf("go upstream %d must be a valid absolute URL", i)
@@ -132,15 +123,15 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 			return fmt.Errorf("go upstream %d must use http or https", i)
 		}
 	}
-	if policy.SumDB != nil && policy.SumDB.Enabled {
-		name := strings.TrimSpace(policy.SumDB.Name)
+	if cfg.SumDB != nil && cfg.SumDB.Enabled {
+		name := strings.TrimSpace(cfg.SumDB.Name)
 		if name == "" {
 			return errors.New("go sumdb name is required when sumdb proxying is enabled")
 		}
 		if strings.ContainsAny(name, "\r\n\t ") {
 			return errors.New("go sumdb name must not contain spaces or line breaks")
 		}
-		rawURL := strings.TrimSpace(policy.SumDB.URL)
+		rawURL := strings.TrimSpace(cfg.SumDB.URL)
 		parsed, err := url.Parse(rawURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return errors.New("go sumdb upstream must be a valid absolute URL")
@@ -149,7 +140,7 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 			return errors.New("go sumdb upstream must use http or https")
 		}
 	}
-	for i, pattern := range policy.GOPrivate {
+	for i, pattern := range cfg.GOPrivate {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
 			return fmt.Errorf("go goprivate %d is empty", i)
@@ -158,12 +149,12 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 			return fmt.Errorf("go goprivate %d must not contain line breaks", i)
 		}
 	}
-	for _, value := range []string{policy.MetadataPolicy, policy.ArtifactPolicy} {
+	for _, value := range []string{cfg.MetadataPolicy, cfg.ArtifactPolicy} {
 		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
 			return fmt.Errorf("invalid go cache policy %q", value)
 		}
 	}
-	for _, value := range []string{policy.MetadataBusyPolicy, policy.SumDBBusyPolicy} {
+	for _, value := range []string{cfg.MetadataBusyPolicy, cfg.SumDBBusyPolicy} {
 		if value != config.BusyPolicyBypass && value != config.BusyPolicyStale {
 			return fmt.Errorf("invalid go busy policy %q", value)
 		}
@@ -171,36 +162,12 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
-	return spec.Policy.(*Policy).MetadataFreshFor
-}
-
-func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
-	handler, err := NewHandler(name, spec.Meta, spec.Source, spec.Policy.(*Policy), store, stats)
-	if err != nil {
-		return nil, nil, err
-	}
-	return handler, handler.Close, nil
-}
-
-func (Driver) Lookup(spec *proxydriver.ResolvedSpec, lookupPath string) (proxy.Route, error) {
-	lookupPath = strings.TrimPrefix(path.Clean("/"+lookupPath), "/")
-	if lookupPath == "." || lookupPath == "" {
-		return proxy.Route{}, errors.New("path is required")
-	}
-	if modulePath, ok := modulePathFromTarget(lookupPath); ok && matchesPrivateModule(spec.Policy.(*Policy), modulePath) {
-		return proxy.Route{Policy: "private-bypass"}, nil
-	}
-	req, _ := http.NewRequest(http.MethodGet, "/"+lookupPath, nil)
-	return (&resolver{policy: spec.Policy.(*Policy)}).Resolve(req)
-}
-
-func matchesPrivateModule(policy *Policy, modulePath string) bool {
-	if policy == nil || len(policy.GOPrivate) == 0 || modulePath == "" {
+func matchesPrivateModule(cfg *Config, modulePath string) bool {
+	if cfg == nil || len(cfg.GOPrivate) == 0 || modulePath == "" {
 		return false
 	}
-	patterns := make([]string, 0, len(policy.GOPrivate))
-	for _, pattern := range policy.GOPrivate {
+	patterns := make([]string, 0, len(cfg.GOPrivate))
+	for _, pattern := range cfg.GOPrivate {
 		pattern = strings.TrimSpace(pattern)
 		if pattern != "" {
 			patterns = append(patterns, pattern)
@@ -226,8 +193,4 @@ func modulePathFromTarget(target string) (string, bool) {
 		return "", false
 	}
 	return unescaped, true
-}
-
-func init() {
-	proxydriver.Default.Register(Driver{})
 }

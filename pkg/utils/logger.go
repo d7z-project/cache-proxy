@@ -7,10 +7,6 @@ import (
 )
 
 func init() {
-	setupLogger()
-}
-
-func setupLogger() {
 	level := slog.LevelInfo
 	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
 	case "debug":

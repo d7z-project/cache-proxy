@@ -1,8 +1,11 @@
 package config
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -29,14 +32,23 @@ const (
 	BusyPolicyStale  = "stale"
 )
 
-type GlobalConfig struct {
-	Version int           `json:"version" yaml:"version"`
-	Metrics MetricsConfig `json:"metrics" yaml:"metrics"`
-	Storage StorageConfig `json:"storage" yaml:"storage"`
+const DefaultExpireAfter Expiration = Expiration(720 * time.Hour)
+
+type Document struct {
+	Server    ServerConfig  `yaml:"server"`
+	Metrics   MetricsConfig `yaml:"metrics"`
+	Storage   StorageConfig `yaml:"storage"`
+	Instances []Instance    `yaml:"instances"`
+}
+
+type ServerConfig struct {
+	Bind    string `yaml:"bind"`
+	Backend string `yaml:"backend"`
 }
 
 type MetricsConfig struct {
-	Path string `json:"path" yaml:"path"`
+	Path  string `yaml:"path"`
+	Token string `yaml:"token"`
 }
 
 type StorageConfig struct {
@@ -66,48 +78,124 @@ func DefaultCleanupConfig() CleanupConfig {
 	}
 }
 
-type InstanceSummary struct {
-	Name       string `json:"name" yaml:"name"`
-	Mode       string `json:"mode" yaml:"mode"`
-	Enabled    bool   `json:"enabled" yaml:"enabled"`
-	Path       string `json:"path,omitempty" yaml:"path,omitempty"`
-	Bind       string `json:"bind,omitempty" yaml:"bind,omitempty"`
-	PublicURL  string `json:"publicUrl,omitempty" yaml:"public_url,omitempty"`
-	EntryKind  string `json:"entryKind,omitempty" yaml:"entry_kind,omitempty"`
-	EntryLabel string `json:"entryLabel,omitempty" yaml:"entry_label,omitempty"`
-	EntryURL   string `json:"entryUrl,omitempty" yaml:"entry_url,omitempty"`
-}
-
-type InstanceSpec struct {
-	Name   string          `json:"name" yaml:"name"`
-	Meta   InstanceMeta    `json:"meta" yaml:"meta"`
-	Route  InstanceRoute   `json:"route" yaml:"route"`
-	Source InstanceSource  `json:"source" yaml:"source"`
-	Policy json.RawMessage `json:"policy" yaml:"-"`
-}
-
-type InstanceMeta struct {
-	Mode        string     `json:"mode" yaml:"mode"`
-	Enabled     bool       `json:"enabled" yaml:"enabled"`
-	Description string     `json:"description,omitempty" yaml:"description,omitempty"`
-	ExpireAfter Expiration `json:"expireAfter" yaml:"expire_after"`
-}
-
-type InstanceRoute struct {
-	Path      string `json:"path,omitempty" yaml:"path,omitempty"`
-	Bind      string `json:"bind,omitempty" yaml:"bind,omitempty"`
-	PublicURL string `json:"publicUrl,omitempty" yaml:"public_url,omitempty"`
-}
-
-type InstanceSource struct {
-	Upstreams []string         `json:"upstreams" yaml:"upstreams"`
-	Transport *TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty"`
+type Instance struct {
+	Name    string     `yaml:"name"`
+	Enabled bool       `yaml:"enabled"`
+	File    *ModeBlock `yaml:"file,omitempty"`
+	OCI     *ModeBlock `yaml:"oci,omitempty"`
+	NPM     *ModeBlock `yaml:"npm,omitempty"`
+	Go      *ModeBlock `yaml:"go,omitempty"`
+	Maven   *ModeBlock `yaml:"maven,omitempty"`
+	Cargo   *ModeBlock `yaml:"cargo,omitempty"`
+	PyPI    *ModeBlock `yaml:"pypi,omitempty"`
+	APK     *ModeBlock `yaml:"apk,omitempty"`
+	DEB     *ModeBlock `yaml:"deb,omitempty"`
+	RPM     *ModeBlock `yaml:"rpm,omitempty"`
+	Pacman  *ModeBlock `yaml:"pacman,omitempty"`
 }
 
 type TransportConfig struct {
-	Proxy     string   `json:"proxy,omitempty" yaml:"proxy,omitempty"`
-	UserAgent string   `json:"ua,omitempty" yaml:"ua,omitempty"`
-	Timeout   Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	Proxy     string   `yaml:"proxy,omitempty"`
+	UserAgent string   `yaml:"ua,omitempty"`
+	Timeout   Duration `yaml:"timeout,omitempty"`
+}
+
+type SelectedMode struct {
+	Name    string
+	Enabled bool
+	Mode    string
+	Block   *ModeBlock
+}
+
+type ModeBlock struct {
+	Node *yaml.Node
+}
+
+func (b *ModeBlock) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil {
+		b.Node = nil
+		return nil
+	}
+	clone := *value
+	b.Node = &clone
+	return nil
+}
+
+func (b ModeBlock) MarshalYAML() (any, error) {
+	if b.Node == nil {
+		return nil, nil
+	}
+	return b.Node, nil
+}
+
+func (b *ModeBlock) DecodeStrict(target any) error {
+	if b == nil || b.Node == nil {
+		return nil
+	}
+	data, err := yaml.Marshal(b.Node)
+	if err != nil {
+		return err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	return decoder.Decode(target)
+}
+
+func (i Instance) SelectMode() (SelectedMode, error) {
+	candidates := []struct {
+		mode  string
+		block *ModeBlock
+	}{
+		{mode: ModeFile, block: i.File},
+		{mode: ModeOCI, block: i.OCI},
+		{mode: ModeNPM, block: i.NPM},
+		{mode: ModeGo, block: i.Go},
+		{mode: ModeMaven, block: i.Maven},
+		{mode: ModeCargo, block: i.Cargo},
+		{mode: ModePyPI, block: i.PyPI},
+		{mode: ModeAPK, block: i.APK},
+		{mode: ModeDEB, block: i.DEB},
+		{mode: ModeRPM, block: i.RPM},
+		{mode: ModePacman, block: i.Pacman},
+	}
+	var selected SelectedMode
+	for _, candidate := range candidates {
+		if candidate.block == nil || candidate.block.Node == nil {
+			continue
+		}
+		if selected.Mode != "" {
+			return SelectedMode{}, fmt.Errorf("instance %q must define exactly one mode block", i.Name)
+		}
+		selected = SelectedMode{
+			Name:    strings.TrimSpace(i.Name),
+			Mode:    candidate.mode,
+			Enabled: i.Enabled,
+			Block:   candidate.block,
+		}
+	}
+	if selected.Mode == "" {
+		return SelectedMode{}, fmt.Errorf("instance %q must define one mode block", i.Name)
+	}
+	return selected, nil
+}
+
+func LoadFile(path string) (*Document, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return Decode(file)
+}
+
+func Decode(r io.Reader) (*Document, error) {
+	var doc Document
+	decoder := yaml.NewDecoder(r)
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 type Duration time.Duration
@@ -115,26 +203,9 @@ type Duration time.Duration
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 func (d Duration) String() string          { return time.Duration(d).String() }
 
-func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
-
-func (d *Duration) UnmarshalJSON(data []byte) error {
-	var text string
-	if err := json.Unmarshal(data, &text); err != nil {
-		return err
-	}
-	if text == "" {
-		*d = 0
-		return nil
-	}
-	parsed, err := time.ParseDuration(text)
-	if err != nil {
-		return err
-	}
-	*d = Duration(parsed)
-	return nil
+func (d Duration) MarshalYAML() (any, error) {
+	return d.String(), nil
 }
-
-func (d Duration) MarshalYAML() (any, error) { return d.String(), nil }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	if value == nil || value.Value == "" {
@@ -154,10 +225,8 @@ type Expiration time.Duration
 const ExpirationNever Expiration = -1
 
 func (e Expiration) Duration() time.Duration { return time.Duration(e) }
-
-func (e Expiration) IsNever() bool   { return e == ExpirationNever }
-func (e Expiration) IsUnset() bool   { return e == 0 }
-func (e Expiration) IsDefault() bool { return e == 0 }
+func (e Expiration) IsNever() bool           { return e == ExpirationNever }
+func (e Expiration) IsUnset() bool           { return e == 0 }
 
 func (e Expiration) String() string {
 	if e == ExpirationNever {
@@ -167,37 +236,6 @@ func (e Expiration) String() string {
 		return ""
 	}
 	return time.Duration(e).String()
-}
-
-func (e Expiration) MarshalJSON() ([]byte, error) { return json.Marshal(e.String()) }
-
-func (e *Expiration) UnmarshalJSON(data []byte) error {
-	var text string
-	if err := json.Unmarshal(data, &text); err != nil {
-		return err
-	}
-	return e.unmarshal(text)
-}
-
-func (e *Expiration) unmarshal(text string) error {
-	if text == "" {
-		*e = 0
-		return nil
-	}
-	switch text {
-	case "never", "0", "none", "infinite":
-		*e = ExpirationNever
-	default:
-		parsed, err := time.ParseDuration(text)
-		if err != nil {
-			return fmt.Errorf("invalid expiration %q: %w", text, err)
-		}
-		if parsed < 0 {
-			return fmt.Errorf("expiration must not be negative: %q", text)
-		}
-		*e = Expiration(parsed)
-	}
-	return nil
 }
 
 func (e Expiration) MarshalYAML() (any, error) {
@@ -218,15 +256,33 @@ func (e *Expiration) UnmarshalYAML(value *yaml.Node) error {
 	return e.unmarshal(value.Value)
 }
 
+func (e *Expiration) unmarshal(text string) error {
+	switch text {
+	case "":
+		*e = 0
+		return nil
+	case "never", "0", "none", "infinite":
+		*e = ExpirationNever
+		return nil
+	}
+	parsed, err := time.ParseDuration(text)
+	if err != nil {
+		return fmt.Errorf("invalid expiration %q: %w", text, err)
+	}
+	if parsed < 0 {
+		return fmt.Errorf("expiration must not be negative: %q", text)
+	}
+	*e = Expiration(parsed)
+	return nil
+}
+
 type Freshness time.Duration
 
 const FreshnessForever Freshness = -1
 
 func (f Freshness) Duration() time.Duration { return time.Duration(f) }
-
-func (f Freshness) IsForever() bool { return f == FreshnessForever }
-func (f Freshness) IsUnset() bool   { return f == 0 }
-func (f Freshness) IsDefault() bool { return f == 0 }
+func (f Freshness) IsForever() bool         { return f == FreshnessForever }
+func (f Freshness) IsUnset() bool           { return f == 0 }
 
 func (f Freshness) String() string {
 	if f == FreshnessForever {
@@ -236,37 +292,6 @@ func (f Freshness) String() string {
 		return ""
 	}
 	return time.Duration(f).String()
-}
-
-func (f Freshness) MarshalJSON() ([]byte, error) { return json.Marshal(f.String()) }
-
-func (f *Freshness) UnmarshalJSON(data []byte) error {
-	var text string
-	if err := json.Unmarshal(data, &text); err != nil {
-		return err
-	}
-	return f.unmarshal(text)
-}
-
-func (f *Freshness) unmarshal(text string) error {
-	if text == "" {
-		*f = 0
-		return nil
-	}
-	switch text {
-	case "forever", "0", "always", "infinite":
-		*f = FreshnessForever
-	default:
-		parsed, err := time.ParseDuration(text)
-		if err != nil {
-			return fmt.Errorf("invalid freshness %q: %w", text, err)
-		}
-		if parsed < 0 {
-			return fmt.Errorf("freshness must not be negative: %q", text)
-		}
-		*f = Freshness(parsed)
-	}
-	return nil
 }
 
 func (f Freshness) MarshalYAML() (any, error) {
@@ -287,45 +312,22 @@ func (f *Freshness) UnmarshalYAML(value *yaml.Node) error {
 	return f.unmarshal(value.Value)
 }
 
-func CloneGlobal(cfg *GlobalConfig) *GlobalConfig {
-	if cfg == nil {
+func (f *Freshness) unmarshal(text string) error {
+	switch text {
+	case "":
+		*f = 0
+		return nil
+	case "forever", "0", "always", "infinite":
+		*f = FreshnessForever
 		return nil
 	}
-	clone := *cfg
-	return &clone
-}
-
-func CloneInstance(spec InstanceSpec) InstanceSpec {
-	clone := spec
-	clone.Source.Upstreams = append([]string(nil), spec.Source.Upstreams...)
-	if spec.Source.Transport != nil {
-		transport := *spec.Source.Transport
-		clone.Source.Transport = &transport
+	parsed, err := time.ParseDuration(text)
+	if err != nil {
+		return fmt.Errorf("invalid freshness %q: %w", text, err)
 	}
-	if spec.Policy != nil {
-		clone.Policy = append(json.RawMessage(nil), spec.Policy...)
+	if parsed < 0 {
+		return fmt.Errorf("freshness must not be negative: %q", text)
 	}
-	return clone
-}
-
-func CloneInstances(instances map[string]InstanceSpec) map[string]InstanceSpec {
-	if instances == nil {
-		return map[string]InstanceSpec{}
-	}
-	clone := make(map[string]InstanceSpec, len(instances))
-	for name, spec := range instances {
-		clone[name] = CloneInstance(spec)
-	}
-	return clone
-}
-
-func (s InstanceSpec) Summary() InstanceSummary {
-	return InstanceSummary{
-		Name:      s.Name,
-		Mode:      s.Meta.Mode,
-		Enabled:   s.Meta.Enabled,
-		Path:      s.Route.Path,
-		Bind:      s.Route.Bind,
-		PublicURL: s.Route.PublicURL,
-	}
+	*f = Freshness(parsed)
+	return nil
 }

@@ -1,20 +1,17 @@
 package oci
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 	containername "github.com/google/go-containerregistry/pkg/name"
-	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 type Policy struct {
@@ -28,7 +25,7 @@ type Policy struct {
 type Rule struct {
 	Match       string            `json:"match" yaml:"match"`
 	Policy      string            `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor    config.Freshness `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	FreshFor    config.Freshness  `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
 	ExpireAfter config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
@@ -39,68 +36,69 @@ type AuthConfig struct {
 	Token    string `json:"token,omitempty" yaml:"token,omitempty"`
 }
 
+type Block struct {
+	Bind      string                  `yaml:"bind"`
+	Upstream  string                  `yaml:"upstream"`
+	Transport *config.TransportConfig `yaml:"transport,omitempty"`
+	Policy    `yaml:",inline"`
+}
+
 type Driver struct{}
 
-func (Driver) Mode() string { return config.ModeOCI }
+func NewDriver() proxyruntime.ModeDriver { return Driver{} }
+func (Driver) Mode() string              { return config.ModeOCI }
 
-func (Driver) DecodeJSON(data json.RawMessage) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 || string(data) == "null" {
-		return policy, nil
+func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	var block Block
+	if err := plan.Decode(&block); err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, err
+	if block.Upstream == "" {
+		return fmt.Errorf("instance %s: oci mode requires one upstream", plan.Name())
 	}
-	return policy, nil
-}
-
-func (Driver) EncodeJSON(policy any) (json.RawMessage, error) {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return nil, err
+	if block.DefaultPolicy == "" {
+		block.DefaultPolicy = config.PolicyBypass
 	}
-	return json.RawMessage(data), nil
-}
-
-func (Driver) DecodeYAML(data []byte) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 {
-		return policy, nil
+	if block.BusyPolicy == "" {
+		block.BusyPolicy = config.BusyPolicyBypass
 	}
-	if err := yaml.Unmarshal(data, policy); err != nil {
-		return nil, err
+	if err := validate(block.Upstream, &block.Policy); err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	return policy, nil
-}
-
-func (Driver) EncodeYAML(policy any) ([]byte, error) { return yaml.Marshal(policy) }
-
-func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
-	policy := spec.Policy.(*Policy)
-	if policy.DefaultPolicy == "" {
-		policy.DefaultPolicy = config.PolicyBypass
-	}
-	if policy.BusyPolicy == "" {
-		policy.BusyPolicy = config.BusyPolicyBypass
-	}
-}
-
-func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
-	if spec.Route.Bind == "" {
-		return errors.New("oci mode requires bind route")
-	}
-	if len(spec.Source.Upstreams) != 1 {
-		return errors.New("oci mode requires exactly one upstream")
-	}
-	for _, rawURL := range spec.Source.Upstreams {
-		if host := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(rawURL, "https://"), "http://")); host != "" {
-			host = strings.Split(host, "/")[0]
-			if _, err := containername.NewRegistry(host); err != nil {
-				return fmt.Errorf("invalid oci registry %q: %w", host, err)
-			}
+	var auth *httpcache.OCIAuthConfig
+	if block.Auth != nil {
+		auth = &httpcache.OCIAuthConfig{
+			Type:     block.Auth.Type,
+			Username: block.Auth.Username,
+			Password: block.Auth.Password,
+			Token:    block.Auth.Token,
 		}
 	}
-	policy := spec.Policy.(*Policy)
+	expireAfter := config.DefaultExpireAfter
+	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+		Mode:            config.ModeOCI,
+		ExpireAfter:     expireAfter,
+		Upstreams:       []string{block.Upstream},
+		Transport:       block.Transport,
+		BusyPolicy:      block.BusyPolicy,
+		DefaultFreshFor: block.FreshFor,
+		OCIAuth:         auth,
+	}, plan.Store(), New(&block.Policy), plan.Stats())
+	plan.SetHomeSnippet(plan.RenderSnippet())
+	return plan.BindAddr(block.Bind, expireAfter, proxyruntime.HandlerInstance{
+		Handler: handler,
+		Close:   func() error { handler.Close(); return nil },
+	})
+}
+
+func validate(upstream string, policy *Policy) error {
+	host := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(upstream, "https://"), "http://"))
+	if host != "" {
+		host = strings.Split(host, "/")[0]
+		if _, err := containername.NewRegistry(host); err != nil {
+			return fmt.Errorf("invalid oci registry %q: %w", host, err)
+		}
+	}
 	if !validPolicy(policy.DefaultPolicy) {
 		return fmt.Errorf("invalid oci default policy %q", policy.DefaultPolicy)
 	}
@@ -142,41 +140,6 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
-	return spec.Policy.(*Policy).FreshFor
-}
-
-func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
-	policy := spec.Policy.(*Policy)
-	var auth *proxy.OCIAuthConfig
-	if policy.Auth != nil {
-		auth = &proxy.OCIAuthConfig{
-			Type:     policy.Auth.Type,
-			Username: policy.Auth.Username,
-			Password: policy.Auth.Password,
-			Token:    policy.Auth.Token,
-		}
-	}
-	handler := proxy.NewHandler(name, proxy.RuntimeConfig{
-		Mode:            config.ModeOCI,
-		ExpireAfter:     spec.Meta.ExpireAfter,
-		Upstreams:       append([]string(nil), spec.Source.Upstreams...),
-		Transport:       spec.Source.Transport,
-		BusyPolicy:      policy.BusyPolicy,
-		DefaultFreshFor: policy.FreshFor,
-		OCIAuth:         auth,
-	}, store, New(policy), stats)
-	return handler, handler.Close, nil
-}
-
-func (Driver) Lookup(spec *proxydriver.ResolvedSpec, lookupPath string) (proxy.Route, error) {
-	return LookupRef(spec.Policy.(*Policy), lookupPath)
-}
-
 func validPolicy(policy string) bool {
 	return policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
-}
-
-func init() {
-	proxydriver.Default.Register(Driver{})
 }

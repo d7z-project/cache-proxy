@@ -13,7 +13,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 const disableModuleFetchHeader = "Disable-Module-Fetch"
@@ -33,7 +33,7 @@ type Handler struct {
 	name   string
 	policy *Policy
 	store  *blobfs.Store
-	base   *proxy.Handler
+	base   *httpcache.Handler
 }
 
 type moduleRequest struct {
@@ -43,16 +43,16 @@ type moduleRequest struct {
 	cacheKey   string
 }
 
-func NewHandler(name string, meta config.InstanceMeta, source config.InstanceSource, policy *Policy, store *blobfs.Store, stats *proxy.Stats) (*Handler, error) {
+func NewHandler(name string, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats) (*Handler, error) {
 	if policy == nil {
 		policy = &Policy{}
 	}
 	applyDefaults(policy)
-	base := proxy.NewHandler(name, proxy.RuntimeConfig{
+	base := httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:            config.ModeGo,
-		ExpireAfter:     meta.ExpireAfter,
-		Upstreams:       append([]string(nil), source.Upstreams...),
-		Transport:       source.Transport,
+		ExpireAfter:     expireAfter,
+		Upstreams:       append([]string(nil), upstreams...),
+		Transport:       transport,
 		BusyPolicy:      policy.MetadataBusyPolicy,
 		DefaultFreshFor: policy.MetadataFreshFor,
 	}, store, &resolver{policy: policy}, stats)
@@ -91,16 +91,16 @@ type resolver struct {
 	policy *Policy
 }
 
-func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
+func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
 	if strings.HasPrefix(target, "sumdb/") {
 		return r.resolveSumDB(target)
 	}
 	moduleReq, err := parseModuleRequest(target)
 	if err != nil {
-		return proxy.Route{}, err
+		return httpcache.Route{}, err
 	}
-	route := proxy.Route{
+	route := httpcache.Route{
 		ObjectPath:   "go/" + moduleReq.cacheKey,
 		UpstreamPath: moduleReq.cacheKey,
 		Policy:       r.policy.MetadataPolicy,
@@ -114,20 +114,20 @@ func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
 	return route, nil
 }
 
-func (r *resolver) resolveSumDB(target string) (proxy.Route, error) {
+func (r *resolver) resolveSumDB(target string) (httpcache.Route, error) {
 	if r.policy == nil || r.policy.SumDB == nil || !r.policy.SumDB.Enabled {
-		return proxy.Route{}, fs.ErrNotExist
+		return httpcache.Route{}, fs.ErrNotExist
 	}
 	name := strings.TrimSpace(r.policy.SumDB.Name)
 	prefix := "sumdb/" + name + "/"
 	if name == "" || !strings.HasPrefix(target, prefix) {
-		return proxy.Route{}, fs.ErrNotExist
+		return httpcache.Route{}, fs.ErrNotExist
 	}
 	baseURL, err := url.Parse(strings.TrimSpace(r.policy.SumDB.URL))
 	if err != nil {
-		return proxy.Route{}, err
+		return httpcache.Route{}, err
 	}
-	return proxy.Route{
+	return httpcache.Route{
 		ObjectPath: "go/" + target,
 		TargetURL:  baseURL.JoinPath(strings.TrimPrefix(target, prefix)).String(),
 		Policy:     config.PolicyRevalidate,

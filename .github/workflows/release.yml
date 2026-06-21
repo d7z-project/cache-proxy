@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   REGISTRY: ghcr.io
@@ -22,26 +22,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build frontend
-        run: |
-          cd web && npm ci && npm run build
+          go-version: "1.25"
 
       - name: Build binary
         env:
           GOARCH: ${{ matrix.goarch }}
-        run: |
-          CGO_ENABLED=0 GOARCH=$GOARCH go build -v \
-            -ldflags "-X gopkg.d7z.net/cache-proxy/pkg/server.DefaultBackend=./data -X gopkg.d7z.net/cache-proxy/pkg/server.DefaultBind=0.0.0.0:8080" \
-            -o cache-proxy-${{ matrix.goarch }} .
+        run: CGO_ENABLED=0 GOARCH=$GOARCH go build -v -o cache-proxy-${{ matrix.goarch }} .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -93,16 +79,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build frontend
-        run: cd web && npm ci && npm run build
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -130,17 +106,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  verify-image:
-    needs: build-image
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        platform: [linux/amd64, linux/arm64]
-    steps:
-      - name: Pull and verify image
-        run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-linux-${{ matrix.platform }}
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-linux-${{ matrix.platform }} --help || true

@@ -1,87 +1,84 @@
 package npm
 
 import (
-	"encoding/json"
-	"errors"
+	"context"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 type Policy struct {
-	DefaultPolicy string             `json:"defaultPolicy,omitempty" yaml:"default_policy,omitempty"`
-	FreshFor      config.Freshness   `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	BusyPolicy    string             `json:"busyPolicy,omitempty" yaml:"busy_policy,omitempty"`
-	Rules         []Rule             `json:"rules" yaml:"rules"`
+	DefaultPolicy string           `json:"defaultPolicy,omitempty" yaml:"default_policy,omitempty"`
+	FreshFor      config.Freshness `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	BusyPolicy    string           `json:"busyPolicy,omitempty" yaml:"busy_policy,omitempty"`
+	Rules         []Rule           `json:"rules" yaml:"rules"`
 }
 
 type Rule struct {
-	Match          string             `json:"match" yaml:"match"`
-	ResourcePolicy string             `json:"resourcePolicy,omitempty" yaml:"resource_policy,omitempty"`
-	Policy         string             `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor       config.Freshness   `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	ExpireAfter    config.Expiration  `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	Match          string            `json:"match" yaml:"match"`
+	ResourcePolicy string            `json:"resourcePolicy,omitempty" yaml:"resource_policy,omitempty"`
+	Policy         string            `json:"policy,omitempty" yaml:"policy,omitempty"`
+	FreshFor       config.Freshness  `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
+	ExpireAfter    config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+}
+
+type Block struct {
+	ExpireAfter config.Expiration `yaml:"expire_after"`
+	Route       struct {
+		Path string `yaml:"path"`
+	} `yaml:"route"`
+	Upstreams []string                `yaml:"upstreams"`
+	Transport *config.TransportConfig `yaml:"transport,omitempty"`
+	Policy    `yaml:",inline"`
 }
 
 type Driver struct{}
 
-func (Driver) Mode() string { return config.ModeNPM }
+func NewDriver() proxyruntime.ModeDriver { return Driver{} }
+func (Driver) Mode() string              { return config.ModeNPM }
 
-func (Driver) DecodeJSON(data json.RawMessage) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 || string(data) == "null" {
-		return policy, nil
+func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	var block Block
+	if err := plan.Decode(&block); err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, err
+	if len(block.Upstreams) != 1 {
+		return fmt.Errorf("instance %s: npm mode requires exactly one upstream", plan.Name())
 	}
-	return policy, nil
+	if block.DefaultPolicy == "" {
+		block.DefaultPolicy = config.PolicyBypass
+	}
+	if block.BusyPolicy == "" {
+		block.BusyPolicy = config.BusyPolicyBypass
+	}
+	if err := validate(&block.Policy); err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	expireAfter := block.ExpireAfter
+	if expireAfter.IsUnset() {
+		expireAfter = config.DefaultExpireAfter
+	}
+	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+		Mode:            config.ModeNPM,
+		ExpireAfter:     expireAfter,
+		Upstreams:       append([]string(nil), block.Upstreams...),
+		Transport:       block.Transport,
+		BusyPolicy:      block.BusyPolicy,
+		DefaultFreshFor: block.FreshFor,
+	}, plan.Store(), New(&block.Policy), plan.Stats())
+	plan.SetHomeSnippet(plan.RenderSnippet())
+	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
+		Handler: handler,
+		Close:   func() error { handler.Close(); return nil },
+	})
 }
 
-func (Driver) EncodeJSON(policy any) (json.RawMessage, error) {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return nil, err
-	}
-	return json.RawMessage(data), nil
-}
-
-func (Driver) DecodeYAML(data []byte) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 {
-		return policy, nil
-	}
-	if err := yaml.Unmarshal(data, policy); err != nil {
-		return nil, err
-	}
-	return policy, nil
-}
-
-func (Driver) EncodeYAML(policy any) ([]byte, error) { return yaml.Marshal(policy) }
-
-func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
-	policy := spec.Policy.(*Policy)
-	if policy.DefaultPolicy == "" {
-		policy.DefaultPolicy = config.PolicyBypass
-	}
-	if policy.BusyPolicy == "" {
-		policy.BusyPolicy = config.BusyPolicyBypass
-	}
-}
-
-func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
-	if len(spec.Source.Upstreams) != 1 {
-		return errors.New("npm mode requires exactly one upstream")
-	}
-	policy := spec.Policy.(*Policy)
+func validate(policy *Policy) error {
 	if !validPolicy(policy.DefaultPolicy) {
 		return fmt.Errorf("invalid npm default policy %q", policy.DefaultPolicy)
 	}
@@ -112,32 +109,6 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
-	return spec.Policy.(*Policy).FreshFor
-}
-
-func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
-	policy := spec.Policy.(*Policy)
-	handler := proxy.NewHandler(name, proxy.RuntimeConfig{
-		Mode:            config.ModeNPM,
-		ExpireAfter:     spec.Meta.ExpireAfter,
-		Upstreams:       append([]string(nil), spec.Source.Upstreams...),
-		Transport:       spec.Source.Transport,
-		BusyPolicy:      policy.BusyPolicy,
-		DefaultFreshFor: policy.FreshFor,
-	}, store, New(policy), stats)
-	return handler, handler.Close, nil
-}
-
-func (Driver) Lookup(spec *proxydriver.ResolvedSpec, lookupPath string) (proxy.Route, error) {
-	req, _ := http.NewRequest(http.MethodGet, "/"+strings.TrimPrefix(lookupPath, "/"), nil)
-	return New(spec.Policy.(*Policy)).Resolve(req)
-}
-
 func validPolicy(policy string) bool {
 	return policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
-}
-
-func init() {
-	proxydriver.Default.Register(Driver{})
 }

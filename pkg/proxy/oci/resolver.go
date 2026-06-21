@@ -10,7 +10,7 @@ import (
 	containername "github.com/google/go-containerregistry/pkg/name"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 type Resolver struct {
@@ -21,29 +21,29 @@ func New(cfg *Policy) *Resolver {
 	return &Resolver{cfg: cfg}
 }
 
-func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
+func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	cleanPath := strings.TrimLeft(req.URL.Path, "/")
 	if cleanPath == "v2" || cleanPath == "v2/" {
-		return proxy.Route{ObjectPath: "oci/ping", UpstreamPath: cleanPath, Policy: config.PolicyBypass}, nil
+		return httpcache.Route{ObjectPath: "oci/ping", UpstreamPath: cleanPath, Policy: config.PolicyBypass}, nil
 	}
-	if !proxy.SafePath(cleanPath) {
-		return proxy.Route{}, errors.New("invalid OCI request path")
+	if !httpcache.SafePath(cleanPath) {
+		return httpcache.Route{}, errors.New("invalid OCI request path")
 	}
 	if !strings.HasPrefix(cleanPath, "v2/") {
-		return proxy.Route{}, errors.New("invalid OCI request path")
+		return httpcache.Route{}, errors.New("invalid OCI request path")
 	}
 
 	parts := strings.Split(cleanPath, "/")
 	for i, part := range parts {
 		if part == "blobs" && i+2 < len(parts) && parts[i+1] == "uploads" {
-			return proxy.Route{}, errors.New("OCI blob uploads are not proxied")
+			return httpcache.Route{}, errors.New("OCI blob uploads are not proxied")
 		}
 		if part == "blobs" && i+1 < len(parts) {
 			digest := parts[i+1]
 			if strings.Contains(digest, ":") {
 				repo := strings.Join(parts[1:i], "/")
 				match := r.resolveRepo(repo)
-				return proxy.Route{
+				return httpcache.Route{
 					ObjectPath:   "oci/blobs/" + strings.ReplaceAll(digest, ":", "/"),
 					UpstreamPath: cleanPath,
 					Policy:       match.policy,
@@ -56,11 +56,11 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 			repo := strings.Join(parts[1:i], "/")
 			ref := parts[i+1]
 			if _, err := containername.ParseReference("example.com/"+repo+":"+ref, containername.WeakValidation); err != nil && !strings.Contains(ref, ":") {
-				return proxy.Route{}, err
+				return httpcache.Route{}, err
 			}
 			match := r.resolveRepo(repo)
-			return proxy.Route{
-				ObjectPath:   "oci/manifests/" + repo + "/" + proxy.HashKey(ref),
+			return httpcache.Route{
+				ObjectPath:   "oci/manifests/" + repo + "/" + httpcache.HashKey(ref),
 				UpstreamPath: cleanPath,
 				Policy:       match.policy,
 				FreshFor:     match.freshFor,
@@ -70,7 +70,7 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		if part == "tags" && i+1 < len(parts) && parts[i+1] == "list" {
 			repo := strings.Join(parts[1:i], "/")
 			match := r.resolveRepo(repo)
-			return proxy.Route{
+			return httpcache.Route{
 				ObjectPath:   "oci/tags/" + repo + "/list",
 				UpstreamPath: cleanPath,
 				Policy:       match.policy,
@@ -79,17 +79,17 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 			}, nil
 		}
 	}
-	return proxy.Route{ObjectPath: "oci/other/" + proxy.HashKey(cleanPath), UpstreamPath: cleanPath, Policy: config.PolicyBypass}, nil
+	return httpcache.Route{ObjectPath: "oci/other/" + httpcache.HashKey(cleanPath), UpstreamPath: cleanPath, Policy: config.PolicyBypass}, nil
 }
 
 // LookupRef 解析用户友好的镜像引用，返回缓存路由。
 // 支持:
 //   - repo     → tags/list
 //   - repo:tag → manifests/tag
-func LookupRef(cfg *Policy, ref string) (proxy.Route, error) {
+func LookupRef(cfg *Policy, ref string) (httpcache.Route, error) {
 	v2Path, err := parseOCIRef(ref)
 	if err != nil {
-		return proxy.Route{}, err
+		return httpcache.Route{}, err
 	}
 	return New(cfg).Resolve(&http.Request{URL: &url.URL{Path: "/" + v2Path}})
 }

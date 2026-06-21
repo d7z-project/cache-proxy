@@ -1,8 +1,8 @@
 package pypi
 
 import (
+	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,12 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
-
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 type Policy struct {
@@ -32,38 +29,53 @@ type Policy struct {
 	ProxySignatures     bool             `json:"proxySignatures,omitempty" yaml:"proxy_signatures,omitempty"`
 }
 
+type Block struct {
+	ExpireAfter config.Expiration `yaml:"expire_after"`
+	Route       struct {
+		Path string `yaml:"path"`
+	} `yaml:"route"`
+	Upstreams []string                `yaml:"upstreams"`
+	Transport *config.TransportConfig `yaml:"transport,omitempty"`
+	Policy    `yaml:",inline"`
+}
+
 type Driver struct{}
 
-func (Driver) Mode() string { return config.ModePyPI }
+func NewDriver() proxyruntime.ModeDriver { return Driver{} }
+func (Driver) Mode() string              { return config.ModePyPI }
 
-func (Driver) DecodeJSON(data json.RawMessage) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 || string(data) == "null" {
-		return policy, nil
+func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	var block Block
+	if err := plan.Decode(&block); err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, err
+	if len(block.Upstreams) != 1 {
+		return fmt.Errorf("instance %s: pypi mode requires exactly one upstream", plan.Name())
 	}
-	return policy, nil
+	applyDefaults(&block.Policy)
+	if err := validate(&block.Policy); err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	expireAfter := block.ExpireAfter
+	if expireAfter.IsUnset() {
+		expireAfter = config.DefaultExpireAfter
+	}
+	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+		Mode:            config.ModePyPI,
+		ExpireAfter:     expireAfter,
+		Upstreams:       append([]string(nil), block.Upstreams...),
+		Transport:       block.Transport,
+		BusyPolicy:      block.AuxiliaryBusyPolicy,
+		DefaultFreshFor: block.AuxiliaryFreshFor,
+	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats())
+	plan.SetHomeSnippet(plan.RenderSnippet())
+	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
+		Handler: handler,
+		Close:   func() error { handler.Close(); return nil },
+	})
 }
 
-func (Driver) EncodeJSON(policy any) (json.RawMessage, error) { return json.Marshal(policy) }
-
-func (Driver) DecodeYAML(data []byte) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 {
-		return policy, nil
-	}
-	if err := yaml.Unmarshal(data, policy); err != nil {
-		return nil, err
-	}
-	return policy, nil
-}
-
-func (Driver) EncodeYAML(policy any) ([]byte, error) { return yaml.Marshal(policy) }
-
-func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
-	policy := spec.Policy.(*Policy)
+func applyDefaults(policy *Policy) {
 	if policy.MetadataPolicy == "" {
 		policy.MetadataPolicy = config.PolicyRevalidate
 	}
@@ -90,11 +102,7 @@ func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
 	}
 }
 
-func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
-	if len(spec.Source.Upstreams) != 1 {
-		return errors.New("pypi mode requires exactly one upstream")
-	}
-	policy := spec.Policy.(*Policy)
+func validate(policy *Policy) error {
 	for _, value := range []string{policy.MetadataPolicy, policy.ArtifactPolicy, policy.AuxiliaryPolicy} {
 		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
 			return fmt.Errorf("invalid pypi policy %q", value)
@@ -108,41 +116,21 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
-	return spec.Policy.(*Policy).AuxiliaryFreshFor
-}
-
-func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
-	handler := proxy.NewHandler(name, proxy.RuntimeConfig{
-		Mode:            config.ModePyPI,
-		ExpireAfter:     spec.Meta.ExpireAfter,
-		Upstreams:       append([]string(nil), spec.Source.Upstreams...),
-		Transport:       spec.Source.Transport,
-		BusyPolicy:      spec.Policy.(*Policy).AuxiliaryBusyPolicy,
-		DefaultFreshFor: spec.Policy.(*Policy).AuxiliaryFreshFor,
-	}, store, &resolver{policy: spec.Policy.(*Policy)}, stats)
-	return handler, handler.Close, nil
-}
-
-func (Driver) Lookup(spec *proxydriver.ResolvedSpec, lookupPath string) (proxy.Route, error) {
-	return routeForPath(spec.Policy.(*Policy), strings.TrimPrefix(path.Clean("/"+lookupPath), "/"))
-}
-
 type resolver struct {
 	policy *Policy
 }
 
-func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
+func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	return routeForPath(r.policy, strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
 }
 
-func routeForPath(policy *Policy, lookupPath string) (proxy.Route, error) {
+func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
 	if lookupPath == "." || lookupPath == "" {
 		lookupPath = "simple/"
 	}
 	switch {
 	case lookupPath == "simple" || lookupPath == "simple/":
-		return proxy.Route{
+		return httpcache.Route{
 			ObjectPath:   "pypi/simple/root.html",
 			UpstreamPath: "simple/",
 			Policy:       policy.MetadataPolicy,
@@ -155,9 +143,9 @@ func routeForPath(policy *Policy, lookupPath string) (proxy.Route, error) {
 		if strings.HasSuffix(trimmed, "/json") {
 			name := normalizeProjectName(strings.TrimSuffix(trimmed, "/json"))
 			if !policy.ProxyJSON {
-				return proxy.Route{}, errors.New("json simple api is disabled")
+				return httpcache.Route{}, errors.New("json simple api is disabled")
 			}
-			return proxy.Route{
+			return httpcache.Route{
 				ObjectPath:     "pypi/simple/" + name + ".json",
 				UpstreamPath:   "simple/" + name + "/",
 				Policy:         policy.MetadataPolicy,
@@ -168,7 +156,7 @@ func routeForPath(policy *Policy, lookupPath string) (proxy.Route, error) {
 			}, nil
 		}
 		name := normalizeProjectName(strings.TrimSuffix(trimmed, "/"))
-		return proxy.Route{
+		return httpcache.Route{
 			ObjectPath:   "pypi/simple/" + name + ".html",
 			UpstreamPath: "simple/" + name + "/",
 			Policy:       policy.MetadataPolicy,
@@ -179,7 +167,7 @@ func routeForPath(policy *Policy, lookupPath string) (proxy.Route, error) {
 	case strings.HasPrefix(lookupPath, "files/"):
 		sourceURL, err := decodeSourceURL(path.Base(lookupPath))
 		if err != nil {
-			return proxy.Route{}, err
+			return httpcache.Route{}, err
 		}
 		return fileRoute(policy, lookupPath, sourceURL), nil
 	default:
@@ -191,12 +179,12 @@ func routeForPath(policy *Policy, lookupPath string) (proxy.Route, error) {
 	}
 }
 
-func fileRoute(policy *Policy, lookupPath, rawURL string) proxy.Route {
+func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
 	objectPath := "pypi/files/" + path.Base(lookupPath)
 	if !strings.HasPrefix(lookupPath, "files/") {
 		objectPath = "pypi/files/" + encodeSourceURL(rawURL)
 	}
-	route := proxy.Route{
+	route := httpcache.Route{
 		ObjectPath: objectPath,
 		Policy:     policy.ArtifactPolicy,
 	}
@@ -252,8 +240,4 @@ func decodeSourceURL(value string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-func init() {
-	proxydriver.Default.Register(Driver{})
 }

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 func TestParseOCIRef(t *testing.T) {
@@ -51,7 +51,7 @@ func TestLookupRefRoutesCorrectly(t *testing.T) {
 		wantObject string
 	}{
 		{name: "repo tags", input: "library/alpine", wantPolicy: "immutable", wantObject: "oci/tags/library/alpine/list"},
-		{name: "repo manifest", input: "library/alpine:latest", wantPolicy: "immutable", wantObject: "oci/manifests/library/alpine/" + proxy.HashKey("latest")},
+		{name: "repo manifest", input: "library/alpine:latest", wantPolicy: "immutable", wantObject: "oci/manifests/library/alpine/" + httpcache.HashKey("latest")},
 		{name: "org repo", input: "org/project/app:v1", wantPolicy: "bypass"},
 	}
 	for _, tt := range tests {

@@ -24,7 +24,7 @@ go.work
 .idea
 *.iml
 build
-cache-proxy
+/cache-proxy
 config.local.yaml
 web/node_modules/
 web/.angular/

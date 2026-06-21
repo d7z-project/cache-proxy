@@ -8,7 +8,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 type Resolver struct {
@@ -19,21 +19,21 @@ func New(cfg *Policy) *Resolver {
 	return &Resolver{cfg: cfg}
 }
 
-func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
+func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	cleanPath := strings.TrimLeft(req.URL.Path, "/")
-	if !proxy.SafePath(cleanPath) {
-		return proxy.Route{}, errors.New("invalid npm request path")
+	if !httpcache.SafePath(cleanPath) {
+		return httpcache.Route{}, errors.New("invalid npm request path")
 	}
 	upstreamPath := cleanPath
 	objectPath := cleanPath
 	if req.URL.RawQuery != "" {
 		upstreamPath += "?" + req.URL.RawQuery
-		objectPath += "/" + proxy.HashKey(req.URL.RawQuery)
+		objectPath += "/" + httpcache.HashKey(req.URL.RawQuery)
 	}
 	packageName := extractPackageName(cleanPath)
 	if strings.HasSuffix(cleanPath, ".tgz") {
 		match := r.resolveResource(packageName, "tarball")
-		return proxy.Route{
+		return httpcache.Route{
 			ObjectPath:   "npm/tarballs/" + objectPath,
 			UpstreamPath: upstreamPath,
 			Policy:       match.policy,
@@ -42,8 +42,8 @@ func (r *Resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		}, nil
 	}
 	match := r.resolveResource(packageName, "metadata")
-	return proxy.Route{
-		ObjectPath:   "npm/metadata/" + proxy.HashKey(objectPath),
+	return httpcache.Route{
+		ObjectPath:   "npm/metadata/" + httpcache.HashKey(objectPath),
 		UpstreamPath: upstreamPath,
 		Policy:       match.policy,
 		FreshFor:     match.freshFor,

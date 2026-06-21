@@ -1,19 +1,17 @@
 package maven
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"net/http"
 	"path"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy"
-	"gopkg.d7z.net/cache-proxy/pkg/proxydriver"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 type Policy struct {
@@ -35,44 +33,52 @@ type Rule struct {
 	ExpireAfter config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
+type Block struct {
+	ExpireAfter config.Expiration `yaml:"expire_after"`
+	Route       struct {
+		Path string `yaml:"path"`
+	} `yaml:"route"`
+	Upstreams []string                `yaml:"upstreams"`
+	Transport *config.TransportConfig `yaml:"transport,omitempty"`
+	Policy    `yaml:",inline"`
+}
+
 type Driver struct{}
 
-func (Driver) Mode() string { return config.ModeMaven }
+func NewDriver() proxyruntime.ModeDriver { return Driver{} }
+func (Driver) Mode() string              { return config.ModeMaven }
 
-func (Driver) DecodeJSON(data json.RawMessage) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 || string(data) == "null" {
-		return policy, nil
+func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	var block Block
+	if err := plan.Decode(&block); err != nil {
+		return err
 	}
-	if err := json.Unmarshal(data, policy); err != nil {
-		return nil, err
+	if len(block.Upstreams) != 1 {
+		return fmt.Errorf("instance %s: maven mode requires exactly one upstream", plan.Name())
 	}
-	return policy, nil
+	applyDefaults(&block.Policy)
+	if err := validate(&block.Policy); err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	expireAfter := block.ExpireAfter
+	if expireAfter.IsUnset() {
+		expireAfter = config.DefaultExpireAfter
+	}
+	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+		Mode:        config.ModeMaven,
+		ExpireAfter: expireAfter,
+		Upstreams:   append([]string(nil), block.Upstreams...),
+		Transport:   block.Transport,
+		BusyPolicy:  config.BusyPolicyBypass,
+	}, plan.Store(), newResolver(&block.Policy), plan.Stats())
+	plan.SetHomeSnippet(plan.RenderSnippet())
+	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
+		Handler: handler,
+		Close:   func() error { handler.Close(); return nil },
+	})
 }
 
-func (Driver) EncodeJSON(policy any) (json.RawMessage, error) {
-	data, err := json.Marshal(policy)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-func (Driver) DecodeYAML(data []byte) (any, error) {
-	policy := &Policy{}
-	if len(data) == 0 {
-		return policy, nil
-	}
-	if err := yaml.Unmarshal(data, policy); err != nil {
-		return nil, err
-	}
-	return policy, nil
-}
-
-func (Driver) EncodeYAML(policy any) ([]byte, error) { return yaml.Marshal(policy) }
-
-func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
-	policy := spec.Policy.(*Policy)
+func applyDefaults(policy *Policy) {
 	if policy.MetadataBusyPolicy == "" {
 		policy.MetadataBusyPolicy = config.BusyPolicyStale
 	}
@@ -90,11 +96,7 @@ func (Driver) ApplyDefaults(spec *proxydriver.ResolvedSpec) {
 	}
 }
 
-func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
-	if len(spec.Source.Upstreams) != 1 {
-		return fmt.Errorf("maven mode requires exactly one upstream")
-	}
-	policy := spec.Policy.(*Policy)
+func validate(policy *Policy) error {
 	if !validPolicy(policy.ReleasePolicy) {
 		return fmt.Errorf("invalid maven release policy %q", policy.ReleasePolicy)
 	}
@@ -128,37 +130,16 @@ func (Driver) Validate(spec *proxydriver.ResolvedSpec) error {
 	return nil
 }
 
-func (Driver) DefaultFreshFor(spec *proxydriver.ResolvedSpec) config.Freshness {
-	return 0
-}
-
-func (Driver) NewHandler(name string, spec *proxydriver.ResolvedSpec, store *blobfs.Store, stats *proxy.Stats) (http.Handler, func(), error) {
-	policy := spec.Policy.(*Policy)
-	handler := proxy.NewHandler(name, proxy.RuntimeConfig{
-		Mode:        config.ModeMaven,
-		ExpireAfter: spec.Meta.ExpireAfter,
-		Upstreams:   append([]string(nil), spec.Source.Upstreams...),
-		Transport:   spec.Source.Transport,
-		BusyPolicy:  config.BusyPolicyBypass,
-	}, store, newResolver(policy), stats)
-	return handler, handler.Close, nil
-}
-
-func (Driver) Lookup(spec *proxydriver.ResolvedSpec, lookupPath string) (proxy.Route, error) {
-	req, _ := http.NewRequest(http.MethodGet, "/"+strings.TrimPrefix(lookupPath, "/"), nil)
-	return newResolver(spec.Policy.(*Policy)).Resolve(req)
-}
-
 type resolver struct{ policy *Policy }
 
 func newResolver(policy *Policy) *resolver { return &resolver{policy: policy} }
 
-func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
+func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	lookupPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
 	if lookupPath == "." || lookupPath == "" {
-		return proxy.Route{}, fmt.Errorf("path is required")
+		return httpcache.Route{}, fmt.Errorf("path is required")
 	}
-	route := proxy.Route{
+	route := httpcache.Route{
 		ObjectPath:   "maven/" + lookupPath,
 		UpstreamPath: lookupPath,
 		Policy:       r.defaultPolicy(lookupPath),
@@ -167,7 +148,6 @@ func (r *resolver) Resolve(req *http.Request) (proxy.Route, error) {
 		route.Policy = config.PolicyRevalidate
 		route.FreshFor = r.policy.MetadataFreshFor
 		route.BusyPolicy = r.policy.MetadataBusyPolicy
-		route.ExpireAfter = 0
 		return route, nil
 	}
 	if isAuxiliaryPath(lookupPath) {
@@ -217,8 +197,4 @@ func isAuxiliaryPath(lookupPath string) bool {
 		}
 	}
 	return false
-}
-
-func init() {
-	proxydriver.Default.Register(Driver{})
 }
