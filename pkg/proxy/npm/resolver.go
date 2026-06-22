@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bmatcuk/doublestar/v4"
-
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
@@ -30,9 +28,8 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		upstreamPath += "?" + req.URL.RawQuery
 		objectPath += "/" + httpcache.HashKey(req.URL.RawQuery)
 	}
-	packageName := extractPackageName(cleanPath)
 	if strings.HasSuffix(cleanPath, ".tgz") {
-		match := r.resolveResource(packageName, "tarball")
+		match := r.resolveResource("tarball")
 		return httpcache.Route{
 			ObjectPath:   "npm/tarballs/" + objectPath,
 			UpstreamPath: upstreamPath,
@@ -41,7 +38,7 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 			ExpireAfter:  match.expireAfter,
 		}, nil
 	}
-	match := r.resolveResource(packageName, "metadata")
+	match := r.resolveResource("metadata")
 	return httpcache.Route{
 		ObjectPath:   "npm/metadata/" + httpcache.HashKey(objectPath),
 		UpstreamPath: upstreamPath,
@@ -58,35 +55,14 @@ type npmMatch struct {
 	expireAfter config.Expiration
 }
 
-func (r *Resolver) resolveResource(packageName, resourceType string) npmMatch {
-	for _, rule := range r.cfg.Rules {
-		if rule.ResourcePolicy != "*" && rule.ResourcePolicy != resourceType {
-			continue
-		}
-		if !doublestar.MatchUnvalidated(rule.Match, packageName) {
-			continue
-		}
+func (r *Resolver) resolveResource(resourceType string) npmMatch {
+	switch resourceType {
+	case "tarball":
+		return npmMatch{policy: r.cfg.TarballPolicy}
+	default:
 		return npmMatch{
-			policy:      rule.Policy,
-			freshFor:    rule.FreshFor,
-			expireAfter: rule.ExpireAfter,
+			policy:   r.cfg.MetadataPolicy,
+			freshFor: r.cfg.MetadataFreshFor,
 		}
 	}
-	match := npmMatch{policy: r.cfg.DefaultPolicy}
-	if match.policy == "" {
-		match.policy = config.PolicyBypass
-	}
-	return match
-}
-
-func extractPackageName(cleanPath string) string {
-	cleanPath = strings.TrimPrefix(cleanPath, "/")
-	if strings.HasPrefix(cleanPath, "@") {
-		parts := strings.SplitN(cleanPath, "/", 3)
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
-		}
-	}
-	parts := strings.SplitN(cleanPath, "/", 2)
-	return parts[0]
 }

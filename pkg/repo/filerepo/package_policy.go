@@ -27,6 +27,40 @@ type Policy struct {
 	Rules                []Rule            `json:"rules,omitempty" yaml:"rules,omitempty"`
 }
 
+type BasicPolicy struct {
+	PassHeaders          []string          `json:"passHeaders,omitempty" yaml:"pass_headers,omitempty"`
+	MetadataPolicy       string            `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
+	MetadataFreshFor     config.Freshness  `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
+	MetadataBusyPolicy   string            `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
+	MetadataExpireAfter  config.Expiration `json:"metadataExpireAfter,omitempty" yaml:"metadata_expire_after,omitempty"`
+	ArtifactPolicy       string            `json:"artifactPolicy,omitempty" yaml:"artifact_policy,omitempty"`
+	ArtifactFreshFor     config.Freshness  `json:"artifactFreshFor,omitempty" yaml:"artifact_fresh_for,omitempty"`
+	ArtifactBusyPolicy   string            `json:"artifactBusyPolicy,omitempty" yaml:"artifact_busy_policy,omitempty"`
+	ArtifactExpireAfter  config.Expiration `json:"artifactExpireAfter,omitempty" yaml:"artifact_expire_after,omitempty"`
+	AuxiliaryPolicy      string            `json:"auxiliaryPolicy,omitempty" yaml:"auxiliary_policy,omitempty"`
+	AuxiliaryFreshFor    config.Freshness  `json:"auxiliaryFreshFor,omitempty" yaml:"auxiliary_fresh_for,omitempty"`
+	AuxiliaryBusyPolicy  string            `json:"auxiliaryBusyPolicy,omitempty" yaml:"auxiliary_busy_policy,omitempty"`
+	AuxiliaryExpireAfter config.Expiration `json:"auxiliaryExpireAfter,omitempty" yaml:"auxiliary_expire_after,omitempty"`
+}
+
+func (p BasicPolicy) AsPolicy() *Policy {
+	return &Policy{
+		PassHeaders:          append([]string(nil), p.PassHeaders...),
+		MetadataPolicy:       p.MetadataPolicy,
+		MetadataFreshFor:     p.MetadataFreshFor,
+		MetadataBusyPolicy:   p.MetadataBusyPolicy,
+		MetadataExpireAfter:  p.MetadataExpireAfter,
+		ArtifactPolicy:       p.ArtifactPolicy,
+		ArtifactFreshFor:     p.ArtifactFreshFor,
+		ArtifactBusyPolicy:   p.ArtifactBusyPolicy,
+		ArtifactExpireAfter:  p.ArtifactExpireAfter,
+		AuxiliaryPolicy:      p.AuxiliaryPolicy,
+		AuxiliaryFreshFor:    p.AuxiliaryFreshFor,
+		AuxiliaryBusyPolicy:  p.AuxiliaryBusyPolicy,
+		AuxiliaryExpireAfter: p.AuxiliaryExpireAfter,
+	}
+}
+
 func ApplyDefaults(policy *Policy, metadataFreshFor config.Freshness) {
 	if policy.MetadataPolicy == "" {
 		policy.MetadataPolicy = config.PolicyRevalidate

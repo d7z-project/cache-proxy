@@ -6,8 +6,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
-
-	"github.com/bmatcuk/doublestar/v4"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -15,22 +14,14 @@ import (
 )
 
 type Policy struct {
-	MetadataFreshFor    config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy  string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	AuxiliaryPolicy     string           `json:"auxiliaryPolicy,omitempty" yaml:"auxiliary_policy,omitempty"`
-	AuxiliaryFreshFor   config.Freshness `json:"auxiliaryFreshFor,omitempty" yaml:"auxiliary_fresh_for,omitempty"`
-	AuxiliaryBusyPolicy string           `json:"auxiliaryBusyPolicy,omitempty" yaml:"auxiliary_busy_policy,omitempty"`
-	ReleasePolicy       string           `json:"releasePolicy,omitempty" yaml:"release_policy,omitempty"`
-	SnapshotPolicy      string           `json:"snapshotPolicy,omitempty" yaml:"snapshot_policy,omitempty"`
-	SnapshotFreshFor    config.Freshness `json:"snapshotFreshFor,omitempty" yaml:"snapshot_fresh_for,omitempty"`
-	Rules               []Rule           `json:"rules" yaml:"rules"`
-}
-
-type Rule struct {
-	Match       string            `json:"match" yaml:"match"`
-	Policy      string            `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor    config.Freshness  `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	ExpireAfter config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+	MetadataFreshFor   config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
+	MetadataBusyPolicy string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
+	ChecksumPolicy     string           `json:"checksumPolicy,omitempty" yaml:"checksum_policy,omitempty"`
+	ChecksumFreshFor   config.Freshness `json:"checksumFreshFor,omitempty" yaml:"checksum_fresh_for,omitempty"`
+	ChecksumBusyPolicy string           `json:"checksumBusyPolicy,omitempty" yaml:"checksum_busy_policy,omitempty"`
+	ReleasePolicy      string           `json:"releasePolicy,omitempty" yaml:"release_policy,omitempty"`
+	SnapshotPolicy     string           `json:"snapshotPolicy,omitempty" yaml:"snapshot_policy,omitempty"`
+	SnapshotFreshFor   config.Freshness `json:"snapshotFreshFor,omitempty" yaml:"snapshot_fresh_for,omitempty"`
 }
 
 type Block struct {
@@ -38,7 +29,7 @@ type Block struct {
 	Route       struct {
 		Path string `yaml:"path"`
 	} `yaml:"route"`
-	Upstreams []string                `yaml:"upstreams"`
+	Upstream  string                  `yaml:"upstream"`
 	Transport *config.TransportConfig `yaml:"transport,omitempty"`
 	Policy    `yaml:",inline"`
 }
@@ -53,8 +44,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.Decode(&block); err != nil {
 		return err
 	}
-	if len(block.Upstreams) != 1 {
-		return fmt.Errorf("instance %s: maven mode requires exactly one upstream", plan.Name())
+	if strings.TrimSpace(block.Upstream) == "" {
+		return fmt.Errorf("instance %s: maven mode requires one upstream", plan.Name())
 	}
 	applyDefaults(&block.Policy)
 	if err := validate(&block.Policy); err != nil {
@@ -67,7 +58,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
 		Mode:        config.ModeMaven,
 		ExpireAfter: expireAfter,
-		Upstreams:   append([]string(nil), block.Upstreams...),
+		Upstreams:   []string{strings.TrimSpace(block.Upstream)},
 		Transport:   block.Transport,
 		BusyPolicy:  config.BusyPolicyBypass,
 	}, plan.Store(), newResolver(&block.Policy), plan.Stats())
@@ -86,11 +77,14 @@ func applyDefaults(policy *Policy) {
 	if policy.ReleasePolicy == "" {
 		policy.ReleasePolicy = config.PolicyImmutable
 	}
-	if policy.AuxiliaryPolicy == "" {
-		policy.AuxiliaryPolicy = config.PolicyRevalidate
+	if policy.ChecksumPolicy == "" {
+		policy.ChecksumPolicy = config.PolicyRevalidate
 	}
-	if policy.AuxiliaryBusyPolicy == "" {
-		policy.AuxiliaryBusyPolicy = config.BusyPolicyStale
+	if policy.ChecksumFreshFor == 0 {
+		policy.ChecksumFreshFor = config.Freshness(30 * time.Second)
+	}
+	if policy.ChecksumBusyPolicy == "" {
+		policy.ChecksumBusyPolicy = config.BusyPolicyStale
 	}
 	if policy.SnapshotPolicy == "" {
 		policy.SnapshotPolicy = config.PolicyRevalidate
@@ -104,29 +98,14 @@ func validate(policy *Policy) error {
 	if !validPolicy(policy.SnapshotPolicy) {
 		return fmt.Errorf("invalid maven snapshot policy %q", policy.SnapshotPolicy)
 	}
-	if !validPolicy(policy.AuxiliaryPolicy) {
-		return fmt.Errorf("invalid maven auxiliary policy %q", policy.AuxiliaryPolicy)
+	if !validPolicy(policy.ChecksumPolicy) {
+		return fmt.Errorf("invalid maven checksum policy %q", policy.ChecksumPolicy)
 	}
 	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
 		return fmt.Errorf("invalid maven metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
-	if policy.AuxiliaryBusyPolicy != config.BusyPolicyBypass && policy.AuxiliaryBusyPolicy != config.BusyPolicyStale {
-		return fmt.Errorf("invalid maven auxiliary busy policy %q", policy.AuxiliaryBusyPolicy)
-	}
-	for i, rule := range policy.Rules {
-		if strings.TrimSpace(rule.Match) == "" {
-			return fmt.Errorf("maven rule %d: match is empty", i)
-		}
-		if !doublestar.ValidatePattern(rule.Match) {
-			return fmt.Errorf("maven rule %d: invalid match %q", i, rule.Match)
-		}
-		if rule.Policy == "" {
-			rule.Policy = config.PolicyBypass
-		}
-		if !validPolicy(rule.Policy) {
-			return fmt.Errorf("maven rule %d: invalid policy %q", i, rule.Policy)
-		}
-		policy.Rules[i] = rule
+	if policy.ChecksumBusyPolicy != config.BusyPolicyBypass && policy.ChecksumBusyPolicy != config.BusyPolicyStale {
+		return fmt.Errorf("invalid maven checksum busy policy %q", policy.ChecksumBusyPolicy)
 	}
 	return nil
 }
@@ -152,19 +131,12 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		return route, nil
 	}
 	if isAuxiliaryPath(lookupPath) {
-		route.Policy = r.policy.AuxiliaryPolicy
-		route.FreshFor = r.policy.AuxiliaryFreshFor
-		route.BusyPolicy = r.policy.AuxiliaryBusyPolicy
+		route.Policy = r.policy.ChecksumPolicy
+		route.FreshFor = r.policy.ChecksumFreshFor
+		route.BusyPolicy = r.policy.ChecksumBusyPolicy
 	} else if isSnapshotPath(lookupPath) {
 		route.Policy = r.policy.SnapshotPolicy
 		route.FreshFor = r.policy.SnapshotFreshFor
-	}
-	for _, rule := range r.policy.Rules {
-		if ok, _ := doublestar.Match(rule.Match, lookupPath); ok {
-			route.Policy = rule.Policy
-			route.FreshFor = rule.FreshFor
-			route.ExpireAfter = rule.ExpireAfter
-		}
 	}
 	return route, nil
 }

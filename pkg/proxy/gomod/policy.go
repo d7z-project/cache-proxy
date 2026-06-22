@@ -25,10 +25,10 @@ type Config struct {
 	SumDB                    *SumDBConfig     `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
 	GOPrivate                []string         `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
 	DisableModuleFetchHeader bool             `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
-	MetadataPolicy           string           `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
-	MetadataFreshFor         config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy       string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	ArtifactPolicy           string           `json:"artifactPolicy,omitempty" yaml:"artifact_policy,omitempty"`
+	ModulePolicy             string           `json:"modulePolicy,omitempty" yaml:"module_policy,omitempty"`
+	ModuleFreshFor           config.Freshness `json:"moduleFreshFor,omitempty" yaml:"module_fresh_for,omitempty"`
+	ModuleBusyPolicy         string           `json:"moduleBusyPolicy,omitempty" yaml:"module_busy_policy,omitempty"`
+	ZipPolicy                string           `json:"zipPolicy,omitempty" yaml:"zip_policy,omitempty"`
 	SumDBFreshFor            config.Freshness `json:"sumdbFreshFor,omitempty" yaml:"sumdb_fresh_for,omitempty"`
 	SumDBBusyPolicy          string           `json:"sumdbBusyPolicy,omitempty" yaml:"sumdb_busy_policy,omitempty"`
 }
@@ -40,7 +40,7 @@ type Block struct {
 	Route       struct {
 		Path string `yaml:"path"`
 	} `yaml:"route"`
-	Upstreams []string                `yaml:"upstreams"`
+	Proxies   []string                `yaml:"proxies"`
 	Transport *config.TransportConfig `yaml:"transport,omitempty"`
 	Config    `yaml:",inline"`
 }
@@ -56,14 +56,14 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return err
 	}
 	applyDefaults(&block.Config)
-	if err := validateBlock(block.Upstreams, &block.Config); err != nil {
+	if err := validateBlock(block.Proxies, &block.Config); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler, err := NewHandler(plan.Name(), expireAfter, block.Upstreams, block.Transport, &block.Config, plan.Store(), plan.Stats())
+	handler, err := NewHandler(plan.Name(), expireAfter, block.Proxies, block.Transport, &block.Config, plan.Store(), plan.Stats())
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
@@ -76,17 +76,17 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 }
 
 func applyDefaults(cfg *Config) {
-	if cfg.MetadataPolicy == "" {
-		cfg.MetadataPolicy = config.PolicyRevalidate
+	if cfg.ModulePolicy == "" {
+		cfg.ModulePolicy = config.PolicyRevalidate
 	}
-	if cfg.MetadataFreshFor == 0 {
-		cfg.MetadataFreshFor = config.Freshness(time.Minute)
+	if cfg.ModuleFreshFor == 0 {
+		cfg.ModuleFreshFor = config.Freshness(time.Minute)
 	}
-	if cfg.MetadataBusyPolicy == "" {
-		cfg.MetadataBusyPolicy = config.BusyPolicyStale
+	if cfg.ModuleBusyPolicy == "" {
+		cfg.ModuleBusyPolicy = config.BusyPolicyStale
 	}
-	if cfg.ArtifactPolicy == "" {
-		cfg.ArtifactPolicy = config.PolicyImmutable
+	if cfg.ZipPolicy == "" {
+		cfg.ZipPolicy = config.PolicyImmutable
 	}
 	if cfg.SumDBFreshFor == 0 {
 		cfg.SumDBFreshFor = config.Freshness(30 * time.Second)
@@ -111,17 +111,17 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
-func validateBlock(upstreams []string, cfg *Config) error {
-	if len(upstreams) == 0 {
-		return errors.New("go proxy requires at least one GOPROXY upstream")
+func validateBlock(proxies []string, cfg *Config) error {
+	if len(proxies) == 0 {
+		return errors.New("go proxy requires at least one proxy")
 	}
-	for i, raw := range upstreams {
+	for i, raw := range proxies {
 		u, err := url.Parse(strings.TrimSpace(raw))
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("go upstream %d must be a valid absolute URL", i)
+			return fmt.Errorf("go proxy %d must be a valid absolute URL", i)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("go upstream %d must use http or https", i)
+			return fmt.Errorf("go proxy %d must use http or https", i)
 		}
 	}
 	if cfg.SumDB != nil && cfg.SumDB.Enabled {
@@ -150,12 +150,12 @@ func validateBlock(upstreams []string, cfg *Config) error {
 			return fmt.Errorf("go goprivate %d must not contain line breaks", i)
 		}
 	}
-	for _, value := range []string{cfg.MetadataPolicy, cfg.ArtifactPolicy} {
+	for _, value := range []string{cfg.ModulePolicy, cfg.ZipPolicy} {
 		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
 			return fmt.Errorf("invalid go cache policy %q", value)
 		}
 	}
-	for _, value := range []string{cfg.MetadataBusyPolicy, cfg.SumDBBusyPolicy} {
+	for _, value := range []string{cfg.ModuleBusyPolicy, cfg.SumDBBusyPolicy} {
 		if value != config.BusyPolicyBypass && value != config.BusyPolicyStale {
 			return fmt.Errorf("invalid go busy policy %q", value)
 		}

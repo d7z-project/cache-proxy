@@ -140,7 +140,6 @@ instances:
       refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
-      rules: []
 `))
 	require.NoError(t, err)
 	selected, err := doc.Instances[0].SelectMode()
@@ -159,11 +158,223 @@ instances:
 		RefreshTimeout Duration `yaml:"refresh_timeout"`
 		MetadataPolicy string   `yaml:"metadata_policy"`
 		ArtifactPolicy string   `yaml:"artifact_policy"`
-		Rules          []any    `yaml:"rules"`
 	}
 	require.NoError(t, selected.Block.DecodeStrict(&block))
 	require.Equal(t, Duration(2*time.Minute), block.RefreshTimeout)
 	require.Len(t, block.Repositories, 1)
 	require.Equal(t, "https://deb.example.com/debian", block.Repositories[0].URL)
 	require.Equal(t, []string{"bookworm"}, block.Repositories[0].Suites)
+}
+
+func TestDecodePackageRepositoryConfigRejectsRules(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: linux
+    enabled: true
+    deb:
+      expire_after: 720h
+      route:
+        path: /deb
+      repositories:
+        - url: https://deb.example.com/debian
+          suites: [bookworm]
+          components: [main]
+          architectures: [amd64]
+      rules: []
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	var block struct {
+		ExpireAfter Expiration `yaml:"expire_after"`
+		Route       struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Repositories []struct {
+			URL           string   `yaml:"url"`
+			Suites        []string `yaml:"suites"`
+			Components    []string `yaml:"components"`
+			Architectures []string `yaml:"architectures"`
+		} `yaml:"repositories"`
+	}
+	err = selected.Block.DecodeStrict(&block)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "field rules not found")
+}
+
+func TestDecodeGoProxyConfig(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: golang
+    enabled: true
+    go:
+      expire_after: 720h
+      route:
+        path: /go
+      proxies:
+        - https://proxy.golang.org
+      module_policy: revalidate
+      zip_policy: immutable
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	var block struct {
+		ExpireAfter Expiration `yaml:"expire_after"`
+		Route       struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Proxies      []string `yaml:"proxies"`
+		ModulePolicy string   `yaml:"module_policy"`
+		ZipPolicy    string   `yaml:"zip_policy"`
+	}
+	require.NoError(t, selected.Block.DecodeStrict(&block))
+	require.Equal(t, []string{"https://proxy.golang.org"}, block.Proxies)
+	require.Equal(t, "revalidate", block.ModulePolicy)
+	require.Equal(t, "immutable", block.ZipPolicy)
+}
+
+func TestDecodePyPIConfig(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: python
+    enabled: true
+    pypi:
+      expire_after: 720h
+      route:
+        path: /pypi
+      upstream: https://pypi.org
+      index_policy: revalidate
+      file_policy: immutable
+      proxy_json: false
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	var block struct {
+		ExpireAfter Expiration `yaml:"expire_after"`
+		Route       struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Upstream    string `yaml:"upstream"`
+		IndexPolicy string `yaml:"index_policy"`
+		FilePolicy  string `yaml:"file_policy"`
+		ProxyJSON   *bool  `yaml:"proxy_json"`
+	}
+	require.NoError(t, selected.Block.DecodeStrict(&block))
+	require.Equal(t, "https://pypi.org", block.Upstream)
+	require.Equal(t, "revalidate", block.IndexPolicy)
+	require.Equal(t, "immutable", block.FilePolicy)
+	require.NotNil(t, block.ProxyJSON)
+	require.False(t, *block.ProxyJSON)
+}
+
+func TestDecodeSimplifiedProxyConfigsRejectLegacyFields(t *testing.T) {
+	tests := []struct {
+		name        string
+		document    string
+		decodeBlock any
+		wantError   string
+	}{
+		{
+			name: "cargo rejects upstreams",
+			document: `
+instances:
+  - name: crates
+    enabled: true
+    cargo:
+      expire_after: 720h
+      route:
+        path: /cargo
+      upstreams:
+        - https://index.crates.io
+`,
+			decodeBlock: &struct {
+				ExpireAfter Expiration `yaml:"expire_after"`
+				Route       struct {
+					Path string `yaml:"path"`
+				} `yaml:"route"`
+				Upstream string `yaml:"upstream"`
+			}{},
+			wantError: "field upstreams not found",
+		},
+		{
+			name: "npm rejects rules",
+			document: `
+instances:
+  - name: npmjs
+    enabled: true
+    npm:
+      expire_after: 720h
+      route:
+        path: /npm
+      upstream: https://registry.npmjs.org
+      rules: []
+`,
+			decodeBlock: &struct {
+				ExpireAfter Expiration `yaml:"expire_after"`
+				Route       struct {
+					Path string `yaml:"path"`
+				} `yaml:"route"`
+				Upstream string `yaml:"upstream"`
+			}{},
+			wantError: "field rules not found",
+		},
+		{
+			name: "maven rejects upstreams",
+			document: `
+instances:
+  - name: central
+    enabled: true
+    maven:
+      expire_after: 720h
+      route:
+        path: /maven
+      upstreams:
+        - https://repo1.maven.org/maven2
+`,
+			decodeBlock: &struct {
+				ExpireAfter Expiration `yaml:"expire_after"`
+				Route       struct {
+					Path string `yaml:"path"`
+				} `yaml:"route"`
+				Upstream string `yaml:"upstream"`
+			}{},
+			wantError: "field upstreams not found",
+		},
+		{
+			name: "pypi rejects artifact policy",
+			document: `
+instances:
+  - name: python
+    enabled: true
+    pypi:
+      expire_after: 720h
+      route:
+        path: /pypi
+      upstream: https://pypi.org
+      artifact_policy: immutable
+`,
+			decodeBlock: &struct {
+				ExpireAfter Expiration `yaml:"expire_after"`
+				Route       struct {
+					Path string `yaml:"path"`
+				} `yaml:"route"`
+				Upstream   string `yaml:"upstream"`
+				FilePolicy string `yaml:"file_policy"`
+			}{},
+			wantError: "field artifact_policy not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, err := Decode(strings.NewReader(tt.document))
+			require.NoError(t, err)
+			selected, err := doc.Instances[0].SelectMode()
+			require.NoError(t, err)
+			err = selected.Block.DecodeStrict(tt.decodeBlock)
+			require.Error(t, err)
+			require.ErrorContains(t, err, tt.wantError)
+		})
+	}
 }

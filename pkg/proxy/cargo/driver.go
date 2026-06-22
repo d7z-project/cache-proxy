@@ -3,6 +3,7 @@ package cargo
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -20,7 +21,7 @@ type Block struct {
 	Route       struct {
 		Path string `yaml:"path"`
 	} `yaml:"route"`
-	Upstreams []string                `yaml:"upstreams"`
+	Upstream  string                  `yaml:"upstream"`
 	Transport *config.TransportConfig `yaml:"transport,omitempty"`
 	Policy    `yaml:",inline"`
 }
@@ -37,8 +38,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return err
 	}
 	applyDefaults(&block.Policy)
-	if len(block.Upstreams) != 1 {
-		return fmt.Errorf("instance %s: cargo mode requires exactly one upstream", plan.Name())
+	if strings.TrimSpace(block.Upstream) == "" {
+		return fmt.Errorf("instance %s: cargo mode requires one upstream", plan.Name())
 	}
 	if err := validatePolicy(plan.Name(), &block.Policy); err != nil {
 		return err
@@ -47,7 +48,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler, err := newHandler(plan.Name(), block.Upstreams[0], block.Transport, &block.Policy, expireAfter, plan.Store(), plan.Stats())
+	handler, err := newHandler(plan.Name(), strings.TrimSpace(block.Upstream), block.Transport, &block.Policy, expireAfter, plan.Store(), plan.Stats())
 	if err != nil {
 		return err
 	}

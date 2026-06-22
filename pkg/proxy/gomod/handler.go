@@ -54,8 +54,8 @@ func NewHandler(name string, expireAfter config.Expiration, upstreams []string, 
 		ExpireAfter:     expireAfter,
 		Upstreams:       append([]string(nil), upstreams...),
 		Transport:       transport,
-		BusyPolicy:      policy.MetadataBusyPolicy,
-		DefaultFreshFor: policy.MetadataFreshFor,
+		BusyPolicy:      policy.ModuleBusyPolicy,
+		DefaultFreshFor: policy.ModuleFreshFor,
 	}, store, &resolver{policy: policy}, stats)
 	return &Handler{name: name, policy: policy, store: store, base: base}, nil
 }
@@ -108,12 +108,12 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	route := httpcache.Route{
 		ObjectPath:   "go/" + moduleReq.cacheKey,
 		UpstreamPath: moduleReq.cacheKey,
-		Policy:       r.policy.MetadataPolicy,
-		FreshFor:     r.policy.MetadataFreshFor,
-		BusyPolicy:   r.policy.MetadataBusyPolicy,
+		Policy:       r.policy.ModulePolicy,
+		FreshFor:     r.policy.ModuleFreshFor,
+		BusyPolicy:   r.policy.ModuleBusyPolicy,
 	}
 	if moduleReq.kind == moduleRequestZip {
-		route.Policy = r.policy.ArtifactPolicy
+		route.Policy = r.policy.ZipPolicy
 		route.BusyPolicy = config.BusyPolicyBypass
 	}
 	return route, nil

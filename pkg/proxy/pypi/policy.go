@@ -17,14 +17,14 @@ import (
 )
 
 type Policy struct {
-	MetadataPolicy      string           `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
-	MetadataFreshFor    config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy  string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	ArtifactPolicy      string           `json:"artifactPolicy,omitempty" yaml:"artifact_policy,omitempty"`
-	AuxiliaryPolicy     string           `json:"auxiliaryPolicy,omitempty" yaml:"auxiliary_policy,omitempty"`
-	AuxiliaryFreshFor   config.Freshness `json:"auxiliaryFreshFor,omitempty" yaml:"auxiliary_fresh_for,omitempty"`
-	AuxiliaryBusyPolicy string           `json:"auxiliaryBusyPolicy,omitempty" yaml:"auxiliary_busy_policy,omitempty"`
-	ProxyJSON           bool             `json:"proxyJson,omitempty" yaml:"proxy_json,omitempty"`
+	IndexPolicy         string           `json:"indexPolicy,omitempty" yaml:"index_policy,omitempty"`
+	IndexFreshFor       config.Freshness `json:"indexFreshFor,omitempty" yaml:"index_fresh_for,omitempty"`
+	IndexBusyPolicy     string           `json:"indexBusyPolicy,omitempty" yaml:"index_busy_policy,omitempty"`
+	FilePolicy          string           `json:"filePolicy,omitempty" yaml:"file_policy,omitempty"`
+	CompanionPolicy     string           `json:"companionPolicy,omitempty" yaml:"companion_policy,omitempty"`
+	CompanionFreshFor   config.Freshness `json:"companionFreshFor,omitempty" yaml:"companion_fresh_for,omitempty"`
+	CompanionBusyPolicy string           `json:"companionBusyPolicy,omitempty" yaml:"companion_busy_policy,omitempty"`
+	ProxyJSON           *bool            `json:"proxyJson,omitempty" yaml:"proxy_json,omitempty"`
 	ProxyCoreMetadata   bool             `json:"proxyCoreMetadata,omitempty" yaml:"proxy_core_metadata,omitempty"`
 	ProxySignatures     bool             `json:"proxySignatures,omitempty" yaml:"proxy_signatures,omitempty"`
 }
@@ -34,7 +34,7 @@ type Block struct {
 	Route       struct {
 		Path string `yaml:"path"`
 	} `yaml:"route"`
-	Upstreams []string                `yaml:"upstreams"`
+	Upstream  string                  `yaml:"upstream"`
 	Transport *config.TransportConfig `yaml:"transport,omitempty"`
 	Policy    `yaml:",inline"`
 }
@@ -49,8 +49,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.Decode(&block); err != nil {
 		return err
 	}
-	if len(block.Upstreams) != 1 {
-		return fmt.Errorf("instance %s: pypi mode requires exactly one upstream", plan.Name())
+	if strings.TrimSpace(block.Upstream) == "" {
+		return fmt.Errorf("instance %s: pypi mode requires one upstream", plan.Name())
 	}
 	applyDefaults(&block.Policy)
 	if err := validate(&block.Policy); err != nil {
@@ -63,10 +63,10 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
 		Mode:            config.ModePyPI,
 		ExpireAfter:     expireAfter,
-		Upstreams:       append([]string(nil), block.Upstreams...),
+		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
 		Transport:       block.Transport,
-		BusyPolicy:      block.AuxiliaryBusyPolicy,
-		DefaultFreshFor: block.AuxiliaryFreshFor,
+		BusyPolicy:      block.CompanionBusyPolicy,
+		DefaultFreshFor: block.CompanionFreshFor,
 	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
@@ -77,39 +77,40 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 }
 
 func applyDefaults(policy *Policy) {
-	if policy.MetadataPolicy == "" {
-		policy.MetadataPolicy = config.PolicyRevalidate
+	if policy.IndexPolicy == "" {
+		policy.IndexPolicy = config.PolicyRevalidate
 	}
-	if policy.MetadataFreshFor == 0 {
-		policy.MetadataFreshFor = config.Freshness(time.Minute)
+	if policy.IndexFreshFor == 0 {
+		policy.IndexFreshFor = config.Freshness(time.Minute)
 	}
-	if policy.MetadataBusyPolicy == "" {
-		policy.MetadataBusyPolicy = config.BusyPolicyStale
+	if policy.IndexBusyPolicy == "" {
+		policy.IndexBusyPolicy = config.BusyPolicyStale
 	}
-	if policy.ArtifactPolicy == "" {
-		policy.ArtifactPolicy = config.PolicyImmutable
+	if policy.FilePolicy == "" {
+		policy.FilePolicy = config.PolicyImmutable
 	}
-	if policy.AuxiliaryPolicy == "" {
-		policy.AuxiliaryPolicy = config.PolicyRevalidate
+	if policy.CompanionPolicy == "" {
+		policy.CompanionPolicy = config.PolicyRevalidate
 	}
-	if policy.AuxiliaryFreshFor == 0 {
-		policy.AuxiliaryFreshFor = config.Freshness(30 * time.Second)
+	if policy.CompanionFreshFor == 0 {
+		policy.CompanionFreshFor = config.Freshness(30 * time.Second)
 	}
-	if policy.AuxiliaryBusyPolicy == "" {
-		policy.AuxiliaryBusyPolicy = config.BusyPolicyStale
+	if policy.CompanionBusyPolicy == "" {
+		policy.CompanionBusyPolicy = config.BusyPolicyStale
 	}
-	if !policy.ProxyJSON {
-		policy.ProxyJSON = true
+	if policy.ProxyJSON == nil {
+		enabled := true
+		policy.ProxyJSON = &enabled
 	}
 }
 
 func validate(policy *Policy) error {
-	for _, value := range []string{policy.MetadataPolicy, policy.ArtifactPolicy, policy.AuxiliaryPolicy} {
+	for _, value := range []string{policy.IndexPolicy, policy.FilePolicy, policy.CompanionPolicy} {
 		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
 			return fmt.Errorf("invalid pypi policy %q", value)
 		}
 	}
-	for _, value := range []string{policy.MetadataBusyPolicy, policy.AuxiliaryBusyPolicy} {
+	for _, value := range []string{policy.IndexBusyPolicy, policy.CompanionBusyPolicy} {
 		if value != config.BusyPolicyBypass && value != config.BusyPolicyStale {
 			return fmt.Errorf("invalid pypi busy policy %q", value)
 		}
@@ -134,24 +135,24 @@ func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
 		return httpcache.Route{
 			ObjectPath:   "pypi/simple/root.html",
 			UpstreamPath: "simple/",
-			Policy:       policy.MetadataPolicy,
-			FreshFor:     policy.MetadataFreshFor,
-			BusyPolicy:   policy.MetadataBusyPolicy,
+			Policy:       policy.IndexPolicy,
+			FreshFor:     policy.IndexFreshFor,
+			BusyPolicy:   policy.IndexBusyPolicy,
 			RewriteKind:  "pypi-simple",
 		}, nil
 	case strings.HasPrefix(lookupPath, "simple/"):
 		trimmed := strings.TrimPrefix(lookupPath, "simple/")
 		if strings.HasSuffix(trimmed, "/json") {
 			name := normalizeProjectName(strings.TrimSuffix(trimmed, "/json"))
-			if !policy.ProxyJSON {
+			if !proxyJSONEnabled(policy) {
 				return httpcache.Route{}, errors.New("json simple api is disabled")
 			}
 			return httpcache.Route{
 				ObjectPath:     "pypi/simple/" + name + ".json",
 				UpstreamPath:   "simple/" + name + "/",
-				Policy:         policy.MetadataPolicy,
-				FreshFor:       policy.MetadataFreshFor,
-				BusyPolicy:     policy.MetadataBusyPolicy,
+				Policy:         policy.IndexPolicy,
+				FreshFor:       policy.IndexFreshFor,
+				BusyPolicy:     policy.IndexBusyPolicy,
 				RequestHeaders: map[string]string{"Accept": "application/vnd.pypi.simple.v1+json"},
 				RewriteKind:    "pypi-simple",
 			}, nil
@@ -160,9 +161,9 @@ func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
 		return httpcache.Route{
 			ObjectPath:   "pypi/simple/" + name + ".html",
 			UpstreamPath: "simple/" + name + "/",
-			Policy:       policy.MetadataPolicy,
-			FreshFor:     policy.MetadataFreshFor,
-			BusyPolicy:   policy.MetadataBusyPolicy,
+			Policy:       policy.IndexPolicy,
+			FreshFor:     policy.IndexFreshFor,
+			BusyPolicy:   policy.IndexBusyPolicy,
 			RewriteKind:  "pypi-simple",
 		}, nil
 	case strings.HasPrefix(lookupPath, "files/"):
@@ -187,7 +188,7 @@ func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
 	}
 	route := httpcache.Route{
 		ObjectPath: objectPath,
-		Policy:     policy.ArtifactPolicy,
+		Policy:     policy.FilePolicy,
 	}
 	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		route.TargetURL = rawURL
@@ -195,9 +196,9 @@ func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
 		route.UpstreamPath = lookupPath
 	}
 	if isAuxiliaryPath(rawURL, policy) {
-		route.Policy = policy.AuxiliaryPolicy
-		route.FreshFor = policy.AuxiliaryFreshFor
-		route.BusyPolicy = policy.AuxiliaryBusyPolicy
+		route.Policy = policy.CompanionPolicy
+		route.FreshFor = policy.CompanionFreshFor
+		route.BusyPolicy = policy.CompanionBusyPolicy
 	}
 	return route
 }
@@ -223,6 +224,10 @@ func isAuxiliaryPath(rawURL string, policy *Policy) bool {
 		}
 	}
 	return false
+}
+
+func proxyJSONEnabled(policy *Policy) bool {
+	return policy != nil && policy.ProxyJSON != nil && *policy.ProxyJSON
 }
 
 func normalizeProjectName(name string) string {

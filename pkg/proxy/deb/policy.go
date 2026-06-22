@@ -11,9 +11,8 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-type Config = filerepo.Policy
+type Config = filerepo.BasicPolicy
 type Policy = Config
-type Rule = filerepo.Rule
 
 type Repository struct {
 	URL           string   `yaml:"url"`
@@ -47,15 +46,16 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	filerepo.ApplyDefaults(&block.Policy, config.Freshness(2*time.Minute))
-	if err := filerepo.Validate(config.ModeDEB, &block.Policy); err != nil {
+	policy := block.Policy.AsPolicy()
+	filerepo.ApplyDefaults(policy, config.Freshness(2*time.Minute))
+	if err := filerepo.Validate(config.ModeDEB, policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler := filerepo.NewIndexedHandler(plan.Name(), config.ModeDEB, config.ModeDEB, config.Freshness(2*time.Minute), classify, upstreams, block.Transport, expireAfter, &block.Policy, filerepo.RefreshPolicy{
+	handler := filerepo.NewIndexedHandler(plan.Name(), config.ModeDEB, config.ModeDEB, config.Freshness(2*time.Minute), classify, upstreams, block.Transport, expireAfter, policy, filerepo.RefreshPolicy{
 		Interval: time.Hour,
 		Timeout:  filerepo.ResolveMetadataRefreshTimeout(block.RefreshTimeout),
 	}, targets, buildSnapshot, plan.Store(), plan.Stats())

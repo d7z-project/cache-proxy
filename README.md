@@ -4,7 +4,7 @@
 
 ## Features
 
-- File, OCI registry, npm registry, Go module, Maven, Cargo, PyPI, APK, DEB, RPM, and Pacman proxy modes.
+- File, OCI registry, npm registry, Go module, Maven, Cargo (Rust), PyPI, APK, DEB, RPM, and Pacman proxy modes.
 - One YAML config file defines listeners, storage, metrics, cleanup, and proxy instances.
 - Path-mounted instances and dedicated bind listeners.
 - Prometheus metrics for proxy traffic and BlobFS state.
@@ -50,6 +50,27 @@ Current built-in publish modes:
 
 - `oci` uses `bind`.
 - `file`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, and `pacman` use `route.path`.
+
+## Home Page URLs
+
+The root page (`/`) shows one access URL for each configured instance.
+
+- For `route.path` instances, the page builds the URL from the current request host plus the configured path.
+- For `bind` instances, the page builds the URL from the configured bind port. If the bind host is `0.0.0.0`, `::`, `127.0.0.1`, or `localhost`, the page reuses the current request host.
+
+When `cache-proxy` is behind another reverse proxy, forward these headers to make the displayed URLs correct:
+
+- `X-Forwarded-Host`
+- `X-Forwarded-Proto`
+
+Example:
+
+```text
+X-Forwarded-Host: cache.example.com
+X-Forwarded-Proto: https
+```
+
+Then the home page will render published URLs like `https://cache.example.com/files` instead of local listener addresses.
 
 ## Example Config
 
@@ -129,13 +150,12 @@ instances:
       expire_after: 720h
       route:
         path: /npm
-      upstreams:
-        - https://registry.npmjs.org # Exactly one upstream
+      upstream: https://registry.npmjs.org # Single registry upstream
       transport:
         proxy: http://127.0.0.1:7890
-      default_policy: revalidate
-      busy_policy: stale
-      rules: []
+      metadata_policy: revalidate
+      metadata_busy_policy: stale
+      tarball_policy: immutable
 ```
 
 </details>
@@ -151,16 +171,16 @@ instances:
       expire_after: 720h
       route:
         path: /go
-      upstreams:
-        - https://proxy.golang.org # GOPROXY upstream chain
+      proxies:
+        - https://proxy.golang.org # GOPROXY chain
       transport:
         proxy: http://127.0.0.1:7890
       sumdb:
         enabled: true
         name: sum.golang.org
         url: https://sum.golang.org
-      metadata_policy: revalidate
-      artifact_policy: immutable
+      module_policy: revalidate
+      zip_policy: immutable
 ```
 
 </details>
@@ -176,19 +196,18 @@ instances:
       expire_after: 720h
       route:
         path: /maven
-      upstreams:
-        - https://repo1.maven.org/maven2 # Exactly one upstream
+      upstream: https://repo1.maven.org/maven2 # Single repository upstream
       transport:
         proxy: http://127.0.0.1:7890
       release_policy: immutable
       snapshot_policy: revalidate
-      rules: []
+      checksum_policy: revalidate
 ```
 
 </details>
 
 <details>
-<summary><code>cargo</code></summary>
+<summary><code>cargo</code> (Rust)</summary>
 
 ```yaml
 instances:
@@ -198,8 +217,7 @@ instances:
       expire_after: 720h
       route:
         path: /cargo
-      upstreams:
-        - https://index.crates.io # Exactly one upstream
+      upstream: https://index.crates.io # Single Cargo index upstream
       transport:
         proxy: http://127.0.0.1:7890
       crate_policy: immutable
@@ -218,12 +236,11 @@ instances:
       expire_after: 720h
       route:
         path: /pypi
-      upstreams:
-        - https://pypi.org # Exactly one upstream
+      upstream: https://pypi.org # Single PyPI upstream
       transport:
         proxy: http://127.0.0.1:7890
-      metadata_policy: revalidate
-      artifact_policy: immutable
+      index_policy: revalidate
+      file_policy: immutable
 ```
 
 </details>
@@ -249,7 +266,6 @@ instances:
       refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
-      rules: []
 ```
 
 </details>
@@ -276,7 +292,6 @@ instances:
       refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
-      rules: []
 ```
 
 </details>
@@ -301,7 +316,6 @@ instances:
       refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
-      rules: []
 ```
 
 </details>
@@ -326,7 +340,6 @@ instances:
       refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
-      rules: []
 ```
 
 </details>
