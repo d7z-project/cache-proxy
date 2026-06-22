@@ -85,6 +85,14 @@ func copyHeaders(headers http.Header) map[string]string {
 	return result
 }
 
+func copyHeadersMap(headers map[string]string) map[string]string {
+	clone := make(map[string]string, len(headers))
+	for key, value := range headers {
+		clone[key] = value
+	}
+	return clone
+}
+
 func responseBytes(headers map[string]string) uint64 {
 	value := headers["Content-Length"]
 	if value == "" {

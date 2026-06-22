@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -81,7 +79,7 @@ func normalizeDocument(doc *config.Document) {
 }
 
 func validateServerConfig(doc *config.Document) error {
-	if err := validateBindAddress(doc.Server.Bind); err != nil {
+	if err := proxyruntime.ValidateBindAddress(doc.Server.Bind); err != nil {
 		return fmt.Errorf("server bind: %w", err)
 	}
 	if err := validateMetricsPath(doc.Metrics.Path); err != nil {
@@ -99,21 +97,6 @@ func validateMetricsPath(path string) error {
 	}
 	if path == "/" {
 		return fmt.Errorf("metrics path %q conflicts with proxy root", path)
-	}
-	return nil
-}
-
-func validateBindAddress(bind string) error {
-	host, port, err := net.SplitHostPort(bind)
-	if err != nil {
-		return fmt.Errorf("invalid listen bind %q: must be host:port format", bind)
-	}
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum < 0 || portNum > 65535 {
-		return fmt.Errorf("invalid listen bind %q: port must be 0-65535", bind)
-	}
-	if host != "" && host != "localhost" && net.ParseIP(host) == nil {
-		return fmt.Errorf("invalid listen bind %q: invalid host %q", bind, host)
 	}
 	return nil
 }

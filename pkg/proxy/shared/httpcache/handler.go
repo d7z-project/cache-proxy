@@ -35,6 +35,7 @@ type RuntimeConfig struct {
 	BusyPolicy      string
 	DefaultFreshFor config.Freshness
 	PassHeaders     []string
+	MetadataFunc    func(*http.Request, Route, map[string]string, string) map[string]string
 }
 
 type Handler struct {

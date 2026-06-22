@@ -202,6 +202,13 @@ func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route 
 		}
 	}
 	meta := metadata(resp.Headers, h.config.Mode, status)
+	if h.config.MetadataFunc != nil {
+		for key, value := range h.config.MetadataFunc(req, route, copyHeadersMap(resp.Headers), status) {
+			if value != "" {
+				meta[key] = value
+			}
+		}
+	}
 	if _, err = h.store.Put(ctx, h.name, route.ObjectPath, tempFile, meta); err != nil {
 		_ = tempFile.Close()
 		return nil, err

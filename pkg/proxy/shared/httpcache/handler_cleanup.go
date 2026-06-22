@@ -32,13 +32,11 @@ func CleanupStoreTenant(ctx context.Context, store *blobfs.Store, tenant string,
 			return nil
 		}
 		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
-		if parseErr != nil || time.Since(fetchedAt) <= expireAfter {
-			if parseErr != nil {
-				slog.Debug("cleanup parse fetched-at failed", "instance", tenant, "path", objectPath, "err", parseErr)
-			}
-			if parseErr == nil {
-				return nil
-			}
+		if parseErr == nil && time.Since(fetchedAt) <= expireAfter {
+			return nil
+		}
+		if parseErr != nil {
+			slog.Debug("cleanup parse fetched-at failed", "instance", tenant, "path", objectPath, "err", parseErr)
 		}
 		if err := store.DeleteObject(ctx, tenant, objectPath); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("cleanup delete failed", "instance", tenant, "path", objectPath, "err", err)

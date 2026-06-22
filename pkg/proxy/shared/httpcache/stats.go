@@ -3,6 +3,7 @@ package httpcache
 import (
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -12,6 +13,9 @@ type metricsCollector struct {
 	responseBytesTotal    *prometheus.CounterVec
 	upstreamRequestsTotal *prometheus.CounterVec
 	activeDownloads       *prometheus.GaugeVec
+	metadataRefreshTotal  *prometheus.CounterVec
+	metadataRefreshTime   *prometheus.HistogramVec
+	metadataSnapshotReady *prometheus.GaugeVec
 }
 
 func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
@@ -32,8 +36,21 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 			Name: "cache_proxy_active_downloads",
 			Help: "Active cache downloads by instance and mode.",
 		}, []string{"instance", "mode"}),
+		metadataRefreshTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_metadata_refresh_total",
+			Help: "Total metadata refresh cycles by instance, mode, and result.",
+		}, []string{"instance", "mode", "result"}),
+		metadataRefreshTime: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "cache_proxy_metadata_refresh_duration_seconds",
+			Help:    "Metadata refresh cycle duration by instance and mode.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"instance", "mode"}),
+		metadataSnapshotReady: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "cache_proxy_metadata_snapshot_ready",
+			Help: "Whether the instance currently has at least one successfully loaded metadata snapshot.",
+		}, []string{"instance", "mode"}),
 	}
-	reg.MustRegister(mc.requestsTotal, mc.responseBytesTotal, mc.upstreamRequestsTotal, mc.activeDownloads)
+	reg.MustRegister(mc.requestsTotal, mc.responseBytesTotal, mc.upstreamRequestsTotal, mc.activeDownloads, mc.metadataRefreshTotal, mc.metadataRefreshTime, mc.metadataSnapshotReady)
 	return mc
 }
 
@@ -59,6 +76,11 @@ type InstanceStats struct {
 	UpstreamErrors   uint64            `json:"upstreamErrors"`
 	UpstreamStatus   map[string]uint64 `json:"upstreamStatus"`
 	ActiveDownloads  int64             `json:"activeDownloads"`
+	MetadataState    string            `json:"metadataState,omitempty"`
+	SnapshotReady    bool              `json:"snapshotReady"`
+	Refreshes        uint64            `json:"refreshes"`
+	RefreshFailures  uint64            `json:"refreshFailures"`
+	LastRefresh      string            `json:"lastRefresh,omitempty"`
 }
 
 func NewStats(reg prometheus.Registerer) *Stats {
@@ -136,6 +158,58 @@ func (s *Stats) AddActiveDownload(instance, mode string, delta int64) {
 	item := s.instance(instance, mode)
 	item.ActiveDownloads += delta
 	s.total.ActiveDownloads += delta
+	s.instances[instance] = item
+}
+
+func (s *Stats) RecordMetadataRefresh(instance, mode, result string, duration time.Duration, ready bool) {
+	if s == nil {
+		return
+	}
+	if result == "" {
+		result = "unknown"
+	}
+	s.mc.metadataRefreshTotal.WithLabelValues(instance, mode, result).Inc()
+	s.mc.metadataRefreshTime.WithLabelValues(instance, mode).Observe(duration.Seconds())
+	if ready {
+		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(1)
+	} else {
+		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(0)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.instance(instance, mode)
+	item.Refreshes++
+	item.LastRefresh = result
+	item.SnapshotReady = ready
+	if result != "success" {
+		item.RefreshFailures++
+	}
+	s.total.Refreshes++
+	s.total.LastRefresh = result
+	if result != "success" {
+		s.total.RefreshFailures++
+	}
+	s.instances[instance] = item
+}
+
+func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
+	if s == nil {
+		return
+	}
+	if ready {
+		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(1)
+	} else {
+		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(0)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.instance(instance, mode)
+	item.MetadataState = state
+	item.SnapshotReady = ready
+	s.total.MetadataState = state
+	s.total.SnapshotReady = ready
 	s.instances[instance] = item
 }
 

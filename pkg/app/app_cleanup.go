@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.d7z.net/blobfs"
+
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func (a *App) gcLoop() {
@@ -65,7 +67,7 @@ func (a *App) runCleanup(ctx context.Context) {
 		case <-ctx.Done():
 			wg.Done()
 		case sem <- struct{}{}:
-			go func(handler interface{ Cleanup(context.Context) error }) {
+			go func(handler proxyruntime.Instance) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				if err := handler.Cleanup(ctx); err != nil && !errors.Is(err, context.Canceled) {

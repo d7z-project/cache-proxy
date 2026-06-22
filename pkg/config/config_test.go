@@ -122,3 +122,48 @@ instances:
 	require.Equal(t, []string{"https://example.com"}, cfg.Upstreams)
 	require.Equal(t, "immutable", cfg.DefaultPolicy)
 }
+
+func TestDecodePackageRepositoryConfig(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: linux
+    enabled: true
+    deb:
+      expire_after: 720h
+      route:
+        path: /deb
+      repositories:
+        - url: https://deb.example.com/debian
+          suites: [bookworm]
+          components: [main]
+          architectures: [amd64]
+      refresh_timeout: 2m
+      metadata_policy: revalidate
+      artifact_policy: immutable
+      rules: []
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	var block struct {
+		ExpireAfter Expiration `yaml:"expire_after"`
+		Route       struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Repositories []struct {
+			URL           string   `yaml:"url"`
+			Suites        []string `yaml:"suites"`
+			Components    []string `yaml:"components"`
+			Architectures []string `yaml:"architectures"`
+		} `yaml:"repositories"`
+		RefreshTimeout Duration `yaml:"refresh_timeout"`
+		MetadataPolicy string   `yaml:"metadata_policy"`
+		ArtifactPolicy string   `yaml:"artifact_policy"`
+		Rules          []any    `yaml:"rules"`
+	}
+	require.NoError(t, selected.Block.DecodeStrict(&block))
+	require.Equal(t, Duration(2*time.Minute), block.RefreshTimeout)
+	require.Len(t, block.Repositories, 1)
+	require.Equal(t, "https://deb.example.com/debian", block.Repositories[0].URL)
+	require.Equal(t, []string{"bookworm"}, block.Repositories[0].Suites)
+}

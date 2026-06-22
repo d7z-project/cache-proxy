@@ -54,7 +54,7 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	require.Equal(t, int64(1), upstreamRequests.Load())
 }
 
-func TestCleanupRemovesExpiredObjects(t *testing.T) {
+func TestAppCleanupRemovesExpiredObjects(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -89,7 +89,7 @@ func TestCleanupRemovesExpiredObjects(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestMetricsBearerToken(t *testing.T) {
+func TestMetricsRequireBearerToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -167,7 +167,7 @@ instances:
 	require.ErrorContains(t, err, "field default_polciy not found")
 }
 
-func TestCleanupHonorsCanceledContext(t *testing.T) {
+func TestAppCleanupHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

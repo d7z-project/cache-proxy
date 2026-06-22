@@ -15,14 +15,19 @@ type Config = filerepo.Policy
 type Policy = Config
 type Rule = filerepo.Rule
 
+type Repository struct {
+	URL           string   `yaml:"url"`
+	Repos         []string `yaml:"repos"`
+	Architectures []string `yaml:"architectures"`
+}
+
 type Block struct {
-	ExpireAfter config.Expiration `yaml:"expire_after"`
-	Route       struct {
-		Path string `yaml:"path"`
-	} `yaml:"route"`
-	Upstreams []string                `yaml:"upstreams"`
-	Transport *config.TransportConfig `yaml:"transport,omitempty"`
-	Policy    `yaml:",inline"`
+	ExpireAfter    config.Expiration       `yaml:"expire_after"`
+	Route          struct{ Path string }   `yaml:"route"`
+	Transport      *config.TransportConfig `yaml:"transport,omitempty"`
+	Repositories   []Repository            `yaml:"repositories"`
+	RefreshTimeout config.Duration         `yaml:"refresh_timeout,omitempty"`
+	Policy         `yaml:",inline"`
 }
 
 type Driver struct{}
@@ -35,8 +40,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.Decode(&block); err != nil {
 		return err
 	}
-	if len(block.Upstreams) == 0 {
-		return fmt.Errorf("instance %s: pacman mode requires at least one upstream", plan.Name())
+	targets, upstreams, err := metadataTargets(block.Repositories)
+	if err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
 	filerepo.ApplyDefaults(&block.Policy, config.Freshness(time.Minute))
 	if err := filerepo.Validate(config.ModePacman, &block.Policy); err != nil {
@@ -46,13 +52,12 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler := filerepo.NewHandler(plan.Name(), config.ModePacman, config.ModePacman, config.Freshness(time.Minute), classify, block.Upstreams, block.Transport, expireAfter, &block.Policy, plan.Store(), plan.Stats())
+	handler := filerepo.NewIndexedHandler(plan.Name(), config.ModePacman, config.ModePacman, config.Freshness(time.Minute), classify, upstreams, block.Transport, expireAfter, &block.Policy, filerepo.RefreshPolicy{
+		Interval: 2 * time.Minute,
+		Timeout:  filerepo.ResolveMetadataRefreshTimeout(block.RefreshTimeout),
+	}, targets, buildSnapshot, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
-		Handler:   handler,
-		Close:     func() error { handler.Close(); return nil },
-		CleanupFn: handler.Cleanup,
-	})
+	return plan.BindPath(block.Route.Path, expireAfter, handler)
 }
 
 func classify(cleanPath string) filerepo.ResourceClass {

@@ -216,7 +216,7 @@ func (i *InstancePlan) bind(pathValue, addr string, expireAfter config.Expiratio
 		i.entry.Path = normalized
 	} else {
 		trimmed := strings.TrimSpace(addr)
-		if err := validateBindAddress(trimmed); err != nil {
+		if err := ValidateBindAddress(trimmed); err != nil {
 			return err
 		}
 		if owner := i.ctx.bindOwners[trimmed]; owner != "" {
@@ -243,7 +243,7 @@ func normalizeRoutePath(value string) string {
 	return normalized
 }
 
-func validateBindAddress(bind string) error {
+func ValidateBindAddress(bind string) error {
 	host, port, err := net.SplitHostPort(bind)
 	if err != nil {
 		return fmt.Errorf("invalid listen bind %q: must be host:port format", bind)
