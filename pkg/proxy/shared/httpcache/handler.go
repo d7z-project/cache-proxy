@@ -1,6 +1,7 @@
 package httpcache
 
 import (
+	"context"
 	"gopkg.d7z.net/blobfs"
 	"log/slog"
 	"net/http"
@@ -108,4 +109,35 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) Close() {
 	h.wait.Wait()
+}
+
+func (h *Handler) CloseContext(ctx context.Context) error {
+	return utils.WaitGroupContext(ctx, &h.wait)
+}
+
+func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, upstreamPath string) {
+	h.wait.Add(1)
+	defer h.wait.Done()
+
+	route := Route{
+		UpstreamPath: upstreamPath,
+		Policy:       config.PolicyBypass,
+	}
+	result, err := h.bypass(req.Context(), req, route)
+	if err != nil {
+		slog.Warn("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
+		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
+		return
+	}
+	status := result.StatusCode
+	cache := result.Headers["X-Cache"]
+	bytes := responseBytes(result.Headers)
+	if err := result.FlushClose(req, resp); err != nil {
+		slog.Warn("flush passthrough response failed", "instance", h.name, "err", err)
+		if status < 500 {
+			status = http.StatusBadGateway
+		}
+	}
+	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, bytes)
 }

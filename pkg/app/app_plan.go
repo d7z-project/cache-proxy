@@ -20,7 +20,6 @@ const DefaultGCInterval = 24 * time.Hour
 func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpproxy.Stats) (map[string]*proxyruntime.Entry, error) {
 	plan := proxyruntime.NewPlanContext(store, stats, doc.Server.Bind, doc.Metrics.Path)
 	drivers := builtinDrivers()
-	rendered := make(map[string]string, len(doc.Instances))
 	for _, decl := range doc.Instances {
 		selected, err := decl.SelectMode()
 		if err != nil {
@@ -37,7 +36,6 @@ func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store,
 		if err := driver.Plan(ctx, instancePlan); err != nil {
 			return nil, err
 		}
-		rendered[instancePlan.Name()] = instancePlan.RenderSnippet()
 	}
 	result, err := plan.Finalize()
 	if err != nil {
@@ -45,9 +43,7 @@ func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store,
 	}
 	entries := make(map[string]*proxyruntime.Entry, len(result.Entries))
 	for _, entry := range result.Entries {
-		if entry.Home.Snippet == "" {
-			entry.Home.Snippet = rendered[entry.Name]
-		}
+		entry.Home.Snippet = renderHomeSnippet(entry)
 		if entry.ExpireAfter.IsUnset() {
 			entry.ExpireAfter = config.DefaultExpireAfter
 		}
@@ -118,4 +114,35 @@ func enabledEntryNames(entries map[string]*proxyruntime.Entry) []string {
 		}
 	}
 	return names
+}
+
+func renderHomeSnippet(entry *proxyruntime.Entry) string {
+	target := entry.Path
+	if target == "" {
+		target = entry.Bind
+	}
+	switch entry.Mode {
+	case config.ModeNPM:
+		return "npm config set registry " + target
+	case config.ModeGo:
+		return "go env -w GOPROXY=" + target
+	case config.ModeMaven:
+		return "<mirror><mirrorOf>*</mirrorOf><url>" + target + "</url></mirror>"
+	case config.ModePyPI:
+		return "pip install --index-url " + strings.TrimRight(target, "/") + "/simple <package>"
+	case config.ModeAPK:
+		return "Use " + strings.TrimRight(target, "/") + "/<branch>/<repo> in /etc/apk/repositories"
+	case config.ModeDEB:
+		return "Use " + target + " as the deb archive base URL in sources.list"
+	case config.ModeRPM:
+		return "Set dnf/yum baseurl to " + strings.TrimRight(target, "/") + "/<repo-path>"
+	case config.ModePacman:
+		return "Set Server = " + strings.TrimRight(target, "/") + "/$repo/os/$arch in pacman.conf"
+	case config.ModeOCI:
+		return "Pull via " + target + "/<repository>:<tag>"
+	case config.ModeCargo:
+		return "Set sparse registry = " + strings.TrimRight(target, "/") + "/"
+	default:
+		return target
+	}
 }

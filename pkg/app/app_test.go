@@ -16,6 +16,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func TestValidateRejectsConflictingPaths(t *testing.T) {
@@ -137,9 +138,9 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "cache-proxy")
 	require.Contains(t, rec.Body.String(), "files")
 	require.Contains(t, rec.Body.String(), "http://proxy.example.test/files")
-	require.Contains(t, rec.Body.String(), "default_policy: immutable")
-	require.Contains(t, rec.Body.String(), "busy_policy: stale")
-	require.Contains(t, rec.Body.String(), "policy: revalidate")
+	require.Contains(t, rec.Body.String(), "Client setup")
+	require.Contains(t, rec.Body.String(), "http://proxy.example.test/files")
+	require.NotContains(t, rec.Body.String(), "YAML snippet")
 }
 
 func TestValidateRejectsUnknownModeField(t *testing.T) {
@@ -190,6 +191,52 @@ func TestAppCleanupHonorsCanceledContext(t *testing.T) {
 
 	_, err = app.store.OpenObject(ctx, "files", "expired.txt")
 	require.NoError(t, err)
+}
+
+func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
+	app := &App{
+		stopRuntime: func() {},
+		handlers: []proxyruntime.Instance{
+			blockingInstance{},
+		},
+		gcDone:      closedChan(),
+		cleanupDone: closedChan(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := app.Close(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestPrepareHandlersUsesLifecycleContext(t *testing.T) {
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := atomic.Bool{}
+	entry := &proxyruntime.Entry{
+		Name:    "test",
+		Mode:    config.ModeFile,
+		Enabled: true,
+		Path:    "/files",
+		Runtime: startContextInstance{
+			onStart: func(ctx context.Context) error {
+				started.Store(ctx == lifecycleCtx)
+				return nil
+			},
+		},
+	}
+	app := &App{
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		entries: map[string]*proxyruntime.Entry{
+			"test": entry,
+		},
+	}
+
+	require.NoError(t, app.prepareHandlers(lifecycleCtx))
+	require.True(t, started.Load())
 }
 
 func testDocument(backend string, instances []config.Instance) *config.Document {
@@ -264,4 +311,34 @@ func closeApp(t *testing.T, app *App) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, app.Close(ctx))
+}
+
+type blockingInstance struct{}
+
+func (blockingInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (blockingInstance) Start(context.Context) error                  { return nil }
+func (blockingInstance) Cleanup(context.Context) error                { return nil }
+func (blockingInstance) Stop(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type startContextInstance struct {
+	onStart func(context.Context) error
+}
+
+func (s startContextInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (s startContextInstance) Cleanup(context.Context) error                { return nil }
+func (s startContextInstance) Stop(context.Context) error                   { return nil }
+func (s startContextInstance) Start(ctx context.Context) error {
+	if s.onStart != nil {
+		return s.onStart(ctx)
+	}
+	return nil
+}
+
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }

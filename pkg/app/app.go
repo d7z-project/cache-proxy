@@ -115,7 +115,7 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		gcDone:       make(chan struct{}),
 		cleanupDone:  make(chan struct{}),
 	}
-	if err := app.prepareHandlers(ctx); err != nil {
+	if err := app.prepareHandlers(lifecycleCtx); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func (a *App) Close(ctx context.Context) error {
 		joined = errors.Join(joined, server.Shutdown(ctx))
 	}
 	for _, handler := range a.handlers {
-		joined = errors.Join(joined, handler.Stop(context.Background()))
+		joined = errors.Join(joined, handler.Stop(ctx))
 	}
 	select {
 	case <-a.gcDone:
@@ -213,7 +213,10 @@ func (a *App) Close(ctx context.Context) error {
 	case <-ctx.Done():
 		joined = errors.Join(joined, ctx.Err())
 	}
-	return errors.Join(joined, a.store.Close())
+	if a.store != nil {
+		joined = errors.Join(joined, a.store.Close())
+	}
+	return joined
 }
 
 func (a *App) prepareHandlers(ctx context.Context) error {

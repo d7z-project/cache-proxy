@@ -229,6 +229,14 @@ func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Fr
 
 func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	cleanPath := cleanRequestPath(req.URL.Path)
+	if cleanPath == "" {
+		h.base.ProxyPassthrough(w, req, "")
+		return
+	}
+	if h.classify(cleanPath) == ResourceUnknown {
+		h.base.ProxyPassthrough(w, req, cleanPath)
+		return
+	}
 	if cleanPath != "" {
 		h.discoverRoot(req.Context(), cleanPath)
 		h.prepareRequest(req.Context(), cleanPath)
@@ -258,10 +266,11 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 	return nil
 }
 
-func (h *IndexedHandler) Stop(context.Context) error {
-	h.wait.Wait()
-	h.base.Close()
-	return nil
+func (h *IndexedHandler) Stop(ctx context.Context) error {
+	if err := utils.WaitGroupContext(ctx, &h.wait); err != nil {
+		return err
+	}
+	return h.base.CloseContext(ctx)
 }
 
 func (h *IndexedHandler) Cleanup(ctx context.Context) error {

@@ -66,6 +66,6 @@ func classify(cleanPath string) filerepo.ResourceClass {
 	case strings.HasSuffix(cleanPath, ".apk"):
 		return filerepo.ResourceArtifact
 	default:
-		return filerepo.ResourceAuxiliary
+		return filerepo.ResourceUnknown
 	}
 }

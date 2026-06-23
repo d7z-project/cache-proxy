@@ -20,6 +20,7 @@ const (
 	ResourceMetadata  ResourceClass = "metadata"
 	ResourceArtifact  ResourceClass = "artifact"
 	ResourceAuxiliary ResourceClass = "auxiliary"
+	ResourceUnknown   ResourceClass = "unknown"
 )
 
 type Rule struct {
@@ -160,7 +161,7 @@ func ValidateRules(mode string, rules []Rule) error {
 			return err
 		}
 		switch rule.ResourceClass {
-		case "", ResourceAny, ResourceMetadata, ResourceArtifact, ResourceAuxiliary:
+		case "", ResourceAny, ResourceMetadata, ResourceArtifact, ResourceAuxiliary, ResourceUnknown:
 		default:
 			return fmt.Errorf("%s rule %d: invalid resource class %q", mode, i, rule.ResourceClass)
 		}

@@ -353,6 +353,75 @@ func TestIndexedHandlerArtifactRequestDoesNotDiscoverRoot(t *testing.T) {
 	require.Empty(t, handler.roots)
 }
 
+func TestIndexedHandlerEmptyPathBypassesUpstream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "root")
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, testDiscoverer{}, nil, func(context.Context, *RefreshSession) (*LiveSnapshot, error) {
+		return &LiveSnapshot{}, nil
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "root", rec.Body.String())
+	require.Empty(t, handler.roots)
+}
+
+func TestIndexedHandlerUnknownPathBypassesUpstream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "other")
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewIndexedHandler(
+		"repo",
+		"test",
+		"repo",
+		config.Freshness(time.Minute),
+		func(cleanPath string) ResourceClass {
+			if cleanPath == "meta/index.txt" {
+				return ResourceMetadata
+			}
+			return ResourceUnknown
+		},
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		testDiscoverer{},
+		nil,
+		func(context.Context, *RefreshSession) (*LiveSnapshot, error) {
+			return &LiveSnapshot{Metadata: map[string]struct{}{}}, nil
+		},
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/robots.txt", nil).WithContext(ctx))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "other", rec.Body.String())
+	require.Empty(t, handler.roots)
+}
+
 func TestIndexedHandlerOnlyMetadataRequestsCanDiscoverRoot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

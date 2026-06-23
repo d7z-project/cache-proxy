@@ -68,6 +68,6 @@ func classify(cleanPath string) filerepo.ResourceClass {
 	case strings.HasSuffix(cleanPath, ".sig"), strings.HasSuffix(cleanPath, ".asc"), strings.HasSuffix(cleanPath, ".sha256"), strings.HasSuffix(cleanPath, ".sha512"):
 		return filerepo.ResourceAuxiliary
 	default:
-		return filerepo.ResourceAuxiliary
+		return filerepo.ResourceUnknown
 	}
 }

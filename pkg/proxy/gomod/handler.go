@@ -88,6 +88,10 @@ func (h *Handler) Close() {
 	h.base.Close()
 }
 
+func (h *Handler) CloseContext(ctx context.Context) error {
+	return h.base.CloseContext(ctx)
+}
+
 func (h *Handler) Cleanup(ctx context.Context) error {
 	return h.base.Cleanup(ctx)
 }

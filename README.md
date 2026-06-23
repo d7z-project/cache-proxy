@@ -72,7 +72,183 @@ Then point clients to the published route:
 - Go proxy: `http://127.0.0.1:18080/go`
 - OCI registry: bind directly to its configured listener
 
-## Configuration
+## Client Setup
+
+`cache-proxy` is only useful after client tools are pointed at it. In practice you usually do two steps:
+
+1. Publish one proxy instance for each ecosystem you want to cache.
+2. Reconfigure the package manager, build tool, or container runtime to use that published URL.
+
+Assume the proxy is reachable at `http://cache.lan:8080`.
+
+### npm
+
+Set the registry:
+
+```bash
+npm config set registry http://cache.lan:8080/npm
+```
+
+Project-local:
+
+```ini
+registry=http://cache.lan:8080/npm
+```
+
+### Go
+
+Point `GOPROXY` at the published route:
+
+```bash
+go env -w GOPROXY=http://cache.lan:8080/go
+```
+
+If SumDB is also proxied by this instance, point `GOSUMDB` at the value exposed by your config.
+
+### Maven
+
+Add the proxy as a repository mirror in `~/.m2/settings.xml`:
+
+```xml
+<settings>
+  <mirrors>
+    <mirror>
+      <id>cache-proxy</id>
+      <mirrorOf>*</mirrorOf>
+      <url>http://cache.lan:8080/maven</url>
+    </mirror>
+  </mirrors>
+</settings>
+```
+
+### Cargo
+
+Configure the sparse index and download endpoint in `.cargo/config.toml`:
+
+```toml
+[source.crates-io]
+replace-with = "cache-proxy"
+
+[source.cache-proxy]
+registry = "sparse+http://cache.lan:8080/cargo/"
+```
+
+### PyPI
+
+Use the proxy as the package index:
+
+```bash
+pip install --index-url http://cache.lan:8080/pypi/simple <package>
+```
+
+Persistent config:
+
+```ini
+[global]
+index-url = http://cache.lan:8080/pypi/simple
+```
+
+### OCI / Docker / Containerd
+
+For OCI mode the proxy usually listens on its own port, for example `http://cache.lan:5000`.
+
+Docker example:
+
+```json
+{
+  "insecure-registries": ["cache.lan:5000"]
+}
+```
+
+Then pull through the proxy host:
+
+```bash
+docker pull cache.lan:5000/library/alpine:latest
+```
+
+### Alpine `apk`
+
+Replace repository lines with the proxy route while preserving the upstream path layout:
+
+```txt
+http://cache.lan:8080/apk/v3.20/main
+http://cache.lan:8080/apk/v3.20/community
+```
+
+The client still requests `APKINDEX.tar.gz` and packages below that path. The proxy discovers roots from those metadata requests automatically.
+
+### Debian / Ubuntu `apt`
+
+Replace archive URLs in `sources.list` or `.sources` files:
+
+```txt
+deb http://cache.lan:8080/deb bookworm main
+deb http://cache.lan:8080/deb bookworm-updates main
+deb http://cache.lan:8080/deb bookworm-security main
+```
+
+After updating sources:
+
+```bash
+apt update
+apt install <package>
+```
+
+`apt update` is what triggers metadata discovery and refresh.
+
+### RPM (`dnf` / `yum`)
+
+Point the repo `baseurl` at the proxy while keeping the upstream path suffix:
+
+```ini
+[baseos]
+name=BaseOS
+baseurl=http://cache.lan:8080/rpm/9/BaseOS/x86_64/os
+enabled=1
+gpgcheck=1
+```
+
+Then refresh metadata:
+
+```bash
+dnf makecache
+dnf install <package>
+```
+
+### Arch `pacman`
+
+Point the server to the proxy route while preserving `$repo` and `$arch`:
+
+```ini
+[core]
+Server = http://cache.lan:8080/pacman/$repo/os/$arch
+```
+
+Then refresh:
+
+```bash
+pacman -Sy
+pacman -S <package>
+```
+
+`pacman -Sy` triggers repository database discovery.
+
+### Choosing Routes
+
+Use stable, ecosystem-specific route prefixes. Typical layouts:
+
+- `/npm`
+- `/go`
+- `/maven`
+- `/pypi`
+- `/apk`
+- `/deb`
+- `/rpm`
+- `/pacman`
+
+For Linux package repositories the route should be the repository root prefix that clients normally expect, not a rewritten artifact path.
+
+## Server Configuration
 
 Each instance enables exactly one mode.
 

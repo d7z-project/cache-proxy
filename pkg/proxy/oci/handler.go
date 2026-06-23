@@ -50,9 +50,8 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 
 func (h *handler) Start(context.Context) error { return nil }
 
-func (h *handler) Stop(context.Context) error {
-	h.wait.Wait()
-	return nil
+func (h *handler) Stop(ctx context.Context) error {
+	return utils.WaitGroupContext(ctx, &h.wait)
 }
 
 func (h *handler) Cleanup(ctx context.Context) error {

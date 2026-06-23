@@ -78,9 +78,10 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	)
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
-		Handler:   handler,
-		Close:     func() error { handler.Close(); return nil },
-		CleanupFn: handler.Cleanup,
+		Handler:      handler,
+		Close:        func() error { handler.Close(); return nil },
+		CloseContext: handler.CloseContext,
+		CleanupFn:    handler.Cleanup,
 	})
 }
 

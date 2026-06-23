@@ -132,8 +132,8 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
         </ul>
       </article>
       <article class="panel">
-        <span class="label">How To Configure</span>
-        <p>Each instance defines exactly one mode block. Route ownership is decided by the mode itself during startup planning.</p>
+        <span class="label">How To Use</span>
+        <p>Point the matching client tool at the published route below. The homepage shows consumer-facing usage hints, not the raw YAML.</p>
         <details>
           <summary>Minimal startup command</summary>
           <pre>./cache-proxy -config ./cache-proxy.yaml</pre>
@@ -147,7 +147,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
         <strong>{{ .Name }}</strong> <span>{{ .Mode }}</span>
         <div><a href="{{ .Target }}">{{ .Target }}</a></div>
         <details>
-          <summary>YAML snippet</summary>
+          <summary>Client setup</summary>
           <pre>{{ .Snippet }}</pre>
         </details>
       </div>
