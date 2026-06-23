@@ -130,11 +130,8 @@ instances:
       expire_after: 720h
       route:
         path: /deb
-      repositories:
-        - url: https://deb.example.com/debian
-          suites: [bookworm]
-          components: [main]
-          architectures: [amd64]
+      upstreams:
+        - https://deb.example.com/debian
       refresh_interval: 1h
       refresh_timeout: 2m
       metadata_policy: revalidate
@@ -148,12 +145,7 @@ instances:
 		Route       struct {
 			Path string `yaml:"path"`
 		} `yaml:"route"`
-		Repositories []struct {
-			URL           string   `yaml:"url"`
-			Suites        []string `yaml:"suites"`
-			Components    []string `yaml:"components"`
-			Architectures []string `yaml:"architectures"`
-		} `yaml:"repositories"`
+		Upstreams       []string `yaml:"upstreams"`
 		RefreshInterval Duration `yaml:"refresh_interval"`
 		RefreshTimeout  Duration `yaml:"refresh_timeout"`
 		MetadataPolicy  string   `yaml:"metadata_policy"`
@@ -162,9 +154,7 @@ instances:
 	require.NoError(t, selected.Block.DecodeStrict(&block))
 	require.Equal(t, Duration(time.Hour), block.RefreshInterval)
 	require.Equal(t, Duration(2*time.Minute), block.RefreshTimeout)
-	require.Len(t, block.Repositories, 1)
-	require.Equal(t, "https://deb.example.com/debian", block.Repositories[0].URL)
-	require.Equal(t, []string{"bookworm"}, block.Repositories[0].Suites)
+	require.Equal(t, []string{"https://deb.example.com/debian"}, block.Upstreams)
 }
 
 func TestDecodePackageRepositoryConfigRejectsRules(t *testing.T) {
@@ -176,11 +166,8 @@ instances:
       expire_after: 720h
       route:
         path: /deb
-      repositories:
-        - url: https://deb.example.com/debian
-          suites: [bookworm]
-          components: [main]
-          architectures: [amd64]
+      upstreams:
+        - https://deb.example.com/debian
       rules: []
 `))
 	require.NoError(t, err)
@@ -191,12 +178,7 @@ instances:
 		Route       struct {
 			Path string `yaml:"path"`
 		} `yaml:"route"`
-		Repositories []struct {
-			URL           string   `yaml:"url"`
-			Suites        []string `yaml:"suites"`
-			Components    []string `yaml:"components"`
-			Architectures []string `yaml:"architectures"`
-		} `yaml:"repositories"`
+		Upstreams []string `yaml:"upstreams"`
 	}
 	err = selected.Block.DecodeStrict(&block)
 	require.Error(t, err)

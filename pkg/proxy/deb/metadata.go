@@ -11,77 +11,112 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func metadataTargets(repositories []Repository) ([]filerepo.MetadataTarget, []string, error) {
-	if len(repositories) == 0 {
-		return nil, nil, fmt.Errorf("deb repositories must not be empty")
-	}
-	targets := []filerepo.MetadataTarget{}
-	upstreams := make([]string, 0, len(repositories))
-	seenUpstreams := map[string]struct{}{}
-	for i, repo := range repositories {
-		baseURL := strings.TrimRight(strings.TrimSpace(repo.URL), "/")
-		if baseURL == "" {
-			return nil, nil, fmt.Errorf("deb repositories[%d].url is empty", i)
-		}
-		suites := repo.Suites
-		if repo.Suite != "" {
-			if len(suites) != 0 {
-				return nil, nil, fmt.Errorf("deb repositories[%d] must not set both suite and suites", i)
-			}
-			suites = []string{repo.Suite}
-		}
-		if len(suites) == 0 {
-			return nil, nil, fmt.Errorf("deb repositories[%d].suites must not be empty", i)
-		}
-		if len(repo.Components) == 0 {
-			return nil, nil, fmt.Errorf("deb repositories[%d].components must not be empty", i)
-		}
-		if len(repo.Architectures) == 0 {
-			return nil, nil, fmt.Errorf("deb repositories[%d].architectures must not be empty", i)
-		}
-		if _, ok := seenUpstreams[baseURL]; !ok {
-			seenUpstreams[baseURL] = struct{}{}
-			upstreams = append(upstreams, baseURL)
-		}
-		for _, suite := range suites {
-			suite = strings.Trim(strings.TrimSpace(suite), "/")
-			if suite == "" {
-				return nil, nil, fmt.Errorf("deb repositories[%d] contains empty suite", i)
-			}
+type rootSpec struct {
+	Suite         string
+	Components    []string
+	Architectures []string
+	Source        bool
+}
+
+func (s *rootSpec) Key() string { return s.Suite }
+
+func (s *rootSpec) Targets() []filerepo.MetadataTarget {
+	targets := []filerepo.MetadataTarget{{
+		URL:        path.Join("dists", s.Suite, "InRelease"),
+		Candidates: []string{path.Join("dists", s.Suite, "Release")},
+		Kind:       "release",
+	}}
+	for _, component := range s.Components {
+		for _, arch := range s.Architectures {
+			basePath := path.Join("dists", s.Suite, component, "binary-"+arch, "Packages")
 			targets = append(targets, filerepo.MetadataTarget{
-				URL:        path.Join("dists", suite, "InRelease"),
-				Candidates: []string{path.Join("dists", suite, "Release")},
-				Kind:       "release",
+				URL:        basePath + ".xz",
+				Candidates: []string{basePath + ".gz", basePath},
+				Kind:       "packages",
 			})
-			for _, component := range repo.Components {
-				component = strings.Trim(strings.TrimSpace(component), "/")
-				if component == "" {
-					return nil, nil, fmt.Errorf("deb repositories[%d] contains empty component", i)
-				}
-				for _, arch := range repo.Architectures {
-					arch = strings.Trim(strings.TrimSpace(arch), "/")
-					if arch == "" {
-						return nil, nil, fmt.Errorf("deb repositories[%d] contains empty architecture", i)
-					}
-					basePath := path.Join("dists", suite, component, "binary-"+arch, "Packages")
-					targets = append(targets, filerepo.MetadataTarget{
-						URL:        basePath + ".xz",
-						Candidates: []string{basePath + ".gz", basePath},
-						Kind:       "packages",
-					})
-				}
-				if repo.Source {
-					basePath := path.Join("dists", suite, component, "source", "Sources")
-					targets = append(targets, filerepo.MetadataTarget{
-						URL:        basePath + ".xz",
-						Candidates: []string{basePath + ".gz", basePath},
-						Kind:       "sources",
-					})
-				}
-			}
+		}
+		if s.Source {
+			basePath := path.Join("dists", s.Suite, component, "source", "Sources")
+			targets = append(targets, filerepo.MetadataTarget{
+				URL:        basePath + ".xz",
+				Candidates: []string{basePath + ".gz", basePath},
+				Kind:       "sources",
+			})
 		}
 	}
-	return targets, upstreams, nil
+	return targets
+}
+
+func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
+	candidate, ok := other.(*rootSpec)
+	if !ok || s.Suite != candidate.Suite {
+		return false
+	}
+	changed := false
+	for _, component := range candidate.Components {
+		if !containsString(s.Components, component) {
+			s.Components = append(s.Components, component)
+			changed = true
+		}
+	}
+	for _, arch := range candidate.Architectures {
+		if !containsString(s.Architectures, arch) {
+			s.Architectures = append(s.Architectures, arch)
+			changed = true
+		}
+	}
+	if candidate.Source && !s.Source {
+		s.Source = true
+		changed = true
+	}
+	return changed
+}
+
+type discoverer struct{}
+
+func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
+	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 3 || parts[0] != "dists" {
+		return nil, false
+	}
+	suite := parts[1]
+	if suite == "" {
+		return nil, false
+	}
+	if len(parts) == 3 && (parts[2] == "InRelease" || parts[2] == "Release") {
+		return &rootSpec{Suite: suite}, true
+	}
+	if len(parts) < 5 {
+		return nil, false
+	}
+	component := parts[2]
+	segment := parts[3]
+	fileName := parts[4]
+	switch {
+	case strings.HasPrefix(segment, "binary-") && strings.HasPrefix(fileName, "Packages"):
+		arch := strings.TrimPrefix(segment, "binary-")
+		if component == "" || arch == "" {
+			return nil, false
+		}
+		return &rootSpec{Suite: suite, Components: []string{component}, Architectures: []string{arch}}, true
+	case segment == "source" && strings.HasPrefix(fileName, "Sources"):
+		if component == "" {
+			return nil, false
+		}
+		return &rootSpec{Suite: suite, Components: []string{component}, Source: true}, true
+	default:
+		return nil, false
+	}
+}
+
+func containsString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {

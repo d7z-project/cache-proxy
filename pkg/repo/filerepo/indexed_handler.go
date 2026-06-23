@@ -23,6 +23,13 @@ import (
 )
 
 const DefaultMetadataRefreshTimeout = 2 * time.Minute
+const DefaultBlockedRetryInterval = time.Hour
+
+var (
+	errMetadataNotFound  = errors.New("metadata upstream not found")
+	errMetadataTransient = errors.New("metadata upstream transient failure")
+	errMetadataForbidden = errors.New("metadata upstream forbidden")
+)
 
 func ResolveMetadataRefreshTimeout(value config.Duration) time.Duration {
 	if value > 0 {
@@ -127,18 +134,20 @@ type IndexedHandler struct {
 	base       *httpcache.Handler
 	client     *utils.HttpClientWrapper
 	upstreams  []string
-	targets    []MetadataTarget
+	discover   Discoverer
 	policy     RefreshPolicy
 	build      SnapshotBuilder
+	removal    RemovalPolicy
 
 	mu         sync.RWMutex
 	state      RefreshState
 	snapshot   *LiveSnapshot
+	roots      map[string]*RepositoryRecord
 	refreshing bool
 	wait       sync.WaitGroup
 }
 
-func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, targets []MetadataTarget, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats) *IndexedHandler {
+func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats) *IndexedHandler {
 	ApplyDefaults(policy, metadataFreshFor)
 	if refreshPolicy.Timeout <= 0 {
 		refreshPolicy.Timeout = DefaultMetadataRefreshTimeout
@@ -151,10 +160,15 @@ func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Fr
 		stats:      stats,
 		classifier: classifier,
 		upstreams:  append([]string(nil), upstreams...),
-		targets:    append([]MetadataTarget(nil), targets...),
+		discover:   discover,
 		policy:     refreshPolicy,
 		build:      builder,
-		state:      RefreshStateBooting,
+		removal: RemovalPolicy{
+			ConsecutiveNotFound: 3,
+			MinNotFoundAge:      10 * time.Minute,
+		},
+		state: RefreshStateBooting,
+		roots: map[string]*RepositoryRecord{},
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:            mode,
@@ -206,6 +220,9 @@ func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Fr
 			}
 		}
 	}
+	for _, seed := range seeds {
+		handler.observeRoot(seed, time.Time{})
+	}
 	handler.stats.SetMetadataState(handler.name, handler.mode, string(handler.state), false)
 	return handler
 }
@@ -213,6 +230,7 @@ func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Fr
 func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	cleanPath := cleanRequestPath(req.URL.Path)
 	if cleanPath != "" {
+		h.discoverRoot(req.Context(), cleanPath)
 		h.prepareRequest(req.Context(), cleanPath)
 	}
 	h.base.ServeHTTP(w, req)
@@ -220,7 +238,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (h *IndexedHandler) Start(ctx context.Context) error {
 	h.runRefreshCycle(ctx)
-	if h.policy.Interval <= 0 || len(h.targets) == 0 || h.build == nil {
+	if h.policy.Interval <= 0 || h.build == nil {
 		return nil
 	}
 	h.wait.Add(1)
@@ -285,7 +303,7 @@ func (h *IndexedHandler) Refresh(ctx context.Context) error {
 }
 
 func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
-	if len(h.targets) == 0 || h.build == nil || ctx.Err() != nil || !h.beginRefresh() {
+	if h.build == nil || ctx.Err() != nil || !h.beginRefresh() {
 		return
 	}
 	startedAt := time.Now()
@@ -296,16 +314,13 @@ func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
 		defer cancel()
 	}
 
-	snapshot, err := h.buildSnapshot(refreshCtx)
-	if err != nil {
-		h.finishRefresh(err, time.Since(startedAt))
-		return
+	refreshed, err := h.refreshDueRoots(refreshCtx, startedAt)
+	if refreshed {
+		if err := h.Cleanup(refreshCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("indexed cleanup failed after refresh", "instance", h.name, "mode", h.mode, "err", err)
+		}
 	}
-	h.commitSnapshot(snapshot)
-	h.finishRefresh(nil, time.Since(startedAt))
-	if err := h.Cleanup(refreshCtx); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Warn("indexed cleanup failed after refresh", "instance", h.name, "mode", h.mode, "err", err)
-	}
+	h.finishRefresh(err, time.Since(startedAt))
 }
 
 func (h *IndexedHandler) refresh(ctx context.Context) error {
@@ -313,21 +328,25 @@ func (h *IndexedHandler) refresh(ctx context.Context) error {
 		return ctx.Err()
 	}
 	startedAt := time.Now()
-	snapshot, err := h.buildSnapshot(ctx)
+	refreshed, err := h.refreshAllRoots(ctx, startedAt)
+	if refreshed {
+		if cleanupErr := h.Cleanup(ctx); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
+			slog.Warn("indexed cleanup failed after refresh", "instance", h.name, "mode", h.mode, "err", cleanupErr)
+		}
+	}
 	if err != nil {
 		h.recordRefreshResult(h.resultForError(err), time.Since(startedAt), h.currentSnapshot() != nil)
 		return err
 	}
-	h.commitSnapshot(snapshot)
 	h.recordRefreshResult("success", time.Since(startedAt), true)
 	return nil
 }
 
-func (h *IndexedHandler) buildSnapshot(ctx context.Context) (*LiveSnapshot, error) {
+func (h *IndexedHandler) buildSnapshot(ctx context.Context, targets []MetadataTarget) (*LiveSnapshot, error) {
 	session := &RefreshSession{
 		handler: h,
 		blobs:   map[string]MetadataBlob{},
-		targets: append([]MetadataTarget(nil), h.targets...),
+		targets: append([]MetadataTarget(nil), targets...),
 	}
 	snapshot, err := h.build(ctx, session)
 	if err != nil {
@@ -349,6 +368,9 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context) (*LiveSnapshot, erro
 }
 
 func (h *IndexedHandler) refreshMetadataObject(ctx context.Context, cleanPath string) (MetadataBlob, error) {
+	notFound := 0
+	transient := 0
+	forbidden := 0
 	for _, upstream := range h.upstreams {
 		targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -364,6 +386,14 @@ func (h *IndexedHandler) refreshMetadataObject(ctx context.Context, cleanPath st
 		h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, response.StatusCode)
 		if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
+			switch response.StatusCode {
+			case http.StatusNotFound, http.StatusGone:
+				notFound++
+			case http.StatusUnauthorized, http.StatusForbidden:
+				forbidden++
+			default:
+				transient++
+			}
 			continue
 		}
 		body, err := io.ReadAll(response.Body)
@@ -382,7 +412,16 @@ func (h *IndexedHandler) refreshMetadataObject(ctx context.Context, cleanPath st
 		}
 		return MetadataBlob{Path: cleanPath, Body: body, Headers: headers}, nil
 	}
-	return MetadataBlob{}, errors.New("metadata upstream fetch failed")
+	switch {
+	case forbidden > 0:
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataForbidden}
+	case transient > 0:
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataTransient}
+	case notFound > 0:
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataNotFound}
+	default:
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataTransient}
+	}
 }
 
 func (h *IndexedHandler) prepareRequest(ctx context.Context, cleanPath string) {
@@ -486,6 +525,230 @@ func (h *IndexedHandler) putObject(ctx context.Context, cleanPath string, body [
 	return err
 }
 
+func (h *IndexedHandler) discoverRoot(ctx context.Context, cleanPath string) {
+	if h.discover == nil || h.classify(cleanPath) != ResourceMetadata {
+		return
+	}
+	spec, ok := h.discover.Discover(cleanPath)
+	if !ok {
+		return
+	}
+	record, changed := h.observeRoot(spec, time.Now())
+	if !changed && record.State != RepositoryStatePending && record.State != RepositoryStateRemoved {
+		return
+	}
+	refreshCtx := ctx
+	if h.policy.Timeout > 0 {
+		var cancel context.CancelFunc
+		refreshCtx, cancel = context.WithTimeout(ctx, h.policy.Timeout)
+		defer cancel()
+	}
+	_, _ = h.refreshRoot(refreshCtx, record, time.Now())
+}
+
+func (h *IndexedHandler) observeRoot(spec RootSpec, now time.Time) (*RepositoryRecord, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if now.IsZero() {
+		now = time.Now()
+	}
+	key := spec.Key()
+	record, ok := h.roots[key]
+	if !ok {
+		record = &RepositoryRecord{
+			Spec:          spec,
+			State:         RepositoryStatePending,
+			LastSeenAt:    now,
+			NextRefreshAt: now,
+		}
+		h.roots[key] = record
+		return record, true
+	}
+	record.LastSeenAt = now
+	changed := record.Spec.Merge(spec)
+	if record.State == RepositoryStateRemoved {
+		record.State = RepositoryStatePending
+		record.Snapshot = nil
+		record.NextRefreshAt = now
+		record.FirstNotFoundAt = time.Time{}
+		record.ConsecutiveNotFound = 0
+		record.ConsecutiveInvalid = 0
+		record.ConsecutiveTransient = 0
+		record.LastError = ""
+		return record, true
+	}
+	if changed {
+		record.NextRefreshAt = now
+	}
+	return record, changed
+}
+
+func (h *IndexedHandler) refreshDueRoots(ctx context.Context, now time.Time) (bool, error) {
+	records := h.snapshotRecords()
+	refreshed := false
+	var firstErr error
+	for _, record := range records {
+		if !record.NextRefreshAt.IsZero() && record.NextRefreshAt.After(now) {
+			continue
+		}
+		changed, err := h.refreshRoot(ctx, record, now)
+		if changed {
+			refreshed = true
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return refreshed, firstErr
+}
+
+func (h *IndexedHandler) refreshAllRoots(ctx context.Context, now time.Time) (bool, error) {
+	records := h.snapshotRecords()
+	refreshed := false
+	var firstErr error
+	for _, record := range records {
+		changed, err := h.refreshRoot(ctx, record, now)
+		if changed {
+			refreshed = true
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return refreshed, firstErr
+}
+
+func (h *IndexedHandler) snapshotRecords() []*RepositoryRecord {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	records := make([]*RepositoryRecord, 0, len(h.roots))
+	for _, record := range h.roots {
+		switch record.State {
+		case RepositoryStateRemoved:
+			continue
+		default:
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+func (h *IndexedHandler) refreshRoot(ctx context.Context, record *RepositoryRecord, now time.Time) (bool, error) {
+	targets := record.Spec.Targets()
+	if len(targets) == 0 {
+		return false, nil
+	}
+	h.mu.Lock()
+	switch record.State {
+	case RepositoryStateRemoved:
+		h.mu.Unlock()
+		return false, nil
+	case RepositoryStatePending:
+	default:
+		record.State = RepositoryStateRefreshing
+	}
+	h.mu.Unlock()
+	snapshot, err := h.buildSnapshot(ctx, targets)
+	if err != nil {
+		return h.handleRootFailure(record, err, now)
+	}
+	h.mu.Lock()
+	record.Snapshot = snapshot
+	record.State = RepositoryStateActive
+	record.LastRefreshAt = now
+	record.LastSuccessAt = now
+	record.NextRefreshAt = now.Add(h.policy.Interval)
+	record.FirstNotFoundAt = time.Time{}
+	record.ConsecutiveNotFound = 0
+	record.ConsecutiveInvalid = 0
+	record.ConsecutiveTransient = 0
+	record.LastError = ""
+	h.rebuildAggregateLocked()
+	h.mu.Unlock()
+	return true, nil
+}
+
+func (h *IndexedHandler) handleRootFailure(record *RepositoryRecord, err error, now time.Time) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	record.LastRefreshAt = now
+	record.LastError = err.Error()
+	switch {
+	case errors.Is(err, errMetadataNotFound):
+		record.ConsecutiveNotFound++
+		if record.FirstNotFoundAt.IsZero() {
+			record.FirstNotFoundAt = now
+		}
+		if record.Snapshot == nil {
+			record.State = RepositoryStateRemoved
+			record.NextRefreshAt = time.Time{}
+			h.rebuildAggregateLocked()
+			return false, err
+		}
+		if record.ConsecutiveNotFound >= h.removal.ConsecutiveNotFound && now.Sub(record.FirstNotFoundAt) >= h.removal.MinNotFoundAge {
+			record.State = RepositoryStateRemoved
+			record.Snapshot = nil
+			record.NextRefreshAt = time.Time{}
+			h.rebuildAggregateLocked()
+			return true, err
+		}
+		record.State = RepositoryStateSuspect
+		record.NextRefreshAt = now.Add(h.policy.Interval)
+		return false, err
+	case errors.Is(err, errMetadataForbidden):
+		record.ConsecutiveInvalid++
+		record.State = RepositoryStateBlocked
+		record.NextRefreshAt = now.Add(DefaultBlockedRetryInterval)
+		return false, err
+	case errors.Is(err, errMetadataTransient), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		record.ConsecutiveTransient++
+		if record.Snapshot != nil {
+			record.State = RepositoryStateSuspect
+		}
+		record.NextRefreshAt = now.Add(h.policy.Interval)
+		return false, err
+	default:
+		record.ConsecutiveInvalid++
+		if record.ConsecutiveInvalid >= 3 {
+			record.State = RepositoryStateBlocked
+			record.NextRefreshAt = now.Add(DefaultBlockedRetryInterval)
+			return false, err
+		}
+		if record.Snapshot != nil {
+			record.State = RepositoryStateSuspect
+		}
+		record.NextRefreshAt = now.Add(h.policy.Interval)
+		return false, err
+	}
+}
+
+func (h *IndexedHandler) rebuildAggregateLocked() {
+	aggregate := &LiveSnapshot{
+		Metadata:  map[string]struct{}{},
+		Artifacts: map[string]string{},
+		Auxiliary: map[string]string{},
+	}
+	for _, record := range h.roots {
+		if record.Snapshot == nil {
+			continue
+		}
+		switch record.State {
+		case RepositoryStatePending, RepositoryStateRemoved:
+			continue
+		}
+		for path := range record.Snapshot.Metadata {
+			aggregate.Metadata[path] = struct{}{}
+		}
+		for path, identity := range record.Snapshot.Artifacts {
+			aggregate.Artifacts[path] = identity
+		}
+		for path, identity := range record.Snapshot.Auxiliary {
+			aggregate.Auxiliary[path] = identity
+		}
+	}
+	h.snapshot = aggregate
+}
+
 func (h *IndexedHandler) beginRefresh() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -496,12 +759,6 @@ func (h *IndexedHandler) beginRefresh() bool {
 	h.state = RefreshStateRefreshing
 	h.stats.SetMetadataState(h.name, h.mode, string(h.state), h.snapshot != nil)
 	return true
-}
-
-func (h *IndexedHandler) commitSnapshot(snapshot *LiveSnapshot) {
-	h.mu.Lock()
-	h.snapshot = snapshot
-	h.mu.Unlock()
 }
 
 func (h *IndexedHandler) finishRefresh(err error, duration time.Duration) {
@@ -550,6 +807,8 @@ func (h *IndexedHandler) resultForError(err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
+	case errors.Is(err, errMetadataNotFound):
+		return "not_found"
 	case errors.As(err, &fetchErr):
 		return "fetch_error"
 	default:

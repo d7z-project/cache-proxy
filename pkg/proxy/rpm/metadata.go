@@ -11,43 +11,33 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func metadataTargets(repositories []Repository) ([]filerepo.MetadataTarget, []string, error) {
-	if len(repositories) == 0 {
-		return nil, nil, fmt.Errorf("rpm repositories must not be empty")
+type rootSpec struct {
+	RepoPath string
+}
+
+func (s *rootSpec) Key() string { return s.RepoPath }
+
+func (s *rootSpec) Targets() []filerepo.MetadataTarget {
+	return []filerepo.MetadataTarget{{URL: path.Join(s.RepoPath, "repodata", "repomd.xml")}}
+}
+
+func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
+	return false
+}
+
+type discoverer struct{}
+
+func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
+	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
+	if !strings.HasSuffix(trimmed, "/repodata/repomd.xml") {
+		return nil, false
 	}
-	var targets []filerepo.MetadataTarget
-	upstreams := make([]string, 0, len(repositories))
-	seenUpstreams := map[string]struct{}{}
-	for i, repo := range repositories {
-		baseURL := strings.TrimRight(strings.TrimSpace(repo.URL), "/")
-		if baseURL == "" {
-			return nil, nil, fmt.Errorf("rpm repositories[%d].url is empty", i)
-		}
-		paths := repo.Paths
-		if repo.Path != "" {
-			if len(paths) != 0 {
-				return nil, nil, fmt.Errorf("rpm repositories[%d] must not set both path and paths", i)
-			}
-			paths = []string{repo.Path}
-		}
-		if len(paths) == 0 {
-			return nil, nil, fmt.Errorf("rpm repositories[%d].paths must not be empty", i)
-		}
-		if _, ok := seenUpstreams[baseURL]; !ok {
-			seenUpstreams[baseURL] = struct{}{}
-			upstreams = append(upstreams, baseURL)
-		}
-		for _, repoPath := range paths {
-			repoPath = strings.Trim(strings.TrimSpace(repoPath), "/")
-			if repoPath == "" {
-				return nil, nil, fmt.Errorf("rpm repositories[%d] contains empty path", i)
-			}
-			targets = append(targets, filerepo.MetadataTarget{
-				URL: path.Join(repoPath, "repodata", "repomd.xml"),
-			})
-		}
+	repoPath := strings.TrimSuffix(trimmed, "/repodata/repomd.xml")
+	repoPath = strings.Trim(repoPath, "/")
+	if repoPath == "" {
+		return nil, false
 	}
-	return targets, upstreams, nil
+	return &rootSpec{RepoPath: repoPath}, true
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {

@@ -14,17 +14,11 @@ import (
 type Config = filerepo.BasicPolicy
 type Policy = Config
 
-type Repository struct {
-	URL           string   `yaml:"url"`
-	Repos         []string `yaml:"repos"`
-	Architectures []string `yaml:"architectures"`
-}
-
 type Block struct {
 	ExpireAfter     config.Expiration       `yaml:"expire_after"`
 	Route           struct{ Path string }   `yaml:"route"`
 	Transport       *config.TransportConfig `yaml:"transport,omitempty"`
-	Repositories    []Repository            `yaml:"repositories"`
+	Upstreams       []string                `yaml:"upstreams"`
 	RefreshInterval config.Duration         `yaml:"refresh_interval,omitempty"`
 	RefreshTimeout  config.Duration         `yaml:"refresh_timeout,omitempty"`
 	Policy          `yaml:",inline"`
@@ -42,9 +36,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.Decode(&block); err != nil {
 		return err
 	}
-	targets, upstreams, err := metadataTargets(block.Repositories)
-	if err != nil {
-		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	upstreams := filerepo.CollectUpstreams(block.Upstreams, nil)
+	if len(upstreams) == 0 {
+		return fmt.Errorf("instance %s: pacman mode requires at least one upstream", plan.Name())
 	}
 	policy := block.Policy.AsPolicy()
 	filerepo.ApplyDefaults(policy, config.Freshness(time.Minute))
@@ -58,7 +52,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	handler := filerepo.NewIndexedHandler(plan.Name(), config.ModePacman, config.ModePacman, config.Freshness(time.Minute), classify, upstreams, block.Transport, expireAfter, policy, filerepo.RefreshPolicy{
 		Interval: filerepo.ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval),
 		Timeout:  filerepo.ResolveMetadataRefreshTimeout(block.RefreshTimeout),
-	}, targets, buildSnapshot, plan.Store(), plan.Stats())
+	}, discoverer{}, nil, buildSnapshot, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, handler)
 }

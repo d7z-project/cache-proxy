@@ -9,16 +9,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func TestMetadataTargetsExpandRepositories(t *testing.T) {
-	targets, upstreams, err := metadataTargets([]Repository{{
-		URL:   "https://download.rockylinux.org/pub/rocky",
-		Paths: []string{"9/BaseOS/x86_64/os"},
-	}})
-	require.NoError(t, err)
-	require.Equal(t, []string{"https://download.rockylinux.org/pub/rocky"}, upstreams)
-	require.Equal(t, []filerepo.MetadataTarget{{URL: "9/BaseOS/x86_64/os/repodata/repomd.xml"}}, targets)
-}
-
 func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
 		Artifacts: map[string]string{},
@@ -35,4 +25,15 @@ func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
 	require.Equal(t, "abc123", snapshot.Artifacts["Packages/h/hello-1.0-1.x86_64.rpm"])
 	require.Equal(t, "abc123", snapshot.Auxiliary["Packages/h/hello-1.0-1.x86_64.rpm.sig"])
 	require.Equal(t, "abc123", snapshot.Auxiliary["Packages/h/hello-1.0-1.x86_64.rpm.sha256"])
+}
+
+func TestDiscovererDetectsRPMRoot(t *testing.T) {
+	spec, ok := (discoverer{}).Discover("9/BaseOS/x86_64/os/repodata/repomd.xml")
+	require.True(t, ok)
+	require.Equal(t, "9/BaseOS/x86_64/os", spec.Key())
+}
+
+func TestDiscovererRejectsRPMArtifactPath(t *testing.T) {
+	_, ok := (discoverer{}).Discover("Packages/h/hello-1.0-1.x86_64.rpm")
+	require.False(t, ok)
 }

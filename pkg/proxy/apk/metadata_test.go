@@ -9,29 +9,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func TestMetadataTargetsExpandRepositories(t *testing.T) {
-	targets, upstreams, err := metadataTargets([]Repository{{
-		URL:           "https://dl-cdn.alpinelinux.org/alpine",
-		Branches:      []string{"v3.20"},
-		Repos:         []string{"main"},
-		Architectures: []string{"x86_64"},
-	}})
-	require.NoError(t, err)
-	require.Equal(t, []string{"https://dl-cdn.alpinelinux.org/alpine"}, upstreams)
-	require.Equal(t, []filerepo.MetadataTarget{{URL: "v3.20/main/x86_64/APKINDEX.tar.gz"}}, targets)
-}
-
-func TestMetadataTargetsRejectMixedBranchForms(t *testing.T) {
-	_, _, err := metadataTargets([]Repository{{
-		URL:           "https://dl-cdn.alpinelinux.org/alpine",
-		Branch:        "v3.20",
-		Branches:      []string{"v3.21"},
-		Repos:         []string{"main"},
-		Architectures: []string{"x86_64"},
-	}})
-	require.ErrorContains(t, err, "must not set both branch and branches")
-}
-
 func TestParseIndexBuildsArtifactsAndAuxiliary(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata:  map[string]struct{}{},
@@ -42,4 +19,15 @@ func TestParseIndexBuildsArtifactsAndAuxiliary(t *testing.T) {
 	require.NoError(t, parseIndex("v3.20/main/x86_64", strings.NewReader(input), snapshot))
 	require.Equal(t, "sha256:abc", snapshot.Artifacts["v3.20/main/x86_64/busybox-1.36.1-r2.apk"])
 	require.Equal(t, "sha256:abc", snapshot.Auxiliary["v3.20/main/x86_64/busybox-1.36.1-r2.apk.sig"])
+}
+
+func TestDiscovererDetectsAPKRoot(t *testing.T) {
+	spec, ok := (discoverer{}).Discover("v3.20/main/x86_64/APKINDEX.tar.gz")
+	require.True(t, ok)
+	require.Equal(t, "v3.20|main|x86_64", spec.Key())
+}
+
+func TestDiscovererRejectsAPKArtifactPath(t *testing.T) {
+	_, ok := (discoverer{}).Discover("v3.20/main/x86_64/busybox-1.0.apk")
+	require.False(t, ok)
 }

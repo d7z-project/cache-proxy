@@ -9,35 +9,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func TestMetadataTargetsExpandRepositories(t *testing.T) {
-	targets, upstreams, err := metadataTargets([]Repository{{
-		URL:           "https://deb.debian.org/debian",
-		Suites:        []string{"bookworm"},
-		Components:    []string{"main"},
-		Architectures: []string{"amd64"},
-		Source:        true,
-	}})
-	require.NoError(t, err)
-	require.Equal(t, []string{"https://deb.debian.org/debian"}, upstreams)
-	require.Len(t, targets, 3)
-	require.Equal(t, "dists/bookworm/InRelease", targets[0].URL)
-	require.Equal(t, []string{"dists/bookworm/Release"}, targets[0].Candidates)
-	require.Equal(t, "dists/bookworm/main/binary-amd64/Packages.xz", targets[1].URL)
-	require.Equal(t, []string{"dists/bookworm/main/binary-amd64/Packages.gz", "dists/bookworm/main/binary-amd64/Packages"}, targets[1].Candidates)
-	require.Equal(t, "dists/bookworm/main/source/Sources.xz", targets[2].URL)
-}
-
-func TestMetadataTargetsRejectMixedSuiteForms(t *testing.T) {
-	_, _, err := metadataTargets([]Repository{{
-		URL:           "https://deb.debian.org/debian",
-		Suite:         "bookworm",
-		Suites:        []string{"bookworm-updates"},
-		Components:    []string{"main"},
-		Architectures: []string{"amd64"},
-	}})
-	require.ErrorContains(t, err, "must not set both suite and suites")
-}
-
 func TestParsePackagesRecordsArtifactChecksum(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]string{}}
 	input := "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\nSHA256: abc123\n\n"
@@ -51,4 +22,37 @@ func TestParseSourcesRecordsArtifacts(t *testing.T) {
 	require.NoError(t, parseSources(strings.NewReader(input), snapshot))
 	require.Equal(t, "abc111", snapshot.Artifacts["pool/main/h/hello/hello_1.0.dsc"])
 	require.Equal(t, "def222", snapshot.Artifacts["pool/main/h/hello/hello_1.0.orig.tar.xz"])
+}
+
+func TestDiscovererDetectsDebianSuiteRoot(t *testing.T) {
+	spec, ok := (discoverer{}).Discover("dists/bookworm/main/binary-amd64/Packages.xz")
+	require.True(t, ok)
+	require.Equal(t, "bookworm", spec.Key())
+
+	root := spec.(*rootSpec)
+	require.Equal(t, []string{"main"}, root.Components)
+	require.Equal(t, []string{"amd64"}, root.Architectures)
+}
+
+func TestRootSpecMergeAggregatesDebianShards(t *testing.T) {
+	root := &rootSpec{
+		Suite:         "bookworm",
+		Components:    []string{"main"},
+		Architectures: []string{"amd64"},
+	}
+	changed := root.Merge(&rootSpec{
+		Suite:         "bookworm",
+		Components:    []string{"contrib"},
+		Architectures: []string{"arm64"},
+		Source:        true,
+	})
+	require.True(t, changed)
+	require.ElementsMatch(t, []string{"main", "contrib"}, root.Components)
+	require.ElementsMatch(t, []string{"amd64", "arm64"}, root.Architectures)
+	require.True(t, root.Source)
+}
+
+func TestDiscovererRejectsDebianPoolArtifact(t *testing.T) {
+	_, ok := (discoverer{}).Discover("pool/main/h/hello/hello_1.0_amd64.deb")
+	require.False(t, ok)
 }

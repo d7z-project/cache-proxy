@@ -12,7 +12,7 @@
 - Path-mounted and dedicated-listener instances
 - Prometheus metrics
 - Background cache cleanup
-- Metadata-driven refresh and cleanup for package repository modes
+- Metadata-driven discovery, refresh, and cleanup for package repository modes
 
 ## Installation
 
@@ -410,18 +410,25 @@ instances:
       expire_after: 720h # Retention upper bound
       route:
         path: /apk # Published under server.bind
-      repositories:
-        - url: https://dl-cdn.alpinelinux.org/alpine # Repository root
-          branches: [v3.20] # Branch list
-          repos: [main] # Repository names
-          architectures: [x86_64] # Architectures to mirror
+      upstreams:
+        - https://dl-cdn.alpinelinux.org/alpine # Upstream repository root list
       transport:
         proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 1h # Background metadata refresh cadence
-      refresh_timeout: 2m # Timeout for a single refresh cycle
-      metadata_policy: revalidate # APKINDEX metadata changes over time
-      artifact_policy: immutable # .apk artifacts are immutable
+      refresh_interval: 1h # Background root refresh cadence after a root is discovered
+      refresh_timeout: 2m # Timeout for one metadata refresh pass
+      metadata_policy: revalidate # APKINDEX metadata can change
+      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
+      artifact_policy: immutable # .apk package artifacts are immutable
+      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
+      auxiliary_policy: revalidate # Signatures and checksum sidecars may change
+      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
 ```
+
+Discovery notes:
+
+- A root is created when a client first requests `/<branch>/<repo>/<arch>/APKINDEX.tar.gz`.
+- The root identity is `<branch>/<repo>/<arch>`.
+- Artifact requests such as `*.apk` do not create a root by themselves.
 
 ### deb
 
@@ -433,19 +440,26 @@ instances:
       expire_after: 720h # Retention upper bound
       route:
         path: /deb # Published under server.bind
-      repositories:
-        - url: https://deb.debian.org/debian # Repository root
-          suites: [bookworm] # Suites to mirror
-          components: [main] # Components to mirror
-          architectures: [amd64] # Binary architectures
-          source: true # Also proxy source package metadata
+      upstreams:
+        - https://deb.debian.org/debian # Upstream archive root list
       transport:
         proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 1h # Background metadata refresh cadence
-      refresh_timeout: 2m # Timeout for a single refresh cycle
-      metadata_policy: revalidate # Release and package indexes change over time
-      artifact_policy: immutable # Package files are immutable
+      refresh_interval: 1h # Background root refresh cadence after a suite is discovered
+      refresh_timeout: 2m # Timeout for one metadata refresh pass
+      metadata_policy: revalidate # Release and package indexes can change
+      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
+      artifact_policy: immutable # .deb/.udeb/.ddeb/source artifacts are immutable
+      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
+      auxiliary_policy: revalidate # Signatures and checksum sidecars may change
+      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
 ```
+
+Discovery notes:
+
+- A root is created from `dists/<suite>/InRelease`, `dists/<suite>/Release`, `Packages*`, or `Sources*`.
+- The root identity is `<suite>`.
+- Component, architecture, and source shards discovered under the same suite are merged into one root.
+- Artifact requests under `pool/` do not create a root by themselves.
 
 ### rpm
 
@@ -457,17 +471,25 @@ instances:
       expire_after: 720h # Retention upper bound
       route:
         path: /rpm # Published under server.bind
-      repositories:
-        - url: https://download.rockylinux.org/pub/rocky # Repository root
-          paths:
-            - 9/BaseOS/x86_64/os # Subpath under the repository root
+      upstreams:
+        - https://download.rockylinux.org/pub/rocky # Upstream repository root list
       transport:
         proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 1h # Background metadata refresh cadence
-      refresh_timeout: 2m # Timeout for a single refresh cycle
-      metadata_policy: revalidate # repodata changes over time
-      artifact_policy: immutable # .rpm artifacts are immutable
+      refresh_interval: 1h # Background root refresh cadence after a repo path is discovered
+      refresh_timeout: 2m # Timeout for one metadata refresh pass
+      metadata_policy: revalidate # repodata can change
+      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
+      artifact_policy: immutable # .rpm/.drpm artifacts are immutable
+      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
+      auxiliary_policy: revalidate # Signatures and checksum sidecars may change
+      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
 ```
+
+Discovery notes:
+
+- A root is created when a client first requests `<repo-path>/repodata/repomd.xml`.
+- The root identity is `<repo-path>`.
+- Artifact requests such as `*.rpm` do not create a root by themselves.
 
 ### pacman
 
@@ -479,29 +501,44 @@ instances:
       expire_after: 720h # Retention upper bound
       route:
         path: /pacman # Published under server.bind
-      repositories:
-        - url: https://mirror.rackspace.com/archlinux # Repository root
-          repos: [core] # Repository names
-          architectures: [x86_64] # Architectures to mirror
+      upstreams:
+        - https://geo.mirror.pkgbuild.com # Upstream mirror root list
       transport:
         proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 2m # Background metadata refresh cadence
-      refresh_timeout: 2m # Timeout for a single refresh cycle
-      metadata_policy: revalidate # Sync databases change over time
-      artifact_policy: immutable # Package files are immutable
+      refresh_interval: 2m # Background root refresh cadence after a repo/arch root is discovered
+      refresh_timeout: 2m # Timeout for one metadata refresh pass
+      metadata_policy: revalidate # Sync databases can change
+      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
+      artifact_policy: immutable # .pkg.tar.* artifacts are immutable
+      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
+      auxiliary_policy: revalidate # Signature and checksum sidecars may change
+      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
 ```
+
+Discovery notes:
+
+- A root is created from `<repo>/os/<arch>/<repo>.db`, `<repo>.db.sig`, `<repo>.files`, or `<repo>.files.sig`.
+- The root identity is `<repo>/<arch>`.
+- Artifact requests such as `*.pkg.tar.*` do not create a root by themselves.
 
 ### Package Repository Notes
 
-The `apk`, `deb`, `rpm`, and `pacman` modes derive repository metadata from `repositories` and keep cache cleanup aligned with the latest successful metadata snapshot.
+The `apk`, `deb`, `rpm`, and `pacman` modes are discovery-driven. You only configure `upstreams`, then roots are created from metadata requests and refreshed independently.
 
 Relevant options:
 
+- `upstreams`: one or more upstream base URLs; requests are tried in order
 - `refresh_interval`: background metadata refresh cadence
 - `refresh_timeout`: timeout for a single refresh cycle
 - `metadata_policy`, `artifact_policy`, `auxiliary_policy`: `bypass`, `immutable`, `revalidate`
 - `metadata_busy_policy`, `artifact_busy_policy`, `auxiliary_busy_policy`: `bypass`, `stale`
-- `deb.repositories[].source`: `true`, `false`
+
+Lifecycle notes:
+
+- Newly seen metadata creates a root in `pending`, then the first successful refresh moves it to `active`.
+- Transient refresh failures keep the last successful snapshot and move the root to a degraded `suspect` state.
+- Repeated metadata `404` / `410` removes the root and its snapshot from the aggregate view.
+- Removed roots are recreated automatically if matching metadata is requested again.
 
 Default refresh intervals when `refresh_interval` is unset:
 
