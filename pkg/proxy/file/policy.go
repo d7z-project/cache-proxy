@@ -110,9 +110,6 @@ func validate(policy *Policy) error {
 			return err
 		}
 	}
-	if len(policy.Rules) == 0 {
-		policy.Rules = []Rule{}
-	}
 	return nil
 }
 

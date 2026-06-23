@@ -105,6 +105,13 @@ func TestIndexedHandlerRefreshInvalidatesArtifactIdentity(t *testing.T) {
 	require.Equal(t, uint64(2), snapshot.Refreshes)
 }
 
+func TestResolveMetadataRefreshPolicyValues(t *testing.T) {
+	require.Equal(t, 2*time.Minute, ResolveMetadataRefreshTimeout(0))
+	require.Equal(t, 30*time.Second, ResolveMetadataRefreshTimeout(config.Duration(30*time.Second)))
+	require.Equal(t, time.Hour, ResolveMetadataRefreshInterval(0, time.Hour))
+	require.Equal(t, 45*time.Second, ResolveMetadataRefreshInterval(config.Duration(45*time.Second), time.Hour))
+}
+
 func TestIndexedHandlerCleanupRemovesOrphanArtifacts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

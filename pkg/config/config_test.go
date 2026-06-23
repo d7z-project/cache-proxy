@@ -93,7 +93,6 @@ instances:
       upstreams:
         - https://example.com
       default_policy: immutable
-      rules: []
 `))
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1:8080", doc.Server.Bind)
@@ -114,7 +113,6 @@ instances:
 		} `yaml:"route"`
 		Upstreams     []string `yaml:"upstreams"`
 		DefaultPolicy string   `yaml:"default_policy"`
-		Rules         []any    `yaml:"rules"`
 	}
 	require.NoError(t, spec.Block.DecodeStrict(&cfg))
 	require.Equal(t, "720h", cfg.ExpireAfter)
@@ -137,6 +135,7 @@ instances:
           suites: [bookworm]
           components: [main]
           architectures: [amd64]
+      refresh_interval: 1h
       refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
@@ -155,11 +154,13 @@ instances:
 			Components    []string `yaml:"components"`
 			Architectures []string `yaml:"architectures"`
 		} `yaml:"repositories"`
-		RefreshTimeout Duration `yaml:"refresh_timeout"`
-		MetadataPolicy string   `yaml:"metadata_policy"`
-		ArtifactPolicy string   `yaml:"artifact_policy"`
+		RefreshInterval Duration `yaml:"refresh_interval"`
+		RefreshTimeout  Duration `yaml:"refresh_timeout"`
+		MetadataPolicy  string   `yaml:"metadata_policy"`
+		ArtifactPolicy  string   `yaml:"artifact_policy"`
 	}
 	require.NoError(t, selected.Block.DecodeStrict(&block))
+	require.Equal(t, Duration(time.Hour), block.RefreshInterval)
 	require.Equal(t, Duration(2*time.Minute), block.RefreshTimeout)
 	require.Len(t, block.Repositories, 1)
 	require.Equal(t, "https://deb.example.com/debian", block.Repositories[0].URL)
@@ -299,7 +300,7 @@ instances:
 			wantError: "field upstreams not found",
 		},
 		{
-			name: "npm rejects rules",
+			name: "npm rejects unexpected rules field",
 			document: `
 instances:
   - name: npmjs
@@ -309,7 +310,7 @@ instances:
       route:
         path: /npm
       upstream: https://registry.npmjs.org
-      rules: []
+      unexpected_rules: []
 `,
 			decodeBlock: &struct {
 				ExpireAfter Expiration `yaml:"expire_after"`
@@ -318,7 +319,7 @@ instances:
 				} `yaml:"route"`
 				Upstream string `yaml:"upstream"`
 			}{},
-			wantError: "field rules not found",
+			wantError: "field unexpected_rules not found",
 		},
 		{
 			name: "maven rejects upstreams",

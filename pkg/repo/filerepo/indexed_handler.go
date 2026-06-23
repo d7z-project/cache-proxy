@@ -31,6 +31,13 @@ func ResolveMetadataRefreshTimeout(value config.Duration) time.Duration {
 	return DefaultMetadataRefreshTimeout
 }
 
+func ResolveMetadataRefreshInterval(value config.Duration, fallback time.Duration) time.Duration {
+	if value > 0 {
+		return value.Duration()
+	}
+	return fallback
+}
+
 type RefreshState string
 
 const (

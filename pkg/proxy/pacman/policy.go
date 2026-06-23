@@ -21,15 +21,18 @@ type Repository struct {
 }
 
 type Block struct {
-	ExpireAfter    config.Expiration       `yaml:"expire_after"`
-	Route          struct{ Path string }   `yaml:"route"`
-	Transport      *config.TransportConfig `yaml:"transport,omitempty"`
-	Repositories   []Repository            `yaml:"repositories"`
-	RefreshTimeout config.Duration         `yaml:"refresh_timeout,omitempty"`
-	Policy         `yaml:",inline"`
+	ExpireAfter     config.Expiration       `yaml:"expire_after"`
+	Route           struct{ Path string }   `yaml:"route"`
+	Transport       *config.TransportConfig `yaml:"transport,omitempty"`
+	Repositories    []Repository            `yaml:"repositories"`
+	RefreshInterval config.Duration         `yaml:"refresh_interval,omitempty"`
+	RefreshTimeout  config.Duration         `yaml:"refresh_timeout,omitempty"`
+	Policy          `yaml:",inline"`
 }
 
 type Driver struct{}
+
+const defaultRefreshInterval = 2 * time.Minute
 
 func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModePacman }
@@ -53,7 +56,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		expireAfter = config.DefaultExpireAfter
 	}
 	handler := filerepo.NewIndexedHandler(plan.Name(), config.ModePacman, config.ModePacman, config.Freshness(time.Minute), classify, upstreams, block.Transport, expireAfter, policy, filerepo.RefreshPolicy{
-		Interval: 2 * time.Minute,
+		Interval: filerepo.ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval),
 		Timeout:  filerepo.ResolveMetadataRefreshTimeout(block.RefreshTimeout),
 	}, targets, buildSnapshot, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())

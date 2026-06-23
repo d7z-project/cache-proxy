@@ -15,7 +15,7 @@ func metadataTargets(repositories []Repository) ([]filerepo.MetadataTarget, []st
 	if len(repositories) == 0 {
 		return nil, nil, fmt.Errorf("rpm repositories must not be empty")
 	}
-	targets := []filerepo.MetadataTarget{}
+	var targets []filerepo.MetadataTarget
 	upstreams := make([]string, 0, len(repositories))
 	seenUpstreams := map[string]struct{}{}
 	for i, repo := range repositories {

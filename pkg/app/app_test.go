@@ -20,8 +20,8 @@ import (
 
 func TestValidateRejectsConflictingPaths(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "one", "/files", "https://example.com", fileproxy.Policy{Rules: []fileproxy.Rule{}}),
-		fileInstance(t, "two", "/files", "https://example.org", fileproxy.Policy{Rules: []fileproxy.Rule{}}),
+		fileInstance(t, "one", "/files", "https://example.com", fileproxy.Policy{}),
+		fileInstance(t, "two", "/files", "https://example.org", fileproxy.Policy{}),
 	})
 	err := Validate(doc)
 	require.ErrorContains(t, err, "listen path /files conflicts")
@@ -42,7 +42,6 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 		fileInstance(t, "files", "/files", upstream.URL, fileproxy.Policy{
 			DefaultPolicy: config.PolicyImmutable,
 			BusyPolicy:    config.BusyPolicyBypass,
-			Rules:         []fileproxy.Rule{},
 		}),
 	})
 	app, err := Open(ctx, doc)
@@ -59,7 +58,7 @@ func TestAppCleanupRemovesExpiredObjects(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{Rules: []fileproxy.Rule{}}),
+		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
 	})
 	doc.Storage.Cleanup.Enabled = true
 
@@ -158,7 +157,6 @@ instances:
       upstreams:
         - https://example.com
       default_polciy: immutable
-      rules: []
 `))
 	require.NoError(t, err)
 
@@ -172,7 +170,7 @@ func TestAppCleanupHonorsCanceledContext(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{Rules: []fileproxy.Rule{}}),
+		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
 	})
 	doc.Storage.Cleanup.Enabled = true
 
