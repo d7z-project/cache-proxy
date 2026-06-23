@@ -205,6 +205,7 @@ func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Fr
 		Classifier: classifier,
 	}), stats)
 	handler.client = utils.DefaultHttpClientWrapper()
+	handler.client.UserAgent = httpcache.ModeUserAgent(mode)
 	if transport != nil {
 		if transport.UserAgent != "" {
 			handler.client.UserAgent = transport.UserAgent

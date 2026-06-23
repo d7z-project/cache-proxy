@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, uint64, error) {
@@ -70,14 +72,22 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
-	body, err := io.ReadAll(response.Body)
+
+	tmp, size, err := utils.TempFileFromReader(response.Body)
 	if err != nil {
 		return 0, "", 0, err
 	}
-	if err := h.putObject(ctx, h.refBlobPath(state.Repo, state.Ref, resolved.digest), body, response.Header, nil); err != nil {
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
+	if err := h.putObjectFromReader(ctx, objectPath, tmp, size, response.Header, nil); err != nil {
 		return 0, "", 0, err
 	}
-	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, objectHeaders(response.Header, len(body), "MISS"), bytes.NewReader(body))
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return 0, "", 0, err
+	}
+	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, objectHeaders(response.Header, int(size), "MISS"), tmp)
 	return status, "MISS", bytes, err
 }
 

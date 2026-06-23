@@ -134,13 +134,94 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
 
+	body := rec.Body.String()
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "cache-proxy")
-	require.Contains(t, rec.Body.String(), "files")
-	require.Contains(t, rec.Body.String(), "http://proxy.example.test/files")
-	require.Contains(t, rec.Body.String(), "Client setup")
-	require.Contains(t, rec.Body.String(), "http://proxy.example.test/files")
-	require.NotContains(t, rec.Body.String(), "YAML snippet")
+	require.Contains(t, body, "cache-proxy")
+	require.Contains(t, body, "files")
+	require.Contains(t, body, "http://proxy.example.test/files")
+	require.Contains(t, body, `class="badge badge-file"`)
+	require.Contains(t, body, "copyURL")
+	require.Contains(t, body, "copyCode")
+}
+
+func TestHomePageUsesPublicURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
+	})
+	doc.Server.PublicURL = "https://cache.home.lan"
+	app, err := Open(ctx, doc)
+	require.NoError(t, err)
+	defer closeApp(t, app)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Contains(t, body, "https://cache.home.lan/files")
+	require.NotContains(t, body, "http://127.0.0.1")
+}
+
+func TestHomePageShowsBindDisplayURL(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "registry",
+		Mode:    "oci",
+		Enabled: true,
+		Bind:    "127.0.0.1:5000",
+		Home: proxyruntime.HomeEntry{
+			Name:       "registry",
+			Mode:       "oci",
+			DisplayURL: "https://cache.home.lan:5000",
+		},
+	}
+
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      map[string]*proxyruntime.Entry{"registry": entry},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Contains(t, body, "https://cache.home.lan:5000")
+	require.Contains(t, body, "docker pull")
+	require.Contains(t, body, `class="badge badge-oci"`)
+}
+
+func TestSetupCommandGeneration(t *testing.T) {
+	tests := []struct {
+		mode    string
+		url     string
+		contain string
+	}{
+		{"npm", "http://cache/npm", "npm config set registry http://cache/npm"},
+		{"go", "http://cache/go", "go env -w GOPROXY=http://cache/go"},
+		{"maven", "http://cache/maven", "http://cache/maven</url>"},
+		{"cargo", "http://cache/cargo", "sparse+"},
+		{"pypi", "http://cache/pypi", "pip install --index-url"},
+		{"oci", "http://cache:5000", "docker pull"},
+		{"apk", "http://cache/apk", "http://cache/apk/v3.20/main"},
+		{"deb", "http://cache/deb", "deb http://cache/deb bookworm main"},
+		{"rpm", "http://cache/rpm", "baseurl=http://cache/rpm/9/BaseOS/x86_64/os"},
+		{"pacman", "http://cache/pacman", "Server = http://cache/pacman/$repo/os/$arch"},
+		{"file", "http://cache/files", "http://cache/files"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cmd := setupCommand(tt.mode, tt.url)
+			require.Contains(t, cmd, tt.contain)
+		})
+	}
 }
 
 func TestValidateRejectsUnknownModeField(t *testing.T) {

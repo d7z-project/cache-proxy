@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) *handler {
 	client := utils.DefaultHttpClientWrapper()
+	client.UserAgent = httpcache.ModeUserAgent(config.ModeOCI)
 	if block.Transport != nil {
 		if block.Transport.UserAgent != "" {
 			client.UserAgent = block.Transport.UserAgent
@@ -181,9 +183,19 @@ func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *h
 }
 
 func (h *handler) putObject(ctx context.Context, objectPath string, body []byte, headers http.Header, extra map[string]string) error {
+	meta := ociObjectMeta(int64(len(body)), headers, extra)
+	return h.storeObject(ctx, objectPath, bytes.NewReader(body), meta)
+}
+
+func (h *handler) putObjectFromReader(ctx context.Context, objectPath string, body io.Reader, size int64, headers http.Header, extra map[string]string) error {
+	meta := ociObjectMeta(size, headers, extra)
+	return h.storeObject(ctx, objectPath, body, meta)
+}
+
+func ociObjectMeta(size int64, headers http.Header, extra map[string]string) map[string]string {
 	meta := map[string]string{
 		"content-type":   headers.Get("Content-Type"),
-		"content-length": strconv.Itoa(len(body)),
+		"content-length": strconv.FormatInt(size, 10),
 		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	for _, key := range []string{"ETag", "Last-Modified", "Docker-Content-Digest"} {
@@ -196,17 +208,21 @@ func (h *handler) putObject(ctx context.Context, objectPath string, body []byte,
 			meta[key] = value
 		}
 	}
-	return h.putRaw(ctx, objectPath, body, meta)
+	return meta
 }
 
-func (h *handler) putRaw(ctx context.Context, objectPath string, body []byte, meta map[string]string) error {
+func (h *handler) storeObject(ctx context.Context, objectPath string, body io.Reader, meta map[string]string) error {
 	if parent := path.Dir(objectPath); parent != "." {
 		if err := h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
 			return err
 		}
 	}
-	_, err := h.store.Put(ctx, h.name, objectPath, bytes.NewReader(body), meta)
+	_, err := h.store.Put(ctx, h.name, objectPath, body, meta)
 	return err
+}
+
+func (h *handler) putRaw(ctx context.Context, objectPath string, body []byte, meta map[string]string) error {
+	return h.storeObject(ctx, objectPath, bytes.NewReader(body), meta)
 }
 
 func (h *handler) refStatePath(repo, ref string) string {

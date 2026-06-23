@@ -35,7 +35,6 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 			},
 			Timeout: 30 * time.Second,
 		},
-		UserAgent: "curl/8.10.0",
 	}
 }
 

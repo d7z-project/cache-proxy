@@ -59,7 +59,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 	valid, err := h.validateCached(ctx, route, cached.Headers)
 	if err != nil {
 		_ = cached.Close()
-		return errorResponse(http.StatusBadGateway, err), nil
+		return ErrorResponse(http.StatusBadGateway, err), nil
 	}
 	if valid {
 		cached.Headers["X-Cache"] = "HIT"
@@ -238,10 +238,10 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxRewriteBody+1))
 	_ = response.Body.Close()
 	if err != nil {
-		return errorResponse(http.StatusBadGateway, err)
+		return ErrorResponse(http.StatusBadGateway, err)
 	}
 	if len(body) > maxRewriteBody {
-		return errorResponse(http.StatusBadGateway, errors.New("response body too large to rewrite"))
+		return ErrorResponse(http.StatusBadGateway, errors.New("response body too large to rewrite"))
 	}
 	switch route.RewriteKind {
 	case "npm-metadata":
@@ -253,21 +253,21 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 		if rewriteNPMTarballs(document, h.config.Upstreams, publicBaseURL(req)) {
 			body, err = json.Marshal(document)
 			if err != nil {
-				return errorResponse(http.StatusBadGateway, err)
+				return ErrorResponse(http.StatusBadGateway, err)
 			}
 			response.Headers["Content-Length"] = strconv.Itoa(len(body))
 		}
 	case "cargo-config":
 		body, err = rewriteCargoConfig(req, body)
 		if err != nil {
-			return errorResponse(http.StatusBadGateway, err)
+			return ErrorResponse(http.StatusBadGateway, err)
 		}
 		response.Headers["Content-Type"] = "application/json"
 		response.Headers["Content-Length"] = strconv.Itoa(len(body))
 	case "pypi-simple":
 		body, response.Headers, err = rewritePyPISimple(req, h.config.Upstreams, route, response.Headers, body)
 		if err != nil {
-			return errorResponse(http.StatusBadGateway, err)
+			return ErrorResponse(http.StatusBadGateway, err)
 		}
 		response.Headers["Content-Length"] = strconv.Itoa(len(body))
 	}

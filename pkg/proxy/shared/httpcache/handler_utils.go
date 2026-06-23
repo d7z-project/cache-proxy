@@ -67,8 +67,14 @@ func setContentType(headers map[string]string, objectPath string) {
 	}
 }
 
-func errorResponse(status int, err error) *utils.ResponseWrapper {
-	return &utils.ResponseWrapper{StatusCode: status, Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8", "X-Cache": "ERROR"}, Body: io.NopCloser(strings.NewReader(err.Error()))}
+func ErrorResponse(status int, err error) *utils.ResponseWrapper {
+	var body string
+	if status >= 500 {
+		body = "internal error"
+	} else {
+		body = err.Error()
+	}
+	return &utils.ResponseWrapper{StatusCode: status, Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8", "X-Cache": "ERROR"}, Body: io.NopCloser(strings.NewReader(body))}
 }
 
 func responseFromHTTP(response *http.Response) *utils.ResponseWrapper {

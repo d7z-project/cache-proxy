@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type handler struct {
 	stats       *httpcache.Stats
 	client      *http.Client
 	expireAfter config.Expiration
+	userAgent   string
 	wait        sync.WaitGroup
 }
 
@@ -36,6 +38,10 @@ type cargoConfig struct {
 }
 
 func newHandler(name, upstream string, transport *config.TransportConfig, policy *Policy, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) (*handler, error) {
+	ua := httpcache.ModeUserAgent(config.ModeCargo)
+	if transport != nil && transport.UserAgent != "" {
+		ua = transport.UserAgent
+	}
 	return &handler{
 		name:        name,
 		upstream:    upstream,
@@ -43,6 +49,7 @@ func newHandler(name, upstream string, transport *config.TransportConfig, policy
 		store:       store,
 		stats:       stats,
 		expireAfter: expireAfter,
+		userAgent:   ua,
 		client: &http.Client{Transport: &statsTransport{
 			base:     transportForConfig(transport),
 			stats:    stats,
@@ -110,22 +117,19 @@ func (h *handler) resolve(ctx context.Context, req *http.Request, route httpcach
 			return body, http.StatusOK, headers, "FRESH", nil
 		}
 	}
-	data, headers, err := h.fetchUpstream(ctx, req, route)
+	body, headers, err := h.fetchUpstream(ctx, req, route)
 	if err != nil {
 		if route.BusyPolicy == config.BusyPolicyStale {
-			if body, cachedHeaders, cacheErr := h.openCached(ctx, route.ObjectPath); cacheErr == nil {
-				return body, http.StatusOK, cachedHeaders, "STALE", nil
+			if cachedBody, cachedHeaders, cacheErr := h.openCached(ctx, route.ObjectPath); cacheErr == nil {
+				return cachedBody, http.StatusOK, cachedHeaders, "STALE", nil
 			}
 		}
 		return nil, 0, nil, "", err
 	}
-	if err := h.putCached(ctx, route.ObjectPath, data, headers); err != nil {
-		return nil, 0, nil, "", err
-	}
-	return io.NopCloser(bytes.NewReader(data)), http.StatusOK, headers, "MISS", nil
+	return body, http.StatusOK, headers, "MISS", nil
 }
 
-func (h *handler) fetchUpstream(ctx context.Context, req *http.Request, route httpcache.Route) ([]byte, map[string]string, error) {
+func (h *handler) fetchUpstream(ctx context.Context, req *http.Request, route httpcache.Route) (io.ReadCloser, map[string]string, error) {
 	rawURL := strings.TrimRight(h.upstream, "/") + "/" + strings.TrimPrefix(route.UpstreamPath, "/")
 	if strings.HasPrefix(route.ObjectPath, "cargo/crates/") {
 		cfg, err := h.fetchConfig(ctx)
@@ -137,12 +141,14 @@ func (h *handler) fetchUpstream(ctx context.Context, req *http.Request, route ht
 			return nil, nil, err
 		}
 		rawURL = cargoDownloadURL(cfg.DL, crate, version)
+		return h.fetchCrateToFile(ctx, route.ObjectPath, rawURL)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, nil, err
 	}
+	request.Header.Set("User-Agent", h.userAgent)
 	resp, err := h.client.Do(request)
 	if err != nil {
 		return nil, nil, err
@@ -168,7 +174,60 @@ func (h *handler) fetchUpstream(ctx context.Context, req *http.Request, route ht
 	default:
 		headers["Content-Type"] = "application/octet-stream"
 	}
-	return data, headers, nil
+	if err := h.putCached(ctx, route.ObjectPath, data, headers); err != nil {
+		return nil, nil, err
+	}
+	return io.NopCloser(bytes.NewReader(data)), headers, nil
+}
+
+func (h *handler) fetchCrateToFile(ctx context.Context, objectPath, rawURL string) (io.ReadCloser, map[string]string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	request.Header.Set("User-Agent", h.userAgent)
+	resp, err := h.client.Do(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, fmt.Errorf("cargo upstream returned %d", resp.StatusCode)
+	}
+	tmp, size, err := utils.TempFileFromReader(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := h.storeCrate(ctx, objectPath, tmp, size); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, nil, err
+	}
+	headers := map[string]string{
+		"Content-Type": "application/octet-stream",
+		"fetched-at":   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return tmp, headers, nil
+}
+
+func (h *handler) storeCrate(ctx context.Context, objectPath string, reader io.Reader, size int64) error {
+	if parent := path.Dir(objectPath); parent != "." {
+		if err := h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
+			return err
+		}
+	}
+	meta := map[string]string{
+		"content-type":   "application/octet-stream",
+		"content-length": fmt.Sprintf("%d", size),
+		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	_, err := h.store.Put(ctx, h.name, objectPath, reader, meta)
+	return err
 }
 
 func (h *handler) rewriteConfig(req *http.Request, data []byte) ([]byte, error) {
@@ -221,6 +280,7 @@ func (h *handler) fetchRawConfig(ctx context.Context) ([]byte, map[string]string
 	if err != nil {
 		return nil, nil, err
 	}
+	request.Header.Set("User-Agent", h.userAgent)
 	resp, err := h.client.Do(request)
 	if err != nil {
 		return nil, nil, err

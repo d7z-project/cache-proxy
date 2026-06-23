@@ -60,14 +60,15 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
+	upstreams := []string{strings.TrimSpace(block.Upstream)}
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
 		Mode:            config.ModePyPI,
 		ExpireAfter:     expireAfter,
-		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
+		Upstreams:       upstreams,
 		Transport:       block.Transport,
 		BusyPolicy:      block.CompanionBusyPolicy,
 		DefaultFreshFor: block.CompanionFreshFor,
-	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats())
+	}, plan.Store(), &resolver{policy: &block.Policy, upstreams: upstreams}, plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      handler,
@@ -120,14 +121,15 @@ func validate(policy *Policy) error {
 }
 
 type resolver struct {
-	policy *Policy
+	policy    *Policy
+	upstreams []string
 }
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
-	return routeForPath(r.policy, strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
+	return routeForPath(r.policy, r.upstreams, strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
 }
 
-func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
+func routeForPath(policy *Policy, upstreams []string, lookupPath string) (httpcache.Route, error) {
 	if lookupPath == "." || lookupPath == "" {
 		lookupPath = "simple/"
 	}
@@ -172,17 +174,13 @@ func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
 		if err != nil {
 			return httpcache.Route{}, err
 		}
-		return fileRoute(policy, lookupPath, sourceURL), nil
+		return fileRoute(policy, upstreams, lookupPath, sourceURL), nil
 	default:
-		targetURL := strings.TrimPrefix(lookupPath, "/")
-		if _, err := url.Parse(targetURL); err == nil && strings.Contains(targetURL, "://") {
-			return fileRoute(policy, lookupPath, targetURL), nil
-		}
-		return fileRoute(policy, lookupPath, targetURL), nil
+		return fileRoute(policy, upstreams, lookupPath, lookupPath), nil
 	}
 }
 
-func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
+func fileRoute(policy *Policy, upstreams []string, lookupPath, rawURL string) httpcache.Route {
 	objectPath := "pypi/files/" + path.Base(lookupPath)
 	if !strings.HasPrefix(lookupPath, "files/") {
 		objectPath = "pypi/files/" + encodeSourceURL(rawURL)
@@ -192,16 +190,31 @@ func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
 		Policy:     policy.FilePolicy,
 	}
 	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		route.TargetURL = rawURL
-	} else {
-		route.UpstreamPath = lookupPath
+		if hostInUpstreams(parsed.Host, upstreams) {
+			route.TargetURL = rawURL
+			if isAuxiliaryPath(rawURL, policy) {
+				route.Policy = policy.CompanionPolicy
+				route.FreshFor = policy.CompanionFreshFor
+				route.BusyPolicy = policy.CompanionBusyPolicy
+			}
+			return route
+		}
 	}
-	if isAuxiliaryPath(rawURL, policy) {
-		route.Policy = policy.CompanionPolicy
-		route.FreshFor = policy.CompanionFreshFor
-		route.BusyPolicy = policy.CompanionBusyPolicy
-	}
+	route.UpstreamPath = lookupPath
 	return route
+}
+
+func hostInUpstreams(host string, upstreams []string) bool {
+	for _, u := range upstreams {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(parsed.Host, host) {
+			return true
+		}
+	}
+	return false
 }
 
 func isAuxiliaryPath(rawURL string, policy *Policy) bool {

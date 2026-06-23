@@ -59,9 +59,10 @@ type ModeDriver interface {
 }
 
 type HomeEntry struct {
-	Name    string
-	Mode    string
-	Snippet string
+	Name       string
+	Mode       string
+	Snippet    string
+	DisplayURL string
 }
 
 type Entry struct {
@@ -184,6 +185,10 @@ func (i *InstancePlan) BindAddr(addr string, expireAfter config.Expiration, runt
 
 func (i *InstancePlan) SetHomeSnippet(snippet string) {
 	i.entry.Home.Snippet = strings.TrimSpace(snippet)
+}
+
+func (i *InstancePlan) SetHomeDisplayURL(url string) {
+	i.entry.Home.DisplayURL = strings.TrimSpace(url)
 }
 
 func (i *InstancePlan) RenderSnippet() string {

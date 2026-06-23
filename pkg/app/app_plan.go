@@ -43,7 +43,6 @@ func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store,
 	}
 	entries := make(map[string]*proxyruntime.Entry, len(result.Entries))
 	for _, entry := range result.Entries {
-		entry.Home.Snippet = renderHomeSnippet(entry)
 		if entry.ExpireAfter.IsUnset() {
 			entry.ExpireAfter = config.DefaultExpireAfter
 		}
@@ -114,35 +113,4 @@ func enabledEntryNames(entries map[string]*proxyruntime.Entry) []string {
 		}
 	}
 	return names
-}
-
-func renderHomeSnippet(entry *proxyruntime.Entry) string {
-	target := entry.Path
-	if target == "" {
-		target = entry.Bind
-	}
-	switch entry.Mode {
-	case config.ModeNPM:
-		return "npm config set registry " + target
-	case config.ModeGo:
-		return "go env -w GOPROXY=" + target
-	case config.ModeMaven:
-		return "<mirror><mirrorOf>*</mirrorOf><url>" + target + "</url></mirror>"
-	case config.ModePyPI:
-		return "pip install --index-url " + strings.TrimRight(target, "/") + "/simple <package>"
-	case config.ModeAPK:
-		return "Use " + strings.TrimRight(target, "/") + "/<branch>/<repo> in /etc/apk/repositories"
-	case config.ModeDEB:
-		return "Use " + target + " as the deb archive base URL in sources.list"
-	case config.ModeRPM:
-		return "Set dnf/yum baseurl to " + strings.TrimRight(target, "/") + "/<repo-path>"
-	case config.ModePacman:
-		return "Set Server = " + strings.TrimRight(target, "/") + "/$repo/os/$arch in pacman.conf"
-	case config.ModeOCI:
-		return "Pull via " + target + "/<repository>:<tag>"
-	case config.ModeCargo:
-		return "Set sparse registry = " + strings.TrimRight(target, "/") + "/"
-	default:
-		return target
-	}
 }

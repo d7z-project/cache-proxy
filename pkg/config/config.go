@@ -42,8 +42,9 @@ type Document struct {
 }
 
 type ServerConfig struct {
-	Bind    string `yaml:"bind"`
-	Backend string `yaml:"backend"`
+	Bind      string `yaml:"bind"`
+	Backend   string `yaml:"backend"`
+	PublicURL string `yaml:"public_url,omitempty"`
 }
 
 type MetricsConfig struct {

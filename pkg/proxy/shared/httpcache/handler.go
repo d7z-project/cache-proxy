@@ -57,6 +57,7 @@ type remoteOptions struct {
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats) *Handler {
 	client := utils.DefaultHttpClientWrapper()
+	client.UserAgent = ModeUserAgent(runtime.Mode)
 	if runtime.Transport != nil {
 		if runtime.Transport.UserAgent != "" {
 			client.UserAgent = runtime.Transport.UserAgent
@@ -140,4 +141,31 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 		}
 	}
 	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, bytes)
+}
+
+func ModeUserAgent(mode string) string {
+	switch mode {
+	case config.ModeNPM:
+		return "npm/10.8.0"
+	case config.ModeGo:
+		return "Go-http-client/2.0"
+	case config.ModeMaven:
+		return "Apache-Maven/3.9.6"
+	case config.ModeCargo:
+		return "cargo/1.79.0"
+	case config.ModePyPI:
+		return "pip/24.0"
+	case config.ModeOCI:
+		return "docker/27.0.0"
+	case config.ModeAPK:
+		return "apk-tools/2.14.0"
+	case config.ModeDEB:
+		return "Debian APT-HTTP/1.3"
+	case config.ModeRPM:
+		return "dnf/4.19.0"
+	case config.ModePacman:
+		return "pacman/6.1.0"
+	default:
+		return "cache-proxy"
+	}
 }

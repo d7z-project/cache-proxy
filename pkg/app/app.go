@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -22,6 +23,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const (
@@ -80,6 +82,7 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		return nil, errors.New("config document is nil")
 	}
 	normalizeDocument(doc)
+	utils.CleanStaleTempFiles(24 * time.Hour)
 	if err := validateServerConfig(doc); err != nil {
 		return nil, err
 	}

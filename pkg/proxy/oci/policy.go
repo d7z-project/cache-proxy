@@ -38,6 +38,7 @@ type AuthConfig struct {
 type Block struct {
 	ExpireAfter config.Expiration       `yaml:"expire_after"`
 	Bind        string                  `yaml:"bind"`
+	DisplayURL  string                  `yaml:"display_url,omitempty"`
 	Upstream    string                  `yaml:"upstream"`
 	Transport   *config.TransportConfig `yaml:"transport,omitempty"`
 	Policy      `yaml:",inline"`
@@ -71,6 +72,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	}
 	handler := newHandler(plan.Name(), block, expireAfter, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
+	if block.DisplayURL != "" {
+		plan.SetHomeDisplayURL(block.DisplayURL)
+	}
 	return plan.BindAddr(block.Bind, expireAfter, handler)
 }
 

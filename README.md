@@ -1,727 +1,421 @@
 # cache-proxy
 
-> This project is part of Dragon's Zone HomeLab.
-
-`cache-proxy` is a Go caching reverse proxy for package registries, artifact repositories, and generic file origins. It uses a static YAML config file and BlobFS-backed storage.
+`cache-proxy` is a caching reverse proxy for package registries and artifact repositories. Single binary, single YAML config, BlobFS-backed storage.
 
 ## Features
 
-- Multiple proxy modes in one process: `file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`
-- BlobFS-backed cache storage
-- Static YAML configuration
+- 11 proxy modes in one process: `file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`
 - Path-mounted and dedicated-listener instances
-- Prometheus metrics
-- Background cache cleanup
-- Metadata-driven discovery, refresh, and cleanup for package repository modes
+- Per-resource cache policies (`bypass` / `immutable` / `revalidate`) with freshness and concurrency controls
+- Prometheus metrics, background GC, expired-object cleanup
+- Discovery-driven metadata refresh for Linux package repositories (`apk`, `deb`, `rpm`, `pacman`)
 
-## Installation
-
-Build from source:
+## Quick Start
 
 ```bash
 make cache-proxy
-```
-
-Run:
-
-```bash
 ./cache-proxy -config ./cache-proxy.yaml
+./cache-proxy -config ./cache-proxy.yaml -validate   # dry-run only
 ```
-
-Validate a config file without starting the server:
-
-```bash
-./cache-proxy -config ./cache-proxy.yaml -validate
-```
-
-## Quick Start
 
 Minimal config:
 
 ```yaml
 server:
-  bind: 127.0.0.1:18080 # Main HTTP listener for route-mounted instances
-  backend: /tmp/cache-proxy # BlobFS storage directory
+  bind: 127.0.0.1:18080
+  backend: /var/lib/cache-proxy
 
 metrics:
-  path: /metrics # Prometheus endpoint path
-  token: "" # Optional bearer token for metrics
-
-storage:
-  gc:
-    blob: 24h # BlobFS GC interval
-  cleanup:
-    enabled: false # Enable expired/orphaned cache cleanup
-    interval: 6h # Cleanup scan interval
-    dry_run: false # Report cleanup candidates without deleting them
-    batch_size: 500 # Objects processed per cleanup batch
-    workers: 0 # Worker count; 0 uses the default behavior
+  path: /metrics
 
 instances:
-  - name: npmjs # Instance name shown in metrics and UI
-    enabled: true # Disabled instances are ignored at runtime
+  - name: npmjs
+    enabled: true
     npm:
-      route:
-        path: /npm # Published under server.bind
-      upstream: https://registry.npmjs.org # Upstream registry base URL
+      route: { path: /npm }
+      upstream: https://registry.npmjs.org
 ```
 
-Then point clients to the published route:
-
-- npm: `http://127.0.0.1:18080/npm`
-- Go proxy: `http://127.0.0.1:18080/go`
-- OCI registry: bind directly to its configured listener
-
-## Client Setup
-
-`cache-proxy` is only useful after client tools are pointed at it. In practice you usually do two steps:
-
-1. Publish one proxy instance for each ecosystem you want to cache.
-2. Reconfigure the package manager, build tool, or container runtime to use that published URL.
-
-Assume the proxy is reachable at `http://cache.lan:8080`.
-
-### npm
-
-Set the registry:
-
-```bash
-npm config set registry http://cache.lan:8080/npm
-```
-
-Project-local:
-
-```ini
-registry=http://cache.lan:8080/npm
-```
-
-### Go
-
-Point `GOPROXY` at the published route:
-
-```bash
-go env -w GOPROXY=http://cache.lan:8080/go
-```
-
-If SumDB is also proxied by this instance, point `GOSUMDB` at the value exposed by your config.
-
-### Maven
-
-Add the proxy as a repository mirror in `~/.m2/settings.xml`:
-
-```xml
-<settings>
-  <mirrors>
-    <mirror>
-      <id>cache-proxy</id>
-      <mirrorOf>*</mirrorOf>
-      <url>http://cache.lan:8080/maven</url>
-    </mirror>
-  </mirrors>
-</settings>
-```
-
-### Cargo
-
-Configure the sparse index and download endpoint in `.cargo/config.toml`:
-
-```toml
-[source.crates-io]
-replace-with = "cache-proxy"
-
-[source.cache-proxy]
-registry = "sparse+http://cache.lan:8080/cargo/"
-```
-
-### PyPI
-
-Use the proxy as the package index:
-
-```bash
-pip install --index-url http://cache.lan:8080/pypi/simple <package>
-```
-
-Persistent config:
-
-```ini
-[global]
-index-url = http://cache.lan:8080/pypi/simple
-```
-
-### OCI / Docker / Containerd
-
-For OCI mode the proxy usually listens on its own port, for example `http://cache.lan:5000`.
-
-Docker example:
-
-```json
-{
-  "insecure-registries": ["cache.lan:5000"]
-}
-```
-
-Then pull through the proxy host:
-
-```bash
-docker pull cache.lan:5000/library/alpine:latest
-```
-
-### Alpine `apk`
-
-Replace repository lines with the proxy route while preserving the upstream path layout:
-
-```txt
-http://cache.lan:8080/apk/v3.20/main
-http://cache.lan:8080/apk/v3.20/community
-```
-
-The client still requests `APKINDEX.tar.gz` and packages below that path. The proxy discovers roots from those metadata requests automatically.
-
-### Debian / Ubuntu `apt`
-
-Replace archive URLs in `sources.list` or `.sources` files:
-
-```txt
-deb http://cache.lan:8080/deb bookworm main
-deb http://cache.lan:8080/deb bookworm-updates main
-deb http://cache.lan:8080/deb bookworm-security main
-```
-
-After updating sources:
-
-```bash
-apt update
-apt install <package>
-```
-
-`apt update` is what triggers metadata discovery and refresh.
-
-### RPM (`dnf` / `yum`)
-
-Point the repo `baseurl` at the proxy while keeping the upstream path suffix:
-
-```ini
-[baseos]
-name=BaseOS
-baseurl=http://cache.lan:8080/rpm/9/BaseOS/x86_64/os
-enabled=1
-gpgcheck=1
-```
-
-Then refresh metadata:
-
-```bash
-dnf makecache
-dnf install <package>
-```
-
-### Arch `pacman`
-
-Point the server to the proxy route while preserving `$repo` and `$arch`:
-
-```ini
-[core]
-Server = http://cache.lan:8080/pacman/$repo/os/$arch
-```
-
-Then refresh:
-
-```bash
-pacman -Sy
-pacman -S <package>
-```
-
-`pacman -Sy` triggers repository database discovery.
-
-### Choosing Routes
-
-Use stable, ecosystem-specific route prefixes. Typical layouts:
-
-- `/npm`
-- `/go`
-- `/maven`
-- `/pypi`
-- `/apk`
-- `/deb`
-- `/rpm`
-- `/pacman`
-
-For Linux package repositories the route should be the repository root prefix that clients normally expect, not a rewritten artifact path.
-
-## Server Configuration
-
-Each instance enables exactly one mode.
-
-- Use `route.path` to publish an instance under the main `server.bind` HTTP listener.
-- Use `bind` for modes that expose their own listener, currently `oci`.
-- Use `transport.proxy` to send upstream HTTP requests through an outbound proxy.
-
-### Top-Level Fields
-
-| Field | Description |
-| --- | --- |
-| `server.bind` | Main HTTP listener address |
-| `server.backend` | BlobFS storage directory |
-| `metrics.path` | Prometheus endpoint path on the main listener |
-| `metrics.token` | Optional bearer token for the metrics endpoint |
-| `storage.gc.blob` | BlobFS garbage collection interval |
-| `storage.cleanup.enabled` | Enable cleanup of expired or orphaned cache objects |
-| `storage.cleanup.interval` | Cleanup scan interval |
-| `storage.cleanup.dry_run` | Report deletions without removing objects |
-| `storage.cleanup.batch_size` | Maximum objects processed per cleanup batch |
-| `storage.cleanup.workers` | Cleanup worker count; `0` uses the default worker behavior |
-
-### Common Value Types
-
-#### Policies
-
-The following cache policy fields share the same allowed values:
-
-- `bypass`: always fetch from upstream
-- `immutable`: treat cached content as immutable
-- `revalidate`: reuse cache but revalidate based on freshness rules
-
-Fields using these values include:
-
-- `file.default_policy`
-- `oci.default_policy`
-- `npm.metadata_policy`
-- `npm.tarball_policy`
-- `go.module_policy`
-- `go.zip_policy`
-- `maven.release_policy`
-- `maven.snapshot_policy`
-- `maven.checksum_policy`
-- `cargo.crate_policy`
-- `pypi.index_policy`
-- `pypi.file_policy`
-- `pypi.companion_policy`
-- `apk|deb|rpm|pacman` package policy fields such as `metadata_policy`, `artifact_policy`, `auxiliary_policy`
-
-#### Busy Policies
-
-Busy policy fields support:
-
-- `bypass`: do not serve stale cache while refresh/download is in progress
-- `stale`: serve stale cache while refresh/download is in progress
-
-Fields using these values include:
-
-- `file.busy_policy`
-- `oci.busy_policy`
-- `npm.metadata_busy_policy`
-- `go.module_busy_policy`
-- `go.sumdb_busy_policy`
-- `maven.metadata_busy_policy`
-- `maven.checksum_busy_policy`
-- `cargo.index_busy_policy`
-- `pypi.index_busy_policy`
-- `pypi.companion_busy_policy`
-- `apk|deb|rpm|pacman` package busy policy fields
-
-#### Durations
-
-Duration fields use Go duration syntax such as:
-
-- `30s`
-- `2m`
-- `1h`
-- `24h`
-
-#### Expiration
-
-Expiration fields such as `expire_after` support:
-
-- a Go duration such as `720h`
-- `never`
-
-#### Freshness
-
-Freshness fields such as `*_fresh_for` support:
-
-- a Go duration such as `1m`
-- `forever`
-
-### Supported Modes
-
-| Mode | Publish style | Typical upstream |
-| --- | --- | --- |
-| `file` | `route.path` | Static files or generic HTTP origins |
-| `oci` | `bind` | OCI / Docker registries |
-| `npm` | `route.path` | npm registry |
-| `go` | `route.path` | GOPROXY chain |
-| `maven` | `route.path` | Maven repository |
-| `cargo` | `route.path` | crates.io index |
-| `pypi` | `route.path` | PyPI |
-| `apk` | `route.path` | Alpine repositories |
-| `deb` | `route.path` | Debian / Ubuntu repositories |
-| `rpm` | `route.path` | RPM repositories |
-| `pacman` | `route.path` | Arch Linux repositories |
-
-## Mode Examples
-
-### file
-
-Use `file` for generic HTTP content with optional path-based rules.
+## Configuration Reference
+
+### Top-level fields
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `server.bind` | `host:port` | `127.0.0.1:18080` | Main HTTP listener |
+| `server.backend` | path | `/tmp/cache-proxy` | BlobFS storage directory |
+| `server.public_url` | URL | — | Override scheme+host shown on home page (e.g. `https://cache.home.lan`) |
+| `metrics.path` | path | `/metrics` | Prometheus endpoint |
+| `metrics.token` | string | — | Bearer token for `/metrics` |
+| `storage.gc.blob` | duration | `24h` | BlobFS GC interval |
+| `storage.cleanup.enabled` | bool | `false` | Enable stale-object cleanup |
+| `storage.cleanup.interval` | duration | `6h` | Cleanup scan interval |
+| `storage.cleanup.dry_run` | bool | `false` | Log deletions without removing |
+| `storage.cleanup.batch_size` | int | `500` | Max objects per batch |
+| `storage.cleanup.workers` | int | `0` | Concurrency (`0` = auto) |
+
+### Value types
+
+Values appearing across all mode tables:
+
+| Category | Format | Examples | Special values |
+| --- | --- | --- | --- |
+| Duration | Go duration | `30s`, `2m`, `1h`, `24h` | — |
+| Expiration | Duration | `720h` | `never` |
+| Freshness | Duration | `1m`, `30s` | `forever` |
+| Policy | Enum | — | `bypass` / `immutable` / `revalidate` |
+| Busy policy | Enum | — | `bypass` / `stale` |
+
+### Instance-level
+
+Every instance block supports these fields regardless of mode:
 
 ```yaml
 instances:
-  - name: files
+  - name: my-instance
     enabled: true
-    file:
+    <mode>:           # exactly one mode block (oci / npm / go / ...)
       expire_after: 720h
-      route:
-        path: /files
-      upstreams:
-        - https://example.com
+      route: { path: /mount }
       transport:
         proxy: http://127.0.0.1:7890
-      default_policy: revalidate
-      busy_policy: stale
-      rules:
-        - match: "releases/**/*.zip"
-          policy: immutable
-        - match: "feeds/**"
-          policy: revalidate
+        ua: custom-agent/1.0
+        timeout: 10s
+      # ... mode-specific fields below
 ```
 
-Relevant options:
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | required | Instance name (metrics label, UI) |
+| `enabled` | bool | required | `false` = skip at runtime |
+| `<mode>` | block | required | One of `file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman` |
+| `expire_after` | expiration | `720h` | Upper bound on cached object lifetime |
+| `route.path` | path | required* | Mount under `server.bind` (* `oci` uses `bind` instead) |
+| `bind` | `host:port` | required* | Dedicated listener (* `oci` only) |
+| `transport.proxy` | URL | — | Outbound HTTP proxy |
+| `transport.ua` | string | `curl/8.10.0` | Override User-Agent |
+| `transport.timeout` | duration | `3s` | Upstream dial timeout |
 
-- `default_policy`: `bypass`, `immutable`, `revalidate`
-- `busy_policy`: `bypass`, `stale`
-- `rules[].match`: doublestar path pattern
-- `rules[].policy`: `bypass`, `immutable`, `revalidate`
-- `rules[].busy_policy`: `bypass`, `stale`
-- `rules[].expire_after`: duration or `never`
+---
 
-### oci
+## Mode Reference
 
-`oci.rules` matches repository names, not HTTP paths.
+### `file` — generic HTTP
 
 ```yaml
-instances:
-  - name: registry # Instance name
-    enabled: true
-    oci:
-      expire_after: 720h # Retention upper bound for cached OCI content
-      bind: 127.0.0.1:5000 # Dedicated listener address
-      upstream: https://registry-1.docker.io # Upstream registry
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      default_policy: bypass # Default policy for unmatched repositories
-      busy_policy: stale # Serve stale while refresh is in progress
-      auth:
-        type: basic # none | basic | bearer
-        username: my-user # Required for basic auth
-        password: my-password # Required for basic auth
-      rules:
-        - match: "library/*" # Repository-name pattern
-          policy: immutable # Immutable public images
-          expire_after: 168h # Optional per-rule retention override
-        - match: "internal/**"
-          policy: revalidate # Mutable internal images
+file:
+  route: { path: /files }
+  upstreams:
+    - https://example.com
+  pass_headers: [X-Custom]
+  default_policy: revalidate
+  fresh_for: 5m
+  busy_policy: stale
+  rules:
+    - match: "releases/**/*.zip"
+      policy: immutable
+      expire_after: 8760h
 ```
 
-Relevant options:
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstreams` | `[]string` | required | Upstream base URLs, tried in order |
+| `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
+| `default_policy` | Policy | `bypass` | Default cache policy |
+| `fresh_for` | Freshness | — | How long cached response is considered fresh |
+| `busy_policy` | Busy | `bypass` | Serve stale while download in progress? |
+| `rules[].match` | string | required | Doublestar path pattern |
+| `rules[].policy` | Policy | — | Override policy for matched paths |
+| `rules[].fresh_for` | Freshness | — | Override freshness for matched paths |
+| `rules[].busy_policy` | Busy | — | Override busy policy for matched paths |
+| `rules[].expire_after` | Expiration | — | Override expiration for matched paths |
 
-- `default_policy`: `bypass`, `immutable`, `revalidate`
-- `busy_policy`: `bypass`, `stale`
-- `auth.type`: `none`, `basic`, `bearer`
-- `rules[].match`: doublestar repository pattern
-- `rules[].policy`: `bypass`, `immutable`, `revalidate`
-- `rules[].expire_after`: duration or `never`
-
-### npm
+### `oci` — Docker / OCI registries
 
 ```yaml
-instances:
-  - name: npmjs # Instance name
-    enabled: true
-    npm:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /npm # Published under server.bind
-      upstream: https://registry.npmjs.org # Upstream registry
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      metadata_policy: revalidate # Registry metadata changes over time
-      metadata_busy_policy: stale # Serve stale metadata during refresh
-      tarball_policy: immutable # Tarballs are usually immutable
+oci:
+  bind: 127.0.0.1:5000
+  display_url: https://cache.home.lan:5000
+  upstream: https://registry-1.docker.io
+  default_policy: bypass
+  fresh_for: 10m
+  busy_policy: stale
+  auth:
+    type: basic
+    username: my-user
+    password: my-pass
+  rules:
+    - match: "library/*"
+      policy: immutable
+      expire_after: 168h
 ```
 
-Relevant options:
+Rules match repository names (doublestar). Client: `docker pull cache.lan:5000/library/alpine:latest`.
 
-- `metadata_policy`: `bypass`, `immutable`, `revalidate`
-- `metadata_busy_policy`: `bypass`, `stale`
-- `tarball_policy`: `bypass`, `immutable`, `revalidate`
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream` | URL | required | Single upstream registry |
+| `display_url` | URL | — | URL shown on home page (overrides auto-derived address) |
+| `default_policy` | Policy | `bypass` | Default cache policy |
+| `fresh_for` | Freshness | — | Freshness for cached manifests/blobs |
+| `busy_policy` | Busy | `bypass` | Serve stale while download in progress? |
+| `auth.type` | Enum | — | `none` \| `basic` \| `bearer` |
+| `auth.username` | string | — | Required for `basic` |
+| `auth.password` | string | — | Required for `basic` |
+| `auth.token` | string | — | Required for `bearer` |
+| `rules[].match` | string | required | Doublestar repo-name pattern |
+| `rules[].policy` | Policy | `bypass` | Override policy for matched repos |
+| `rules[].fresh_for` | Freshness | — | Override freshness for matched repos |
+| `rules[].expire_after` | Expiration | — | Override expiration for matched repos |
 
-### go
+### `npm`
 
 ```yaml
-instances:
-  - name: golang # Instance name
-    enabled: true
-    go:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /go # Published under server.bind
-      proxies:
-        - https://proxy.golang.org # GOPROXY chain entry
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      sumdb:
-        enabled: true # Enable checksum database proxying
-        name: sum.golang.org # SumDB name exposed to clients
-        url: https://sum.golang.org # Upstream SumDB URL
-      goprivate:
-        - "*.corp.example.com" # Patterns treated as private modules
-      module_policy: revalidate # Version metadata can change
-      module_busy_policy: stale # Serve stale metadata during refresh
-      zip_policy: immutable # Module zip archives are immutable
-      sumdb_busy_policy: stale # Serve stale SumDB data during refresh
+npm:
+  route: { path: /npm }
+  upstream: https://registry.npmjs.org
+  metadata_policy: revalidate
+  metadata_fresh_for: 1m
+  metadata_busy_policy: stale
+  tarball_policy: immutable
 ```
 
-Relevant options:
+Client: `npm config set registry http://cache.lan:8080/npm`
 
-- `module_policy`: `bypass`, `immutable`, `revalidate`
-- `module_busy_policy`: `bypass`, `stale`
-- `zip_policy`: `bypass`, `immutable`, `revalidate`
-- `sumdb.enabled`: `true`, `false`
-- `sumdb_busy_policy`: `bypass`, `stale`
-- `disable_module_fetch_header`: `true`, `false`
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream` | URL | required | Single upstream registry |
+| `metadata_policy` | Policy | `revalidate` | Cache policy for package metadata |
+| `metadata_fresh_for` | Freshness | — | Freshness for metadata |
+| `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
+| `tarball_policy` | Policy | `immutable` | Cache policy for `.tgz` files |
 
-### maven
+### `go` — GOPROXY + SumDB
 
 ```yaml
-instances:
-  - name: central # Instance name
+go:
+  route: { path: /go }
+  proxies:
+    - https://proxy.golang.org
+  module_policy: revalidate
+  module_fresh_for: 1m
+  module_busy_policy: stale
+  zip_policy: immutable
+  sumdb:
     enabled: true
-    maven:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /maven # Published under server.bind
-      upstream: https://repo1.maven.org/maven2 # Upstream repository root
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      metadata_busy_policy: stale # Serve stale maven-metadata.xml during refresh
-      checksum_policy: revalidate # Checksums and signatures can be updated
-      checksum_busy_policy: stale # Serve stale checksum sidecars during refresh
-      release_policy: immutable # Release artifacts should not change
-      snapshot_policy: revalidate # Snapshot artifacts are mutable
+    name: sum.golang.org
+    url: https://sum.golang.org
+  sumdb_fresh_for: 30s
+  sumdb_busy_policy: stale
+  goprivate:
+    - "*.corp.example.com"
+  disable_module_fetch_header: false
 ```
 
-Relevant options:
+Client: `go env -w GOPROXY=http://cache.lan:8080/go`
 
-- `release_policy`: `bypass`, `immutable`, `revalidate`
-- `snapshot_policy`: `bypass`, `immutable`, `revalidate`
-- `checksum_policy`: `bypass`, `immutable`, `revalidate`
-- `metadata_busy_policy`: `bypass`, `stale`
-- `checksum_busy_policy`: `bypass`, `stale`
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `proxies` | `[]URL` | required | GOPROXY chain (must be http/https) |
+| `module_policy` | Policy | `revalidate` | Policy for `.info` / `.mod` / `@latest` / `@v/list` |
+| `module_fresh_for` | Freshness | `1m` | Freshness for module metadata |
+| `module_busy_policy` | Busy | `stale` | Busy policy for module metadata |
+| `zip_policy` | Policy | `immutable` | Policy for `.zip` archives |
+| `sumdb.enabled` | bool | `true` | Proxy checksum database requests |
+| `sumdb.name` | string | `sum.golang.org` | SumDB name exposed in URL prefix |
+| `sumdb.url` | URL | `https://sum.golang.org` | Upstream SumDB (http/https only) |
+| `sumdb_fresh_for` | Freshness | `30s` | Freshness for SumDB responses |
+| `sumdb_busy_policy` | Busy | `stale` | Busy policy for SumDB |
+| `goprivate` | `[]string` | — | Patterns for private modules (skipped by proxy) |
+| `disable_module_fetch_header` | bool | `false` | Honor `Disable-Module-Fetch` request header |
 
-### cargo
+### `maven`
 
 ```yaml
-instances:
-  - name: crates # Instance name
-    enabled: true
-    cargo:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /cargo # Published under server.bind
-      upstream: https://index.crates.io # Cargo sparse index upstream
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      index_busy_policy: stale # Serve stale index during refresh
-      crate_policy: immutable # Crate archives are immutable
-      auth_required: false # Require auth for crate downloads
+maven:
+  route: { path: /maven }
+  upstream: https://repo1.maven.org/maven2
+  release_policy: immutable
+  snapshot_policy: revalidate
+  snapshot_fresh_for: 5m
+  checksum_policy: revalidate
+  checksum_fresh_for: 30s
+  checksum_busy_policy: stale
+  metadata_fresh_for: 2m
+  metadata_busy_policy: stale
 ```
 
-Relevant options:
+Client: set `<mirror><url>http://cache.lan:8080/maven</url></mirror>` in `~/.m2/settings.xml`.
 
-- `index_busy_policy`: `bypass`, `stale`
-- `crate_policy`: `bypass`, `immutable`, `revalidate`
-- `auth_required`: `true`, `false`
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream` | URL | required | Single upstream repository root |
+| `release_policy` | Policy | `immutable` | Policy for release artifacts |
+| `snapshot_policy` | Policy | `revalidate` | Policy for `-SNAPSHOT` artifacts |
+| `snapshot_fresh_for` | Freshness | — | Freshness for snapshot artifacts |
+| `checksum_policy` | Policy | `revalidate` | Policy for `.sha1` / `.md5` / `.asc` sidecars |
+| `checksum_fresh_for` | Freshness | `30s` | Freshness for checksum sidecars |
+| `checksum_busy_policy` | Busy | `stale` | Busy policy for checksum sidecars |
+| `metadata_fresh_for` | Freshness | — | Freshness for `maven-metadata.xml` |
+| `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
 
-### pypi
+### `cargo`
 
 ```yaml
-instances:
-  - name: python # Instance name
-    enabled: true
-    pypi:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /pypi # Published under server.bind
-      upstream: https://pypi.org # Upstream PyPI base URL
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      index_policy: revalidate # Simple API pages change over time
-      index_busy_policy: stale # Serve stale indexes during refresh
-      file_policy: immutable # Package files are immutable
-      companion_policy: revalidate # Sidecar metadata may change
-      companion_busy_policy: stale # Serve stale sidecars during refresh
-      proxy_json: true # Enable JSON Simple API proxying
-      proxy_core_metadata: false # Proxy core metadata sidecars
-      proxy_signatures: false # Proxy signature sidecars
+cargo:
+  route: { path: /cargo }
+  upstream: https://index.crates.io
+  crate_policy: immutable
+  index_fresh_for: 5m
+  index_busy_policy: stale
+  auth_required: false
 ```
 
-Relevant options:
+Client: `registry = "sparse+http://cache.lan:8080/cargo/"` in `.cargo/config.toml`.
 
-- `index_policy`: `bypass`, `immutable`, `revalidate`
-- `file_policy`: `bypass`, `immutable`, `revalidate`
-- `companion_policy`: `bypass`, `immutable`, `revalidate`
-- `index_busy_policy`: `bypass`, `stale`
-- `companion_busy_policy`: `bypass`, `stale`
-- `proxy_json`: `true`, `false`
-- `proxy_core_metadata`: `true`, `false`
-- `proxy_signatures`: `true`, `false`
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream` | URL | required | Single upstream sparse index |
+| `crate_policy` | Policy | `immutable` | Policy for crate download files |
+| `index_fresh_for` | Freshness | — | Freshness for index entries and `config.json` |
+| `index_busy_policy` | Busy | `stale` | Busy policy for index |
+| `auth_required` | bool | `false` | Set `auth-required: true` in rewritten `config.json` |
 
-### apk
+### `pypi`
 
 ```yaml
-instances:
-  - name: alpine # Instance name
-    enabled: true
-    apk:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /apk # Published under server.bind
-      upstreams:
-        - https://dl-cdn.alpinelinux.org/alpine # Upstream repository root list
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 1h # Background root refresh cadence after a root is discovered
-      refresh_timeout: 2m # Timeout for one metadata refresh pass
-      metadata_policy: revalidate # APKINDEX metadata can change
-      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
-      artifact_policy: immutable # .apk package artifacts are immutable
-      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
-      auxiliary_policy: revalidate # Signatures and checksum sidecars may change
-      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
+pypi:
+  route: { path: /pypi }
+  upstream: https://pypi.org
+  index_policy: revalidate
+  index_fresh_for: 1m
+  index_busy_policy: stale
+  file_policy: immutable
+  companion_policy: revalidate
+  companion_fresh_for: 30s
+  companion_busy_policy: stale
+  proxy_json: true
+  proxy_core_metadata: false
+  proxy_signatures: false
 ```
 
-Discovery notes:
+Client: `pip install --index-url http://cache.lan:8080/pypi/simple <pkg>`
 
-- A root is created when a client first requests `/<branch>/<repo>/<arch>/APKINDEX.tar.gz`.
-- The root identity is `<branch>/<repo>/<arch>`.
-- Artifact requests such as `*.apk` do not create a root by themselves.
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream` | URL | required | Single upstream PyPI base URL |
+| `index_policy` | Policy | `revalidate` | Policy for `/simple/` index pages |
+| `index_fresh_for` | Freshness | `1m` | Freshness for index pages |
+| `index_busy_policy` | Busy | `stale` | Busy policy for index pages |
+| `file_policy` | Policy | `immutable` | Policy for package files |
+| `companion_policy` | Policy | `revalidate` | Policy for sidecar files (signatures, metadata) |
+| `companion_fresh_for` | Freshness | `30s` | Freshness for sidecar files |
+| `companion_busy_policy` | Busy | `stale` | Busy policy for sidecars |
+| `proxy_json` | bool | `true` | Enable JSON Simple API (`/simple/<pkg>/json`) |
+| `proxy_core_metadata` | bool | `false` | Proxy `.metadata` / `.json` / `.attestation` / `.provenance` as sidecars |
+| `proxy_signatures` | bool | `false` | Proxy `.asc` / `.sig` / `.minisig` as sidecars |
 
-### deb
+### `apk` — Alpine
 
 ```yaml
-instances:
-  - name: debian # Instance name
-    enabled: true
-    deb:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /deb # Published under server.bind
-      upstreams:
-        - https://deb.debian.org/debian # Upstream archive root list
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 1h # Background root refresh cadence after a suite is discovered
-      refresh_timeout: 2m # Timeout for one metadata refresh pass
-      metadata_policy: revalidate # Release and package indexes can change
-      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
-      artifact_policy: immutable # .deb/.udeb/.ddeb/source artifacts are immutable
-      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
-      auxiliary_policy: revalidate # Signatures and checksum sidecars may change
-      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
+apk:
+  route: { path: /apk }
+  upstreams:
+    - https://dl-cdn.alpinelinux.org/alpine
+  refresh_interval: 1h
+  refresh_timeout: 2m
+  metadata_policy: revalidate
+  metadata_fresh_for: 1m
+  artifact_policy: immutable
+  auxiliary_policy: revalidate
 ```
 
-Discovery notes:
+Client repo line: `http://cache.lan:8080/apk/v3.20/main`. Roots auto-discovered from `APKINDEX.tar.gz` requests.
 
-- A root is created from `dists/<suite>/InRelease`, `dists/<suite>/Release`, `Packages*`, or `Sources*`.
-- The root identity is `<suite>`.
-- Component, architecture, and source shards discovered under the same suite are merged into one root.
-- Artifact requests under `pool/` do not create a root by themselves.
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstreams` | `[]URL` | required | Upstream mirrors, tried in order |
+| `refresh_interval` | duration | `1h` | Background metadata refresh cadence |
+| `refresh_timeout` | duration | `2m` | Timeout per refresh cycle |
+| `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
+| `metadata_policy` | Policy | `revalidate` | Policy for `APKINDEX.tar.gz` and repo metadata |
+| `metadata_fresh_for` | Freshness | `1m` | Freshness for metadata |
+| `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
+| `metadata_expire_after` | Expiration | — | Override expiration for metadata |
+| `artifact_policy` | Policy | `immutable` | Policy for `.apk` files |
+| `artifact_fresh_for` | Freshness | — | Freshness for artifacts |
+| `artifact_busy_policy` | Busy | `bypass` | Busy policy for artifacts |
+| `artifact_expire_after` | Expiration | — | Override expiration for artifacts |
+| `auxiliary_policy` | Policy | `revalidate` | Policy for signatures / checksums |
+| `auxiliary_fresh_for` | Freshness | `30s` | Freshness for auxiliary files |
+| `auxiliary_busy_policy` | Busy | `stale` | Busy policy for auxiliary files |
+| `auxiliary_expire_after` | Expiration | — | Override expiration for auxiliary files |
 
-### rpm
+### `deb` — Debian / Ubuntu
 
 ```yaml
-instances:
-  - name: rocky # Instance name
-    enabled: true
-    rpm:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /rpm # Published under server.bind
-      upstreams:
-        - https://download.rockylinux.org/pub/rocky # Upstream repository root list
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 1h # Background root refresh cadence after a repo path is discovered
-      refresh_timeout: 2m # Timeout for one metadata refresh pass
-      metadata_policy: revalidate # repodata can change
-      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
-      artifact_policy: immutable # .rpm/.drpm artifacts are immutable
-      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
-      auxiliary_policy: revalidate # Signatures and checksum sidecars may change
-      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
+deb:
+  route: { path: /deb }
+  upstreams:
+    - https://deb.debian.org/debian
+  refresh_interval: 1h
+  refresh_timeout: 2m
+  metadata_policy: revalidate
+  metadata_fresh_for: 2m
+  artifact_policy: immutable
+  auxiliary_policy: revalidate
 ```
 
-Discovery notes:
+Client: `deb http://cache.lan:8080/deb bookworm main`. Roots auto-discovered from `InRelease` / `Packages*` / `Sources*`.
 
-- A root is created when a client first requests `<repo-path>/repodata/repomd.xml`.
-- The root identity is `<repo-path>`.
-- Artifact requests such as `*.rpm` do not create a root by themselves.
+Same field table as `apk`, except `metadata_fresh_for` defaults to `2m`.
 
-### pacman
+### `rpm` — RHEL / Rocky / Fedora
 
 ```yaml
-instances:
-  - name: archlinux # Instance name
-    enabled: true
-    pacman:
-      expire_after: 720h # Retention upper bound
-      route:
-        path: /pacman # Published under server.bind
-      upstreams:
-        - https://geo.mirror.pkgbuild.com # Upstream mirror root list
-      transport:
-        proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy
-      refresh_interval: 2m # Background root refresh cadence after a repo/arch root is discovered
-      refresh_timeout: 2m # Timeout for one metadata refresh pass
-      metadata_policy: revalidate # Sync databases can change
-      metadata_busy_policy: stale # Serve stale metadata while refresh is in progress
-      artifact_policy: immutable # .pkg.tar.* artifacts are immutable
-      artifact_busy_policy: stale # Serve stale package objects while refill is in progress
-      auxiliary_policy: revalidate # Signature and checksum sidecars may change
-      auxiliary_busy_policy: stale # Serve stale sidecars while refresh is in progress
+rpm:
+  route: { path: /rpm }
+  upstreams:
+    - https://download.rockylinux.org/pub/rocky
+  refresh_interval: 1h
+  refresh_timeout: 2m
+  metadata_policy: revalidate
+  metadata_fresh_for: 1m
+  artifact_policy: immutable
+  auxiliary_policy: revalidate
 ```
 
-Discovery notes:
+Client: `baseurl=http://cache.lan:8080/rpm/9/BaseOS/x86_64/os`. Roots auto-discovered from `repomd.xml`.
 
-- A root is created from `<repo>/os/<arch>/<repo>.db`, `<repo>.db.sig`, `<repo>.files`, or `<repo>.files.sig`.
-- The root identity is `<repo>/<arch>`.
-- Artifact requests such as `*.pkg.tar.*` do not create a root by themselves.
+Same field table as `apk`.
 
-### Package Repository Notes
+### `pacman` — Arch
 
-The `apk`, `deb`, `rpm`, and `pacman` modes are discovery-driven. You only configure `upstreams`, then roots are created from metadata requests and refreshed independently.
+```yaml
+pacman:
+  route: { path: /pacman }
+  upstreams:
+    - https://geo.mirror.pkgbuild.com
+  refresh_interval: 2m
+  refresh_timeout: 2m
+  metadata_policy: revalidate
+  metadata_fresh_for: 1m
+  artifact_policy: immutable
+  auxiliary_policy: revalidate
+```
 
-Relevant options:
+Client: `Server = http://cache.lan:8080/pacman/$repo/os/$arch`. Roots auto-discovered from `.db` / `.files` requests.
 
-- `upstreams`: one or more upstream base URLs; requests are tried in order
-- `refresh_interval`: background metadata refresh cadence
-- `refresh_timeout`: timeout for a single refresh cycle
-- `metadata_policy`, `artifact_policy`, `auxiliary_policy`: `bypass`, `immutable`, `revalidate`
-- `metadata_busy_policy`, `artifact_busy_policy`, `auxiliary_busy_policy`: `bypass`, `stale`
+Same field table as `apk`, except `refresh_interval` defaults to `2m`.
 
-Lifecycle notes:
+### Package repository lifecycle
 
-- Newly seen metadata creates a root in `pending`, then the first successful refresh moves it to `active`.
-- Transient refresh failures keep the last successful snapshot and move the root to a degraded `suspect` state.
-- Repeated metadata `404` / `410` removes the root and its snapshot from the aggregate view.
-- Removed roots are recreated automatically if matching metadata is requested again.
+For `apk`, `deb`, `rpm`, `pacman`: configure `upstreams` and the proxy discovers roots from client metadata requests. Each root transitions through `pending` → `active` → `suspect` → `removed` states automatically:
 
-Default refresh intervals when `refresh_interval` is unset:
-
-- `apk`: `1h`
-- `deb`: `1h`
-- `rpm`: `1h`
-- `pacman`: `2m`
+- New metadata requests create roots in `pending`; first successful refresh promotes to `active`.
+- Transient failures keep the last snapshot and mark as `suspect` (still serves stale).
+- Repeated `404` responses remove the root entirely.
+- Re-requesting metadata for a removed root recreates it automatically.
 
 ## Development
 
@@ -730,6 +424,12 @@ make fmt
 make test
 ```
 
+## Deployment Notes
+
+- Run behind a TLS-terminating reverse proxy (nginx, Caddy, HAProxy) that sets `X-Forwarded-Proto` and `X-Forwarded-Host`.
+- Store credentials in the YAML config. Keep it out of version control and protect with filesystem permissions.
+- Set a long random `metrics.token` if `/metrics` is reachable beyond localhost.
+
 ## License
 
-This project is licensed under the terms of the [LICENSE](LICENSE).
+[MIT](LICENSE)
