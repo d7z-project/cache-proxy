@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="{{.Locale}}" data-theme="{{.Theme}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cache-proxy</title>
+<style>{{css}}</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>cache-proxy</h1>
+    <button id="theme-btn" class="btn-icon" onclick="toggleTheme()">{{.ThemeSwitch}}</button>
+    <button class="btn-icon" onclick="toggleLang()">{{.LangSwitch}}</button>
+    <div class="header-count">{{.Count}} {{t "instances"}}</div>
+  </div>
+</header>
+<main>
+  <div class="grid">
+    {{range .Instances}}
+    <div class="card">
+      <div class="card-head">
+        <span class="badge badge-{{.Mode}}">{{.Mode}}</span>
+        <span class="name">{{.Name}}</span>
+        {{if .StatusColor}}<span class="dot dot-{{.StatusColor}}" title="{{.StatusLabel}}"></span>{{end}}
+      </div>
+      <div class="card-url">
+        <a href="{{.URL}}">{{.URL}}</a>
+        <button onclick="copyURL(this,'{{.URL}}')">{{t "copy"}}</button>
+      </div>
+      <div class="card-stats">
+        <div class="stat">
+          <div class="stat-val">{{.Requests}}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">{{.HitRate}}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">{{.StatusLabel}}</div>
+          {{if .StatusExtra}}<div class="stat-lbl">{{.StatusExtra}}</div>{{end}}
+        </div>
+      </div>
+      <div class="card-cmd" onclick="copyCode(this,'{{.SetupCmd}}')">{{.SetupCmd}}</div>
+    </div>
+    {{else}}
+    <div class="empty">{{t "no_instances"}}</div>
+    {{end}}
+  </div>
+</main>
+<script>window.I18N={{.I18NJSON}};</script>
+<script>{{js}}</script>
+</body>
+</html>

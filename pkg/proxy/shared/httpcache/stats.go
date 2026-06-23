@@ -81,6 +81,7 @@ type InstanceStats struct {
 	Refreshes        uint64            `json:"refreshes"`
 	RefreshFailures  uint64            `json:"refreshFailures"`
 	LastRefresh      string            `json:"lastRefresh,omitempty"`
+	LastRefreshAt    time.Time         `json:"lastRefreshAt,omitempty"`
 }
 
 func NewStats(reg prometheus.Registerer) *Stats {
@@ -181,6 +182,7 @@ func (s *Stats) RecordMetadataRefresh(instance, mode, result string, duration ti
 	item := s.instance(instance, mode)
 	item.Refreshes++
 	item.LastRefresh = result
+	item.LastRefreshAt = time.Now()
 	item.SnapshotReady = ready
 	if result != "success" {
 		item.RefreshFailures++
@@ -207,6 +209,7 @@ func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
 	defer s.mu.Unlock()
 	item := s.instance(instance, mode)
 	item.MetadataState = state
+	item.LastRefreshAt = time.Now()
 	item.SnapshotReady = ready
 	s.total.MetadataState = state
 	s.total.SnapshotReady = ready

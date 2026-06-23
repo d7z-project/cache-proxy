@@ -7,7 +7,7 @@ import (
 )
 
 func init() {
-	level := slog.LevelInfo
+	level := slog.LevelWarn
 	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
 	case "debug":
 		level = slog.LevelDebug

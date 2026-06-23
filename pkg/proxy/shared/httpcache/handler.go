@@ -91,7 +91,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	}
 	result, err := h.handle(req.Context(), req)
 	if err != nil {
-		slog.Warn("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
+		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
 		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
@@ -100,7 +100,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	cache := result.Headers["X-Cache"]
 	bytes := responseBytes(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
-		slog.Warn("flush response failed", "instance", h.name, "err", err)
+		slog.Info("flush response failed", "instance", h.name, "err", err)
 		if status < 500 {
 			status = http.StatusBadGateway
 		}
@@ -126,7 +126,7 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 	}
 	result, err := h.bypass(req.Context(), req, route)
 	if err != nil {
-		slog.Warn("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
+		slog.Info("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
 		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
@@ -135,7 +135,7 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 	cache := result.Headers["X-Cache"]
 	bytes := responseBytes(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
-		slog.Warn("flush passthrough response failed", "instance", h.name, "err", err)
+		slog.Info("flush passthrough response failed", "instance", h.name, "err", err)
 		if status < 500 {
 			status = http.StatusBadGateway
 		}

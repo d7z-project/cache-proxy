@@ -104,13 +104,3 @@ func sortedEntryNames(entries map[string]*proxyruntime.Entry) []string {
 	sort.Strings(names)
 	return names
 }
-
-func enabledEntryNames(entries map[string]*proxyruntime.Entry) []string {
-	names := make([]string, 0, len(entries))
-	for _, name := range sortedEntryNames(entries) {
-		if entries[name].Enabled {
-			names = append(names, name)
-		}
-	}
-	return names
-}

@@ -142,7 +142,7 @@ func TestIndexedHandlerRefreshInvalidatesArtifactIdentity(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pkg.tar.zst", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "artifact-v2", rec.Body.String())
-	require.Equal(t, int64(4), upstreamHits.Load())
+	require.Equal(t, int64(3), upstreamHits.Load())
 
 	snapshot := stats.Snapshot().Instances["repo"]
 	require.Equal(t, "ready", snapshot.MetadataState)
@@ -312,14 +312,33 @@ func TestIndexedHandlerMetadataRequestDiscoversAndRefreshesRoot(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
-	handler := newTestHandler(t, store, []string{server.URL}, testDiscoverer{}, nil, func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
-		_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
-		require.NoError(t, err)
-		return &LiveSnapshot{
-			Metadata:  map[string]struct{}{"meta/index.txt": {}},
-			Artifacts: map[string]string{"pkg.tar.zst": "v1"},
-		}, nil
-	})
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(time.Minute),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "meta/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: 0, Timeout: time.Second},
+		testDiscoverer{},
+		nil,
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{
+				Metadata:  map[string]struct{}{"meta/index.txt": {}},
+				Artifacts: map[string]string{"pkg.tar.zst": "v1"},
+			}, nil
+		},
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
@@ -330,6 +349,68 @@ func TestIndexedHandlerMetadataRequestDiscoversAndRefreshesRoot(t *testing.T) {
 	require.Equal(t, RepositoryStateActive, record.State)
 	require.Contains(t, handler.currentSnapshot().Metadata, "meta/index.txt")
 	require.Equal(t, "v1", handler.currentSnapshot().Artifacts["pkg.tar.zst"])
+}
+
+func TestDiscoverRootTriggersAsyncRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/meta/index.txt":
+			_, _ = io.WriteString(w, "meta")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	var refreshCount atomic.Int64
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(time.Minute),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "meta/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Minute, Timeout: time.Second},
+		testDiscoverer{},
+		nil,
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			refreshCount.Add(1)
+			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
+		},
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	require.NoError(t, handler.Start(ctx))
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = handler.Stop(stopCtx)
+	}()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, handler.roots, "meta", "root discovered and added to map")
+
+	require.Eventually(t, func() bool { return refreshCount.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, RepositoryStateActive, handler.roots["meta"].State)
+	require.Contains(t, handler.currentSnapshot().Metadata, "meta/index.txt")
 }
 
 func TestIndexedHandlerArtifactRequestDoesNotDiscoverRoot(t *testing.T) {
@@ -504,18 +585,37 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
-	handler := newTestHandler(t, store, []string{server.URL}, nil, []RootSpec{staticRootSpec{
-		key:     "meta",
-		targets: []MetadataTarget{{URL: "meta/index.txt"}},
-	}}, func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
-		if _, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"}); err != nil {
-			return nil, err
-		}
-		return &LiveSnapshot{
-			Metadata:  map[string]struct{}{"meta/index.txt": {}},
-			Artifacts: map[string]string{"pkg.tar.zst": "v1"},
-		}, nil
-	})
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(0),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "meta/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		nil,
+		[]RootSpec{staticRootSpec{
+			key:     "meta",
+			targets: []MetadataTarget{{URL: "meta/index.txt"}},
+		}},
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			if _, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"}); err != nil {
+				return nil, err
+			}
+			return &LiveSnapshot{
+				Metadata:  map[string]struct{}{"meta/index.txt": {}},
+				Artifacts: map[string]string{"pkg.tar.zst": "v1"},
+			}, nil
+		},
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
 	handler.removal = RemovalPolicy{ConsecutiveNotFound: 2, MinNotFoundAge: 0}
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -609,3 +709,360 @@ func TestRefreshSessionFetchFallsBackToCandidatePath(t *testing.T) {
 	require.Equal(t, "dists/bookworm/Release", blob.Path)
 	require.Equal(t, int64(2), upstreamHits.Load())
 }
+
+func TestRestoreRootsDiscoversFromCachedMetadata(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "meta")
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	h1 := newTestHandler(t, store, []string{server.URL}, testDiscoverer{},
+		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
+		})
+	require.NoError(t, h1.Refresh(ctx))
+	require.Contains(t, h1.roots, "meta")
+	require.Equal(t, RepositoryStateActive, h1.roots["meta"].State)
+	require.NotNil(t, h1.roots["meta"].Snapshot)
+
+	h2 := newTestHandler(t, store, []string{server.URL}, testDiscoverer{}, nil, nil)
+	h2.restoreRoots(ctx)
+
+	require.Contains(t, h2.roots, "meta")
+	rec := h2.roots["meta"]
+	require.Equal(t, RepositoryStateActive, rec.State)
+	require.WithinDuration(t, time.Now(), rec.LastRefreshAt, 5*time.Second)
+	require.False(t, rec.LastSuccessAt.IsZero())
+}
+
+func TestRefreshUsesCachedMetadataWhenFresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var upstreamHits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		_, _ = io.WriteString(w, "meta")
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, nil,
+		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
+		})
+
+	require.NoError(t, handler.Refresh(ctx))
+	require.Equal(t, int64(1), upstreamHits.Load())
+
+	require.NoError(t, handler.Refresh(ctx))
+	require.Equal(t, int64(1), upstreamHits.Load(), "second refresh within fresh window must not hit upstream")
+}
+
+func TestRefreshFallsBackToCacheOnUpstream500(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	fail := atomic.Bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, "meta")
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, nil,
+		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}, Artifacts: map[string]string{"pkg": "v1"}}, nil
+		})
+	require.NoError(t, handler.Refresh(ctx))
+	require.NotNil(t, handler.currentSnapshot())
+
+	fail.Store(true)
+	require.NoError(t, handler.Refresh(ctx))
+	require.NotNil(t, handler.currentSnapshot(), "snapshot must survive upstream 500 via cache fallback")
+	require.Equal(t, RepositoryStateActive, handler.roots["meta"].State)
+}
+
+func TestStateRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(time.Minute),
+		func(string) ResourceClass { return ResourceMetadata },
+		nil, nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		testDiscoverer{},
+		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		nil,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	now := time.Now()
+	handler.mu.Lock()
+	handler.roots["meta"] = &RepositoryRecord{
+		Spec:                 handler.roots["meta"].Spec,
+		State:                RepositoryStateActive,
+		LastSeenAt:           now,
+		LastRefreshAt:        now,
+		LastSuccessAt:        now.Add(-time.Minute),
+		ConsecutiveNotFound:  2,
+		ConsecutiveInvalid:   1,
+		ConsecutiveTransient: 3,
+		LastError:            "test error",
+	}
+	handler.mu.Unlock()
+
+	handler.saveState(ctx)
+
+	state := handler.loadState(ctx)
+	require.Equal(t, 1, state.Version)
+	require.Contains(t, state.Roots, "meta")
+	pr := state.Roots["meta"]
+	require.Equal(t, "active", pr.State)
+	require.Equal(t, 2, pr.ConsecutiveNotFound)
+	require.Equal(t, 1, pr.ConsecutiveInvalid)
+	require.Equal(t, 3, pr.ConsecutiveTransient)
+	require.Equal(t, "test error", pr.LastError)
+	require.WithinDuration(t, now, pr.LastRefreshAt, time.Second)
+}
+
+func TestStartRestoresStateThenRefreshes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var upstreamHits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		_, _ = io.WriteString(w, "meta")
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	makeHandler := func() *IndexedHandler {
+		return NewIndexedHandler(
+			"repo", "test", "repo",
+			config.Freshness(time.Minute),
+			func(cleanPath string) ResourceClass {
+				if strings.HasPrefix(cleanPath, "meta/") {
+					return ResourceMetadata
+				}
+				return ResourceArtifact
+			},
+			[]string{server.URL},
+			nil,
+			config.Expiration(time.Hour),
+			&Policy{},
+			RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+			testDiscoverer{},
+			[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+			func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+				_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+				if err != nil {
+					return nil, err
+				}
+				return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
+			},
+			store,
+			httpcache.NewStats(prometheus.NewRegistry()),
+		)
+	}
+
+	h1 := makeHandler()
+	require.NoError(t, h1.Start(ctx))
+	require.Contains(t, h1.roots, "meta")
+	require.Equal(t, RepositoryStateActive, h1.roots["meta"].State)
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	_ = h1.Stop(stopCtx)
+
+	h2 := makeHandler()
+	h2.restoreRoots(ctx)
+
+	require.Contains(t, h2.roots, "meta")
+	rec := h2.roots["meta"]
+	require.Equal(t, RepositoryStateActive, rec.State, "state restored from persisted file")
+	require.False(t, rec.LastSuccessAt.IsZero())
+	require.False(t, rec.LastRefreshAt.IsZero())
+}
+
+func TestRefreshConditionalGET304(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var upstreamHits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		etag := r.Header.Get("If-None-Match")
+		if etag == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Write([]byte("meta-content"))
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(0),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "meta/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		nil,
+		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
+		},
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	require.NoError(t, handler.Refresh(ctx))
+	require.Equal(t, int64(1), upstreamHits.Load(), "first refresh fetches upstream")
+
+	require.NoError(t, handler.Refresh(ctx))
+	require.Equal(t, int64(2), upstreamHits.Load(), "second refresh sends conditional GET (304)")
+}
+
+func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("deb-meta"))
+	}))
+	defer upstream.Close()
+
+	debDiscoverer := discovererFunc(func(cleanPath string) (RootSpec, bool) {
+		parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
+		if len(parts) != 2 {
+			return nil, false
+		}
+		return staticRootSpec{
+			key:     parts[0],
+			targets: []MetadataTarget{{URL: parts[0] + "/" + parts[1]}},
+		}, true
+	})
+
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(time.Minute),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "bookworm/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		[]string{upstream.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		debDiscoverer,
+		[]RootSpec{staticRootSpec{key: "bookworm", targets: []MetadataTarget{{URL: "bookworm/main"}}}},
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			_, _ = session.Fetch(ctx, MetadataTarget{URL: "bookworm/main"})
+			return &LiveSnapshot{Metadata: map[string]struct{}{"bookworm/main": {}}}, nil
+		},
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+	require.NoError(t, handler.Refresh(ctx))
+
+	rec, ok := handler.roots["bookworm"]
+	require.True(t, ok)
+	require.Equal(t, RepositoryStateActive, rec.State)
+
+	rec.LastSuccessAt = time.Now().Add(-time.Hour)
+	handler.mu.Lock()
+	handler.roots["bookworm"] = rec
+	handler.mu.Unlock()
+	handler.saveState(ctx)
+
+	h2 := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(time.Minute),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "bookworm/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		nil, nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		debDiscoverer,
+		nil,
+		nil,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+	h2.restoreRoots(ctx)
+
+	rec2, ok := h2.roots["bookworm"]
+	require.True(t, ok)
+	require.Equal(t, RepositoryStateActive, rec2.State)
+	require.WithinDuration(t, rec.LastSuccessAt, rec2.LastSuccessAt, time.Second)
+}
+
+type discovererFunc func(string) (RootSpec, bool)
+
+func (f discovererFunc) Discover(path string) (RootSpec, bool) { return f(path) }

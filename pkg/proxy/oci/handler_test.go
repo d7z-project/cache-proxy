@@ -218,3 +218,19 @@ func TestOCIBypassesBlobWithoutActiveRef(t *testing.T) {
 	require.Error(t, err)
 	require.False(t, strings.Contains(rec.Body.String(), "Bad Gateway"))
 }
+
+func TestOCITokenPurgeExpired(t *testing.T) {
+	handler := &handler{auth: authHandler{tokens: map[string]ociToken{}}}
+
+	now := time.Now()
+	handler.auth.tokens["expired"] = ociToken{value: "tok1", expire: now.Add(-time.Hour)}
+	handler.auth.tokens["valid"] = ociToken{value: "tok2", expire: now.Add(time.Hour)}
+	handler.auth.tokens["just-expired"] = ociToken{value: "tok3", expire: now}
+
+	handler.purgeExpiredTokens()
+
+	require.Empty(t, handler.auth.tokens["expired"].value)
+	require.Empty(t, handler.auth.tokens["just-expired"].value)
+	require.Equal(t, "tok2", handler.auth.tokens["valid"].value)
+	require.Len(t, handler.auth.tokens, 1)
+}

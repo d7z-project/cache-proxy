@@ -43,6 +43,21 @@ type RepositoryRecord struct {
 	LastError            string
 }
 
+type rootStateRecord struct {
+	State                string    `yaml:"state"`
+	LastRefreshAt        time.Time `yaml:"last_refresh_at"`
+	LastSuccessAt        time.Time `yaml:"last_success_at"`
+	ConsecutiveNotFound  int       `yaml:"consecutive_not_found"`
+	ConsecutiveInvalid   int       `yaml:"consecutive_invalid"`
+	ConsecutiveTransient int       `yaml:"consecutive_transient"`
+	LastError            string    `yaml:"last_error,omitempty"`
+}
+
+type persistedState struct {
+	Version int                       `yaml:"version"`
+	Roots   map[string]rootStateRecord `yaml:"roots"`
+}
+
 type staticRootSpec struct {
 	key     string
 	targets []MetadataTarget

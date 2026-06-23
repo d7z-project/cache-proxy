@@ -22,7 +22,7 @@ func (a *App) gcLoop() {
 			return
 		case <-ticker.C:
 			if _, err := a.store.RunGC(a.lifecycleCtx, blobfs.GCOptions{Compact: true}); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Warn("blob gc failed", "err", err)
+				slog.Info("blob gc failed", "err", err)
 			}
 		}
 	}
@@ -71,7 +71,7 @@ func (a *App) runCleanup(ctx context.Context) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				if err := handler.Cleanup(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					slog.Warn("instance cleanup failed", "err", err)
+					slog.Info("instance cleanup failed", "err", err)
 				}
 			}(handler)
 		}

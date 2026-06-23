@@ -1,0 +1,20 @@
+{
+  "title": "缓存代理",
+  "instances": "个实例",
+  "theme_switch": "切换主题",
+  "lang_switch": "切换语言",
+  "copy": "复制",
+  "copied": "已复制",
+  "no_instances": "未启用任何实例，请在 YAML 配置中添加实例。",
+  "requests": "请求",
+  "loading": "加载中",
+  "ready": "就绪",
+  "refreshing": "刷新中",
+  "degraded": "降级",
+  "upstream_ok": "上游正常",
+  "n_err": "%d 个错误",
+  "just_now": "刚刚",
+  "s_ago": "%d秒前",
+  "m_ago": "%d分钟前",
+  "h_ago": "%d小时前"
+}

@@ -1,0 +1,20 @@
+{
+  "title": "Cache Proxy",
+  "instances": "instances",
+  "theme_switch": "Toggle theme",
+  "lang_switch": "Switch language",
+  "copy": "Copy",
+  "copied": "Copied",
+  "no_instances": "No instances enabled. Add instances to your YAML config.",
+  "requests": "req",
+  "loading": "loading",
+  "ready": "ready",
+  "refreshing": "refreshing",
+  "degraded": "degraded",
+  "upstream_ok": "upstream OK",
+  "n_err": "%d err",
+  "just_now": "just now",
+  "s_ago": "%ds ago",
+  "m_ago": "%dm ago",
+  "h_ago": "%dh ago"
+}

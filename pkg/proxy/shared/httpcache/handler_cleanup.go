@@ -39,7 +39,7 @@ func CleanupStoreTenant(ctx context.Context, store *blobfs.Store, tenant string,
 			slog.Debug("cleanup parse fetched-at failed", "instance", tenant, "path", objectPath, "err", parseErr)
 		}
 		if err := store.DeleteObject(ctx, tenant, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("cleanup delete failed", "instance", tenant, "path", objectPath, "err", err)
+			slog.Info("cleanup delete failed", "instance", tenant, "path", objectPath, "err", err)
 		}
 		return nil
 	})

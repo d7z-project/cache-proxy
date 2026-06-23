@@ -50,7 +50,34 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 	}
 }
 
-func (h *handler) Start(context.Context) error { return nil }
+func (h *handler) Start(ctx context.Context) error {
+	h.wait.Add(1)
+	go func() {
+		defer h.wait.Done()
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.purgeExpiredTokens()
+			}
+		}
+	}()
+	return nil
+}
+
+func (h *handler) purgeExpiredTokens() {
+	h.auth.tokenMu.Lock()
+	defer h.auth.tokenMu.Unlock()
+	now := time.Now()
+	for key, token := range h.auth.tokens {
+		if !now.Before(token.expire) {
+			delete(h.auth.tokens, key)
+		}
+	}
+}
 
 func (h *handler) Stop(ctx context.Context) error {
 	return utils.WaitGroupContext(ctx, &h.wait)
@@ -67,7 +94,7 @@ func (h *handler) Cleanup(ctx context.Context) error {
 		state, readErr := h.readState(ctx, current)
 		if readErr != nil || h.stateExpired(state) {
 			if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil && !errors.Is(removeErr, context.Canceled) {
-				slog.Warn("oci cleanup delete failed", "instance", h.name, "prefix", path.Dir(current), "err", removeErr)
+				slog.Info("oci cleanup delete failed", "instance", h.name, "prefix", path.Dir(current), "err", removeErr)
 			}
 		}
 		return nil
@@ -92,7 +119,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	status, cache, bytes, err := h.serve(req.Context(), w, req, resolved)
 	if err != nil {
-		slog.Warn("oci proxy failed", "instance", h.name, "method", req.Method, "path", req.URL.Path, "err", err)
+		slog.Info("oci proxy failed", "instance", h.name, "method", req.Method, "path", req.URL.Path, "err", err)
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
