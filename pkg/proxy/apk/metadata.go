@@ -58,6 +58,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = struct{}{}
+		snapshot.Metadata[blob.Path+".sig"] = struct{}{}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 		if err != nil {
 			return nil, err

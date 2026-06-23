@@ -338,7 +338,7 @@ func (h *IndexedHandler) refresh(ctx context.Context) error {
 		h.recordRefreshResult(h.resultForError(err), time.Since(startedAt), h.currentSnapshot() != nil)
 		return err
 	}
-	h.recordRefreshResult("success", time.Since(startedAt), true)
+	h.recordRefreshResult("success", time.Since(startedAt), h.currentSnapshot() != nil)
 	return nil
 }
 
@@ -766,9 +766,14 @@ func (h *IndexedHandler) finishRefresh(err error, duration time.Duration) {
 	defer h.mu.Unlock()
 	h.refreshing = false
 	if err == nil {
-		h.state = RefreshStateReady
-		h.stats.SetMetadataState(h.name, h.mode, string(h.state), true)
-		h.stats.RecordMetadataRefresh(h.name, h.mode, "success", duration, true)
+		ready := h.snapshot != nil
+		if ready {
+			h.state = RefreshStateReady
+		} else {
+			h.state = RefreshStateBooting
+		}
+		h.stats.SetMetadataState(h.name, h.mode, string(h.state), ready)
+		h.stats.RecordMetadataRefresh(h.name, h.mode, "success", duration, ready)
 		return
 	}
 	if errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -792,8 +797,10 @@ func (h *IndexedHandler) finishRefresh(err error, duration time.Duration) {
 
 func (h *IndexedHandler) recordRefreshResult(result string, duration time.Duration, ready bool) {
 	state := RefreshStateDegraded
-	if result == "success" {
+	if result == "success" && ready {
 		state = RefreshStateReady
+	} else if result == "success" {
+		state = RefreshStateBooting
 	}
 	h.mu.Lock()
 	h.state = state

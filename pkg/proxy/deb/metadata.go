@@ -131,6 +131,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = struct{}{}
+		switch {
+		case strings.HasSuffix(blob.Path, "/InRelease"):
+			snapshot.Metadata[path.Join(path.Dir(blob.Path), "Release.gpg")] = struct{}{}
+		case strings.HasSuffix(blob.Path, "/Release"):
+			snapshot.Metadata[blob.Path+".gpg"] = struct{}{}
+		}
 		switch target.Kind {
 		case "release":
 			continue

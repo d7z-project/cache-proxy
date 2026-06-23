@@ -157,6 +157,41 @@ func TestResolveMetadataRefreshPolicyValues(t *testing.T) {
 	require.Equal(t, 45*time.Second, ResolveMetadataRefreshInterval(config.Duration(45*time.Second), time.Hour))
 }
 
+func TestIndexedHandlerRefreshWithoutRootsStaysBooting(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	handler := NewIndexedHandler(
+		"repo",
+		"test",
+		"repo",
+		config.Freshness(time.Minute),
+		func(string) ResourceClass { return ResourceMetadata },
+		nil,
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		nil,
+		nil,
+		func(context.Context, *RefreshSession) (*LiveSnapshot, error) {
+			return &LiveSnapshot{Metadata: map[string]struct{}{}}, nil
+		},
+		store,
+		stats,
+	)
+
+	require.NoError(t, handler.Refresh(ctx))
+	instance := stats.Snapshot().Instances["repo"]
+	require.Equal(t, "booting", instance.MetadataState)
+	require.False(t, instance.SnapshotReady)
+}
+
 func TestIndexedHandlerCleanupRemovesOrphanArtifacts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -349,6 +384,37 @@ func TestIndexedHandlerOnlyMetadataRequestsCanDiscoverRoot(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
 	require.Empty(t, handler.roots)
+}
+
+func TestIndexedHandlerCleanupKeepsTrackedMetadataCompanions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newTestHandler(t, store, nil, nil, nil, nil)
+	handler.snapshot = &LiveSnapshot{
+		Metadata: map[string]struct{}{
+			"meta/index.txt":     {},
+			"meta/index.txt.sig": {},
+		},
+		Artifacts: map[string]string{},
+		Auxiliary: map[string]string{},
+	}
+
+	require.NoError(t, store.MkdirAll("repo/repo/meta", 0o755))
+	for _, name := range []string{"repo/meta/index.txt", "repo/meta/index.txt.sig"} {
+		_, err = store.Put(ctx, "repo", name, strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, handler.Cleanup(ctx))
+	for _, name := range []string{"repo/meta/index.txt", "repo/meta/index.txt.sig"} {
+		_, err = store.OpenObject(ctx, "repo", name)
+		require.NoError(t, err)
+	}
 }
 
 func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {

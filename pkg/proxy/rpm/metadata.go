@@ -52,6 +52,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[repomd.Path] = struct{}{}
+		snapshot.Metadata[repomd.Path+".asc"] = struct{}{}
 		var root struct {
 			Data []struct {
 				Type     string `xml:"type,attr"`
@@ -66,12 +67,16 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
 		foundPrimary := false
 		for _, item := range root.Data {
-			if item.Type != "primary" || item.Location.Href == "" {
+			if item.Location.Href == "" {
+				continue
+			}
+			metadataPath := path.Join(repoRoot, item.Location.Href)
+			snapshot.Metadata[metadataPath] = struct{}{}
+			if item.Type != "primary" {
 				continue
 			}
 			foundPrimary = true
-			primaryPath := path.Join(repoRoot, item.Location.Href)
-			primary, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: primaryPath})
+			primary, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: metadataPath})
 			if err != nil {
 				return nil, err
 			}

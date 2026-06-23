@@ -62,6 +62,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = struct{}{}
+		if target.Repo != "" && target.Arch != "" {
+			basePath := path.Join(target.Repo, "os", target.Arch)
+			snapshot.Metadata[path.Join(basePath, target.Repo+".db.sig")] = struct{}{}
+			snapshot.Metadata[path.Join(basePath, target.Repo+".files")] = struct{}{}
+			snapshot.Metadata[path.Join(basePath, target.Repo+".files.sig")] = struct{}{}
+		}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 		if err != nil {
 			return nil, err

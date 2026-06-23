@@ -59,7 +59,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 
 func classify(cleanPath string) filerepo.ResourceClass {
 	switch {
-	case strings.HasPrefix(cleanPath, "repodata/"), strings.HasSuffix(cleanPath, "/repomd.xml"), cleanPath == "repomd.xml", strings.HasSuffix(cleanPath, "/mirrorlist"), cleanPath == "mirrorlist", strings.HasSuffix(cleanPath, "/metalink"), cleanPath == "metalink":
+	case strings.HasPrefix(cleanPath, "repodata/"), strings.Contains(cleanPath, "/repodata/"), strings.HasSuffix(cleanPath, "/repomd.xml"), cleanPath == "repomd.xml", strings.HasSuffix(cleanPath, "/mirrorlist"), cleanPath == "mirrorlist", strings.HasSuffix(cleanPath, "/metalink"), cleanPath == "metalink":
 		return filerepo.ResourceMetadata
 	case strings.HasSuffix(cleanPath, ".rpm"), strings.HasSuffix(cleanPath, ".drpm"):
 		return filerepo.ResourceArtifact
