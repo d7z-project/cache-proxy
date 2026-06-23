@@ -222,6 +222,20 @@ func (a *App) Close(ctx context.Context) error {
 	return joined
 }
 
+type bindHomeHandler struct {
+	app   *App
+	entry *proxyruntime.Entry
+	next  http.Handler
+}
+
+func (h bindHomeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if (req.Method == http.MethodGet || req.Method == http.MethodHead) && req.URL.Path == "/" {
+		h.app.serveBindHome(w, req, h.entry)
+		return
+	}
+	h.next.ServeHTTP(w, req)
+}
+
 func (a *App) prepareHandlers(ctx context.Context) error {
 	for _, name := range sortedEntryNames(a.entries) {
 		entry := a.entries[name]
@@ -238,7 +252,11 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 			a.pathPrefixes = append(a.pathPrefixes, entry.Path)
 			continue
 		}
-		a.bindHandlers[entry.Bind] = entry.Runtime
+		a.bindHandlers[entry.Bind] = bindHomeHandler{
+			app:   a,
+			entry: entry,
+			next:  entry.Runtime,
+		}
 	}
 	sort.Slice(a.pathPrefixes, func(i, j int) bool {
 		if len(a.pathPrefixes[i]) == len(a.pathPrefixes[j]) {

@@ -1,9 +1,6 @@
 {
   "title": "Cache Proxy",
   "instances": "instances",
-  "total_instances": "Total instances",
-  "ready_instances": "Ready",
-  "degraded_instances": "Degraded",
   "theme_switch": "Toggle theme",
   "lang_switch": "Switch language",
   "copy": "Copy",
@@ -12,7 +9,6 @@
   "search_label": "Search instances",
   "search_placeholder": "Filter by name, mode, URL, or setup command",
   "search_empty": "No instances match the current search.",
-  "matching": "matching",
   "filter_mode": "Mode",
   "filter_status": "Status",
   "all": "All",

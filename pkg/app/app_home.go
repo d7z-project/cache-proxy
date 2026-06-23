@@ -25,13 +25,24 @@ type homeInstance struct {
 	StatusExtra string
 }
 
-type homeSummary struct {
-	Total    int
-	Ready    int
-	Degraded int
+func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
+	a.renderHomePage(w, req, a.homePageData(req, sortedEntries(a.entries), false))
 }
 
-func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
+func (a *App) serveBindHome(w http.ResponseWriter, req *http.Request, entry *proxyruntime.Entry) {
+	a.renderHomePage(w, req, a.homePageData(req, []*proxyruntime.Entry{entry}, true))
+}
+
+func (a *App) renderHomePage(w http.ResponseWriter, req *http.Request, data homeData) {
+	if req.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	renderHome(w, data)
+}
+
+func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, single bool) homeData {
 	locale := detectLocale(req)
 	i18n := i18nMaps[locale]
 	if i18n == nil {
@@ -45,38 +56,15 @@ func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
 	instances := make([]homeInstance, 0)
 	modes := make([]string, 0)
 	seenModes := map[string]struct{}{}
-	summary := homeSummary{}
-	for _, name := range sortedEntryNames(a.entries) {
-		entry := a.entries[name]
+	for _, entry := range entries {
 		if !entry.Enabled {
 			continue
 		}
-		instURL := instURL(entry, baseURL, req)
-		hi := homeInstance{
-			Name: entry.Name,
-			Mode: entry.Mode,
-			URL:  instURL,
-		}
-		hi.SetupNote, hi.SetupCmd = setupCommand(entry.Mode, instURL)
-		if hi.SetupNote != "" {
-			hi.SetupCopy = hi.SetupNote + "\n" + hi.SetupCmd
-		} else {
-			hi.SetupCopy = hi.SetupCmd
-		}
 		s := ss.Instances[entry.Name]
-		hi.Requests = formatCompact(s.Requests)
-		hi.HitRate = formatHitRate(s.Cache)
-		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+		hi := buildHomeInstance(entry, baseURL, req, s, i18n)
 		if _, ok := seenModes[hi.Mode]; !ok {
 			seenModes[hi.Mode] = struct{}{}
 			modes = append(modes, hi.Mode)
-		}
-		summary.Total++
-		if hi.StatusColor == "red" || s.MetadataState == "degraded" {
-			summary.Degraded++
-		}
-		if hi.StatusColor == "green" {
-			summary.Ready++
 		}
 		instances = append(instances, hi)
 	}
@@ -89,17 +77,43 @@ func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
 		themeSwitch = "\u65e5"
 	}
 	i18nJSON, _ := json.Marshal(i18n)
-	renderHome(w, homeData{
+	return homeData{
 		Instances:   instances,
 		Modes:       modes,
-		Summary:     summary,
-		Count:       len(instances),
+		Single:      single,
 		Locale:      locale,
 		Theme:       detectTheme(req),
 		LangSwitch:  langSwitch,
 		ThemeSwitch: themeSwitch,
 		I18NJSON:    template.JS(i18nJSON),
-	})
+	}
+}
+
+func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpproxy.InstanceStats, i18n map[string]string) homeInstance {
+	instURL := instURL(entry, baseURL, req)
+	hi := homeInstance{
+		Name: entry.Name,
+		Mode: entry.Mode,
+		URL:  instURL,
+	}
+	hi.SetupNote, hi.SetupCmd = setupCommand(entry.Mode, instURL)
+	if hi.SetupNote != "" {
+		hi.SetupCopy = hi.SetupNote + "\n" + hi.SetupCmd
+	} else {
+		hi.SetupCopy = hi.SetupCmd
+	}
+	hi.Requests = formatCompact(s.Requests)
+	hi.HitRate = formatHitRate(s.Cache)
+	hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+	return hi
+}
+
+func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry {
+	items := make([]*proxyruntime.Entry, 0, len(entries))
+	for _, name := range sortedEntryNames(entries) {
+		items = append(items, entries[name])
+	}
+	return items
 }
 
 func (a *App) publicBaseURL(req *http.Request) string {

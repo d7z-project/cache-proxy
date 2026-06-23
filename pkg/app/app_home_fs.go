@@ -49,8 +49,7 @@ func init() {
 type homeData struct {
 	Instances   []homeInstance
 	Modes       []string
-	Summary     homeSummary
-	Count       int
+	Single      bool
 	Locale      string
 	Theme       string
 	LangSwitch  string

@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -99,6 +99,42 @@ func TestHomePageWithNilStats(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, body, "<div class=\"stat-val\">0</div>")
 	require.Contains(t, body, "test")
+}
+
+func TestBindHomePageShowsSingleInstanceView(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "registry",
+		Mode:    "oci",
+		Enabled: true,
+		Bind:    "127.0.0.1:5000",
+		Home: proxyruntime.HomeEntry{
+			Name: "registry",
+			Mode: "oci",
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries: map[string]*proxyruntime.Entry{
+			"registry": entry,
+		},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "proxy.example.test"
+	rec := httptest.NewRecorder()
+	app.serveBindHome(rec, req, entry)
+
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, body, "single-hero")
+	require.Contains(t, body, "registry")
+	require.Contains(t, body, "http://proxy.example.test:5000")
+	require.NotContains(t, body, "<section class=\"toolbar\">")
 }
 
 func TestFormatHitRate(t *testing.T) {

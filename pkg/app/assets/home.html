@@ -19,6 +19,15 @@
   </div>
 </header>
 <main>
+  {{if .Single}}
+  {{with index .Instances 0}}
+  <section class="single-hero">
+    <div class="single-kicker">{{.Mode}}</div>
+    <h2>{{.Name}}</h2>
+    <p>{{t "endpoint"}}: <a href="{{.URL}}">{{.URL}}</a></p>
+  </section>
+  {{end}}
+  {{else}}
   <section class="toolbar">
     <div class="search-panel">
       <div class="toolbar-main">
@@ -32,7 +41,6 @@
             aria-label="{{t "search_label"}}"
           >
         </div>
-        <div id="search-meta" class="search-meta">{{.Count}} {{t "instances"}}</div>
       </div>
       <div class="chip-groups">
         <div class="chip-group">
@@ -58,18 +66,21 @@
       </div>
     </div>
   </section>
+  {{end}}
   <div class="grid">
     {{range .Instances}}
-    <div class="card" data-search="{{.Name}} {{.Mode}} {{.URL}} {{.SetupCmd}} {{.StatusLabel}} {{.StatusExtra}}" data-mode="{{.Mode}}" data-status="{{.StatusColor}}">
+    <div class="card" data-mode="{{.Mode}}" data-status="{{.StatusColor}}">
       <div class="card-head">
         <span class="badge badge-{{.Mode}}">{{.Mode}}</span>
-        <span class="name">{{.Name}}</span>
+        <span class="name" title="{{.Name}}">{{.Name}}</span>
         <span class="status-pill{{if .StatusColor}} status-pill-{{.StatusColor}}{{end}}">
           {{if .StatusColor}}<span class="dot dot-{{.StatusColor}}"></span>{{end}}
           <span>{{.StatusLabel}}</span>
         </span>
       </div>
-      {{if .StatusExtra}}<div class="card-note">{{.StatusExtra}}</div>{{end}}
+      <div class="card-note{{if not .StatusExtra}} card-note-empty{{end}}">
+        {{if .StatusExtra}}{{.StatusExtra}}{{else}}&nbsp;{{end}}
+      </div>
       <div class="card-section">
         <div class="section-head">
           <span class="section-title">{{t "endpoint"}}</span>

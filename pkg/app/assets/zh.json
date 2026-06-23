@@ -1,9 +1,6 @@
 {
   "title": "缓存代理",
   "instances": "个实例",
-  "total_instances": "总实例数",
-  "ready_instances": "就绪",
-  "degraded_instances": "降级",
   "theme_switch": "切换主题",
   "lang_switch": "切换语言",
   "copy": "复制",
@@ -12,7 +9,6 @@
   "search_label": "搜索实例",
   "search_placeholder": "按名称、模式、地址或接入配置筛选",
   "search_empty": "没有匹配当前搜索条件的实例。",
-  "matching": "个匹配结果",
   "filter_mode": "模式",
   "filter_status": "状态",
   "all": "全部",

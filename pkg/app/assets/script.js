@@ -44,29 +44,22 @@ function initSearch() {
     var input = document.getElementById('instance-search');
     if (!input) return;
 
-    var cards = Array.prototype.slice.call(document.querySelectorAll('.grid .card'));
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.grid .card')).map(function(card) {
+        return {
+            node: card,
+            mode: card.getAttribute('data-mode') || '',
+            status: card.getAttribute('data-status') || '',
+            haystack: (card.textContent || '').toLowerCase()
+        };
+    });
     var chips = Array.prototype.slice.call(document.querySelectorAll('.filter-chip'));
     var empty = document.getElementById('search-empty');
-    var meta = document.getElementById('search-meta');
-    var t = window.I18N;
     var active = { mode: '', status: '' };
 
-    function updateMeta(count, active) {
-        if (!meta) return;
-        if (active) {
-            meta.textContent = count + ' ' + t.matching;
-            return;
-        }
-        meta.textContent = count + ' ' + t.instances;
-    }
-
     function matchesForCard(card, query, modeValue, statusValue) {
-        var haystack = (card.getAttribute('data-search') || '').toLowerCase();
-        var mode = card.getAttribute('data-mode') || '';
-        var status = card.getAttribute('data-status') || '';
-        var matchQuery = !query || haystack.indexOf(query) !== -1;
-        var matchMode = !modeValue || mode === modeValue;
-        var matchStatus = !statusValue || status === statusValue;
+        var matchQuery = !query || card.haystack.indexOf(query) !== -1;
+        var matchMode = !modeValue || card.mode === modeValue;
+        var matchStatus = !statusValue || card.status === statusValue;
         return matchQuery && matchMode && matchStatus;
     }
 
@@ -103,13 +96,12 @@ function initSearch() {
         for (var i = 0; i < cards.length; i++) {
             var card = cards[i];
             var match = matchesForCard(card, query, active.mode, active.status);
-            card.hidden = !match;
+            card.node.hidden = !match;
             if (match) {
                 visible += 1;
             }
         }
         updateChipStates(query);
-        updateMeta(visible, query.length > 0 || active.mode || active.status);
         if (empty) empty.hidden = !(visible === 0 && (query || active.mode || active.status));
     }
 

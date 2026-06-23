@@ -322,6 +322,89 @@ func TestPrepareHandlersUsesLifecycleContext(t *testing.T) {
 	require.True(t, started.Load())
 }
 
+func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "registry",
+		Mode:    config.ModeOCI,
+		Enabled: true,
+		Bind:    "127.0.0.1:5000",
+		Runtime: proxyruntime.HandlerInstance{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				_, _ = io.WriteString(w, req.URL.Path)
+			}),
+		},
+		Home: proxyruntime.HomeEntry{
+			Name: "registry",
+			Mode: config.ModeOCI,
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		entries: map[string]*proxyruntime.Entry{
+			"registry": entry,
+		},
+	}
+
+	require.NoError(t, app.prepareHandlers(context.Background()))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "proxy.example.test"
+	rec := httptest.NewRecorder()
+	app.bindHandlers[entry.Bind].ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "registry")
+	require.NotContains(t, rec.Body.String(), "<section class=\"toolbar\">")
+
+	req = httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	rec = httptest.NewRecorder()
+	app.bindHandlers[entry.Bind].ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "/v2/", rec.Body.String())
+}
+
+func TestBindHomePageHeadReturnsOK(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "registry",
+		Mode:    config.ModeOCI,
+		Enabled: true,
+		Bind:    "127.0.0.1:5000",
+		Runtime: proxyruntime.HandlerInstance{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				_, _ = io.WriteString(w, "proxy")
+			}),
+		},
+		Home: proxyruntime.HomeEntry{
+			Name: "registry",
+			Mode: config.ModeOCI,
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		entries: map[string]*proxyruntime.Entry{
+			"registry": entry,
+		},
+	}
+
+	require.NoError(t, app.prepareHandlers(context.Background()))
+
+	req := httptest.NewRequest(http.MethodHead, "/", nil)
+	rec := httptest.NewRecorder()
+	app.bindHandlers[entry.Bind].ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, rec.Body.String())
+	require.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+}
+
 func testDocument(backend string, instances []config.Instance) *config.Document {
 	return &config.Document{
 		Server: config.ServerConfig{
