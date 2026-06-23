@@ -200,26 +200,28 @@ func TestHomePageShowsBindDisplayURL(t *testing.T) {
 
 func TestSetupCommandGeneration(t *testing.T) {
 	tests := []struct {
-		mode    string
-		url     string
-		contain string
+		mode        string
+		url         string
+		noteContain string
+		cmdContain  string
 	}{
-		{"npm", "http://cache/npm", "npm config set registry http://cache/npm"},
-		{"go", "http://cache/go", "go env -w GOPROXY=http://cache/go"},
-		{"maven", "http://cache/maven", "http://cache/maven</url>"},
-		{"cargo", "http://cache/cargo", "sparse+"},
-		{"pypi", "http://cache/pypi", "pip install --index-url"},
-		{"oci", "http://cache:5000", "docker pull"},
-		{"apk", "http://cache/apk", "http://cache/apk/v3.20/main"},
-		{"deb", "http://cache/deb", "deb http://cache/deb bookworm main"},
-		{"rpm", "http://cache/rpm", "baseurl=http://cache/rpm/9/BaseOS/x86_64/os"},
-		{"pacman", "http://cache/pacman", "Server = http://cache/pacman/$repo/os/$arch"},
-		{"file", "http://cache/files", "http://cache/files"},
+		{"npm", "http://cache/npm", "npm registry", "npm config set registry http://cache/npm"},
+		{"go", "http://cache/go", "Go module proxy", "go env -w GOPROXY=http://cache/go"},
+		{"maven", "http://cache/maven", "{mirror_id}", "http://cache/maven</url>"},
+		{"cargo", "http://cache/cargo", "{source_name}", "sparse+http://cache/cargo/"},
+		{"pypi", "http://cache/pypi", "{package}", "pip install --index-url http://cache/pypi/simple {package}"},
+		{"oci", "http://cache:5000", "{image}", "docker pull http://cache:5000/{image}:{tag}"},
+		{"apk", "http://cache/apk", "{alpine_branch}", "http://cache/apk/{alpine_branch}/{repository}"},
+		{"deb", "http://cache/deb", "{distribution}", "deb http://cache/deb {distribution} {component}"},
+		{"rpm", "http://cache/rpm", "{releasever}", "baseurl=http://cache/rpm/{releasever}/{repository}/{arch}"},
+		{"pacman", "http://cache/pacman", "{repo}", "Server = http://cache/pacman/{repo}/os/{arch}"},
+		{"file", "http://cache/files", "Base URL", "http://cache/files"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
-			cmd := setupCommand(tt.mode, tt.url)
-			require.Contains(t, cmd, tt.contain)
+			note, cmd := setupCommand(tt.mode, tt.url)
+			require.Contains(t, note, tt.noteContain)
+			require.Contains(t, cmd, tt.cmdContain)
 		})
 	}
 }

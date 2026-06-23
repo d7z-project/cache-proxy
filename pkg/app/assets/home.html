@@ -8,43 +8,102 @@
 </head>
 <body>
 <header>
-  <div class="wrap">
-    <h1>cache-proxy</h1>
-    <button id="theme-btn" class="btn-icon" onclick="toggleTheme()">{{.ThemeSwitch}}</button>
-    <button class="btn-icon" onclick="toggleLang()">{{.LangSwitch}}</button>
-    <div class="header-count">{{.Count}} {{t "instances"}}</div>
+  <div class="wrap header-bar">
+    <div class="header-brand">
+      <h1>cache-proxy</h1>
+    </div>
+    <div class="header-actions">
+      <button id="theme-btn" class="btn-icon" onclick="toggleTheme()">{{.ThemeSwitch}}</button>
+      <button class="btn-icon" onclick="toggleLang()">{{.LangSwitch}}</button>
+    </div>
   </div>
 </header>
 <main>
+  <section class="toolbar">
+    <div class="search-panel">
+      <div class="toolbar-main">
+        <div class="search-box">
+          <label class="search-label" for="instance-search">{{t "search_label"}}</label>
+          <input
+            id="instance-search"
+            class="search-input"
+            type="search"
+            placeholder="{{t "search_placeholder"}}"
+            aria-label="{{t "search_label"}}"
+          >
+        </div>
+        <div id="search-meta" class="search-meta">{{.Count}} {{t "instances"}}</div>
+      </div>
+      <div class="chip-groups">
+        <div class="chip-group">
+          <div class="chip-label">{{t "filter_mode"}}</div>
+          <div class="chips" id="mode-filters">
+            <button class="filter-chip is-active" type="button" data-filter-group="mode" data-filter-value="">{{t "all"}}</button>
+            {{range .Modes}}
+            <button class="filter-chip" type="button" data-filter-group="mode" data-filter-value="{{.}}">{{.}} <span class="chip-count"></span></button>
+            {{end}}
+          </div>
+        </div>
+        <div class="chip-group">
+          <div class="chip-label">{{t "filter_status"}}</div>
+          <div class="chips">
+            <button class="filter-chip is-active" type="button" data-filter-group="status" data-filter-value="">{{t "all"}}</button>
+            <button class="filter-chip" type="button" data-filter-group="status" data-filter-value="green">{{t "ready"}} <span class="chip-count"></span></button>
+            <button class="filter-chip" type="button" data-filter-group="status" data-filter-value="blue">{{t "refreshing"}} <span class="chip-count"></span></button>
+            <button class="filter-chip" type="button" data-filter-group="status" data-filter-value="red">{{t "degraded"}} <span class="chip-count"></span></button>
+            <button class="filter-chip" type="button" data-filter-group="status" data-filter-value="yellow">{{t "upstream_issue"}} <span class="chip-count"></span></button>
+            <button class="filter-chip" type="button" data-filter-group="status" data-filter-value="gray">{{t "loading"}} <span class="chip-count"></span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
   <div class="grid">
     {{range .Instances}}
-    <div class="card">
+    <div class="card" data-search="{{.Name}} {{.Mode}} {{.URL}} {{.SetupCmd}} {{.StatusLabel}} {{.StatusExtra}}" data-mode="{{.Mode}}" data-status="{{.StatusColor}}">
       <div class="card-head">
         <span class="badge badge-{{.Mode}}">{{.Mode}}</span>
         <span class="name">{{.Name}}</span>
-        {{if .StatusColor}}<span class="dot dot-{{.StatusColor}}" title="{{.StatusLabel}}"></span>{{end}}
+        <span class="status-pill{{if .StatusColor}} status-pill-{{.StatusColor}}{{end}}">
+          {{if .StatusColor}}<span class="dot dot-{{.StatusColor}}"></span>{{end}}
+          <span>{{.StatusLabel}}</span>
+        </span>
       </div>
-      <div class="card-url">
-        <a href="{{.URL}}">{{.URL}}</a>
-        <button onclick="copyURL(this,'{{.URL}}')">{{t "copy"}}</button>
+      {{if .StatusExtra}}<div class="card-note">{{.StatusExtra}}</div>{{end}}
+      <div class="card-section">
+        <div class="section-head">
+          <span class="section-title">{{t "endpoint"}}</span>
+          <button class="section-action" onclick="copyURL(this,'{{.URL}}')">{{t "copy"}}</button>
+        </div>
+        <div class="card-url">
+          <a href="{{.URL}}">{{.URL}}</a>
+        </div>
       </div>
       <div class="card-stats">
         <div class="stat">
+          <div class="stat-lbl">{{t "requests"}}</div>
           <div class="stat-val">{{.Requests}}</div>
         </div>
         <div class="stat">
+          <div class="stat-lbl">{{t "hit_rate"}}</div>
           <div class="stat-val">{{.HitRate}}</div>
         </div>
-        <div class="stat">
-          <div class="stat-val">{{.StatusLabel}}</div>
-          {{if .StatusExtra}}<div class="stat-lbl">{{.StatusExtra}}</div>{{end}}
+      </div>
+      <div class="card-section card-section-setup">
+        <div class="section-head">
+          <span class="section-title">{{t "setup"}}</span>
+          <button class="section-action" onclick="copyCode(this,'{{.SetupCopy}}')">{{t "copy"}}</button>
+        </div>
+        <div class="card-cmd-wrap">
+          {{if .SetupNote}}<div class="card-cmd-note">{{.SetupNote}}</div>{{end}}
+          <div class="card-cmd">{{.SetupCmd}}</div>
         </div>
       </div>
-      <div class="card-cmd" onclick="copyCode(this,'{{.SetupCmd}}')">{{.SetupCmd}}</div>
     </div>
     {{else}}
     <div class="empty">{{t "no_instances"}}</div>
     {{end}}
+    <div id="search-empty" class="empty search-empty" hidden>{{t "search_empty"}}</div>
   </div>
 </main>
 <script>window.I18N={{.I18NJSON}};</script>

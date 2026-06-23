@@ -9,12 +9,15 @@ function copyURL(btn, txt) {
     }, 1500);
 }
 
-function copyCode(el, txt) {
+function copyCode(btn, txt) {
     navigator.clipboard.writeText(txt);
-    var root = document.documentElement;
-    var s = getComputedStyle(root).getPropertyValue('--code-flash').trim();
-    el.style.background = s;
-    setTimeout(function() { el.style.background = ''; }, 600);
+    var t = window.I18N;
+    btn.textContent = t.copied;
+    btn.classList.add('copied');
+    setTimeout(function() {
+        btn.textContent = t.copy;
+        btn.classList.remove('copied');
+    }, 1500);
 }
 
 function toggleTheme() {
@@ -37,6 +40,98 @@ function updateThemeBtn(theme) {
     if (btn) btn.textContent = theme === 'dark' ? '\u65e5' : '\u591c';
 }
 
+function initSearch() {
+    var input = document.getElementById('instance-search');
+    if (!input) return;
+
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.grid .card'));
+    var chips = Array.prototype.slice.call(document.querySelectorAll('.filter-chip'));
+    var empty = document.getElementById('search-empty');
+    var meta = document.getElementById('search-meta');
+    var t = window.I18N;
+    var active = { mode: '', status: '' };
+
+    function updateMeta(count, active) {
+        if (!meta) return;
+        if (active) {
+            meta.textContent = count + ' ' + t.matching;
+            return;
+        }
+        meta.textContent = count + ' ' + t.instances;
+    }
+
+    function matchesForCard(card, query, modeValue, statusValue) {
+        var haystack = (card.getAttribute('data-search') || '').toLowerCase();
+        var mode = card.getAttribute('data-mode') || '';
+        var status = card.getAttribute('data-status') || '';
+        var matchQuery = !query || haystack.indexOf(query) !== -1;
+        var matchMode = !modeValue || mode === modeValue;
+        var matchStatus = !statusValue || status === statusValue;
+        return matchQuery && matchMode && matchStatus;
+    }
+
+    function updateChipStates(query) {
+        for (var i = 0; i < chips.length; i++) {
+            var chip = chips[i];
+            var group = chip.getAttribute('data-filter-group');
+            var value = chip.getAttribute('data-filter-value') || '';
+            var count = 0;
+
+            for (var j = 0; j < cards.length; j++) {
+                var card = cards[j];
+                var modeValue = group === 'mode' ? value : active.mode;
+                var statusValue = group === 'status' ? value : active.status;
+                if (matchesForCard(card, query, modeValue, statusValue)) {
+                    count += 1;
+                }
+            }
+
+            var countNode = chip.querySelector('.chip-count');
+            if (countNode) {
+                countNode.textContent = value ? '(' + count + ')' : '';
+            }
+
+            var disabled = value && count === 0;
+            chip.disabled = disabled;
+            chip.classList.toggle('is-disabled', disabled);
+        }
+    }
+
+    function filterCards() {
+        var query = input.value.trim().toLowerCase();
+        var visible = 0;
+        for (var i = 0; i < cards.length; i++) {
+            var card = cards[i];
+            var match = matchesForCard(card, query, active.mode, active.status);
+            card.hidden = !match;
+            if (match) {
+                visible += 1;
+            }
+        }
+        updateChipStates(query);
+        updateMeta(visible, query.length > 0 || active.mode || active.status);
+        if (empty) empty.hidden = !(visible === 0 && (query || active.mode || active.status));
+    }
+
+    for (var j = 0; j < chips.length; j++) {
+        chips[j].addEventListener('click', function() {
+            if (this.disabled) return;
+            var group = this.getAttribute('data-filter-group');
+            var value = this.getAttribute('data-filter-value') || '';
+            active[group] = value;
+            for (var k = 0; k < chips.length; k++) {
+                if (chips[k].getAttribute('data-filter-group') === group) {
+                    chips[k].classList.toggle('is-active', chips[k] === this);
+                }
+            }
+            filterCards();
+        });
+    }
+
+    input.addEventListener('input', filterCards);
+    filterCards();
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     if (!document.cookie.includes('theme=') && !window.location.search.includes('theme=')) {
         if (window.matchMedia('(prefers-color-scheme:dark)').matches) {
@@ -44,4 +139,5 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     updateThemeBtn(document.documentElement.getAttribute('data-theme') || 'light');
+    initSearch();
 });

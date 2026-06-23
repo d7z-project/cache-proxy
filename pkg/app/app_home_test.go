@@ -44,7 +44,8 @@ func TestHomePageShowsStatsAfterRequests(t *testing.T) {
 	body := rec.Body.String()
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, body, "card-stats")
-	require.Contains(t, body, "1 req")
+	require.Contains(t, body, "Requests")
+	require.Contains(t, body, "<div class=\"stat-val\">1</div>")
 }
 
 func TestHomePageWithEmptyStats(t *testing.T) {
@@ -64,7 +65,7 @@ func TestHomePageWithEmptyStats(t *testing.T) {
 
 	body := rec.Body.String()
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, body, "0 req")
+	require.Contains(t, body, "<div class=\"stat-val\">0</div>")
 	require.Contains(t, body, "\u2014")
 }
 
@@ -96,7 +97,7 @@ func TestHomePageWithNilStats(t *testing.T) {
 
 	body := rec.Body.String()
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, body, "0 req")
+	require.Contains(t, body, "<div class=\"stat-val\">0</div>")
 	require.Contains(t, body, "test")
 }
 

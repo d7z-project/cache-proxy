@@ -41,13 +41,15 @@ func init() {
 
 	homeTemplate = template.Must(template.New("home").Funcs(template.FuncMap{
 		"css": func() template.CSS { return template.CSS(cssData) },
-		"js":  func() template.JS   { return template.JS(jsData) },
+		"js":  func() template.JS { return template.JS(jsData) },
 		"t":   func(string, ...any) string { return "" },
 	}).Parse(string(htmlData)))
 }
 
 type homeData struct {
 	Instances   []homeInstance
+	Modes       []string
+	Summary     homeSummary
 	Count       int
 	Locale      string
 	Theme       string

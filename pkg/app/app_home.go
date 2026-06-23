@@ -15,12 +15,20 @@ type homeInstance struct {
 	Name        string
 	Mode        string
 	URL         string
+	SetupNote   string
 	SetupCmd    string
+	SetupCopy   string
 	Requests    string
 	HitRate     string
 	StatusColor string
 	StatusLabel string
 	StatusExtra string
+}
+
+type homeSummary struct {
+	Total    int
+	Ready    int
+	Degraded int
 }
 
 func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
@@ -35,6 +43,9 @@ func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
 		ss = a.stats.Snapshot()
 	}
 	instances := make([]homeInstance, 0)
+	modes := make([]string, 0)
+	seenModes := map[string]struct{}{}
+	summary := homeSummary{}
 	for _, name := range sortedEntryNames(a.entries) {
 		entry := a.entries[name]
 		if !entry.Enabled {
@@ -42,15 +53,31 @@ func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
 		}
 		instURL := instURL(entry, baseURL, req)
 		hi := homeInstance{
-			Name:     entry.Name,
-			Mode:     entry.Mode,
-			URL:      instURL,
-			SetupCmd: setupCommand(entry.Mode, instURL),
+			Name: entry.Name,
+			Mode: entry.Mode,
+			URL:  instURL,
+		}
+		hi.SetupNote, hi.SetupCmd = setupCommand(entry.Mode, instURL)
+		if hi.SetupNote != "" {
+			hi.SetupCopy = hi.SetupNote + "\n" + hi.SetupCmd
+		} else {
+			hi.SetupCopy = hi.SetupCmd
 		}
 		s := ss.Instances[entry.Name]
-		hi.Requests = formatCompact(s.Requests) + " " + i18n["requests"]
+		hi.Requests = formatCompact(s.Requests)
 		hi.HitRate = formatHitRate(s.Cache)
 		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+		if _, ok := seenModes[hi.Mode]; !ok {
+			seenModes[hi.Mode] = struct{}{}
+			modes = append(modes, hi.Mode)
+		}
+		summary.Total++
+		if hi.StatusColor == "red" || s.MetadataState == "degraded" {
+			summary.Degraded++
+		}
+		if hi.StatusColor == "green" {
+			summary.Ready++
+		}
 		instances = append(instances, hi)
 	}
 	langSwitch := "EN"
@@ -64,6 +91,8 @@ func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
 	i18nJSON, _ := json.Marshal(i18n)
 	renderHome(w, homeData{
 		Instances:   instances,
+		Modes:       modes,
+		Summary:     summary,
 		Count:       len(instances),
 		Locale:      locale,
 		Theme:       detectTheme(req),
@@ -124,30 +153,30 @@ func bindURL(req *http.Request, bind string) string {
 	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
-func setupCommand(mode, url string) string {
+func setupCommand(mode, url string) (note, cmd string) {
 	url = strings.TrimRight(url, "/")
 	switch mode {
 	case "npm":
-		return "npm config set registry " + url
+		return "# Set the npm registry to this proxy", "npm config set registry " + url
 	case "go":
-		return "go env -w GOPROXY=" + url
+		return "# Set Go module proxy", "go env -w GOPROXY=" + url
 	case "maven":
-		return "<mirror>\n  <url>" + url + "</url>\n</mirror>"
+		return "<!-- Replace {mirror_id} if needed -->", "<mirror>\n  <id>{mirror_id}</id>\n  <url>" + url + "</url>\n  <mirrorOf>*</mirrorOf>\n</mirror>"
 	case "cargo":
-		return "[source.cache-proxy]\nregistry = \"sparse+" + url + "/\""
+		return "# Replace {source_name} and keep the proxy URL as is", "[source.{source_name}]\nregistry = \"sparse+" + url + "/\"\n\n[source.crates-io]\nreplace-with = \"{source_name}\""
 	case "pypi":
-		return "pip install --index-url " + url + "/simple <package>"
+		return "# Replace {package} with the package you want to install", "pip install --index-url " + url + "/simple {package}"
 	case "oci":
-		return "docker pull " + url + "/<image>:<tag>"
+		return "# Replace {image} and {tag}", "docker pull " + url + "/{image}:{tag}"
 	case "apk":
-		return url + "/v3.20/main"
+		return "# Replace {alpine_branch} and {repository}", url + "/{alpine_branch}/{repository}"
 	case "deb":
-		return "deb " + url + " bookworm main"
+		return "# Replace {distribution} and {component}", "deb " + url + " {distribution} {component}"
 	case "rpm":
-		return "baseurl=" + url + "/9/BaseOS/x86_64/os"
+		return "# Replace {releasever}, {repository}, and {arch}", "baseurl=" + url + "/{releasever}/{repository}/{arch}"
 	case "pacman":
-		return "Server = " + url + "/$repo/os/$arch"
+		return "# Replace {repo} and {arch}", "Server = " + url + "/{repo}/os/{arch}"
 	default:
-		return url
+		return "# Base URL for file access", url
 	}
 }
