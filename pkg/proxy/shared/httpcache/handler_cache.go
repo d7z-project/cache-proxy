@@ -34,6 +34,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		return h.lockBusy(ctx, req, route)
 	}
 	defer lock.Unlock()
+
 	if req.Header.Get("Range") != "" {
 		cached, err := h.openValidCached(ctx, route)
 		if err == nil {
@@ -43,10 +44,14 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		return h.bypass(ctx, req, route)
 	}
 
+	if _, downloading := h.downloads.Load(route.ObjectPath); downloading {
+		return h.lockBusy(ctx, req, route)
+	}
+
 	cached, err := h.openCached(ctx, route)
 	if err != nil {
 		slog.Debug("cache miss", "instance", h.name, "object", route.ObjectPath, "err", err)
-		return h.downloadAndOpen(ctx, req, route, "MISS")
+		return h.streamDownload(ctx, req, route, "MISS")
 	}
 	if route.Policy == config.PolicyImmutable {
 		cached.Headers["X-Cache"] = "HIT"
@@ -67,7 +72,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 	}
 	_ = cached.Close()
 	slog.Debug("cache stale", "instance", h.name, "object", route.ObjectPath)
-	return h.downloadAndOpen(ctx, req, route, "REFRESH")
+	return h.streamDownload(ctx, req, route, "REFRESH")
 }
 
 func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
@@ -170,9 +175,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 	}
 }
 
-func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
-	h.stats.AddActiveDownload(h.name, h.config.Mode, 1)
-	defer h.stats.AddActiveDownload(h.name, h.config.Mode, -1)
+func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
 	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.remoteHeaders(req, route, nil))
 	if err != nil {
 		return nil, err
@@ -181,26 +184,21 @@ func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route 
 		resp.Headers["X-Cache"] = "BYPASS"
 		return h.rewriteResponse(req, route, resp), nil
 	}
-	defer resp.Close()
+
 	tempFile, err := os.CreateTemp("", "cache-proxy-*")
 	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(tempFile.Name())
-	if _, err = io.Copy(tempFile, resp.Body); err != nil {
-		_ = tempFile.Close()
-		return nil, err
-	}
-	if _, err = tempFile.Seek(0, io.SeekStart); err != nil {
-		_ = tempFile.Close()
+		resp.Close()
 		return nil, err
 	}
 	if parent := path.Dir(route.ObjectPath); parent != "." {
 		if err = h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
-			_ = tempFile.Close()
+			resp.Close()
+			tempFile.Close()
+			os.Remove(tempFile.Name())
 			return nil, err
 		}
 	}
+
 	meta := metadata(resp.Headers, h.config.Mode, status)
 	if h.config.MetadataFunc != nil {
 		for key, value := range h.config.MetadataFunc(req, route, copyHeadersMap(resp.Headers), status) {
@@ -209,25 +207,41 @@ func (h *Handler) downloadAndOpen(ctx context.Context, req *http.Request, route 
 			}
 		}
 	}
-	if _, err = h.store.Put(ctx, h.name, route.ObjectPath, tempFile, meta); err != nil {
-		_ = tempFile.Close()
-		return nil, err
+
+	done := make(chan struct{})
+	h.downloads.Store(route.ObjectPath, done)
+
+	pr, pw := io.Pipe()
+	h.wait.Add(1)
+	h.stats.AddActiveDownload(h.name, h.config.Mode, 1)
+	go func() {
+		defer h.wait.Done()
+		defer h.stats.AddActiveDownload(h.name, h.config.Mode, -1)
+		defer close(done)
+		defer h.downloads.Delete(route.ObjectPath)
+		defer resp.Body.Close()
+		defer pw.Close()
+
+		tee := io.TeeReader(resp.Body, tempFile)
+		_, copyErr := io.Copy(pw, tee)
+		if copyErr == nil {
+			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
+				h.store.Put(context.Background(), h.name, route.ObjectPath, tempFile, meta)
+			}
+		}
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+	}()
+
+	headers := map[string]string{"X-Cache": status}
+	if v := resp.Headers["Content-Length"]; v != "" {
+		headers["Content-Length"] = v
 	}
-	if _, err = tempFile.Seek(0, io.SeekStart); err != nil {
-		_ = tempFile.Close()
-		return nil, err
-	}
-	stat, err := tempFile.Stat()
-	if err != nil {
-		_ = tempFile.Close()
-		return nil, err
-	}
-	headers := map[string]string{"Content-Length": strconv.FormatInt(stat.Size(), 10), "X-Cache": status}
 	for key, value := range meta {
 		headers[headerName(key)] = value
 	}
 	setContentType(headers, route.ObjectPath)
-	return h.rewriteResponse(req, route, &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: tempFile}), nil
+	return &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: pr}, nil
 }
 
 func (h *Handler) rewriteResponse(req *http.Request, route Route, response *utils.ResponseWrapper) *utils.ResponseWrapper {

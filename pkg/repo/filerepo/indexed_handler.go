@@ -618,17 +618,6 @@ func (h *IndexedHandler) observeRoot(spec RootSpec, now time.Time) (*RepositoryR
 	}
 	record.LastSeenAt = now
 	changed := record.Spec.Merge(spec)
-	if record.State == RepositoryStateRemoved {
-		record.State = RepositoryStatePending
-		record.Snapshot = nil
-		record.NextRefreshAt = now
-		record.FirstNotFoundAt = time.Time{}
-		record.ConsecutiveNotFound = 0
-		record.ConsecutiveInvalid = 0
-		record.ConsecutiveTransient = 0
-		record.LastError = ""
-		return record, true
-	}
 	if changed {
 		record.NextRefreshAt = now
 	}
@@ -686,20 +675,19 @@ func (h *IndexedHandler) snapshotRecords() []*RepositoryRecord {
 }
 
 func (h *IndexedHandler) refreshRoot(ctx context.Context, record *RepositoryRecord, now time.Time) (bool, error) {
-	targets := record.Spec.Targets()
-	if len(targets) == 0 {
-		return false, nil
-	}
 	h.mu.Lock()
-	switch record.State {
-	case RepositoryStateRemoved:
+	if record.State == RepositoryStateRemoved {
 		h.mu.Unlock()
 		return false, nil
-	case RepositoryStatePending:
-	default:
+	}
+	targets := record.Spec.Targets()
+	if record.State != RepositoryStatePending {
 		record.State = RepositoryStateRefreshing
 	}
 	h.mu.Unlock()
+	if len(targets) == 0 {
+		return false, nil
+	}
 	snapshot, err := h.buildSnapshot(ctx, targets)
 	if err != nil {
 		return h.handleRootFailure(record, err, now)
@@ -732,15 +720,12 @@ func (h *IndexedHandler) handleRootFailure(record *RepositoryRecord, err error, 
 			record.FirstNotFoundAt = now
 		}
 		if record.Snapshot == nil {
-			record.State = RepositoryStateRemoved
-			record.NextRefreshAt = time.Time{}
+			delete(h.roots, record.Spec.Key())
 			h.rebuildAggregateLocked()
 			return false, err
 		}
 		if record.ConsecutiveNotFound >= h.removal.ConsecutiveNotFound && now.Sub(record.FirstNotFoundAt) >= h.removal.MinNotFoundAge {
-			record.State = RepositoryStateRemoved
-			record.Snapshot = nil
-			record.NextRefreshAt = time.Time{}
+			delete(h.roots, record.Spec.Key())
 			h.rebuildAggregateLocked()
 			return true, err
 		}
@@ -874,6 +859,29 @@ func (h *IndexedHandler) classify(cleanPath string) ResourceClass {
 	return h.classifier(cleanPath)
 }
 
+func (h *IndexedHandler) RootRecord(key string) (RepositoryRecord, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	rec, ok := h.roots[key]
+	if !ok {
+		return RepositoryRecord{}, false
+	}
+	return *rec, true
+}
+
+func (h *IndexedHandler) HasRoot(key string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.roots[key]
+	return ok
+}
+
+func (h *IndexedHandler) SetRootRecord(key string, record *RepositoryRecord) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.roots[key] = record
+}
+
 func cleanRequestPath(target string) string {
 	cleanPath := strings.TrimPrefix(path.Clean("/"+target), "/")
 	if cleanPath == "." {
@@ -987,17 +995,6 @@ func (h *IndexedHandler) observeRootLocked(spec RootSpec, now time.Time) (*Repos
 	}
 	record.LastSeenAt = now
 	changed := record.Spec.Merge(spec)
-	if record.State == RepositoryStateRemoved {
-		record.State = RepositoryStatePending
-		record.Snapshot = nil
-		record.NextRefreshAt = now
-		record.FirstNotFoundAt = time.Time{}
-		record.ConsecutiveNotFound = 0
-		record.ConsecutiveInvalid = 0
-		record.ConsecutiveTransient = 0
-		record.LastError = ""
-		return record, true
-	}
 	if changed {
 		record.NextRefreshAt = now
 	}

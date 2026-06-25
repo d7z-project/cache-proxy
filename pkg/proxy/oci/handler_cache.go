@@ -18,7 +18,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, uint64, error) {
@@ -60,34 +59,53 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 }
 
 func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
-	h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
-	defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
-
 	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, nil)
 	if err != nil {
 		return 0, "", 0, err
 	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		defer response.Body.Close()
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
 
-	tmp, size, err := utils.TempFileFromReader(response.Body)
+	tempFile, err := os.CreateTemp("", "cache-proxy-*")
 	if err != nil {
+		response.Body.Close()
 		return 0, "", 0, err
 	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
 
 	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
-	if err := h.putObjectFromReader(ctx, objectPath, tmp, size, response.Header, nil); err != nil {
-		return 0, "", 0, err
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return 0, "", 0, err
-	}
-	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, objectHeaders(response.Header, int(size), "MISS"), tmp)
+	contentLen := response.ContentLength
+	respHeader := response.Header
+
+	done := make(chan struct{})
+	h.downloads.Store(objectPath, done)
+
+	pr, pw := io.Pipe()
+	h.wait.Add(1)
+	go func() {
+		h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
+		defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
+		defer h.wait.Done()
+		defer close(done)
+		defer h.downloads.Delete(objectPath)
+		defer response.Body.Close()
+		defer pw.Close()
+
+		tee := io.TeeReader(response.Body, tempFile)
+		_, copyErr := io.Copy(pw, tee)
+		if copyErr == nil {
+			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
+				h.putObjectFromReader(context.Background(), objectPath, tempFile, contentLen, respHeader, nil)
+			}
+		}
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+	}()
+
+	headers := objectHeaders(respHeader, int(contentLen), "MISS")
+	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, pr)
 	return status, "MISS", bytes, err
 }
 

@@ -344,8 +344,8 @@ func TestIndexedHandlerMetadataRequestDiscoversAndRefreshesRoot(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	record := handler.roots["meta"]
-	require.NotNil(t, record)
+	record, ok := handler.RootRecord("meta")
+	require.True(t, ok)
 	require.Equal(t, RepositoryStateActive, record.State)
 	require.Contains(t, handler.currentSnapshot().Metadata, "meta/index.txt")
 	require.Equal(t, "v1", handler.currentSnapshot().Artifacts["pkg.tar.zst"])
@@ -406,10 +406,12 @@ func TestDiscoverRootTriggersAsyncRefresh(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, handler.roots, "meta", "root discovered and added to map")
+	require.True(t, handler.HasRoot("meta"), "root discovered and added")
 
 	require.Eventually(t, func() bool { return refreshCount.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
-	require.Equal(t, RepositoryStateActive, handler.roots["meta"].State)
+	rootRec, rootOk := handler.RootRecord("meta")
+	require.True(t, rootOk)
+	require.Equal(t, RepositoryStateActive, rootRec.State)
 	require.Contains(t, handler.currentSnapshot().Metadata, "meta/index.txt")
 }
 
@@ -431,7 +433,7 @@ func TestIndexedHandlerArtifactRequestDoesNotDiscoverRoot(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pkg.tar.zst", nil).WithContext(ctx))
 	require.Equal(t, http.StatusNotFound, rec.Code)
-	require.Empty(t, handler.roots)
+	require.False(t, handler.HasRoot("meta"))
 }
 
 func TestIndexedHandlerEmptyPathBypassesUpstream(t *testing.T) {
@@ -455,7 +457,7 @@ func TestIndexedHandlerEmptyPathBypassesUpstream(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "root", rec.Body.String())
-	require.Empty(t, handler.roots)
+	require.False(t, handler.HasRoot("meta"))
 }
 
 func TestIndexedHandlerUnknownPathBypassesUpstream(t *testing.T) {
@@ -624,14 +626,15 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 	missing.Store(true)
 	err = handler.Refresh(ctx)
 	require.ErrorIs(t, err, errMetadataNotFound)
-	record := handler.roots["meta"]
+	record, ok := handler.RootRecord("meta")
+	require.True(t, ok)
 	require.Equal(t, RepositoryStateSuspect, record.State)
 	require.NotNil(t, record.Snapshot)
 
 	err = handler.Refresh(ctx)
 	require.ErrorIs(t, err, errMetadataNotFound)
-	require.Equal(t, RepositoryStateRemoved, record.State)
-	require.Nil(t, record.Snapshot)
+	_, ok2 := handler.RootRecord("meta")
+	require.False(t, ok2, "root must be deleted after removal threshold")
 	require.Empty(t, handler.currentSnapshot().Artifacts)
 }
 
@@ -731,15 +734,17 @@ func TestRestoreRootsDiscoversFromCachedMetadata(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
 		})
 	require.NoError(t, h1.Refresh(ctx))
-	require.Contains(t, h1.roots, "meta")
-	require.Equal(t, RepositoryStateActive, h1.roots["meta"].State)
-	require.NotNil(t, h1.roots["meta"].Snapshot)
+	require.True(t, h1.HasRoot("meta"))
+	rec1, ok := h1.RootRecord("meta")
+	require.True(t, ok)
+	require.Equal(t, RepositoryStateActive, rec1.State)
+	require.NotNil(t, rec1.Snapshot)
 
 	h2 := newTestHandler(t, store, []string{server.URL}, testDiscoverer{}, nil, nil)
 	h2.restoreRoots(ctx)
 
-	require.Contains(t, h2.roots, "meta")
-	rec := h2.roots["meta"]
+	require.True(t, h2.HasRoot("meta"))
+	rec, _ := h2.RootRecord("meta")
 	require.Equal(t, RepositoryStateActive, rec.State)
 	require.WithinDuration(t, time.Now(), rec.LastRefreshAt, 5*time.Second)
 	require.False(t, rec.LastSuccessAt.IsZero())
@@ -806,7 +811,9 @@ func TestRefreshFallsBackToCacheOnUpstream500(t *testing.T) {
 	fail.Store(true)
 	require.NoError(t, handler.Refresh(ctx))
 	require.NotNil(t, handler.currentSnapshot(), "snapshot must survive upstream 500 via cache fallback")
-	require.Equal(t, RepositoryStateActive, handler.roots["meta"].State)
+	rec, ok := handler.RootRecord("meta")
+	require.True(t, ok)
+	require.Equal(t, RepositoryStateActive, rec.State)
 }
 
 func TestStateRoundTrip(t *testing.T) {
@@ -833,9 +840,10 @@ func TestStateRoundTrip(t *testing.T) {
 	)
 
 	now := time.Now()
-	handler.mu.Lock()
-	handler.roots["meta"] = &RepositoryRecord{
-		Spec:                 handler.roots["meta"].Spec,
+	specRec, ok := handler.RootRecord("meta")
+	require.True(t, ok)
+	handler.SetRootRecord("meta", &RepositoryRecord{
+		Spec:                 specRec.Spec,
 		State:                RepositoryStateActive,
 		LastSeenAt:           now,
 		LastRefreshAt:        now,
@@ -844,8 +852,7 @@ func TestStateRoundTrip(t *testing.T) {
 		ConsecutiveInvalid:   1,
 		ConsecutiveTransient: 3,
 		LastError:            "test error",
-	}
-	handler.mu.Unlock()
+	})
 
 	handler.saveState(ctx)
 
@@ -907,8 +914,10 @@ func TestStartRestoresStateThenRefreshes(t *testing.T) {
 
 	h1 := makeHandler()
 	require.NoError(t, h1.Start(ctx))
-	require.Contains(t, h1.roots, "meta")
-	require.Equal(t, RepositoryStateActive, h1.roots["meta"].State)
+	require.True(t, h1.HasRoot("meta"))
+	rec1, ok := h1.RootRecord("meta")
+	require.True(t, ok)
+	require.Equal(t, RepositoryStateActive, rec1.State)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
 	defer stopCancel()
@@ -917,8 +926,9 @@ func TestStartRestoresStateThenRefreshes(t *testing.T) {
 	h2 := makeHandler()
 	h2.restoreRoots(ctx)
 
-	require.Contains(t, h2.roots, "meta")
-	rec := h2.roots["meta"]
+	require.True(t, h2.HasRoot("meta"))
+	rec, ok := h2.RootRecord("meta")
+	require.True(t, ok)
 	require.Equal(t, RepositoryStateActive, rec.State, "state restored from persisted file")
 	require.False(t, rec.LastSuccessAt.IsZero())
 	require.False(t, rec.LastRefreshAt.IsZero())
@@ -1026,14 +1036,12 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 	)
 	require.NoError(t, handler.Refresh(ctx))
 
-	rec, ok := handler.roots["bookworm"]
+	rec, ok := handler.RootRecord("bookworm")
 	require.True(t, ok)
 	require.Equal(t, RepositoryStateActive, rec.State)
 
 	rec.LastSuccessAt = time.Now().Add(-time.Hour)
-	handler.mu.Lock()
-	handler.roots["bookworm"] = rec
-	handler.mu.Unlock()
+	handler.SetRootRecord("bookworm", &rec)
 	handler.saveState(ctx)
 
 	h2 := NewIndexedHandler(
@@ -1057,7 +1065,7 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 	)
 	h2.restoreRoots(ctx)
 
-	rec2, ok := h2.roots["bookworm"]
+	rec2, ok := h2.RootRecord("bookworm")
 	require.True(t, ok)
 	require.Equal(t, RepositoryStateActive, rec2.State)
 	require.WithinDuration(t, rec.LastSuccessAt, rec2.LastSuccessAt, time.Second)

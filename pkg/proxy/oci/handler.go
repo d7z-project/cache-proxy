@@ -173,6 +173,10 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	if err != nil {
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
+	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
+	if _, downloading := h.downloads.Load(objectPath); downloading {
+		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+	}
 	return h.fetchBlob(ctx, w, req, resolved, state)
 }
 

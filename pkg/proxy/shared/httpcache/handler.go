@@ -40,14 +40,15 @@ type RuntimeConfig struct {
 }
 
 type Handler struct {
-	name     string
-	config   RuntimeConfig
-	store    *blobfs.Store
-	client   *utils.HttpClientWrapper
-	locks    *utils.RWLockGroup
-	resolver Resolver
-	stats    *Stats
-	wait     sync.WaitGroup
+	name      string
+	config    RuntimeConfig
+	store     *blobfs.Store
+	client    *utils.HttpClientWrapper
+	locks     *utils.RWLockGroup
+	resolver  Resolver
+	stats     *Stats
+	wait      sync.WaitGroup
+	downloads sync.Map
 }
 
 type remoteOptions struct {

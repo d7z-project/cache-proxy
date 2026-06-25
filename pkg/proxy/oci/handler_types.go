@@ -54,4 +54,5 @@ type handler struct {
 	client      *utils.HttpClientWrapper
 	wait        sync.WaitGroup
 	auth        authHandler
+	downloads   sync.Map
 }

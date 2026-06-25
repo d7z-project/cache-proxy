@@ -30,6 +30,7 @@ type handler struct {
 	expireAfter config.Expiration
 	userAgent   string
 	wait        sync.WaitGroup
+	downloads   sync.Map
 }
 
 type cargoConfig struct {
@@ -117,6 +118,12 @@ func (h *handler) resolve(ctx context.Context, req *http.Request, route httpcach
 			return body, http.StatusOK, headers, "FRESH", nil
 		}
 	}
+	if _, downloading := h.downloads.Load(route.ObjectPath); downloading {
+		if body, headers, err := h.openCached(ctx, route.ObjectPath); err == nil {
+			return body, http.StatusOK, headers, "STALE", nil
+		}
+		return nil, 0, nil, "", fmt.Errorf("cargo resource download in progress")
+	}
 	body, headers, err := h.fetchUpstream(ctx, req, route)
 	if err != nil {
 		if route.BusyPolicy == config.BusyPolicyStale {
@@ -190,29 +197,45 @@ func (h *handler) fetchCrateToFile(ctx context.Context, objectPath, rawURL strin
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
 		return nil, nil, fmt.Errorf("cargo upstream returned %d", resp.StatusCode)
 	}
-	tmp, size, err := utils.TempFileFromReader(resp.Body)
+
+	tempFile, err := os.CreateTemp("", "cache-proxy-*")
 	if err != nil {
+		resp.Body.Close()
 		return nil, nil, err
 	}
-	if err := h.storeCrate(ctx, objectPath, tmp, size); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, nil, err
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, nil, err
-	}
+
+	done := make(chan struct{})
+	h.downloads.Store(objectPath, done)
+
+	pr, pw := io.Pipe()
+	h.wait.Add(1)
+	go func() {
+		defer h.wait.Done()
+		defer close(done)
+		defer h.downloads.Delete(objectPath)
+		defer resp.Body.Close()
+		defer pw.Close()
+
+		tee := io.TeeReader(resp.Body, tempFile)
+		written, copyErr := io.Copy(pw, tee)
+		if copyErr == nil {
+			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
+				h.storeCrate(context.Background(), objectPath, tempFile, written)
+			}
+		}
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+	}()
+
 	headers := map[string]string{
 		"Content-Type": "application/octet-stream",
 		"fetched-at":   time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	return tmp, headers, nil
+	return pr, headers, nil
 }
 
 func (h *handler) storeCrate(ctx context.Context, objectPath string, reader io.Reader, size int64) error {
