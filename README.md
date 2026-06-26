@@ -47,7 +47,7 @@ instances:
 | `server.public_url` | URL | — | Override scheme+host shown on home page (e.g. `https://cache.home.lan`) |
 | `metrics.path` | path | `/metrics` | Prometheus endpoint |
 | `metrics.token` | string | — | Bearer token for `/metrics` |
-| `storage.gc.interval` | duration | `24h` | Storage GC interval |
+| `storage.gc.blob` | duration | `24h` | Storage GC interval |
 | `storage.cleanup.enabled` | bool | `false` | Enable stale-object cleanup |
 | `storage.cleanup.interval` | duration | `6h` | Cleanup scan interval |
 | `storage.cleanup.dry_run` | bool | `false` | Log deletions without removing |
@@ -194,7 +194,6 @@ Client: `docker pull cache.lan:5000/library/alpine:latest`.
 | `auth.token` | string | — | Required for `bearer` |
 | `rules[].match` | glob | required | Repository name pattern |
 | `rules[].policy` | Policy | `bypass` | Override policy for matched repos |
-| `rules[].fresh_for` | Freshness | — | Override freshness for matched repos |
 | `rules[].expire_after` | Expiration | — | Override expiration for matched repos |
 
 </details>
