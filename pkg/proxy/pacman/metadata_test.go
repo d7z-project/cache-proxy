@@ -95,6 +95,61 @@ func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
 	}
 }
 
+func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/core/os/x86_64/core.db":
+			_, _ = w.Write(mustGzipTar(t, "hello-1.0-1/desc", "%FILENAME%\nhello-1.0-1-x86_64.pkg.tar.zst\n%SHA256SUM%\nabc123\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := filerepo.NewIndexedHandler(
+		"repo",
+		"pacman",
+		"repo",
+		config.Freshness(time.Minute),
+		classify,
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&filerepo.Policy{},
+		filerepo.RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		discoverer{},
+		[]filerepo.RootSpec{&rootSpec{Repo: "core", Arch: "x86_64"}},
+		buildSnapshot,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	require.NoError(t, store.MkdirAll("repo/repo/core/os/x86_64", 0o755))
+	companions := []string{
+		"repo/core/os/x86_64/core.db.sig",
+		"repo/core/os/x86_64/core.files",
+		"repo/core/os/x86_64/core.files.sig",
+	}
+	for _, name := range companions {
+		_, err = store.Put(ctx, "repo", name, strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, handler.Refresh(ctx))
+
+	for _, name := range companions {
+		_, err = store.OpenObject(ctx, "repo", name)
+		require.Error(t, err, "companion %q should be invalidated after refresh", name)
+	}
+}
+
 func mustGzipTar(t *testing.T, name, body string) []byte {
 	t.Helper()
 

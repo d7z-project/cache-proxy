@@ -119,6 +119,65 @@ func TestRefreshKeepsRepodataCompanionsDuringCleanup(t *testing.T) {
 	}
 }
 
+func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/9/BaseOS/x86_64/os/repodata/repomd.xml":
+			_, _ = w.Write([]byte(`
+<repomd>
+  <data type="primary">
+    <location href="repodata/primary.xml.gz"/>
+  </data>
+</repomd>`))
+		case "/9/BaseOS/x86_64/os/repodata/primary.xml.gz":
+			_, _ = w.Write(mustGzip(t, `
+<metadata>
+  <package>
+    <checksum>abc123</checksum>
+    <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
+  </package>
+</metadata>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := filerepo.NewIndexedHandler(
+		"repo",
+		"rpm",
+		"repo",
+		config.Freshness(time.Minute),
+		classify,
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&filerepo.Policy{},
+		filerepo.RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		discoverer{},
+		[]filerepo.RootSpec{&rootSpec{RepoPath: "9/BaseOS/x86_64/os"}},
+		buildSnapshot,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	require.NoError(t, store.MkdirAll("repo/repo/9/BaseOS/x86_64/os/repodata", 0o755))
+	_, err = store.Put(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc", strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
+	require.NoError(t, err)
+
+	require.NoError(t, handler.Refresh(ctx))
+
+	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc")
+	require.Error(t, err, "companion should be invalidated after refresh")
+}
+
 func mustGzip(t *testing.T, body string) []byte {
 	t.Helper()
 

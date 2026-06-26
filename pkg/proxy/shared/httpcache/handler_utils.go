@@ -15,6 +15,42 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
+var internalHeaders = map[string]struct{}{
+	"fetched-at":       {},
+	"mode":            {},
+	"cache":           {},
+	"indexed-identity": {},
+}
+
+func StripInternal(headers map[string]string) {
+	for key := range internalHeaders {
+		delete(headers, key)
+	}
+}
+
+func (h *Handler) addCacheDebugHeaders(headers map[string]string, route Route, fetchedAt string) {
+	headers["X-Cache-Policy"] = route.Policy
+	t, err := utils.ParseFetchedAt(fetchedAt)
+	if err != nil {
+		return
+	}
+	headers["X-Cache-Fetched-At"] = t.UTC().Format(time.RFC3339)
+	expireAfter := route.ExpireAfter
+	if expireAfter.IsUnset() {
+		expireAfter = h.config.ExpireAfter
+	}
+	if !expireAfter.IsNever() && !expireAfter.IsUnset() {
+		headers["X-Cache-Expires-At"] = t.Add(expireAfter.Duration()).UTC().Format(time.RFC3339)
+	}
+	freshFor := route.FreshFor
+	if freshFor.IsUnset() {
+		freshFor = h.config.DefaultFreshFor
+	}
+	if freshFor > 0 && !freshFor.IsForever() {
+		headers["X-Cache-Fresh-Until"] = t.Add(freshFor.Duration()).UTC().Format(time.RFC3339)
+	}
+}
+
 func redactedURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -99,7 +135,7 @@ func copyHeadersMap(headers map[string]string) map[string]string {
 	return clone
 }
 
-func responseBytes(headers map[string]string) uint64 {
+func ResponseBytes(headers map[string]string) uint64 {
 	value := headers["Content-Length"]
 	if value == "" {
 		return 0

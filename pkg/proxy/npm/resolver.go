@@ -3,6 +3,7 @@ package npm
 import (
 	"errors"
 	"net/http"
+	"path"
 	"strings"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -18,7 +19,7 @@ func New(cfg *Policy) *Resolver {
 }
 
 func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
-	cleanPath := strings.TrimLeft(req.URL.Path, "/")
+	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
 	if !httpcache.SafePath(cleanPath) {
 		return httpcache.Route{}, errors.New("invalid npm request path")
 	}

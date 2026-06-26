@@ -54,7 +54,7 @@ func (h *handler) writeResponse(w http.ResponseWriter, method string, status int
 	}
 	w.WriteHeader(status)
 	if method == http.MethodHead || body == nil {
-		return status, responseBytes(headers), nil
+		return status, httpcache.ResponseBytes(headers), nil
 	}
 	written, err := io.Copy(w, body)
 	return status, uint64(written), err

@@ -3,6 +3,7 @@ package oci
 import (
 	"errors"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -38,7 +39,7 @@ type repoMatch struct {
 }
 
 func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
-	cleanPath := strings.TrimLeft(req.URL.Path, "/")
+	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
 	if cleanPath == "v2" || cleanPath == "v2/" {
 		return request{kind: requestPing, upstreamPath: "v2"}, nil
 	}

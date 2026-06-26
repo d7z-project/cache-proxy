@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"strings"
 
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
@@ -54,13 +55,13 @@ func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
 	}
 	changed := false
 	for _, component := range candidate.Components {
-		if !containsString(s.Components, component) {
+		if !slices.Contains(s.Components, component) {
 			s.Components = append(s.Components, component)
 			changed = true
 		}
 	}
 	for _, arch := range candidate.Architectures {
-		if !containsString(s.Architectures, arch) {
+		if !slices.Contains(s.Architectures, arch) {
 			s.Architectures = append(s.Architectures, arch)
 			changed = true
 		}
@@ -110,20 +111,12 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	}
 }
 
-func containsString(items []string, value string) bool {
-	for _, item := range items {
-		if item == value {
-			return true
-		}
-	}
-	return false
-}
-
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]struct{}{},
-		Artifacts: map[string]string{},
-		Auxiliary: map[string]string{},
+		Metadata:   map[string]struct{}{},
+		Artifacts:  map[string]string{},
+		Auxiliary:  map[string]string{},
+		Companions: map[string][]string{},
 	}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
@@ -133,9 +126,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		snapshot.Metadata[blob.Path] = struct{}{}
 		switch {
 		case strings.HasSuffix(blob.Path, "/InRelease"):
-			snapshot.Metadata[path.Join(path.Dir(blob.Path), "Release.gpg")] = struct{}{}
+			gpgPath := path.Join(path.Dir(blob.Path), "Release.gpg")
+			snapshot.Metadata[gpgPath] = struct{}{}
+			snapshot.Companions[blob.Path] = []string{gpgPath}
 		case strings.HasSuffix(blob.Path, "/Release"):
 			snapshot.Metadata[blob.Path+".gpg"] = struct{}{}
+			snapshot.Companions[blob.Path] = []string{blob.Path + ".gpg"}
 		}
 		switch target.Kind {
 		case "release":

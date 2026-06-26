@@ -32,6 +32,10 @@ const (
 	BusyPolicyStale  = "stale"
 )
 
+func ValidPolicy(v string) bool { return v == PolicyBypass || v == PolicyImmutable || v == PolicyRevalidate }
+
+func ValidBusyPolicy(v string) bool { return v == "" || v == BusyPolicyBypass || v == BusyPolicyStale }
+
 const DefaultExpireAfter Expiration = Expiration(720 * time.Hour)
 
 type Document struct {

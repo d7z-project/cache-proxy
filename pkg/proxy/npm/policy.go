@@ -74,18 +74,14 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 }
 
 func validate(policy *Policy) error {
-	if !validPolicy(policy.MetadataPolicy) {
+	if !config.ValidPolicy(policy.MetadataPolicy) {
 		return fmt.Errorf("invalid npm metadata policy %q", policy.MetadataPolicy)
 	}
-	if !validPolicy(policy.TarballPolicy) {
+	if !config.ValidPolicy(policy.TarballPolicy) {
 		return fmt.Errorf("invalid npm tarball policy %q", policy.TarballPolicy)
 	}
 	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
 		return fmt.Errorf("invalid npm metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
 	return nil
-}
-
-func validPolicy(policy string) bool {
-	return policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
 }

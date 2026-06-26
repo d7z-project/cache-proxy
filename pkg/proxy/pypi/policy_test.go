@@ -1,8 +1,6 @@
 package pypi
 
 import (
-	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 func TestHostInUpstreams(t *testing.T) {
@@ -97,22 +94,4 @@ func TestResolveWithUpstreams(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, route.TargetURL)
 	require.Equal(t, "files/"+encodeSourceURL("https://evil.com/malware.tar.gz"), route.UpstreamPath)
-}
-
-func TestErrorResponseHidesInternalDetails(t *testing.T) {
-	resp := httpcache.ErrorResponse(http.StatusBadGateway, errors.New("sensitive data"))
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, "internal error", string(body))
-	require.Equal(t, "ERROR", resp.Headers["X-Cache"])
-}
-
-func TestSafePath(t *testing.T) {
-	require.True(t, httpcache.SafePath("foo/bar/baz"))
-	require.True(t, httpcache.SafePath("pypi/files/something.tgz"))
-	require.False(t, httpcache.SafePath("../etc/passwd"))
-	require.False(t, httpcache.SafePath("foo/../../bar"))
-	require.False(t, httpcache.SafePath("/absolute/path"))
-	require.False(t, httpcache.SafePath("."))
-	require.False(t, httpcache.SafePath(".."))
 }

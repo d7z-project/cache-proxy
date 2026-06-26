@@ -43,7 +43,7 @@ func TestDiscovererRejectsAPKArtifactPath(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestRefreshKeepsAPKIndexSignatureDuringCleanup(t *testing.T) {
+func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -79,13 +79,14 @@ func TestRefreshKeepsAPKIndexSignatureDuringCleanup(t *testing.T) {
 		httpcache.NewStats(prometheus.NewRegistry()),
 	)
 
-	require.NoError(t, handler.Refresh(ctx))
 	require.NoError(t, store.MkdirAll("repo/repo/v3.20/main/x86_64", 0o755))
 	_, err = store.Put(ctx, "repo", "repo/v3.20/main/x86_64/APKINDEX.tar.gz.sig", strings.NewReader("sig"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
 	require.NoError(t, err)
-	require.NoError(t, handler.Cleanup(ctx))
+
+	require.NoError(t, handler.Refresh(ctx))
+
 	_, err = store.OpenObject(ctx, "repo", "repo/v3.20/main/x86_64/APKINDEX.tar.gz.sig")
-	require.NoError(t, err)
+	require.Error(t, err, "companion should be invalidated after refresh")
 }
 
 func mustGzipTar(t *testing.T, name, body string) []byte {

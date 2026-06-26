@@ -1,30 +1,45 @@
 package utils
 
 import (
-	"sync"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRWLockGroupReturnsConsistentLocks(t *testing.T) {
 	group := NewRWLockGroup()
 	l1 := group.Get("/test")
 	l2 := group.Get("/test")
-	assert.Same(t, l1, l2)
+	require.Same(t, l1, l2)
 
 	l3 := group.Get("/other")
-	assert.NotSame(t, l1, l3)
+	require.NotSame(t, l1, l3)
+}
 
-	// Basic lock test
-	l1.Lock()
-	var wg sync.WaitGroup
-	wg.Add(1)
+func TestRWLockGroupExclusiveLock(t *testing.T) {
+	group := NewRWLockGroup()
+	l := group.Get("/lock")
+	l.Lock()
+
+	acquired := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		l2.Lock()
-		l2.Unlock()
+		l.Lock()
+		close(acquired)
+		l.Unlock()
 	}()
-	l1.Unlock()
-	wg.Wait()
+
+	select {
+	case <-acquired:
+		t.Fatal("lock should not be acquired while held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	l.Unlock()
+
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("lock should be acquired after release")
+	}
 }

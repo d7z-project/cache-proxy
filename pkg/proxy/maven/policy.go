@@ -93,19 +93,19 @@ func applyDefaults(policy *Policy) {
 }
 
 func validate(policy *Policy) error {
-	if !validPolicy(policy.ReleasePolicy) {
+	if !config.ValidPolicy(policy.ReleasePolicy) {
 		return fmt.Errorf("invalid maven release policy %q", policy.ReleasePolicy)
 	}
-	if !validPolicy(policy.SnapshotPolicy) {
+	if !config.ValidPolicy(policy.SnapshotPolicy) {
 		return fmt.Errorf("invalid maven snapshot policy %q", policy.SnapshotPolicy)
 	}
-	if !validPolicy(policy.ChecksumPolicy) {
+	if !config.ValidPolicy(policy.ChecksumPolicy) {
 		return fmt.Errorf("invalid maven checksum policy %q", policy.ChecksumPolicy)
 	}
-	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
+	if !config.ValidBusyPolicy(policy.MetadataBusyPolicy) {
 		return fmt.Errorf("invalid maven metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
-	if policy.ChecksumBusyPolicy != config.BusyPolicyBypass && policy.ChecksumBusyPolicy != config.BusyPolicyStale {
+	if !config.ValidBusyPolicy(policy.ChecksumBusyPolicy) {
 		return fmt.Errorf("invalid maven checksum busy policy %q", policy.ChecksumBusyPolicy)
 	}
 	return nil
@@ -151,10 +151,6 @@ func (r *resolver) defaultPolicy(lookupPath string) string {
 
 func isSnapshotPath(lookupPath string) bool {
 	return strings.Contains(lookupPath, "-SNAPSHOT") || strings.Contains(lookupPath, "/SNAPSHOT/")
-}
-
-func validPolicy(policy string) bool {
-	return policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
 }
 
 func isMetadataPath(lookupPath string) bool {

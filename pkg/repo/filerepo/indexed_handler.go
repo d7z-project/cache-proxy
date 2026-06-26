@@ -84,9 +84,10 @@ type MetadataBlob struct {
 }
 
 type LiveSnapshot struct {
-	Metadata  map[string]struct{}
-	Artifacts map[string]string
-	Auxiliary map[string]string
+	Metadata   map[string]struct{}
+	Artifacts  map[string]string
+	Auxiliary  map[string]string
+	Companions map[string][]string // primary metadata path → companion paths invalidated on refresh
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession) (*LiveSnapshot, error)
@@ -383,6 +384,14 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, targets []MetadataTa
 	}
 	if snapshot.Auxiliary == nil {
 		snapshot.Auxiliary = map[string]string{}
+	}
+	if snapshot.Companions == nil {
+		snapshot.Companions = map[string][]string{}
+	}
+	for _, companions := range snapshot.Companions {
+		for _, companion := range companions {
+			h.deleteObject(ctx, companion)
+		}
 	}
 	return snapshot, nil
 }

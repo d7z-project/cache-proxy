@@ -42,9 +42,10 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]struct{}{},
-		Artifacts: map[string]string{},
-		Auxiliary: map[string]string{},
+		Metadata:   map[string]struct{}{},
+		Artifacts:  map[string]string{},
+		Auxiliary:  map[string]string{},
+		Companions: map[string][]string{},
 	}
 	for _, target := range session.Targets() {
 		repomd, err := session.Fetch(ctx, target)
@@ -53,6 +54,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		}
 		snapshot.Metadata[repomd.Path] = struct{}{}
 		snapshot.Metadata[repomd.Path+".asc"] = struct{}{}
+		snapshot.Companions[repomd.Path] = []string{repomd.Path + ".asc"}
 		var root struct {
 			Data []struct {
 				Type     string `xml:"type,attr"`

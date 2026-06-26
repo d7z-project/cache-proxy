@@ -48,9 +48,10 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]struct{}{},
-		Artifacts: map[string]string{},
-		Auxiliary: map[string]string{},
+		Metadata:   map[string]struct{}{},
+		Artifacts:  map[string]string{},
+		Auxiliary:  map[string]string{},
+		Companions: map[string][]string{},
 	}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
@@ -59,6 +60,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		}
 		snapshot.Metadata[blob.Path] = struct{}{}
 		snapshot.Metadata[blob.Path+".sig"] = struct{}{}
+		snapshot.Companions[blob.Path] = []string{blob.Path + ".sig"}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 		if err != nil {
 			return nil, err

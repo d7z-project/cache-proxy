@@ -86,10 +86,10 @@ func validate(upstream string, policy *Policy) error {
 			return fmt.Errorf("invalid oci registry %q: %w", host, err)
 		}
 	}
-	if !validPolicy(policy.DefaultPolicy) {
+	if !config.ValidPolicy(policy.DefaultPolicy) {
 		return fmt.Errorf("invalid oci default policy %q", policy.DefaultPolicy)
 	}
-	if policy.BusyPolicy != config.BusyPolicyBypass && policy.BusyPolicy != config.BusyPolicyStale {
+	if !config.ValidBusyPolicy(policy.BusyPolicy) {
 		return fmt.Errorf("invalid oci busy policy %q", policy.BusyPolicy)
 	}
 	for i, rule := range policy.Rules {
@@ -102,7 +102,7 @@ func validate(upstream string, policy *Policy) error {
 		if rule.Policy == "" {
 			rule.Policy = config.PolicyBypass
 		}
-		if !validPolicy(rule.Policy) {
+		if !config.ValidPolicy(rule.Policy) {
 			return fmt.Errorf("oci rule %d: invalid policy %q", i, rule.Policy)
 		}
 		policy.Rules[i] = rule
@@ -125,8 +125,4 @@ func validate(upstream string, policy *Policy) error {
 		return fmt.Errorf("unsupported oci auth type %q", policy.Auth.Type)
 	}
 	return nil
-}
-
-func validPolicy(policy string) bool {
-	return policy == config.PolicyBypass || policy == config.PolicyImmutable || policy == config.PolicyRevalidate
 }

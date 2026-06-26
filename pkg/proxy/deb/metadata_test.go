@@ -117,3 +117,57 @@ func TestRefreshKeepsReleaseSignatureDuringCleanup(t *testing.T) {
 	_, err = store.OpenObject(ctx, "repo", "repo/dists/bookworm/Release.gpg")
 	require.NoError(t, err)
 }
+
+func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/bookworm/InRelease":
+			http.NotFound(w, r)
+		case "/dists/bookworm/Release":
+			_, _ = w.Write([]byte("Suite: bookworm\n"))
+		case "/dists/bookworm/main/binary-amd64/Packages.xz":
+			http.NotFound(w, r)
+		case "/dists/bookworm/main/binary-amd64/Packages.gz":
+			http.NotFound(w, r)
+		case "/dists/bookworm/main/binary-amd64/Packages":
+			_, _ = w.Write([]byte("Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\nSHA256: abc123\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := filerepo.NewIndexedHandler(
+		"repo",
+		"deb",
+		"repo",
+		config.Freshness(2*time.Minute),
+		classify,
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&filerepo.Policy{},
+		filerepo.RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		discoverer{},
+		[]filerepo.RootSpec{&rootSpec{Suite: "bookworm", Components: []string{"main"}, Architectures: []string{"amd64"}}},
+		buildSnapshot,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+	)
+
+	require.NoError(t, store.MkdirAll("repo/repo/dists/bookworm", 0o755))
+	_, err = store.Put(ctx, "repo", "repo/dists/bookworm/Release.gpg", strings.NewReader("sig"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
+	require.NoError(t, err)
+
+	require.NoError(t, handler.Refresh(ctx))
+
+	_, err = store.OpenObject(ctx, "repo", "repo/dists/bookworm/Release.gpg")
+	require.Error(t, err, "companion should be invalidated after refresh")
+}

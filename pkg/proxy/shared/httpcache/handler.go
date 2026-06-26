@@ -99,7 +99,8 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	}
 	status := result.StatusCode
 	cache := result.Headers["X-Cache"]
-	bytes := responseBytes(result.Headers)
+	bytes := ResponseBytes(result.Headers)
+	StripInternal(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
 		slog.Info("flush response failed", "instance", h.name, "err", err)
 		if status < 500 {
@@ -134,7 +135,8 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 	}
 	status := result.StatusCode
 	cache := result.Headers["X-Cache"]
-	bytes := responseBytes(result.Headers)
+	bytes := ResponseBytes(result.Headers)
+	StripInternal(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
 		slog.Info("flush passthrough response failed", "instance", h.name, "err", err)
 		if status < 500 {

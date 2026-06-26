@@ -237,15 +237,3 @@ func manifestHeaders(headers http.Header, body []byte, digest string) map[string
 	}
 	return result
 }
-
-func responseBytes(headers map[string]string) uint64 {
-	value := headers["Content-Length"]
-	if value == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return parsed
-}
