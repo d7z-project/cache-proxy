@@ -28,13 +28,12 @@ func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network
 }
 
 func DefaultHttpClientWrapper() *HttpClientWrapper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = DefaultDialContext(3 * time.Second)
+	transport.ResponseHeaderTimeout = 30 * time.Second
 	return &HttpClientWrapper{
-		Client: &http.Client{
-			Transport: &http.Transport{
-				DialContext: DefaultDialContext(3 * time.Second),
-			},
-			Timeout: 30 * time.Second,
-		},
+		Client:    &http.Client{Transport: transport},
+		UserAgent: "cache-proxy",
 	}
 }
 

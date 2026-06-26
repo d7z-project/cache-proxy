@@ -323,7 +323,6 @@ apk:
   upstreams:
     - https://dl-cdn.alpinelinux.org/alpine
   refresh_interval: 1h
-  refresh_timeout: 2m
   metadata_policy: revalidate
   metadata_fresh_for: 1m
   artifact_policy: immutable
@@ -336,7 +335,6 @@ Client repo line: `http://cache.lan:8080/apk/v3.20/main`. Roots auto-discovered 
 | --- | --- | --- | --- |
 | `upstreams` | `[]URL` | required | Upstream mirrors, tried in order |
 | `refresh_interval` | duration | `1h` | Background metadata refresh cadence |
-| `refresh_timeout` | duration | `2m` | Timeout per refresh cycle |
 | `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
 | `metadata_policy` | Policy | `revalidate` | Policy for `APKINDEX.tar.gz` and repo metadata |
 | `metadata_fresh_for` | Freshness | `1m` | Freshness for metadata |
@@ -359,7 +357,6 @@ deb:
   upstreams:
     - https://deb.debian.org/debian
   refresh_interval: 1h
-  refresh_timeout: 2m
   metadata_policy: revalidate
   metadata_fresh_for: 2m
   artifact_policy: immutable
@@ -378,7 +375,6 @@ rpm:
   upstreams:
     - https://download.rockylinux.org/pub/rocky
   refresh_interval: 1h
-  refresh_timeout: 2m
   metadata_policy: revalidate
   metadata_fresh_for: 1m
   artifact_policy: immutable
@@ -397,7 +393,6 @@ pacman:
   upstreams:
     - https://geo.mirror.pkgbuild.com
   refresh_interval: 2m
-  refresh_timeout: 2m
   metadata_policy: revalidate
   metadata_fresh_for: 1m
   artifact_policy: immutable

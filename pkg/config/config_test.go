@@ -133,7 +133,6 @@ instances:
       upstreams:
         - https://deb.example.com/debian
       refresh_interval: 1h
-      refresh_timeout: 2m
       metadata_policy: revalidate
       artifact_policy: immutable
 `))
@@ -147,13 +146,11 @@ instances:
 		} `yaml:"route"`
 		Upstreams       []string `yaml:"upstreams"`
 		RefreshInterval Duration `yaml:"refresh_interval"`
-		RefreshTimeout  Duration `yaml:"refresh_timeout"`
 		MetadataPolicy  string   `yaml:"metadata_policy"`
 		ArtifactPolicy  string   `yaml:"artifact_policy"`
 	}
 	require.NoError(t, selected.Block.DecodeStrict(&block))
 	require.Equal(t, Duration(time.Hour), block.RefreshInterval)
-	require.Equal(t, Duration(2*time.Minute), block.RefreshTimeout)
 	require.Equal(t, []string{"https://deb.example.com/debian"}, block.Upstreams)
 }
 

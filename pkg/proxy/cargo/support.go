@@ -2,13 +2,10 @@ package cargo
 
 import (
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func cargoRoute(policy *Policy, lookupPath string) (httpcache.Route, error) {
@@ -66,42 +63,4 @@ func cloneHeaders(source map[string]string) map[string]string {
 		clone[key] = value
 	}
 	return clone
-}
-
-func transportForConfig(cfg *config.TransportConfig) http.RoundTripper {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if cfg == nil {
-		return transport
-	}
-	if cfg.Proxy != "" {
-		proxyURL, err := url.Parse(cfg.Proxy)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
-	}
-	if cfg.Timeout > 0 {
-		transport.DialContext = utils.DefaultDialContext(cfg.Timeout.Duration())
-	}
-	return transport
-}
-
-type statsTransport struct {
-	base     http.RoundTripper
-	stats    *httpcache.Stats
-	instance string
-	mode     string
-}
-
-func (t *statsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	resp, err := base.RoundTrip(req)
-	if err != nil {
-		t.stats.RecordUpstream(t.instance, t.mode, req.Method, 0)
-		return nil, err
-	}
-	t.stats.RecordUpstream(t.instance, t.mode, req.Method, resp.StatusCode)
-	return resp, nil
 }

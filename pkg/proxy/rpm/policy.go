@@ -20,7 +20,6 @@ type Block struct {
 	Transport       *config.TransportConfig `yaml:"transport,omitempty"`
 	Upstreams       []string                `yaml:"upstreams"`
 	RefreshInterval config.Duration         `yaml:"refresh_interval,omitempty"`
-	RefreshTimeout  config.Duration         `yaml:"refresh_timeout,omitempty"`
 	Policy          `yaml:",inline"`
 }
 
@@ -51,7 +50,6 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	}
 	handler := filerepo.NewIndexedHandler(plan.Name(), config.ModeRPM, config.ModeRPM, config.Freshness(time.Minute), classify, upstreams, block.Transport, expireAfter, policy, filerepo.RefreshPolicy{
 		Interval: filerepo.ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval),
-		Timeout:  filerepo.ResolveMetadataRefreshTimeout(block.RefreshTimeout),
 	}, discoverer{}, nil, buildSnapshot, plan.Store(), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, handler)

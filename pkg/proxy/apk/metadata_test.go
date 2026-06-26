@@ -71,7 +71,7 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
 		[]filerepo.RootSpec{&rootSpec{Branch: "v3.20", Repo: "main", Arch: "x86_64"}},
 		buildSnapshot,

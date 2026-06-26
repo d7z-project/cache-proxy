@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func (h *handler) retryChallenge(ctx context.Context, method, targetURL string, headers map[string]string, response *http.Response) (*http.Response, error) {
@@ -114,6 +116,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 		return "", time.Time{}, err
 	}
 	defer response.Body.Close()
+	response.Body = utils.NewRateLimitReader(response.Body)
 	if response.StatusCode != http.StatusOK {
 		return "", time.Time{}, errors.New("OCI token request failed")
 	}

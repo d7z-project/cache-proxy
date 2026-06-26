@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -26,7 +27,7 @@ type handler struct {
 	policy      *Policy
 	store       *blobfs.Store
 	stats       *httpcache.Stats
-	client      *http.Client
+	client      *utils.HttpClientWrapper
 	expireAfter config.Expiration
 	userAgent   string
 	wait        sync.WaitGroup
@@ -40,9 +41,26 @@ type cargoConfig struct {
 
 func newHandler(name, upstream string, transport *config.TransportConfig, policy *Policy, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) (*handler, error) {
 	ua := httpcache.ModeUserAgent(config.ModeCargo)
-	if transport != nil && transport.UserAgent != "" {
-		ua = transport.UserAgent
+	client := utils.DefaultHttpClientWrapper()
+	if transport != nil {
+		if transport.UserAgent != "" {
+			ua = transport.UserAgent
+		}
+		if t, ok := client.Transport.(*http.Transport); ok {
+			if transport.Proxy != "" {
+				if proxyURL, err := url.Parse(transport.Proxy); err == nil {
+					t.Proxy = http.ProxyURL(proxyURL)
+				}
+			}
+			if transport.Timeout > 0 {
+				t.DialContext = utils.DefaultDialContext(transport.Timeout.Duration())
+			}
+		}
 	}
+	st := utils.NewStatsTransport(client.Transport)
+	st.Bind(stats, name, config.ModeCargo)
+	client.Transport = st
+	client.UserAgent = ua
 	return &handler{
 		name:        name,
 		upstream:    upstream,
@@ -51,12 +69,7 @@ func newHandler(name, upstream string, transport *config.TransportConfig, policy
 		stats:       stats,
 		expireAfter: expireAfter,
 		userAgent:   ua,
-		client: &http.Client{Transport: &statsTransport{
-			base:     transportForConfig(transport),
-			stats:    stats,
-			instance: name,
-			mode:     config.ModeCargo,
-		}},
+		client:      client,
 	}, nil
 }
 
@@ -160,6 +173,7 @@ func (h *handler) fetchUpstream(ctx context.Context, req *http.Request, route ht
 	if err != nil {
 		return nil, nil, err
 	}
+	resp.Body = utils.NewRateLimitReader(resp.Body)
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, nil, fmt.Errorf("cargo upstream returned %d", resp.StatusCode)
@@ -197,6 +211,7 @@ func (h *handler) fetchCrateToFile(ctx context.Context, objectPath, rawURL strin
 	if err != nil {
 		return nil, nil, err
 	}
+	resp.Body = utils.NewRateLimitReader(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
 		return nil, nil, fmt.Errorf("cargo upstream returned %d", resp.StatusCode)
@@ -308,6 +323,7 @@ func (h *handler) fetchRawConfig(ctx context.Context) ([]byte, map[string]string
 	if err != nil {
 		return nil, nil, err
 	}
+	resp.Body = utils.NewRateLimitReader(resp.Body)
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, nil, fmt.Errorf("cargo upstream config returned %d", resp.StatusCode)

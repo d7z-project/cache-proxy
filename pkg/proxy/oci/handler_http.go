@@ -8,6 +8,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string, headers map[string]string) (*http.Response, error) {
@@ -39,6 +40,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string
 		}
 	}
 	h.stats.RecordUpstream(h.name, config.ModeOCI, method, response.StatusCode)
+	response.Body = utils.NewRateLimitReader(response.Body)
 	return response, nil
 }
 

@@ -114,7 +114,7 @@ func ErrorResponse(status int, err error) *utils.ResponseWrapper {
 }
 
 func responseFromHTTP(response *http.Response) *utils.ResponseWrapper {
-	return &utils.ResponseWrapper{StatusCode: response.StatusCode, Headers: copyHeaders(response.Header), Body: response.Body}
+	return &utils.ResponseWrapper{StatusCode: response.StatusCode, Headers: copyHeaders(response.Header), Body: utils.NewRateLimitReader(response.Body)}
 }
 
 func copyHeaders(headers http.Header) map[string]string {

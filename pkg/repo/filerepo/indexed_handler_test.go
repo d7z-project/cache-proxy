@@ -53,7 +53,7 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, disco
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		discover,
 		seeds,
 		builder,
@@ -102,7 +102,7 @@ func TestIndexedHandlerRefreshInvalidatesArtifactIdentity(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		nil,
 		[]RootSpec{staticRootSpec{
 			key:     "meta",
@@ -151,8 +151,6 @@ func TestIndexedHandlerRefreshInvalidatesArtifactIdentity(t *testing.T) {
 }
 
 func TestResolveMetadataRefreshPolicyValues(t *testing.T) {
-	require.Equal(t, 2*time.Minute, ResolveMetadataRefreshTimeout(0))
-	require.Equal(t, 30*time.Second, ResolveMetadataRefreshTimeout(config.Duration(30*time.Second)))
 	require.Equal(t, time.Hour, ResolveMetadataRefreshInterval(0, time.Hour))
 	require.Equal(t, 45*time.Second, ResolveMetadataRefreshInterval(config.Duration(45*time.Second), time.Hour))
 }
@@ -176,7 +174,7 @@ func TestIndexedHandlerRefreshWithoutRootsStaysBooting(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		nil,
 		nil,
 		func(context.Context, *RefreshSession) (*LiveSnapshot, error) {
@@ -263,7 +261,7 @@ func TestIndexedHandlerFailedRefreshKeepsPreviousSnapshot(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		nil,
 		[]RootSpec{staticRootSpec{
 			key:     "meta",
@@ -325,7 +323,7 @@ func TestIndexedHandlerMetadataRequestDiscoversAndRefreshesRoot(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: 0, Timeout: time.Second},
+		RefreshPolicy{Interval: 0},
 		testDiscoverer{},
 		nil,
 		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
@@ -383,7 +381,7 @@ func TestDiscoverRootTriggersAsyncRefresh(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Minute, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Minute},
 		testDiscoverer{},
 		nil,
 		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
@@ -488,7 +486,7 @@ func TestIndexedHandlerUnknownPathBypassesUpstream(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		testDiscoverer{},
 		nil,
 		func(context.Context, *RefreshSession) (*LiveSnapshot, error) {
@@ -523,7 +521,7 @@ func TestIndexedHandlerOnlyMetadataRequestsCanDiscoverRoot(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		testDiscoverer{},
 		nil,
 		func(context.Context, *RefreshSession) (*LiveSnapshot, error) {
@@ -600,7 +598,7 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		nil,
 		[]RootSpec{staticRootSpec{
 			key:     "meta",
@@ -831,7 +829,7 @@ func TestStateRoundTrip(t *testing.T) {
 		nil, nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		testDiscoverer{},
 		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
 		nil,
@@ -897,7 +895,7 @@ func TestStartRestoresStateThenRefreshes(t *testing.T) {
 			nil,
 			config.Expiration(time.Hour),
 			&Policy{},
-			RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+			RefreshPolicy{Interval: time.Hour},
 			testDiscoverer{},
 			[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
 			func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
@@ -968,7 +966,7 @@ func TestRefreshConditionalGET304(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		nil,
 		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
 		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
@@ -1024,7 +1022,7 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		debDiscoverer,
 		[]RootSpec{staticRootSpec{key: "bookworm", targets: []MetadataTarget{{URL: "bookworm/main"}}}},
 		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
@@ -1056,7 +1054,7 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 		nil, nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour, Timeout: time.Second},
+		RefreshPolicy{Interval: time.Hour},
 		debDiscoverer,
 		nil,
 		nil,

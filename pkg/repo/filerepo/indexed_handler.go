@@ -23,7 +23,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-const DefaultMetadataRefreshTimeout = 2 * time.Minute
 const DefaultBlockedRetryInterval = time.Hour
 
 var (
@@ -31,13 +30,6 @@ var (
 	errMetadataTransient = errors.New("metadata upstream transient failure")
 	errMetadataForbidden = errors.New("metadata upstream forbidden")
 )
-
-func ResolveMetadataRefreshTimeout(value config.Duration) time.Duration {
-	if value > 0 {
-		return value.Duration()
-	}
-	return DefaultMetadataRefreshTimeout
-}
 
 func ResolveMetadataRefreshInterval(value config.Duration, fallback time.Duration) time.Duration {
 	if value > 0 {
@@ -57,7 +49,6 @@ const (
 
 type RefreshPolicy struct {
 	Interval time.Duration
-	Timeout  time.Duration
 }
 
 type MetadataFetchError struct {
@@ -155,9 +146,6 @@ type IndexedHandler struct {
 
 func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats) *IndexedHandler {
 	ApplyDefaults(policy, metadataFreshFor)
-	if refreshPolicy.Timeout <= 0 {
-		refreshPolicy.Timeout = DefaultMetadataRefreshTimeout
-	}
 	handler := &IndexedHandler{
 		name:       name,
 		mode:       mode,
@@ -340,21 +328,15 @@ func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
 
 func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 	startedAt := time.Now()
-	refreshCtx := ctx
-	if h.policy.Timeout > 0 {
-		var cancel context.CancelFunc
-		refreshCtx, cancel = context.WithTimeout(ctx, h.policy.Timeout)
-		defer cancel()
-	}
 	var refreshed bool
 	var err error
 	if allRoots {
-		refreshed, err = h.refreshAllRoots(refreshCtx, startedAt)
+		refreshed, err = h.refreshAllRoots(ctx, startedAt)
 	} else {
-		refreshed, err = h.refreshDueRoots(refreshCtx, startedAt)
+		refreshed, err = h.refreshDueRoots(ctx, startedAt)
 	}
 	if refreshed {
-		if cleanupErr := h.Cleanup(refreshCtx); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
+		if cleanupErr := h.Cleanup(ctx); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
 			slog.Info("indexed cleanup failed after refresh", "instance", h.name, "mode", h.mode, "err", cleanupErr)
 		}
 	}
@@ -426,6 +408,7 @@ func (h *IndexedHandler) refreshMetadataObject(ctx context.Context, cleanPath st
 			continue
 		}
 		h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, response.StatusCode)
+		response.Body = utils.NewRateLimitReader(response.Body)
 
 		if response.StatusCode == http.StatusNotModified && cached != nil {
 			_ = response.Body.Close()
@@ -598,13 +581,7 @@ func (h *IndexedHandler) discoverRoot(ctx context.Context, cleanPath string) {
 		}
 		return
 	}
-	refreshCtx := ctx
-	if h.policy.Timeout > 0 {
-		var cancel context.CancelFunc
-		refreshCtx, cancel = context.WithTimeout(ctx, h.policy.Timeout)
-		defer cancel()
-	}
-	_, _ = h.refreshRoot(refreshCtx, record, time.Now())
+	_, _ = h.refreshRoot(ctx, record, time.Now())
 }
 
 func (h *IndexedHandler) observeRoot(spec RootSpec, now time.Time) (*RepositoryRecord, bool) {
