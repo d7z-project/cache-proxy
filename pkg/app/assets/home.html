@@ -12,6 +12,15 @@
     <div class="header-brand">
       <h1>cache-proxy</h1>
     </div>
+    <div class="header-status">
+      {{if .StoreTotalSize}}
+      <span class="status-indicator{{if .StoreHealthy}} status-healthy{{else}} status-degraded{{end}}">
+        <span class="dot{{if .StoreHealthy}} dot-green{{else}} dot-red{{end}}"></span>
+        <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
+      </span>
+      <span class="store-size">{{.StoreTotalSize}}</span>
+      {{end}}
+    </div>
     <div class="header-actions">
       <button id="theme-btn" class="btn-icon" onclick="toggleTheme()">{{.ThemeSwitch}}</button>
       <button class="btn-icon" onclick="toggleLang()">{{.LangSwitch}}</button>
@@ -98,6 +107,10 @@
         <div class="stat">
           <div class="stat-lbl">{{t "hit_rate"}}</div>
           <div class="stat-val">{{.HitRate}}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-lbl">{{t "disk_usage"}}</div>
+          <div class="stat-val">{{.DiskUsage}}</div>
         </div>
       </div>
       <div class="card-section card-section-setup">

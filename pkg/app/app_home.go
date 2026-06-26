@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"gopkg.d7z.net/blobfs"
+
 	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
@@ -20,6 +22,7 @@ type homeInstance struct {
 	SetupCopy   string
 	Requests    string
 	HitRate     string
+	DiskUsage   string
 	StatusColor string
 	StatusLabel string
 	StatusExtra string
@@ -53,6 +56,15 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	if a.stats != nil {
 		ss = a.stats.Snapshot()
 	}
+	var storeStats *blobfs.StatsSnapshot
+	var usage map[string]int64
+	if a.store != nil {
+		storeStats, _ = a.store.Stats(req.Context())
+		usage = a.tenantUsage(req.Context(), entryNames(entries))
+	}
+	if usage == nil {
+		usage = make(map[string]int64)
+	}
 	instances := make([]homeInstance, 0)
 	modes := make([]string, 0)
 	seenModes := map[string]struct{}{}
@@ -61,7 +73,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 			continue
 		}
 		s := ss.Instances[entry.Name]
-		hi := buildHomeInstance(entry, baseURL, req, s, i18n)
+		hi := buildHomeInstance(entry, baseURL, req, s, usage[entry.Name], i18n)
 		if _, ok := seenModes[hi.Mode]; !ok {
 			seenModes[hi.Mode] = struct{}{}
 			modes = append(modes, hi.Mode)
@@ -77,19 +89,32 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		themeSwitch = "\u65e5"
 	}
 	i18nJSON, _ := json.Marshal(i18n)
+	var healthy bool
+	var degraded, objects int
+	var totalSize string
+	if storeStats != nil {
+		healthy = storeStats.DegradedObjects == 0
+		degraded = storeStats.DegradedObjects
+		objects = storeStats.Objects
+		totalSize = formatBytes(storeStats.Bytes.LogicalObjectBytes)
+	}
 	return homeData{
-		Instances:   instances,
-		Modes:       modes,
-		Single:      single,
-		Locale:      locale,
-		Theme:       detectTheme(req),
-		LangSwitch:  langSwitch,
-		ThemeSwitch: themeSwitch,
-		I18NJSON:    template.JS(i18nJSON),
+		Instances:      instances,
+		Modes:          modes,
+		Single:         single,
+		Locale:         locale,
+		Theme:          detectTheme(req),
+		LangSwitch:     langSwitch,
+		ThemeSwitch:    themeSwitch,
+		I18NJSON:       template.JS(i18nJSON),
+		StoreHealthy:   healthy,
+		StoreDegraded:  degraded,
+		StoreObjects:   objects,
+		StoreTotalSize: totalSize,
 	}
 }
 
-func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpproxy.InstanceStats, i18n map[string]string) homeInstance {
+func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpproxy.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
 	instURL := instURL(entry, baseURL, req)
 	hi := homeInstance{
 		Name: entry.Name,
@@ -104,6 +129,7 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 	}
 	hi.Requests = formatCompact(s.Requests)
 	hi.HitRate = formatHitRate(s.Cache)
+	hi.DiskUsage = formatBytes(diskBytes)
 	hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
 	return hi
 }
@@ -114,6 +140,14 @@ func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry
 		items = append(items, entries[name])
 	}
 	return items
+}
+
+func entryNames(entries []*proxyruntime.Entry) []string {
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	return names
 }
 
 func (a *App) publicBaseURL(req *http.Request) string {

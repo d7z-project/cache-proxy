@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +51,29 @@ type App struct {
 	closed       atomic.Bool
 	gcDone       chan struct{}
 	cleanupDone  chan struct{}
+
+	tuMu         sync.Mutex
+	tuCachedAt   time.Time
+	tuCache      map[string]int64
+}
+
+func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
+	a.tuMu.Lock()
+	prev := a.tuCachedAt
+	a.tuMu.Unlock()
+	if time.Since(prev) < 30*time.Second {
+		a.tuMu.Lock()
+		defer a.tuMu.Unlock()
+		if time.Since(a.tuCachedAt) < 30*time.Second {
+			return a.tuCache
+		}
+	}
+	usage := collectTenantUsage(ctx, tenants, a.store)
+	a.tuMu.Lock()
+	a.tuCache = usage
+	a.tuCachedAt = time.Now()
+	a.tuMu.Unlock()
+	return usage
 }
 
 func Load(path string) (*config.Document, error) {

@@ -1,9 +1,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"time"
+
+	"gopkg.d7z.net/blobfs"
 
 	httpcache "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
@@ -90,4 +94,37 @@ func formatCompact(n uint64) string {
 		}
 		return fmt.Sprintf("%.1fM", v)
 	}
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%dB", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1fK", float64(n)/1024)
+	case n < 1024*1024*1024:
+		return fmt.Sprintf("%.1fM", float64(n)/(1024*1024))
+	default:
+		return fmt.Sprintf("%.1fG", float64(n)/(1024*1024*1024))
+	}
+}
+
+func collectTenantUsage(ctx context.Context, tenants []string, store *blobfs.Store) map[string]int64 {
+	usage := make(map[string]int64)
+	for _, tenant := range tenants {
+		var total int64
+		_ = fs.WalkDir(store.TenantFS(tenant), ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			info, statErr := d.Info()
+			if statErr != nil {
+				return nil
+			}
+			total += info.Size()
+			return nil
+		})
+		usage[tenant] = total
+	}
+	return usage
 }

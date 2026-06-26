@@ -59,6 +59,10 @@ google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBN
 google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
 gopkg.d7z.net/blobfs v0.0.0-20260615134803-92c40351c8f4 h1:I3nmtOsxxTo4aceAHR1JeMd47jKS98baUr449ejO6UI=
 gopkg.d7z.net/blobfs v0.0.0-20260615134803-92c40351c8f4/go.mod h1:112VJqDoLrQRXvuxhKp72OW57mQMPLAJgpBwMdSMSmU=
+gopkg.d7z.net/blobfs v0.0.0-20260626022545-538d6a12d62a h1:Au9mNVfT9nUAMQugJqTpAutNLf1b6N8sz6y9ty2XgO4=
+gopkg.d7z.net/blobfs v0.0.0-20260626022545-538d6a12d62a/go.mod h1:112VJqDoLrQRXvuxhKp72OW57mQMPLAJgpBwMdSMSmU=
+gopkg.d7z.net/blobfs v0.0.0-20260626023552-d98529b45acf h1:ay4lsPl81f3j8zCaVlcTpJVPuQGOPFjPwGfGBZ17zE4=
+gopkg.d7z.net/blobfs v0.0.0-20260626023552-d98529b45acf/go.mod h1:112VJqDoLrQRXvuxhKp72OW57mQMPLAJgpBwMdSMSmU=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=

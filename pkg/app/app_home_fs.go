@@ -47,14 +47,18 @@ func init() {
 }
 
 type homeData struct {
-	Instances   []homeInstance
-	Modes       []string
-	Single      bool
-	Locale      string
-	Theme       string
-	LangSwitch  string
-	ThemeSwitch string
-	I18NJSON    template.JS
+	Instances      []homeInstance
+	Modes          []string
+	Single         bool
+	Locale         string
+	Theme          string
+	LangSwitch     string
+	ThemeSwitch    string
+	I18NJSON       template.JS
+	StoreHealthy   bool
+	StoreDegraded  int
+	StoreObjects   int
+	StoreTotalSize string
 }
 
 func renderHome(w http.ResponseWriter, data homeData) {
