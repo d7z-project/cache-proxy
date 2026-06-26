@@ -1,5 +1,12 @@
 # AGENTS.md
 
+本项目的行为规范与约束。所有新增/修改代码必须遵守下述规则，不匹配的代码需一并进行适配。
+
+## AGENTS.md 自身
+
+- 上述所有规范变更时，必须同步更新本文件对应章节
+- 新增约束规则时追加到对应分类下；如无合适分类则新建章节
+
 ## 添加新的 proxy mode
 
 1. 在 `pkg/proxy/<mode>/policy.go` 中定义 `Block` 结构体（`yaml:",inline"` 嵌入 Policy）和 `Driver`
@@ -7,6 +14,7 @@
 3. 在 `pkg/config/config.go` 的 `Instance` 中添加 `*ModeBlock` 字段，常量 `Mode<Xxx>`，并在 `SelectMode()` 候选列表追加
 4. 在 `pkg/app/drivers.go` 的 `builtinDrivers()` 注册 `NewDriver()`
 5. 如需路由规则支持，实现 `httpcache.Resolver`；如需元数据发现刷新，基于 `filerepo.IndexedHandler` 构建
+6. 如需健康检查支持，在 `Plan()` 中通过 `httpcache.NewHandler` 的 `svcHealth` 参数注入 `health.ServiceHealth`（参考 `filerepo.health_factory.go`）；handler 内部通过 `openRemote()` 自动调用 `RecordResult`/`RecordFailure`，无需额外代码
 
 ## YAML 配置结构体
 
@@ -39,41 +47,38 @@
 ## 健康检查 (pkg/health)
 
 `ServiceHealth` 提供统一的服务健康管理，包括：
-- **上游传输层健康**：per URL 的状态机 (Healthy/Degraded/Unhealthy/HalfOpen)，EWMA 延迟追踪，降权，主动 HEAD/GET 探测
+- **上游传输层健康**：per URL 的状态机 (Closed/Degraded/Open/HalfOpen)，滑动窗口错误率评估，EWMA 延迟追踪，金丝雀逐级恢复
 - **资源级健康**：per repo 的状态机 (Pending/Active/Suspect/Blocked/Removed)，错误计数，熔断恢复
 - **透明故障转移**：`WeightedUpstreams()` 按权重排序上游列表，权重 0 的跳过，全部 0 时 bypass 兜底
+- **可观测性**：5 个 Prometheus 指标 (`cache_proxy_upstream_health`, `_weight`, `_error_rate`, `_latency_seconds`, `cache_proxy_circuit_breaker_events_total`)
 
 核心 API：
 - `health.New(name, mode, config, upstreams, stats, ua)` — 创建，config 从 `health.DefaultConfig()` 开始覆盖
 - `health.Start()` / `health.Stop(ctx)` — 启动/停止探测定时器
 - `health.WeightedUpstreams(upstreams)` — 取权重排序的上游列表
-- `health.RecordResult(url, status, latency)` / `health.RecordFailure(url, err)` — 被动记录请求结果
+- `health.RecordResult(url, status, latency)` / `health.RecordFailure(url, err)` — 被动记录请求结果（驱动错误率窗口 + 状态机）
 - `health.TryStartRefresh(path)` / `health.FinishRefresh(path, gen, err, targets)` — CAS 防重入的刷新生命周期 (filerepo)
 - `health.AddResource(path, targets, upstreams)` — 注册新资源
 - `health.DashboardStatus()` — 返回仪表盘 (color, label, extra)
 - `health.AggregateState()` — 返回整体状态 (Healthy/Degraded/Unhealthy)
 
-配置嵌入 `TransportConfig.Health`:
-```yaml
-transport:
-  health:
-    enabled: true
-    probe_interval: 30s
-    probe_timeout: 5s
-    probe_path: /v2/
-    failure_threshold: 3
-    success_threshold: 2
-    degrade_latency: 2s
-    min_weight: 0.1
-    ewma_alpha: 0.2
-    removal_threshold: 3
-    block_interval: 1h
-    max_dynamic_paths: 8
-    min_not_found_age: 10m
-```
+### 状态机
+
+- **Closed**: 正常合闸，`errorRate > degradeRate` 或 `latency > degradeLatency` 进入 Degraded；`errorRate >= tripRate` 直接熔断 Open
+- **Degraded**: 降级限流，`errorRate <= degradeRate` 且 `latency <= degradeLatency` 恢复 Closed；`errorRate >= tripRate` 熔断 Open
+- **Open**: 熔断零流量；cooldown 后主动探测成功进入 HalfOpen
+- **HalfOpen**: 金丝雀逐步放量 (0.1 → +0.1 → 上限 0.5 → Closed)；任何失败立即回 Open
+
+### 错误率模型
+
+- 固定容量时间桶环形缓冲区（每桶 1s，最大 2KB/上游），`evaluation_window` 内滑动计算
+- 最小样本 10 个才启用错误率判断；主动探测 Closed/Degraded 每 `probe_interval`，Open/HalfOpen 每 `canary_cooldown`
 
 编写健康检查相关逻辑时：
-- 探测路径根据 mode 自动选择：OCI→`/v2/`、Cargo→`config.json`、filerepo→从 ResourceHealth.LastTargets 动态学习、其余→HEAD base URL
+- 主动和被动事件统一走 `recordSuccess` / `recordFailure`，由 `evaluateRate` 统一驱动状态转换
 - 探测结果 404/403 不标记上游不健康，而是更新对应的 ResourceHealth
 - `context.Canceled` 不计入故障计数
 - 全部测试需用 `-race` 验证，ServiceHealth 使用单一 `sync.RWMutex` 无死锁
+- 状态切换统一输出 debug 日志，格式：`"upstream state change" from=xxx to=yyy weight=N error_rate=N reason=reason`
+- 故障转移透明：`openRemote()` 循环依次尝试，返回首个成功响应；failover 通过 debug 日志记录
+- 5 个 Prometheus 指标通过 `StatsRecorder.SetUpstreamHealth` 和 `RecordCircuitEvent` 写入

@@ -75,13 +75,6 @@ type ResourceSnapshot struct {
 	UpstreamURLs        []string         `yaml:"upstream_urls,omitempty"`
 }
 
-func (rh *ResourceHealth) CanRetry(blockInterval time.Duration) bool {
-	if rh.State == RBlocked {
-		return time.Now().After(rh.NextRefreshAt)
-	}
-	return true
-}
-
 func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
 	return ResourceSnapshot{
 		Path:                 rh.Path,

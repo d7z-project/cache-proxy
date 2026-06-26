@@ -84,7 +84,7 @@ func TestRefreshKeepsRepodataCompanionsDuringCleanup(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "rpm", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "rpm", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"rpm",
@@ -155,7 +155,7 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "rpm", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "rpm", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"rpm",

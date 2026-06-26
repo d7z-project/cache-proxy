@@ -201,7 +201,7 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		}
 	}
 
-	_, pr, err := StreamToPipe(ctx, StreamConfig{
+	pr, err := StreamToPipe(ctx, StreamConfig{
 		Body:       resp.Body,
 		ObjectPath: route.ObjectPath,
 		Downloads:  &h.downloads,

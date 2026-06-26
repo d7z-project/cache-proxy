@@ -93,7 +93,7 @@ func TestRefreshKeepsReleaseSignatureDuringCleanup(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "deb", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"deb",
@@ -149,7 +149,7 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "deb", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"deb",

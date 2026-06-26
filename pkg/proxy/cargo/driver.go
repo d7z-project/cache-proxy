@@ -62,7 +62,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		BusyPolicy:      block.IndexBusyPolicy,
 		DefaultFreshFor: block.IndexFreshFor,
 	}
-	h := newHandler(plan.Name(), config.ModeCargo, runtime, plan.Store(), newResolver(&block.Policy, plan.Store(), plan.Name()), plan.Stats(), expireAfter)
+	h := newHandler(plan.Name(), runtime, plan.Store(), newResolver(&block.Policy, plan.Store(), plan.Name()), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      h,

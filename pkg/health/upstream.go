@@ -1,6 +1,7 @@
 package health
 
 import (
+	"log/slog"
 	"math"
 	"time"
 )
@@ -8,20 +9,20 @@ import (
 type UpstreamState int
 
 const (
-	SHealthy   UpstreamState = iota
+	SClosed    UpstreamState = iota
 	SDegraded
-	SUnhealthy
+	SOpen
 	SHalfOpen
 )
 
 func (s UpstreamState) String() string {
 	switch s {
-	case SHealthy:
-		return "healthy"
+	case SClosed:
+		return "closed"
 	case SDegraded:
 		return "degraded"
-	case SUnhealthy:
-		return "unhealthy"
+	case SOpen:
+		return "open"
 	case SHalfOpen:
 		return "halfopen"
 	default:
@@ -29,161 +30,189 @@ func (s UpstreamState) String() string {
 	}
 }
 
-type failureRecord struct {
-	Time    time.Time
-	Latency time.Duration
-	Status  int
-}
-
 type UpstreamHealth struct {
 	URL   string
 	State UpstreamState
 
-	ConsecutiveFails int
-	ConsecutiveOk    int
-	LastFailureAt    time.Time
-	LastSuccessAt    time.Time
+	window         *rateWindow
+	ewmaLatency    time.Duration
+	latencySamples int64
 
-	Latency      time.Duration
-	LatencySamples int64
+	consecutiveOk int
 
-	Failures []failureRecord
+	openedAt       time.Time
+	lastSuccessAt  time.Time
+	lastProbeAt    time.Time
+	lastProbeErr   string
 
-	LastProbeAt    time.Time
-	LastProbeError string
-
-	TotalRequests  int64
-	FailedRequests int64
-
-	Weight float64
-
-	ProbeIdx int32
+	totalRequests  int64
+	failedRequests int64
+	weight         float64
+	probeIdx       int32
 }
 
-func newUpstreamHealth(url string) *UpstreamHealth {
+func newUpstreamHealth(url string, evalWindow time.Duration) *UpstreamHealth {
 	return &UpstreamHealth{
 		URL:    url,
-		State:  SHealthy,
-		Weight: 1.0,
+		State:  SClosed,
+		weight: 1.0,
+		window: newRateWindow(evalWindow),
 	}
 }
 
-func (uh *UpstreamHealth) recordSuccess(latency time.Duration, alpha, degradeLatency, minWeight float64) {
-	uh.ConsecutiveFails = 0
-	uh.ConsecutiveOk++
-	uh.LastSuccessAt = time.Now()
-	uh.TotalRequests++
+func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) {
+	wasState := uh.State
 
-	if uh.LatencySamples == 0 {
-		uh.Latency = latency
+	if uh.latencySamples == 0 {
+		uh.ewmaLatency = latency
 	} else {
-		uh.Latency = time.Duration(float64(uh.Latency)*(1-alpha) + float64(latency)*alpha)
+		old := float64(uh.ewmaLatency)
+		uh.ewmaLatency = time.Duration(old*(1-ewmaAlpha) + float64(latency)*ewmaAlpha)
 	}
-	uh.LatencySamples++
+	uh.latencySamples++
+	uh.lastSuccessAt = time.Now()
+	uh.totalRequests++
+	uh.window.record(true)
 
-	uh.recalcState(degradeLatency)
-	uh.computeWeight(degradeLatency, minWeight)
-}
-
-func (uh *UpstreamHealth) recordFailure(err error, latency time.Duration, failureThreshold int, degradeLatency, minWeight float64) {
-	uh.ConsecutiveFails++
-	uh.ConsecutiveOk = 0
-	uh.LastFailureAt = time.Now()
-	uh.TotalRequests++
-	uh.FailedRequests++
-	if err != nil {
-		uh.LastProbeError = err.Error()
-	} else {
-		uh.LastProbeError = ""
-	}
-	if latency > 0 {
-		uh.Latency = latency
-		uh.LatencySamples++
-	}
-
-	now := time.Now()
-	uh.Failures = append(uh.Failures, failureRecord{Time: now, Latency: latency})
-	cutoff := now.Add(-5 * time.Minute)
-	start := 0
-	for i, f := range uh.Failures {
-		if f.Time.After(cutoff) {
-			start = i
-			break
-		}
-	}
-	uh.Failures = uh.Failures[start:]
-
-	if uh.ConsecutiveFails >= failureThreshold {
-		uh.State = SUnhealthy
-		uh.Weight = 0
-		return
-	}
-	uh.recalcState(degradeLatency)
-	uh.computeWeight(degradeLatency, minWeight)
-}
-
-func (uh *UpstreamHealth) recordProbeResult(success bool, latency time.Duration, alpha float64, failureThreshold, successThreshold int, degradeLatency, minWeight float64) {
-	uh.LastProbeAt = time.Now()
-
-	if success {
-		uh.LastProbeError = ""
-		if uh.State == SHalfOpen {
-			uh.ConsecutiveOk++
-			if uh.ConsecutiveOk >= successThreshold {
-				uh.State = SHealthy
-				uh.ConsecutiveFails = 0
-				uh.ConsecutiveOk = 0
-			}
-		} else if uh.State == SUnhealthy {
-			uh.State = SHalfOpen
-			uh.ConsecutiveOk = 1
-			uh.ConsecutiveFails = 0
-		} else {
-			uh.ConsecutiveFails = 0
-		}
-		uh.recordSuccess(latency, alpha, degradeLatency, minWeight)
-	} else {
-		if uh.State == SHalfOpen {
-			uh.State = SUnhealthy
-			uh.ConsecutiveOk = 0
-		}
-		uh.recordFailure(nil, 0, failureThreshold, degradeLatency, minWeight)
-	}
-}
-
-func (uh *UpstreamHealth) recalcState(degradeLatency float64) {
-	if uh.State == SUnhealthy || uh.State == SHalfOpen {
-		return
-	}
-	if uh.LatencySamples > 0 && float64(uh.Latency) > degradeLatency {
-		uh.State = SDegraded
-		return
-	}
-	uh.State = SHealthy
-}
-
-func (uh *UpstreamHealth) computeWeight(degradeLatency, minWeight float64) {
 	switch uh.State {
-	case SUnhealthy:
-		uh.Weight = 0
+	case SOpen:
+		if time.Since(uh.openedAt) >= cfg.CanaryCooldown {
+			uh.transition(SHalfOpen)
+			uh.consecutiveOk = 1
+		}
 	case SHalfOpen:
-		uh.Weight = 0.1
-	case SHealthy:
-		uh.Weight = 1.0
-	case SDegraded:
-		if uh.LatencySamples == 0 || float64(uh.Latency) <= 0 {
-			uh.Weight = 1.0
+		uh.consecutiveOk++
+		w := cfg.CanaryStep * float64(uh.consecutiveOk)
+		if float64(uh.consecutiveOk) >= float64(canarySuccessMin) && w >= canaryCeiling {
+			uh.transition(SClosed)
+			uh.consecutiveOk = 0
+		}
+	default:
+		uh.evaluateRate(cfg)
+	}
+
+	uh.computeWeight(cfg)
+	if wasState != uh.State {
+		uh.logChange(wasState, "success", "")
+	}
+}
+
+func (uh *UpstreamHealth) recordFailure(err error, cfg Config) {
+	wasState := uh.State
+
+	uh.window.record(false)
+	if err != nil {
+		uh.lastProbeErr = err.Error()
+	}
+	uh.failedRequests++
+	uh.totalRequests++
+
+	switch uh.State {
+	case SHalfOpen:
+		uh.transition(SOpen)
+		uh.openedAt = time.Now()
+		uh.consecutiveOk = 0
+	default:
+		uh.evaluateRate(cfg)
+	}
+
+	uh.computeWeight(cfg)
+	if wasState != uh.State {
+		uh.logChange(wasState, "failure", err.Error())
+	}
+}
+
+func (uh *UpstreamHealth) recordProbe(success bool, latency time.Duration, cfg Config) {
+	uh.lastProbeAt = time.Now()
+	if success {
+		uh.recordSuccess(latency, cfg)
+	} else {
+		uh.recordFailure(nil, cfg)
+	}
+}
+
+func (uh *UpstreamHealth) evaluateRate(cfg Config) {
+	rate := uh.window.errorRate()
+	samples := uh.window.totalSamples()
+
+	if samples >= minSampleSize {
+		if rate >= cfg.TripRate {
+			uh.transition(SOpen)
+			uh.openedAt = time.Now()
 			return
 		}
-		ratio := degradeLatency / float64(uh.Latency)
-		uh.Weight = math.Max(minWeight, ratio)
+		if rate > cfg.DegradeRate {
+			uh.transition(SDegraded)
+			return
+		}
+	}
+
+	if uh.latencySamples > 0 && float64(uh.ewmaLatency) > float64(cfg.DegradeLatency) {
+		uh.transition(SDegraded)
+	} else {
+		uh.transition(SClosed)
 	}
 }
 
-func (uh *UpstreamHealth) shouldProbe(healthyInterval, unhealthyInterval time.Duration) bool {
-	interval := healthyInterval
-	if uh.State == SUnhealthy {
-		interval = unhealthyInterval
+func (uh *UpstreamHealth) computeWeight(cfg Config) {
+	switch uh.State {
+	case SClosed:
+		uh.weight = uh.latencyWeight(cfg)
+	case SDegraded:
+		lw := uh.latencyWeight(cfg)
+		ew := uh.errorWeight(cfg)
+		uh.weight = math.Max(cfg.MinWeight, lw*ew)
+	case SOpen:
+		uh.weight = 0
+	case SHalfOpen:
+		w := cfg.CanaryStep * float64(uh.consecutiveOk)
+		uh.weight = math.Min(canaryCeiling, w)
 	}
-	return time.Since(uh.LastProbeAt) >= interval
+}
+
+func (uh *UpstreamHealth) latencyWeight(cfg Config) float64 {
+	if uh.latencySamples == 0 {
+		return 1.0
+	}
+	if float64(uh.ewmaLatency) <= float64(cfg.DegradeLatency) {
+		return 1.0
+	}
+	r := float64(cfg.DegradeLatency) / float64(uh.ewmaLatency)
+	return math.Max(cfg.MinWeight, r)
+}
+
+func (uh *UpstreamHealth) errorWeight(cfg Config) float64 {
+	rate := uh.window.errorRate()
+	if rate <= cfg.DegradeRate {
+		return 1.0
+	}
+	if rate >= cfg.TripRate {
+		return cfg.MinWeight
+	}
+	r := (rate - cfg.DegradeRate) / (cfg.TripRate - cfg.DegradeRate)
+	return 1.0 - r*(1.0-cfg.MinWeight)
+}
+
+func (uh *UpstreamHealth) transition(state UpstreamState) {
+	uh.State = state
+}
+
+func (uh *UpstreamHealth) logChange(wasState UpstreamState, reason, detail string) {
+	attrs := []any{
+		"url", uh.URL,
+		"from", wasState.String(),
+		"to", uh.State.String(),
+		"weight", uh.weight,
+		"error_rate", uh.window.errorRate(),
+		"ewma_latency", uh.ewmaLatency,
+		"reason", reason,
+	}
+	if detail != "" {
+		attrs = append(attrs, "detail", detail)
+	}
+	slog.Debug("upstream state change", attrs...)
+}
+
+func (uh *UpstreamHealth) shouldProbe(interval time.Duration) bool {
+	return time.Since(uh.lastProbeAt) >= interval
 }

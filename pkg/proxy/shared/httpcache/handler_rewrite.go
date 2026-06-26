@@ -101,7 +101,7 @@ func resolveURL(base, raw string) string {
 	return baseURL.ResolveReference(ref).String()
 }
 
-func schemeAndHost(req *http.Request) string {
+func BaseURL(req *http.Request) string {
 	scheme := req.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
 		if req.TLS != nil {
@@ -122,11 +122,7 @@ func externalBaseURL(req *http.Request) string {
 	if prefix == "" {
 		prefix = normalizedProxyPrefix(strings.TrimSuffix(req.URL.Path, "/config.json"))
 	}
-	return schemeAndHost(req) + prefix
-}
-
-func ExternalBaseURL(req *http.Request) string {
-	return externalBaseURL(req)
+	return BaseURL(req) + prefix
 }
 
 func proxyBaseURL(req *http.Request) string {
@@ -138,7 +134,7 @@ func proxyBaseURL(req *http.Request) string {
 		}
 		prefix = normalizedProxyPrefix(p)
 	}
-	return schemeAndHost(req) + prefix
+	return BaseURL(req) + prefix
 }
 
 func normalizedProxyPrefix(value string) string {
@@ -155,8 +151,4 @@ func normalizedProxyPrefix(value string) string {
 
 func joinBaseAndPath(base, suffix string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
-}
-
-func JoinBaseAndPath(base, suffix string) string {
-	return joinBaseAndPath(base, suffix)
 }

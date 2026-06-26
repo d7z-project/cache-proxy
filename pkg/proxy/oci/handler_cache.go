@@ -73,7 +73,7 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	contentLen := response.ContentLength
 	respHeader := response.Header
 
-	_, pr, err := httpcache.StreamToPipe(ctx, httpcache.StreamConfig{
+	pr, err := httpcache.StreamToPipe(ctx, httpcache.StreamConfig{
 		Body:       response.Body,
 		ObjectPath: objectPath,
 		Downloads:  &h.downloads,

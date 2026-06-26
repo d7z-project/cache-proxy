@@ -18,11 +18,11 @@ type StreamConfig struct {
 	StoreFn    func(ctx context.Context, r io.Reader) error
 }
 
-func StreamToPipe(ctx context.Context, cfg StreamConfig) (*os.File, io.ReadCloser, error) {
+func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 	tempFile, err := os.CreateTemp("", "cache-proxy-*")
 	if err != nil {
 		cfg.Body.Close()
-		return nil, nil, err
+		return nil, err
 	}
 
 	done := make(chan struct{})
@@ -60,5 +60,5 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (*os.File, io.ReadClose
 		os.Remove(tempFile.Name())
 	}()
 
-	return tempFile, pr, nil
+	return pr, nil
 }

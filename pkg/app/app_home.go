@@ -154,19 +154,7 @@ func (a *App) publicBaseURL(req *http.Request) string {
 	if url := strings.TrimRight(a.config.Server.PublicURL, "/"); url != "" {
 		return url
 	}
-	scheme := req.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		if req.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-	host := req.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = req.Host
-	}
-	return scheme + "://" + host
+	return httpcache.BaseURL(req)
 }
 
 func instURL(entry *proxyruntime.Entry, baseURL string, req *http.Request) string {

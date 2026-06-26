@@ -35,7 +35,7 @@ func (testDiscoverer) Discover(cleanPath string) (RootSpec, bool) {
 }
 
 func newTestHealth(t *testing.T, stats *httpcache.Stats) *health.ServiceHealth {
-	return health.New("repo", "test", health.Config{}, nil, stats, "cache-proxy-test")
+	return health.New("repo", "test", health.DefaultConfig(), nil, stats, "cache-proxy-test")
 }
 
 func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder) *IndexedHandler {
@@ -618,8 +618,8 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	svcHealth := health.New("repo", "test", health.Config{
-		RemovalThreshold: 2,
-		MinNotFoundAge:   0,
+		ResourceRemoveAge:   0,
+		ResourceRemoveCount: 2,
 	}, []string{server.URL}, stats, "cache-proxy-test")
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",

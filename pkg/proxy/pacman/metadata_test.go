@@ -58,7 +58,7 @@ func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "pacman", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "pacman", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"pacman",
@@ -118,7 +118,7 @@ func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "pacman", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "pacman", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"pacman",

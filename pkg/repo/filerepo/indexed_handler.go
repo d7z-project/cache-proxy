@@ -250,11 +250,7 @@ func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 	startedAt := time.Now()
 	var refreshed bool
 	var err error
-	if allRoots {
-		refreshed, err = h.refreshAllRoots(ctx, startedAt)
-	} else {
-		refreshed, err = h.refreshDueRoots(ctx, startedAt)
-	}
+	refreshed, err = h.refreshRoots(ctx, startedAt, !allRoots)
 
 	h.mu.Lock()
 	h.refreshing = false
@@ -340,12 +336,20 @@ func (h *IndexedHandler) refreshMetadataObject(ctx context.Context, cleanPath st
 			}
 		}
 
+		start := time.Now()
 		response, err := h.client.Do(request)
+		latency := time.Since(start)
 		if err != nil {
 			h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, 0)
+			if h.health != nil {
+				h.health.RecordFailure(upstream, err)
+			}
 			continue
 		}
 		h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, response.StatusCode)
+		if h.health != nil {
+			h.health.RecordResult(upstream, response.StatusCode, latency)
+		}
 		response.Body = utils.NewRateLimitReader(response.Body)
 
 		if response.StatusCode == http.StatusNotModified && cached != nil {
@@ -478,7 +482,7 @@ func (h *IndexedHandler) putObject(ctx context.Context, cleanPath string, body [
 		"content-type":   headers["Content-Type"],
 		"content-length": headers["Content-Length"],
 		"last-modified":  headers["Last-Modified"],
-		"etag":           headers["ETag"],
+			"etag":           headers["Etag"],
 		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
 		"mode":           h.mode,
 		"cache":          "REFRESH",
@@ -510,13 +514,8 @@ func targetsToProbe(targets []MetadataTarget) []health.ProbeTarget {
 
 func (h *IndexedHandler) addRoot(path string, targets []MetadataTarget) {
 	h.mu.Lock()
-	if _, ok := h.targets[path]; ok {
-		h.targets[path] = targets
-		h.mu.Unlock()
-	} else {
-		h.targets[path] = targets
-		h.mu.Unlock()
-	}
+	h.targets[path] = targets
+	h.mu.Unlock()
 	if h.health != nil {
 		h.health.AddResource(path, targetsToProbe(targets), h.upstreams)
 	}
@@ -600,7 +599,7 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, path string, now time.
 	return true, nil
 }
 
-func (h *IndexedHandler) refreshDueRoots(ctx context.Context, now time.Time) (bool, error) {
+func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnly bool) (bool, error) {
 	if h.health == nil {
 		return false, nil
 	}
@@ -608,29 +607,12 @@ func (h *IndexedHandler) refreshDueRoots(ctx context.Context, now time.Time) (bo
 	refreshed := false
 	var firstErr error
 	for _, rh := range resources {
-		nextRefresh, ok := h.health.ResourceNextRefresh(rh.Path)
-		if ok && !nextRefresh.IsZero() && nextRefresh.After(now) {
-			continue
+		if dueOnly {
+			nextRefresh, ok := h.health.ResourceNextRefresh(rh.Path)
+			if ok && !nextRefresh.IsZero() && nextRefresh.After(now) {
+				continue
+			}
 		}
-		changed, err := h.refreshRoot(ctx, rh.Path, now)
-		if changed {
-			refreshed = true
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return refreshed, firstErr
-}
-
-func (h *IndexedHandler) refreshAllRoots(ctx context.Context, now time.Time) (bool, error) {
-	if h.health == nil {
-		return false, nil
-	}
-	resources := h.health.ActiveResources()
-	refreshed := false
-	var firstErr error
-	for _, rh := range resources {
 		changed, err := h.refreshRoot(ctx, rh.Path, now)
 		if changed {
 			refreshed = true

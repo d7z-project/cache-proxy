@@ -13,6 +13,8 @@ type StatsRecorder interface {
 	RecordUpstream(instance, mode, method string, status int)
 	RecordMetadataRefresh(instance, mode, result string, duration time.Duration, ready bool)
 	SetMetadataState(instance, mode, state string, ready bool)
+	SetUpstreamHealth(instance, mode, upstream string, state int, weight, errorRate, latency float64)
+	RecordCircuitEvent(instance, mode, upstream, event string)
 }
 
 type AggregateState int
@@ -42,11 +44,11 @@ type WeightedUpstream struct {
 }
 
 type ServiceHealth struct {
-	mu       sync.RWMutex
-	name     string
-	mode     string
-	config   Config
-	stats    StatsRecorder
+	mu        sync.RWMutex
+	name      string
+	mode      string
+	config    Config
+	stats     StatsRecorder
 	userAgent string
 
 	upstreams map[string]*UpstreamHealth
@@ -72,7 +74,7 @@ func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder,
 		resources: map[string]*ResourceHealth{},
 	}
 	for _, url := range upstreams {
-		h.upstreams[url] = newUpstreamHealth(url)
+		h.upstreams[url] = newUpstreamHealth(url, cfg.EvaluationWindow)
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -118,7 +120,7 @@ func (h *ServiceHealth) WeightedUpstreams(upstreams []string) []WeightedUpstream
 	for _, url := range upstreams {
 		w := 1.0
 		if uh, ok := h.upstreams[url]; ok {
-			w = uh.Weight
+			w = uh.weight
 		}
 		if w > 0 {
 			usable = true
@@ -144,10 +146,11 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 		return
 	}
 	if status >= 500 || status == 0 {
-		uh.recordFailure(fmtStatusError(status), latency, h.config.FailureThreshold, float64(h.config.DegradeLatency), h.config.MinWeight)
+		uh.recordFailure(fmtStatusError(status), h.config)
 	} else {
-		uh.recordSuccess(latency, h.config.EwmaAlpha, float64(h.config.DegradeLatency), h.config.MinWeight)
+		uh.recordSuccess(latency, h.config)
 	}
+	_ = h.emitUpstreamMetrics(uh)
 	h.recomputeAggregateLocked()
 }
 
@@ -158,7 +161,8 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 	if !ok {
 		return
 	}
-	uh.recordFailure(err, 0, h.config.FailureThreshold, float64(h.config.DegradeLatency), h.config.MinWeight)
+	uh.recordFailure(err, h.config)
+	_ = h.emitUpstreamMetrics(uh)
 	h.recomputeAggregateLocked()
 }
 
@@ -172,11 +176,11 @@ func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstream
 	}
 
 	rh := &ResourceHealth{
-		Path:          path,
-		State:         RPending,
-		DiscoveredAt:  time.Now(),
-		LastTargets:   append([]ProbeTarget(nil), targets...),
-		UpstreamURLs:  append([]string(nil), upstreams...),
+		Path:         path,
+		State:        RPending,
+		DiscoveredAt: time.Now(),
+		LastTargets:  append([]ProbeTarget(nil), targets...),
+		UpstreamURLs: append([]string(nil), upstreams...),
 	}
 	if existing != nil {
 		rh.Generation = existing.Generation + 1
@@ -237,7 +241,7 @@ func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, target
 			rh.FirstNotFoundAt = time.Now()
 		}
 		now := time.Now()
-		if rh.ConsecutiveNotFound >= h.config.RemovalThreshold && now.Sub(rh.FirstNotFoundAt) >= h.config.MinNotFoundAge {
+		if rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount && now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge {
 			rh.State = RRemoved
 			rh.Generation++
 		} else {
@@ -246,20 +250,20 @@ func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, target
 	case IsResourceForbidden(err):
 		rh.ConsecutiveInvalid++
 		rh.State = RBlocked
-		rh.NextRefreshAt = time.Now().Add(h.config.BlockInterval)
+		rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
 	case IsResourceTransient(err):
 		rh.ConsecutiveTransient++
-		if rh.ConsecutiveTransient >= h.config.FailureThreshold {
+		if rh.ConsecutiveTransient >= resourceFailCount {
 			rh.State = RBlocked
-			rh.NextRefreshAt = time.Now().Add(h.config.BlockInterval)
+			rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
 		} else {
 			rh.State = RSuspect
 		}
 	default:
 		rh.ConsecutiveInvalid++
-		if rh.ConsecutiveInvalid >= h.config.FailureThreshold {
+		if rh.ConsecutiveInvalid >= resourceFailCount {
 			rh.State = RBlocked
-			rh.NextRefreshAt = time.Now().Add(h.config.BlockInterval)
+			rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
 		} else {
 			rh.State = RSuspect
 		}
@@ -346,7 +350,7 @@ func (h *ServiceHealth) DegradedCount() int {
 	defer h.mu.RUnlock()
 	n := 0
 	for _, uh := range h.upstreams {
-		if uh.State == SDegraded || uh.State == SUnhealthy || uh.State == SHalfOpen {
+		if uh.State == SDegraded || uh.State == SOpen || uh.State == SHalfOpen {
 			n++
 		}
 	}
@@ -372,11 +376,11 @@ func (h *ServiceHealth) recomputeAggregateLocked() {
 	healthy, degraded, unhealthy := 0, 0, 0
 	for _, uh := range h.upstreams {
 		switch uh.State {
-		case SHealthy:
+		case SClosed:
 			healthy++
 		case SDegraded:
 			degraded++
-		case SUnhealthy, SHalfOpen:
+		case SOpen, SHalfOpen:
 			unhealthy++
 		}
 	}
@@ -422,7 +426,7 @@ func (h *ServiceHealth) recordResourceResultLocked(rh *ResourceHealth, err error
 			rh.FirstNotFoundAt = time.Now()
 		}
 		now := time.Now()
-		if rh.ConsecutiveNotFound >= h.config.RemovalThreshold && now.Sub(rh.FirstNotFoundAt) >= h.config.MinNotFoundAge {
+		if rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount && now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge {
 			rh.State = RRemoved
 			rh.Generation++
 		} else {
@@ -431,12 +435,12 @@ func (h *ServiceHealth) recordResourceResultLocked(rh *ResourceHealth, err error
 	case IsResourceForbidden(err):
 		rh.State = RBlocked
 		rh.ConsecutiveInvalid++
-		rh.NextRefreshAt = time.Now().Add(h.config.BlockInterval)
+		rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
 	default:
 		rh.ConsecutiveTransient++
-		if rh.ConsecutiveTransient >= h.config.FailureThreshold {
+		if rh.ConsecutiveTransient >= resourceFailCount {
 			rh.State = RBlocked
-			rh.NextRefreshAt = time.Now().Add(h.config.BlockInterval)
+			rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
 		} else {
 			rh.State = RSuspect
 		}
@@ -468,10 +472,20 @@ func (h *ServiceHealth) SetResourceTargets(path string, targets []ProbeTarget) {
 	rh.LastTargets = append([]ProbeTarget(nil), targets...)
 }
 
+func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) error {
+	if h.stats == nil {
+		return nil
+	}
+	h.stats.SetUpstreamHealth(h.name, h.mode, uh.URL,
+		int(uh.State), uh.weight, uh.window.errorRate(),
+		uh.ewmaLatency.Seconds())
+	return nil
+}
+
 func fmtDegradedLabel(upstreams map[string]*UpstreamHealth, resources map[string]*ResourceHealth) string {
 	n := 0
 	for _, uh := range upstreams {
-		if uh.State != SHealthy {
+		if uh.State != SClosed {
 			n++
 		}
 	}

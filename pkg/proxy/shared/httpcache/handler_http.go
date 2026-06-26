@@ -73,20 +73,8 @@ func RewriteNPMTarballURL(rawURL string, upstreams []string, publicBase string) 
 }
 
 func publicBaseURL(req *http.Request) string {
-	scheme := req.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		if req.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-	host := req.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = req.Host
-	}
 	prefix := strings.TrimRight(req.Header.Get("X-Cache-Proxy-Prefix"), "/")
-	return scheme + "://" + host + prefix
+	return BaseURL(req) + prefix
 }
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
@@ -139,7 +127,7 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		}
 	}
 
-	for _, candidate := range upstreams {
+	for i, candidate := range upstreams {
 		targetURL := strings.TrimRight(candidate.URL, "/") + "/" + EscapePath(pathPart)
 		if rawQuery != "" {
 			targetURL += "?" + rawQuery
@@ -148,6 +136,9 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		if err != nil {
 			lastErr = err
 			slog.Debug("upstream request build failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
+			if i+1 < len(upstreams) {
+				slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "to", upstreams[i+1].URL)
+			}
 			continue
 		}
 		request.Header.Set("User-Agent", h.client.UserAgent)
@@ -166,6 +157,9 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 			}
 			lastErr = err
 			slog.Debug("upstream request failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
+			if i+1 < len(upstreams) {
+				slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "to", upstreams[i+1].URL)
+			}
 			continue
 		}
 		slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
@@ -178,6 +172,9 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
 			lastErr = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
+			if i+1 < len(upstreams) {
+				slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "to", upstreams[i+1].URL)
+			}
 			continue
 		}
 		return responseFromHTTP(response), nil
@@ -196,7 +193,7 @@ func (h *Handler) requestHeaders(req *http.Request) map[string]string {
 	if len(h.config.PassHeaders) == 0 {
 		return headers
 	}
-	for _, name := range h.passHeaders() {
+	for _, name := range h.config.PassHeaders {
 		if !passableHeader(name) {
 			continue
 		}
@@ -219,10 +216,6 @@ func (h *Handler) remoteHeaders(req *http.Request, route Route, extra map[string
 		headers[key] = value
 	}
 	return headers
-}
-
-func (h *Handler) passHeaders() []string {
-	return h.config.PassHeaders
 }
 
 func passableHeader(name string) bool {

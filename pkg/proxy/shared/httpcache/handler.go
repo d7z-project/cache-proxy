@@ -102,12 +102,16 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
 	}
+	h.flushResult(req, resp, result, "flush response failed")
+}
+
+func (h *Handler) flushResult(req *http.Request, resp http.ResponseWriter, result *utils.ResponseWrapper, logMsg string) {
 	status := result.StatusCode
 	cache := result.Headers["X-Cache"]
 	bytes := ResponseBytes(result.Headers)
 	StripInternal(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
-		slog.Info("flush response failed", "instance", h.name, "err", err)
+		slog.Info(logMsg, "instance", h.name, "err", err)
 		if status < 500 {
 			status = http.StatusBadGateway
 		}
@@ -138,17 +142,7 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
 	}
-	status := result.StatusCode
-	cache := result.Headers["X-Cache"]
-	bytes := ResponseBytes(result.Headers)
-	StripInternal(result.Headers)
-	if err := result.FlushClose(req, resp); err != nil {
-		slog.Info("flush passthrough response failed", "instance", h.name, "err", err)
-		if status < 500 {
-			status = http.StatusBadGateway
-		}
-	}
-	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, bytes)
+	h.flushResult(req, resp, result, "flush passthrough response failed")
 }
 
 func ModeUserAgent(mode string) string {

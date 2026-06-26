@@ -63,7 +63,7 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "apk", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
+	svcHealth := health.New("repo", "apk", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"apk",

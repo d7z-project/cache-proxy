@@ -32,8 +32,20 @@ func (h *ServiceHealth) probeAll() {
 	h.mu.RUnlock()
 
 	for _, uh := range upstreams {
-		if !uh.shouldProbe(h.config.ProbeInterval, h.config.BlockInterval) {
-			continue
+		h.mu.RLock()
+		state := uh.State
+		lastProbe := uh.lastProbeAt
+		h.mu.RUnlock()
+
+		switch state {
+		case SOpen, SHalfOpen:
+			if time.Since(lastProbe) < h.config.CanaryCooldown {
+				continue
+			}
+		default:
+			if time.Since(lastProbe) < h.config.ProbeInterval {
+				continue
+			}
 		}
 		h.probeOne(uh)
 	}
@@ -55,23 +67,27 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 	defer h.mu.Unlock()
 
 	if err != nil {
-		uh.recordProbeResult(false, 0, h.config.EwmaAlpha, h.config.FailureThreshold, h.config.SuccessThreshold, float64(h.config.DegradeLatency), h.config.MinWeight)
-		uh.LastProbeError = err.Error()
-		return
+		uh.recordProbe(false, 0, h.config)
+		uh.lastProbeErr = err.Error()
+		goto emit
 	}
 
 	switch {
 	case resp.StatusCode >= 500:
-		uh.recordProbeResult(false, 0, h.config.EwmaAlpha, h.config.FailureThreshold, h.config.SuccessThreshold, float64(h.config.DegradeLatency), h.config.MinWeight)
-		uh.LastProbeError = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		uh.recordProbe(false, 0, h.config)
+		uh.lastProbeErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	case resp.StatusCode == 404 || resp.StatusCode == 403 || resp.StatusCode == 410:
-		uh.recordProbeResult(true, latency, h.config.EwmaAlpha, h.config.FailureThreshold, h.config.SuccessThreshold, float64(h.config.DegradeLatency), h.config.MinWeight)
+		uh.recordProbe(true, latency, h.config)
 		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil {
 			h.recordResourceResultLocked(rh, statusToResourceError(resp.StatusCode))
 		}
 	default:
-		uh.recordProbeResult(true, latency, h.config.EwmaAlpha, h.config.FailureThreshold, h.config.SuccessThreshold, float64(h.config.DegradeLatency), h.config.MinWeight)
+		uh.recordProbe(true, latency, h.config)
 	}
+
+emit:
+	_ = h.emitUpstreamMetrics(uh)
+	h.recomputeAggregateLocked()
 }
 
 func (h *ServiceHealth) probeDo(ctx context.Context, uh *UpstreamHealth) (*http.Response, error) {
@@ -85,7 +101,7 @@ func (h *ServiceHealth) probeDo(ctx context.Context, uh *UpstreamHealth) (*http.
 		return h.probeClient.Do(req)
 	}
 
-	idx := int(atomic.AddInt32(&uh.ProbeIdx, 1)) % len(targets)
+	idx := int(atomic.AddInt32(&uh.probeIdx, 1)) % len(targets)
 	targetURL := uh.URL + "/" + targets[idx].Path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -106,7 +122,7 @@ func (h *ServiceHealth) probeTargetsForUpstream(uh *UpstreamHealth) []ProbeTarge
 			if len(rh.UpstreamURLs) > 0 && rh.UpstreamURLs[0] == uh.URL {
 				for _, t := range rh.LastTargets {
 					targets = append(targets, t)
-					if len(targets) >= h.config.MaxDynamicPaths {
+					if len(targets) >= maxDynamicPaths {
 						return targets
 					}
 				}

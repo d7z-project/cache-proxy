@@ -83,18 +83,18 @@ instances:
         timeout: 10s
         health:
           enabled: true
-          probe_interval: 30s
-          probe_timeout: 5s
-          probe_path: /v2/
-          failure_threshold: 3
-          success_threshold: 2
+          degrade_rate: 0.1
+          trip_rate: 0.3
+          evaluation_window: 2m
           degrade_latency: 2s
           min_weight: 0.1
-          ewma_alpha: 0.2
-          removal_threshold: 3
-          block_interval: 1h
-          max_dynamic_paths: 8
-          min_not_found_age: 10m
+          canary_cooldown: 30s
+          canary_step: 0.1
+          probe_interval: 2m
+          probe_timeout: 5s
+          resource_block_interval: 2m
+          resource_remove_age: 5m
+          resource_remove_count: 5
       # ... mode-specific fields below
 ```
 
@@ -110,18 +110,18 @@ instances:
 | `transport.ua` | string | `per mode` | Override User-Agent (per-mode: docker/27.0.0, npm/10.8.0, cargo/1.79.0, Go-http-client/2.0, cache-proxy) |
 | `transport.timeout` | duration | `3s` | Upstream TCP dial timeout |
 | `transport.health.enabled` | bool | `true` | Enable active health probing |
-| `transport.health.probe_interval` | duration | `30s` | Health probe interval |
-| `transport.health.probe_timeout` | duration | `5s` | Single probe timeout |
-| `transport.health.probe_path` | path | — | Override probe path (auto-detected per mode) |
-| `transport.health.failure_threshold` | int | `3` | Consecutive failures → circuit break |
-| `transport.health.success_threshold` | int | `2` | Half-open successes → recover |
-| `transport.health.degrade_latency` | duration | `2s` | EWMA latency > this → weight reduction |
+| `transport.health.degrade_rate` | float | `0.1` | Error rate threshold to start reducing upstream weight |
+| `transport.health.trip_rate` | float | `0.3` | Error rate threshold to open circuit (zero traffic) |
+| `transport.health.evaluation_window` | duration | `2m` | Sliding window for error rate calculation |
+| `transport.health.degrade_latency` | duration | `2s` | EWMA latency above this reduces weight |
 | `transport.health.min_weight` | float | `0.1` | Minimum weight for degraded upstream |
-| `transport.health.ewma_alpha` | float | `0.2` | EWMA smoothing factor |
-| `transport.health.removal_threshold` | int | `3` | Consecutive 404 → remove repo (filerepo) |
-| `transport.health.block_interval` | duration | `1h` | Blocked repo retry interval (filerepo) |
-| `transport.health.max_dynamic_paths` | int | `8` | Max auto-discovered probe paths per resource (filerepo) |
-| `transport.health.min_not_found_age` | duration | `10m` | Min age before 404-consecutive removal (filerepo) |
+| `transport.health.canary_cooldown` | duration | `30s` | Cooldown before probing a tripped upstream |
+| `transport.health.canary_step` | float | `0.1` | Weight increase per canary success (0.1→0.5→restore) |
+| `transport.health.probe_interval` | duration | `2m` | Active probe interval for closed/degraded upstreams |
+| `transport.health.probe_timeout` | duration | `5s` | Single probe request timeout |
+| `transport.health.resource_block_interval` | duration | `2m` | Blocked repo retry interval (filerepo modes) |
+| `transport.health.resource_remove_age` | duration | `5m` | Min age before 404-consecutive removal (filerepo) |
+| `transport.health.resource_remove_count` | int | `5` | Consecutive 404s to remove repo (filerepo) |
 
 ---
 
