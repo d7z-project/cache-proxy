@@ -9,9 +9,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"strconv"
 	"time"
@@ -19,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, uint64, error) {
@@ -70,47 +69,24 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		return status, "BYPASS", bytes, copyErr
 	}
 
-	tempFile, err := os.CreateTemp("", "cache-proxy-*")
-	if err != nil {
-		response.Body.Close()
-		return 0, "", 0, err
-	}
-
 	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
 	contentLen := response.ContentLength
 	respHeader := response.Header
 
-	done := make(chan struct{})
-	h.downloads.Store(objectPath, done)
-
-	pr, pw := io.Pipe()
-	h.wait.Add(1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("oci download goroutine panic", "path", objectPath, "panic", r)
-			}
-		}()
-		h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
-		defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
-		defer h.wait.Done()
-		defer close(done)
-		defer h.downloads.Delete(objectPath)
-		defer response.Body.Close()
-		defer pw.Close()
-
-		tee := io.TeeReader(response.Body, tempFile)
-		_, copyErr := io.Copy(pw, tee)
-		if copyErr == nil {
-			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
-				if err := h.putObjectFromReader(context.Background(), objectPath, tempFile, contentLen, respHeader, nil); err != nil {
-					slog.Warn("oci store write failed", "path", objectPath, "err", err)
-				}
-			}
-		}
-		tempFile.Close()
-		os.Remove(tempFile.Name())
-	}()
+	_, pr, err := httpcache.StreamToPipe(ctx, httpcache.StreamConfig{
+		Body:       response.Body,
+		ObjectPath: objectPath,
+		Downloads:  &h.downloads,
+		Wait:       &h.wait,
+		StatsStart: func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
+		StatsDone:  func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
+		StoreFn: func(ctx context.Context, r io.Reader) error {
+			return h.putObjectFromReader(ctx, objectPath, r, contentLen, respHeader, nil)
+		},
+	})
+	if err != nil {
+		return 0, "", 0, err
+	}
 
 	headers := objectHeaders(respHeader, int(contentLen), "MISS")
 	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, pr)

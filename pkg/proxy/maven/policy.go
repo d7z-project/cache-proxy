@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -46,6 +47,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	}
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: maven mode requires one upstream", plan.Name())
+	}
+	if _, err := url.Parse(block.Upstream); err != nil {
+		return fmt.Errorf("instance %s: maven upstream URL is invalid: %w", plan.Name(), err)
 	}
 	applyDefaults(&block.Policy)
 	if err := validate(&block.Policy); err != nil {
@@ -108,6 +112,15 @@ func validate(policy *Policy) error {
 	if !config.ValidBusyPolicy(policy.ChecksumBusyPolicy) {
 		return fmt.Errorf("invalid maven checksum busy policy %q", policy.ChecksumBusyPolicy)
 	}
+	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
+		return fmt.Errorf("maven metadata fresh_for must be at least 1s")
+	}
+	if policy.ChecksumFreshFor > 0 && policy.ChecksumFreshFor.Duration() < time.Second {
+		return fmt.Errorf("maven checksum fresh_for must be at least 1s")
+	}
+	if policy.SnapshotFreshFor > 0 && policy.SnapshotFreshFor.Duration() < time.Second {
+		return fmt.Errorf("maven snapshot fresh_for must be at least 1s")
+	}
 	return nil
 }
 
@@ -117,6 +130,9 @@ func newResolver(policy *Policy) *resolver { return &resolver{policy: policy} }
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	lookupPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if !httpcache.SafePath(lookupPath) {
+		return httpcache.Route{}, fmt.Errorf("invalid maven request path")
+	}
 	if lookupPath == "." || lookupPath == "" {
 		return httpcache.Route{}, fmt.Errorf("path is required")
 	}

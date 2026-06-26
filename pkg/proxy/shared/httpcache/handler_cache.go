@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"strconv"
 
@@ -94,7 +93,7 @@ func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) 
 }
 
 func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.remoteHeaders(req, route, nil))
+	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL}, h.remoteHeaders(req, route, nil))
 	if response != nil {
 		response.Headers["X-Cache"] = "BYPASS"
 		response = h.rewriteResponse(req, route, response)
@@ -152,7 +151,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 	if lastModified := cached["Last-Modified"]; lastModified != "" {
 		headers["If-Modified-Since"] = lastModified
 	}
-	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true}, h.remoteHeaders(nil, route, headers))
+	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true, TargetURL: route.TargetURL}, h.remoteHeaders(nil, route, headers))
 	if err != nil {
 		return false, err
 	}
@@ -177,7 +176,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 }
 
 func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
-	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true}, h.remoteHeaders(req, route, nil))
+	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL}, h.remoteHeaders(req, route, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -186,16 +185,9 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		return h.rewriteResponse(req, route, resp), nil
 	}
 
-	tempFile, err := os.CreateTemp("", "cache-proxy-*")
-	if err != nil {
-		resp.Close()
-		return nil, err
-	}
 	if parent := path.Dir(route.ObjectPath); parent != "." {
 		if err = h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
 			resp.Close()
-			tempFile.Close()
-			os.Remove(tempFile.Name())
 			return nil, err
 		}
 	}
@@ -209,38 +201,21 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		}
 	}
 
-	done := make(chan struct{})
-	h.downloads.Store(route.ObjectPath, done)
-
-	pr, pw := io.Pipe()
-	h.wait.Add(1)
-	h.stats.AddActiveDownload(h.name, h.config.Mode, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("download goroutine panic", "instance", h.name, "path", route.ObjectPath, "panic", r)
-			}
-		}()
-		defer h.wait.Done()
-		defer h.stats.AddActiveDownload(h.name, h.config.Mode, -1)
-		defer close(done)
-		defer h.downloads.Delete(route.ObjectPath)
-		defer resp.Body.Close()
-		defer pw.Close()
-
-		tee := io.TeeReader(resp.Body, tempFile)
-		_, copyErr := io.Copy(pw, tee)
-		if copyErr == nil {
-			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
-				_, err := h.store.Put(context.Background(), h.name, route.ObjectPath, tempFile, meta)
-				if err != nil {
-					slog.Warn("cache store write failed", "instance", h.name, "path", route.ObjectPath, "err", err)
-				}
-			}
-		}
-		tempFile.Close()
-		os.Remove(tempFile.Name())
-	}()
+	_, pr, err := StreamToPipe(ctx, StreamConfig{
+		Body:       resp.Body,
+		ObjectPath: route.ObjectPath,
+		Downloads:  &h.downloads,
+		Wait:       &h.wait,
+		StatsStart: func() { h.stats.AddActiveDownload(h.name, h.config.Mode, 1) },
+		StatsDone:  func() { h.stats.AddActiveDownload(h.name, h.config.Mode, -1) },
+		StoreFn: func(ctx context.Context, r io.Reader) error {
+			_, err := h.store.Put(ctx, h.name, route.ObjectPath, r, meta)
+			return err
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	headers := map[string]string{"X-Cache": status}
 	for key, value := range meta {
@@ -271,7 +246,7 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 			response.Body = io.NopCloser(bytes.NewReader(body))
 			return response
 		}
-		if rewriteNPMTarballs(document, h.config.Upstreams, publicBaseURL(req)) {
+		if RewriteNPMTarballs(document, h.config.Upstreams, publicBaseURL(req)) {
 			body, err = json.Marshal(document)
 			if err != nil {
 				return ErrorResponse(http.StatusBadGateway, err)
@@ -279,7 +254,7 @@ func (h *Handler) rewriteResponse(req *http.Request, route Route, response *util
 			response.Headers["Content-Length"] = strconv.Itoa(len(body))
 		}
 	case "cargo-config":
-		body, err = rewriteCargoConfig(req, body)
+		body, err = rewriteCargoConfig(req, body, route.AuthRequired)
 		if err != nil {
 			return ErrorResponse(http.StatusBadGateway, err)
 		}

@@ -3,7 +3,9 @@ package npm
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -39,6 +41,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	}
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: npm mode requires one upstream", plan.Name())
+	}
+	if _, err := url.Parse(block.Upstream); err != nil {
+		return fmt.Errorf("instance %s: npm upstream URL is invalid: %w", plan.Name(), err)
 	}
 	if block.MetadataPolicy == "" {
 		block.MetadataPolicy = config.PolicyRevalidate
@@ -82,6 +87,9 @@ func validate(policy *Policy) error {
 	}
 	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
 		return fmt.Errorf("invalid npm metadata busy policy %q", policy.MetadataBusyPolicy)
+	}
+	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
+		return fmt.Errorf("npm metadata fresh_for must be at least 1s")
 	}
 	return nil
 }

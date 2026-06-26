@@ -3,9 +3,12 @@ package cargo
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -41,6 +44,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: cargo mode requires one upstream", plan.Name())
 	}
+	if _, err := url.Parse(block.Upstream); err != nil {
+		return fmt.Errorf("instance %s: cargo upstream URL is invalid: %w", plan.Name(), err)
+	}
 	if err := validatePolicy(plan.Name(), &block.Policy); err != nil {
 		return err
 	}
@@ -48,12 +54,22 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler, err := newHandler(plan.Name(), strings.TrimSpace(block.Upstream), block.Transport, &block.Policy, expireAfter, plan.Store(), plan.Stats())
-	if err != nil {
-		return err
+	runtime := httpcache.RuntimeConfig{
+		Mode:            config.ModeCargo,
+		ExpireAfter:     expireAfter,
+		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
+		Transport:       block.Transport,
+		BusyPolicy:      block.IndexBusyPolicy,
+		DefaultFreshFor: block.IndexFreshFor,
 	}
+	h := newHandler(plan.Name(), config.ModeCargo, runtime, plan.Store(), newResolver(&block.Policy, plan.Store(), plan.Name()), plan.Stats(), expireAfter)
 	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindPath(block.Route.Path, expireAfter, handler)
+	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
+		Handler:      h,
+		Close:        func() error { h.base.Close(); return nil },
+		CloseContext: h.Stop,
+		CleanupFn:    h.Cleanup,
+	})
 }
 
 func applyDefaults(policy *Policy) {
@@ -71,6 +87,9 @@ func validatePolicy(instance string, policy *Policy) error {
 	}
 	if policy.CratePolicy != config.PolicyBypass && policy.CratePolicy != config.PolicyImmutable && policy.CratePolicy != config.PolicyRevalidate {
 		return fmt.Errorf("instance %s: invalid cargo crate policy %q", instance, policy.CratePolicy)
+	}
+	if policy.IndexFreshFor > 0 && policy.IndexFreshFor.Duration() < time.Second {
+		return fmt.Errorf("instance %s: cargo index fresh_for must be at least 1s", instance)
 	}
 	return nil
 }

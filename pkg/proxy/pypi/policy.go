@@ -52,6 +52,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: pypi mode requires one upstream", plan.Name())
 	}
+	if _, err := url.Parse(block.Upstream); err != nil {
+		return fmt.Errorf("instance %s: pypi upstream URL is invalid: %w", plan.Name(), err)
+	}
 	applyDefaults(&block.Policy)
 	if err := validate(&block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
@@ -117,6 +120,12 @@ func validate(policy *Policy) error {
 			return fmt.Errorf("invalid pypi busy policy %q", value)
 		}
 	}
+	if policy.IndexFreshFor > 0 && policy.IndexFreshFor.Duration() < time.Second {
+		return fmt.Errorf("pypi index fresh_for must be at least 1s")
+	}
+	if policy.CompanionFreshFor > 0 && policy.CompanionFreshFor.Duration() < time.Second {
+		return fmt.Errorf("pypi companion fresh_for must be at least 1s")
+	}
 	return nil
 }
 
@@ -132,6 +141,9 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 func routeForPath(policy *Policy, upstreams []string, lookupPath string) (httpcache.Route, error) {
 	if lookupPath == "." || lookupPath == "" {
 		lookupPath = "simple/"
+	}
+	if !httpcache.SafePath(lookupPath) {
+		return httpcache.Route{}, errors.New("invalid pypi request path")
 	}
 	switch {
 	case lookupPath == "simple" || lookupPath == "simple/":

@@ -161,6 +161,12 @@ func validateBlock(proxies []string, cfg *Config) error {
 			return fmt.Errorf("invalid go busy policy %q", value)
 		}
 	}
+	if cfg.ModuleFreshFor > 0 && cfg.ModuleFreshFor.Duration() < time.Second {
+		return fmt.Errorf("go module fresh_for must be at least 1s")
+	}
+	if cfg.SumDBFreshFor > 0 && cfg.SumDBFreshFor.Duration() < time.Second {
+		return fmt.Errorf("go sumdb fresh_for must be at least 1s")
+	}
 	return nil
 }
 

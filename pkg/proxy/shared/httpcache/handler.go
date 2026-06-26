@@ -24,6 +24,7 @@ type Route struct {
 	ExpireAfter    config.Expiration
 	RequestHeaders map[string]string
 	RewriteKind    string
+	AuthRequired   bool
 }
 
 type Resolver interface {
@@ -57,6 +58,7 @@ type Handler struct {
 type remoteOptions struct {
 	AcceptErrors bool
 	Record       bool
+	TargetURL    string
 }
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {

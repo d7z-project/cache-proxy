@@ -102,6 +102,9 @@ type resolver struct {
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if !httpcache.SafePath(target) {
+		return httpcache.Route{}, fs.ErrNotExist
+	}
 	if strings.HasPrefix(target, "sumdb/") {
 		return r.resolveSumDB(target)
 	}

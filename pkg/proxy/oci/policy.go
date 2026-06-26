@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	containername "github.com/google/go-containerregistry/pkg/name"
@@ -24,7 +25,6 @@ type Policy struct {
 type Rule struct {
 	Match       string            `json:"match" yaml:"match"`
 	Policy      string            `json:"policy,omitempty" yaml:"policy,omitempty"`
-	FreshFor    config.Freshness  `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
 	ExpireAfter config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
 }
 
@@ -91,6 +91,9 @@ func validate(upstream string, policy *Policy) error {
 	}
 	if !config.ValidBusyPolicy(policy.BusyPolicy) {
 		return fmt.Errorf("invalid oci busy policy %q", policy.BusyPolicy)
+	}
+	if policy.FreshFor > 0 && policy.FreshFor.Duration() < time.Second {
+		return fmt.Errorf("oci fresh_for must be at least 1s")
 	}
 	for i, rule := range policy.Rules {
 		if strings.TrimSpace(rule.Match) == "" {

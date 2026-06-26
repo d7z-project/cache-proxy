@@ -13,26 +13,26 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func rewriteNPMTarballs(value any, upstreams []string, publicBase string) bool {
+func RewriteNPMTarballs(value any, upstreams []string, publicBase string) bool {
 	changed := false
 	switch typed := value.(type) {
 	case map[string]any:
 		if dist, ok := typed["dist"].(map[string]any); ok {
 			if tarball, ok := dist["tarball"].(string); ok {
-				if rewritten := rewriteNPMTarballURL(tarball, upstreams, publicBase); rewritten != tarball {
+				if rewritten := RewriteNPMTarballURL(tarball, upstreams, publicBase); rewritten != tarball {
 					dist["tarball"] = rewritten
 					changed = true
 				}
 			}
 		}
 		for _, nested := range typed {
-			if rewriteNPMTarballs(nested, upstreams, publicBase) {
+			if RewriteNPMTarballs(nested, upstreams, publicBase) {
 				changed = true
 			}
 		}
 	case []any:
 		for _, nested := range typed {
-			if rewriteNPMTarballs(nested, upstreams, publicBase) {
+			if RewriteNPMTarballs(nested, upstreams, publicBase) {
 				changed = true
 			}
 		}
@@ -40,7 +40,7 @@ func rewriteNPMTarballs(value any, upstreams []string, publicBase string) bool {
 	return changed
 }
 
-func rewriteNPMTarballURL(rawURL string, upstreams []string, publicBase string) string {
+func RewriteNPMTarballURL(rawURL string, upstreams []string, publicBase string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" {
 		return rawURL
@@ -91,9 +91,8 @@ func publicBaseURL(req *http.Request) string {
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	var lastErr error
-	if target := headers[""]; target != "" {
-		delete(headers, "")
-		request, err := http.NewRequestWithContext(ctx, method, target, nil)
+	if options.TargetURL != "" {
+		request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -218,9 +217,6 @@ func (h *Handler) remoteHeaders(req *http.Request, route Route, extra map[string
 	}
 	for key, value := range extra {
 		headers[key] = value
-	}
-	if route.TargetURL != "" {
-		headers[""] = route.TargetURL
 	}
 	return headers
 }

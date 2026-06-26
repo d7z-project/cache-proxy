@@ -16,7 +16,7 @@ type CargoConfig struct {
 	AuthRequired bool   `json:"auth-required,omitempty"`
 }
 
-func rewriteCargoConfig(req *http.Request, data []byte) ([]byte, error) {
+func rewriteCargoConfig(req *http.Request, data []byte, authRequired bool) ([]byte, error) {
 	cfg := CargoConfig{}
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -24,6 +24,9 @@ func rewriteCargoConfig(req *http.Request, data []byte) ([]byte, error) {
 		}
 	}
 	cfg.DL = joinBaseAndPath(externalBaseURL(req), "/api/v1/crates/{crate}/{version}/download")
+	if authRequired {
+		cfg.AuthRequired = true
+	}
 	return json.Marshal(cfg)
 }
 
