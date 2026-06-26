@@ -18,6 +18,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
@@ -33,8 +34,13 @@ func (testDiscoverer) Discover(cleanPath string) (RootSpec, bool) {
 	}, true
 }
 
+func newTestHealth(t *testing.T, stats *httpcache.Stats) *health.ServiceHealth {
+	return health.New("repo", "test", health.Config{}, nil, stats, "cache-proxy-test")
+}
+
 func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder) *IndexedHandler {
 	t.Helper()
+	stats := httpcache.NewStats(prometheus.NewRegistry())
 	return NewIndexedHandler(
 		"repo",
 		"test",
@@ -58,7 +64,8 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, disco
 		seeds,
 		builder,
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		newTestHealth(t, stats),
 	)
 }
 
@@ -87,6 +94,7 @@ func TestIndexedHandlerRefreshInvalidatesArtifactIdentity(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo",
 		"test",
@@ -119,6 +127,7 @@ func TestIndexedHandlerRefreshInvalidatesArtifactIdentity(t *testing.T) {
 		},
 		store,
 		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -164,6 +173,7 @@ func TestIndexedHandlerRefreshWithoutRootsStaysBooting(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo",
 		"test",
@@ -182,6 +192,7 @@ func TestIndexedHandlerRefreshWithoutRootsStaysBooting(t *testing.T) {
 		},
 		store,
 		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -250,6 +261,7 @@ func TestIndexedHandlerFailedRefreshKeepsPreviousSnapshot(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	fail := atomic.Bool{}
 	handler := NewIndexedHandler(
 		"repo",
@@ -275,6 +287,7 @@ func TestIndexedHandlerFailedRefreshKeepsPreviousSnapshot(t *testing.T) {
 		},
 		store,
 		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -310,6 +323,8 @@ func TestIndexedHandlerMetadataRequestDiscoversAndRefreshesRoot(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(time.Minute),
@@ -335,17 +350,24 @@ func TestIndexedHandlerMetadataRequestDiscoversAndRefreshesRoot(t *testing.T) {
 			}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	record, ok := handler.RootRecord("meta")
+	_, ok := handler.targets["meta"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, record.State)
-	require.Contains(t, handler.currentSnapshot().Metadata, "meta/index.txt")
+	require.Eventually(t, func() bool {
+		snap := handler.currentSnapshot()
+		if snap == nil {
+			return false
+		}
+		_, ok := snap.Metadata["meta/index.txt"]
+		return ok
+	}, time.Second, 10*time.Millisecond)
 	require.Equal(t, "v1", handler.currentSnapshot().Artifacts["pkg.tar.zst"])
 }
 
@@ -368,6 +390,8 @@ func TestDiscoverRootTriggersAsyncRefresh(t *testing.T) {
 	defer store.Close()
 
 	var refreshCount atomic.Int64
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(time.Minute),
@@ -391,7 +415,8 @@ func TestDiscoverRootTriggersAsyncRefresh(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, handler.Start(ctx))
@@ -404,12 +429,10 @@ func TestDiscoverRootTriggersAsyncRefresh(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.True(t, handler.HasRoot("meta"), "root discovered and added")
+	_, ok := handler.targets["meta"]
+	require.True(t, ok, "root discovered and added")
 
 	require.Eventually(t, func() bool { return refreshCount.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
-	rootRec, rootOk := handler.RootRecord("meta")
-	require.True(t, rootOk)
-	require.Equal(t, RepositoryStateActive, rootRec.State)
 	require.Contains(t, handler.currentSnapshot().Metadata, "meta/index.txt")
 }
 
@@ -431,7 +454,8 @@ func TestIndexedHandlerArtifactRequestDoesNotDiscoverRoot(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pkg.tar.zst", nil).WithContext(ctx))
 	require.Equal(t, http.StatusNotFound, rec.Code)
-	require.False(t, handler.HasRoot("meta"))
+	_, ok := handler.targets["meta"]
+	require.False(t, ok)
 }
 
 func TestIndexedHandlerEmptyPathBypassesUpstream(t *testing.T) {
@@ -455,7 +479,8 @@ func TestIndexedHandlerEmptyPathBypassesUpstream(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "root", rec.Body.String())
-	require.False(t, handler.HasRoot("meta"))
+	_, ok := handler.targets["meta"]
+	require.False(t, ok)
 }
 
 func TestIndexedHandlerUnknownPathBypassesUpstream(t *testing.T) {
@@ -471,6 +496,8 @@ func TestIndexedHandlerUnknownPathBypassesUpstream(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo",
 		"test",
@@ -493,14 +520,15 @@ func TestIndexedHandlerUnknownPathBypassesUpstream(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{}}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/robots.txt", nil).WithContext(ctx))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "other", rec.Body.String())
-	require.Empty(t, handler.roots)
+	require.Empty(t, handler.targets)
 }
 
 func TestIndexedHandlerOnlyMetadataRequestsCanDiscoverRoot(t *testing.T) {
@@ -511,6 +539,8 @@ func TestIndexedHandlerOnlyMetadataRequestsCanDiscoverRoot(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo",
 		"test",
@@ -528,12 +558,13 @@ func TestIndexedHandlerOnlyMetadataRequestsCanDiscoverRoot(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{}}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil).WithContext(ctx))
-	require.Empty(t, handler.roots)
+	require.Empty(t, handler.targets)
 }
 
 func TestIndexedHandlerCleanupKeepsTrackedMetadataCompanions(t *testing.T) {
@@ -585,6 +616,11 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := health.New("repo", "test", health.Config{
+		RemovalThreshold: 2,
+		MinNotFoundAge:   0,
+	}, []string{server.URL}, stats, "cache-proxy-test")
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(0),
@@ -614,9 +650,9 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 			}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
-	handler.removal = RemovalPolicy{ConsecutiveNotFound: 2, MinNotFoundAge: 0}
 
 	require.NoError(t, handler.Refresh(ctx))
 	require.NotNil(t, handler.currentSnapshot())
@@ -624,15 +660,17 @@ func TestIndexedHandlerRemovesRootAfterRepeatedMetadataNotFound(t *testing.T) {
 	missing.Store(true)
 	err = handler.Refresh(ctx)
 	require.ErrorIs(t, err, errMetadataNotFound)
-	record, ok := handler.RootRecord("meta")
+
+	state, ok := svcHealth.ResourceState("meta")
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateSuspect, record.State)
-	require.NotNil(t, record.Snapshot)
+	require.Equal(t, health.RSuspect, state)
+	require.NotNil(t, handler.currentSnapshot())
 
 	err = handler.Refresh(ctx)
 	require.ErrorIs(t, err, errMetadataNotFound)
-	_, ok2 := handler.RootRecord("meta")
-	require.False(t, ok2, "root must be deleted after removal threshold")
+
+	state, ok = svcHealth.ResourceState("meta")
+	require.False(t, ok, "root must be deleted after removal threshold")
 	require.Empty(t, handler.currentSnapshot().Artifacts)
 }
 
@@ -732,20 +770,14 @@ func TestRestoreRootsDiscoversFromCachedMetadata(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
 		})
 	require.NoError(t, h1.Refresh(ctx))
-	require.True(t, h1.HasRoot("meta"))
-	rec1, ok := h1.RootRecord("meta")
+	_, ok := h1.targets["meta"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, rec1.State)
-	require.NotNil(t, rec1.Snapshot)
 
 	h2 := newTestHandler(t, store, []string{server.URL}, testDiscoverer{}, nil, nil)
 	h2.restoreRoots(ctx)
 
-	require.True(t, h2.HasRoot("meta"))
-	rec, _ := h2.RootRecord("meta")
-	require.Equal(t, RepositoryStateActive, rec.State)
-	require.WithinDuration(t, time.Now(), rec.LastRefreshAt, 5*time.Second)
-	require.False(t, rec.LastSuccessAt.IsZero())
+	_, ok = h2.targets["meta"]
+	require.True(t, ok)
 }
 
 func TestRefreshUsesCachedMetadataWhenFresh(t *testing.T) {
@@ -809,9 +841,8 @@ func TestRefreshFallsBackToCacheOnUpstream500(t *testing.T) {
 	fail.Store(true)
 	require.NoError(t, handler.Refresh(ctx))
 	require.NotNil(t, handler.currentSnapshot(), "snapshot must survive upstream 500 via cache fallback")
-	rec, ok := handler.RootRecord("meta")
+	_, ok := handler.targets["meta"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, rec.State)
 }
 
 func TestStateRoundTrip(t *testing.T) {
@@ -822,6 +853,8 @@ func TestStateRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(time.Minute),
@@ -834,36 +867,18 @@ func TestStateRoundTrip(t *testing.T) {
 		[]RootSpec{staticRootSpec{key: "meta", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
 		nil,
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
-	now := time.Now()
-	specRec, ok := handler.RootRecord("meta")
-	require.True(t, ok)
-	handler.SetRootRecord("meta", &RepositoryRecord{
-		Spec:                 specRec.Spec,
-		State:                RepositoryStateActive,
-		LastSeenAt:           now,
-		LastRefreshAt:        now,
-		LastSuccessAt:        now.Add(-time.Minute),
-		ConsecutiveNotFound:  2,
-		ConsecutiveInvalid:   1,
-		ConsecutiveTransient: 3,
-		LastError:            "test error",
-	})
-
+	handler.addRoot("meta", []MetadataTarget{{URL: "meta/index.txt"}})
 	handler.saveState(ctx)
 
 	state := handler.loadState(ctx)
 	require.Equal(t, 1, state.Version)
-	require.Contains(t, state.Roots, "meta")
-	pr := state.Roots["meta"]
-	require.Equal(t, "active", pr.State)
-	require.Equal(t, 2, pr.ConsecutiveNotFound)
-	require.Equal(t, 1, pr.ConsecutiveInvalid)
-	require.Equal(t, 3, pr.ConsecutiveTransient)
-	require.Equal(t, "test error", pr.LastError)
-	require.WithinDuration(t, now, pr.LastRefreshAt, time.Second)
+	require.Len(t, state.Roots, 1)
+	require.Equal(t, "meta", state.Roots[0].Path)
+	require.Equal(t, "pending", state.Roots[0].State)
 }
 
 func TestStartRestoresStateThenRefreshes(t *testing.T) {
@@ -882,6 +897,7 @@ func TestStartRestoresStateThenRefreshes(t *testing.T) {
 	defer store.Close()
 
 	makeHandler := func() *IndexedHandler {
+		stats := httpcache.NewStats(prometheus.NewRegistry())
 		return NewIndexedHandler(
 			"repo", "test", "repo",
 			config.Freshness(time.Minute),
@@ -906,16 +922,15 @@ func TestStartRestoresStateThenRefreshes(t *testing.T) {
 				return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
 			},
 			store,
-			httpcache.NewStats(prometheus.NewRegistry()),
+			stats,
+			newTestHealth(t, stats),
 		)
 	}
 
 	h1 := makeHandler()
 	require.NoError(t, h1.Start(ctx))
-	require.True(t, h1.HasRoot("meta"))
-	rec1, ok := h1.RootRecord("meta")
+	_, ok := h1.targets["meta"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, rec1.State)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
 	defer stopCancel()
@@ -924,12 +939,8 @@ func TestStartRestoresStateThenRefreshes(t *testing.T) {
 	h2 := makeHandler()
 	h2.restoreRoots(ctx)
 
-	require.True(t, h2.HasRoot("meta"))
-	rec, ok := h2.RootRecord("meta")
+	_, ok = h2.targets["meta"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, rec.State, "state restored from persisted file")
-	require.False(t, rec.LastSuccessAt.IsZero())
-	require.False(t, rec.LastRefreshAt.IsZero())
 }
 
 func TestRefreshConditionalGET304(t *testing.T) {
@@ -953,6 +964,8 @@ func TestRefreshConditionalGET304(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(0),
@@ -975,7 +988,8 @@ func TestRefreshConditionalGET304(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{"meta/index.txt": {}}}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -1009,6 +1023,8 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 		}, true
 	})
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := newTestHealth(t, stats)
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(time.Minute),
@@ -1030,18 +1046,17 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]struct{}{"bookworm/main": {}}}, nil
 		},
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 	require.NoError(t, handler.Refresh(ctx))
 
-	rec, ok := handler.RootRecord("bookworm")
+	_, ok := handler.targets["bookworm"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, rec.State)
 
-	rec.LastSuccessAt = time.Now().Add(-time.Hour)
-	handler.SetRootRecord("bookworm", &rec)
 	handler.saveState(ctx)
 
+	stats2 := httpcache.NewStats(prometheus.NewRegistry())
 	h2 := NewIndexedHandler(
 		"repo", "test", "repo",
 		config.Freshness(time.Minute),
@@ -1059,14 +1074,13 @@ func TestRestoreRootsPreservesMergeForDEB(t *testing.T) {
 		nil,
 		nil,
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats2,
+		newTestHealth(t, stats2),
 	)
 	h2.restoreRoots(ctx)
 
-	rec2, ok := h2.RootRecord("bookworm")
+	_, ok = h2.targets["bookworm"]
 	require.True(t, ok)
-	require.Equal(t, RepositoryStateActive, rec2.State)
-	require.WithinDuration(t, rec.LastSuccessAt, rec2.LastSuccessAt, time.Second)
 }
 
 type discovererFunc func(string) (RootSpec, bool)

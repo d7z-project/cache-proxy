@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
@@ -80,9 +81,9 @@ func publicBaseURL(req *http.Request) string {
 			scheme = "http"
 		}
 	}
-	host := req.Host
-	if forwardedHost := req.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-		host = forwardedHost
+	host := req.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = req.Host
 	}
 	prefix := strings.TrimRight(req.Header.Get("X-Cache-Proxy-Prefix"), "/")
 	return scheme + "://" + host + prefix
@@ -91,13 +92,13 @@ func publicBaseURL(req *http.Request) string {
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	var lastErr error
 	if target := headers[""]; target != "" {
-		requestHeaders := mapsCloneWithoutEmptyKey(headers)
+		delete(headers, "")
 		request, err := http.NewRequestWithContext(ctx, method, target, nil)
 		if err != nil {
 			return nil, err
 		}
 		request.Header.Set("User-Agent", h.client.UserAgent)
-		for key, value := range requestHeaders {
+		for key, value := range headers {
 			request.Header.Set(key, value)
 		}
 		response, err := h.client.Do(request)
@@ -116,9 +117,31 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		}
 		return responseFromHTTP(response), nil
 	}
-	for _, baseURL := range h.config.Upstreams {
-		pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
-		targetURL := strings.TrimRight(baseURL, "/") + "/" + EscapePath(pathPart)
+
+	pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
+	var upstreams []struct {
+		URL    string
+		Weight float64
+	}
+	if h.health != nil {
+		weighted := h.health.WeightedUpstreams(h.config.Upstreams)
+		for _, wu := range weighted {
+			upstreams = append(upstreams, struct {
+				URL    string
+				Weight float64
+			}{wu.URL, wu.Weight})
+		}
+	} else {
+		for _, url := range h.config.Upstreams {
+			upstreams = append(upstreams, struct {
+				URL    string
+				Weight float64
+			}{url, 1.0})
+		}
+	}
+
+	for _, candidate := range upstreams {
+		targetURL := strings.TrimRight(candidate.URL, "/") + "/" + EscapePath(pathPart)
 		if rawQuery != "" {
 			targetURL += "?" + rawQuery
 		}
@@ -132,10 +155,15 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		for key, value := range headers {
 			request.Header.Set(key, value)
 		}
+		start := time.Now()
 		response, err := h.client.Do(request)
+		latency := time.Since(start)
 		if err != nil {
 			if options.Record {
 				h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
+			}
+			if h.health != nil {
+				h.health.RecordFailure(candidate.URL, err)
 			}
 			lastErr = err
 			slog.Debug("upstream request failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
@@ -144,6 +172,9 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 		slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
 		if options.Record {
 			h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
+		}
+		if h.health != nil {
+			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 		}
 		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
@@ -192,17 +223,6 @@ func (h *Handler) remoteHeaders(req *http.Request, route Route, extra map[string
 		headers[""] = route.TargetURL
 	}
 	return headers
-}
-
-func mapsCloneWithoutEmptyKey(headers map[string]string) map[string]string {
-	clone := make(map[string]string, len(headers))
-	for key, value := range headers {
-		if key == "" {
-			continue
-		}
-		clone[key] = value
-	}
-	return clone
 }
 
 func (h *Handler) passHeaders() []string {

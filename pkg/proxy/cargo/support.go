@@ -56,11 +56,3 @@ func cargoDownloadURL(template, crate, version string) string {
 		"{lowerprefix}", "",
 	).Replace(template)
 }
-
-func cloneHeaders(source map[string]string) map[string]string {
-	clone := make(map[string]string, len(source))
-	for key, value := range source {
-		clone[key] = value
-	}
-	return clone
-}

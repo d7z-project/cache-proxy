@@ -11,13 +11,13 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 const DefaultGCInterval = 24 * time.Hour
 
-func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpproxy.Stats) (map[string]*proxyruntime.Entry, error) {
+func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats) (map[string]*proxyruntime.Entry, error) {
 	plan := proxyruntime.NewPlanContext(store, stats, doc.Server.Bind, doc.Metrics.Path)
 	drivers := builtinDrivers()
 	for _, decl := range doc.Instances {

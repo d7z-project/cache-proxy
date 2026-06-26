@@ -11,13 +11,13 @@ import (
 	"strings"
 )
 
-type cargoConfig struct {
+type CargoConfig struct {
 	DL           string `json:"dl"`
 	AuthRequired bool   `json:"auth-required,omitempty"`
 }
 
 func rewriteCargoConfig(req *http.Request, data []byte) ([]byte, error) {
-	cfg := cargoConfig{}
+	cfg := CargoConfig{}
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, err
@@ -84,7 +84,13 @@ func rewritePyPISimpleHTML(base, upstreamPageURL string, data []byte) []byte {
 }
 
 func resolveURL(base, raw string) string {
-	baseURL, _ := url.Parse(base)
+	if base == "" {
+		return raw
+	}
+	baseURL, err := url.Parse(base)
+	if err != nil || baseURL == nil {
+		return raw
+	}
 	ref, err := url.Parse(raw)
 	if err != nil {
 		return raw
@@ -92,7 +98,7 @@ func resolveURL(base, raw string) string {
 	return baseURL.ResolveReference(ref).String()
 }
 
-func externalBaseURL(req *http.Request) string {
+func schemeAndHost(req *http.Request) string {
 	scheme := req.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
 		if req.TLS != nil {
@@ -105,11 +111,15 @@ func externalBaseURL(req *http.Request) string {
 	if host == "" {
 		host = req.Host
 	}
+	return scheme + "://" + host
+}
+
+func externalBaseURL(req *http.Request) string {
 	prefix := normalizedProxyPrefix(req.Header.Get("X-Cache-Proxy-Prefix"))
 	if prefix == "" {
 		prefix = normalizedProxyPrefix(strings.TrimSuffix(req.URL.Path, "/config.json"))
 	}
-	return scheme + "://" + host + prefix
+	return schemeAndHost(req) + prefix
 }
 
 func ExternalBaseURL(req *http.Request) string {
@@ -117,27 +127,15 @@ func ExternalBaseURL(req *http.Request) string {
 }
 
 func proxyBaseURL(req *http.Request) string {
-	scheme := req.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		if req.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-	host := req.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = req.Host
-	}
 	prefix := normalizedProxyPrefix(req.Header.Get("X-Cache-Proxy-Prefix"))
 	if prefix == "" {
-		prefix = req.URL.Path
-		if idx := strings.Index(prefix, "/simple/"); idx >= 0 {
-			prefix = prefix[:idx]
+		p := req.URL.Path
+		if idx := strings.Index(p, "/simple/"); idx >= 0 {
+			p = p[:idx]
 		}
-		prefix = normalizedProxyPrefix(prefix)
+		prefix = normalizedProxyPrefix(p)
 	}
-	return scheme + "://" + host + prefix
+	return schemeAndHost(req) + prefix
 }
 
 func normalizedProxyPrefix(value string) string {

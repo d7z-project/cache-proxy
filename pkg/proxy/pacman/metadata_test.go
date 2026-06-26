@@ -16,6 +16,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
@@ -56,6 +57,8 @@ func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := health.New("repo", "pacman", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"pacman",
@@ -71,7 +74,8 @@ func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
 		[]filerepo.RootSpec{&rootSpec{Repo: "core", Arch: "x86_64"}},
 		buildSnapshot,
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -113,6 +117,8 @@ func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := health.New("repo", "pacman", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"pacman",
@@ -128,7 +134,8 @@ func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
 		[]filerepo.RootSpec{&rootSpec{Repo: "core", Arch: "x86_64"}},
 		buildSnapshot,
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, store.MkdirAll("repo/repo/core/os/x86_64", 0o755))

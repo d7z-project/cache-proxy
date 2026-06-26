@@ -16,6 +16,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
@@ -61,6 +62,8 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := health.New("repo", "apk", health.Config{}, []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo",
 		"apk",
@@ -76,7 +79,8 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 		[]filerepo.RootSpec{&rootSpec{Branch: "v3.20", Repo: "main", Arch: "x86_64"}},
 		buildSnapshot,
 		store,
-		httpcache.NewStats(prometheus.NewRegistry()),
+		stats,
+		svcHealth,
 	)
 
 	require.NoError(t, store.MkdirAll("repo/repo/v3.20/main/x86_64", 0o755))

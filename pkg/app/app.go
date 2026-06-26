@@ -22,7 +22,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
-	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
@@ -36,7 +36,7 @@ const (
 type App struct {
 	config       *config.Document
 	store        *blobfs.Store
-	stats        *httpproxy.Stats
+	stats        *httpcache.Stats
 	metricsReg   *prometheus.Registry
 	entries      map[string]*proxyruntime.Entry
 	handlers     []proxyruntime.Instance
@@ -96,7 +96,7 @@ func Validate(doc *config.Document) error {
 	defer store.Close()
 
 	registry := prometheus.NewRegistry()
-	stats := httpproxy.NewStats(registry)
+	stats := httpcache.NewStats(registry)
 	_, err = planEntries(context.Background(), &copy, store, stats)
 	return err
 }
@@ -120,7 +120,7 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 	}
 	metricsReg := prometheus.NewRegistry()
 	metricsReg.MustRegister(metrics.NewBlobFSCollector(store))
-	stats := httpproxy.NewStats(metricsReg)
+	stats := httpcache.NewStats(metricsReg)
 	entries, err := planEntries(ctx, doc, store, stats)
 	if err != nil {
 		_ = store.Close()

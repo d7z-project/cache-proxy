@@ -82,7 +82,7 @@ func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
 		ExpireAfter:     config.Expiration(72 * time.Hour),
 		Upstreams:       []string{upstream.URL},
 		DefaultFreshFor: config.Freshness(time.Minute),
-	}, store, resolver, NewStats(prometheus.NewRegistry()))
+	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
 
 	// First request: cache miss, fetches from upstream
 	rec := httptest.NewRecorder()
@@ -141,7 +141,7 @@ func TestCacheDebugHeadersOnRevalidateFresh(t *testing.T) {
 		ExpireAfter:     config.Expiration(72 * time.Hour),
 		Upstreams:       []string{upstream.URL},
 		DefaultFreshFor: config.Freshness(time.Minute),
-	}, store, resolver, NewStats(prometheus.NewRegistry()))
+	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
 
 	// First request: cache miss
 	rec := httptest.NewRecorder()
@@ -186,7 +186,7 @@ func TestCacheDebugHeadersOnBypass(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{upstream.URL},
-	}, store, resolver, NewStats(prometheus.NewRegistry()))
+	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/bypass", nil)
@@ -220,7 +220,7 @@ func TestPassthroughStripsInternalHeaders(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{upstream.URL},
-	}, store, resolver, NewStats(prometheus.NewRegistry()))
+	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/object", nil)
@@ -262,7 +262,7 @@ func TestHeadRequestStripsInternalHeaders(t *testing.T) {
 		ExpireAfter:     config.Expiration(72 * time.Hour),
 		Upstreams:       []string{upstream.URL},
 		DefaultFreshFor: config.Freshness(time.Minute),
-	}, store, resolver, NewStats(prometheus.NewRegistry()))
+	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
 
 	// First: cache the object
 	rec := httptest.NewRecorder()

@@ -147,5 +147,5 @@ func NewHandler(name, mode, objectRoot string, metadataFreshFor config.Freshness
 		},
 		Rules:      append([]Rule(nil), policy.Rules...),
 		Classifier: classifier,
-	}), stats)
+	}), stats, nil)
 }

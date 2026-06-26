@@ -216,6 +216,11 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 	h.wait.Add(1)
 	h.stats.AddActiveDownload(h.name, h.config.Mode, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("download goroutine panic", "instance", h.name, "path", route.ObjectPath, "panic", r)
+			}
+		}()
 		defer h.wait.Done()
 		defer h.stats.AddActiveDownload(h.name, h.config.Mode, -1)
 		defer close(done)
@@ -227,7 +232,10 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		_, copyErr := io.Copy(pw, tee)
 		if copyErr == nil {
 			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
-				h.store.Put(context.Background(), h.name, route.ObjectPath, tempFile, meta)
+				_, err := h.store.Put(context.Background(), h.name, route.ObjectPath, tempFile, meta)
+				if err != nil {
+					slog.Warn("cache store write failed", "instance", h.name, "path", route.ObjectPath, "err", err)
+				}
 			}
 		}
 		tempFile.Close()

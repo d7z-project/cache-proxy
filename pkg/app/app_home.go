@@ -9,7 +9,7 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
-	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -52,7 +52,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		i18n = i18nMaps["en"]
 	}
 	baseURL := a.publicBaseURL(req)
-	var ss httpproxy.StatsSnapshot
+	var ss httpcache.StatsSnapshot
 	if a.stats != nil {
 		ss = a.stats.Snapshot()
 	}
@@ -114,7 +114,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	}
 }
 
-func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpproxy.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
+func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpcache.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
 	instURL := instURL(entry, baseURL, req)
 	hi := homeInstance{
 		Name: entry.Name,

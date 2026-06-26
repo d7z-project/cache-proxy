@@ -29,7 +29,7 @@ func instanceStatus(s httpcache.InstanceStats, i18n map[string]string) (color, l
 		case "refreshing":
 			color = "blue"
 		case "degraded":
-			color = "red"
+			color = "yellow"
 		default:
 			color = "gray"
 		}

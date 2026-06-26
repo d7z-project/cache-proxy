@@ -2,13 +2,15 @@ package httpcache
 
 import (
 	"context"
-	"gopkg.d7z.net/blobfs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
 
+	"gopkg.d7z.net/blobfs"
+
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -40,13 +42,14 @@ type RuntimeConfig struct {
 }
 
 type Handler struct {
-	name      string
-	config    RuntimeConfig
-	store     *blobfs.Store
-	client    *utils.HttpClientWrapper
-	locks     *utils.RWLockGroup
+	name   string
+	config RuntimeConfig
+	store  *blobfs.Store
+	client *utils.HttpClientWrapper
+	locks  *utils.RWLockGroup
 	resolver  Resolver
 	stats     *Stats
+	health    *health.ServiceHealth
 	wait      sync.WaitGroup
 	downloads sync.Map
 }
@@ -56,7 +59,7 @@ type remoteOptions struct {
 	Record       bool
 }
 
-func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats) *Handler {
+func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
 	client := utils.DefaultHttpClientWrapper()
 	client.UserAgent = ModeUserAgent(runtime.Mode)
 	if runtime.Transport != nil {
@@ -80,7 +83,7 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 			}
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats}
+	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth}
 }
 
 func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {

@@ -81,6 +81,20 @@ instances:
         proxy: http://127.0.0.1:7890
         ua: custom-agent/1.0
         timeout: 10s
+        health:
+          enabled: true
+          probe_interval: 30s
+          probe_timeout: 5s
+          probe_path: /v2/
+          failure_threshold: 3
+          success_threshold: 2
+          degrade_latency: 2s
+          min_weight: 0.1
+          ewma_alpha: 0.2
+          removal_threshold: 3
+          block_interval: 1h
+          max_dynamic_paths: 8
+          min_not_found_age: 10m
       # ... mode-specific fields below
 ```
 
@@ -93,8 +107,21 @@ instances:
 | `route.path` | path | required* | Mount under `server.bind` (* `oci` uses `bind` instead) |
 | `bind` | `host:port` | required* | Dedicated listener (* `oci` only) |
 | `transport.proxy` | URL | — | Outbound HTTP proxy |
-| `transport.ua` | string | `curl/8.10.0` | Override User-Agent |
-| `transport.timeout` | duration | `3s` | Upstream dial timeout |
+| `transport.ua` | string | `per mode` | Override User-Agent (per-mode: docker/27.0.0, npm/10.8.0, cargo/1.79.0, Go-http-client/2.0, cache-proxy) |
+| `transport.timeout` | duration | `3s` | Upstream TCP dial timeout |
+| `transport.health.enabled` | bool | `true` | Enable active health probing |
+| `transport.health.probe_interval` | duration | `30s` | Health probe interval |
+| `transport.health.probe_timeout` | duration | `5s` | Single probe timeout |
+| `transport.health.probe_path` | path | — | Override probe path (auto-detected per mode) |
+| `transport.health.failure_threshold` | int | `3` | Consecutive failures → circuit break |
+| `transport.health.success_threshold` | int | `2` | Half-open successes → recover |
+| `transport.health.degrade_latency` | duration | `2s` | EWMA latency > this → weight reduction |
+| `transport.health.min_weight` | float | `0.1` | Minimum weight for degraded upstream |
+| `transport.health.ewma_alpha` | float | `0.2` | EWMA smoothing factor |
+| `transport.health.removal_threshold` | int | `3` | Consecutive 404 → remove repo (filerepo) |
+| `transport.health.block_interval` | duration | `1h` | Blocked repo retry interval (filerepo) |
+| `transport.health.max_dynamic_paths` | int | `8` | Max auto-discovered probe paths per resource (filerepo) |
+| `transport.health.min_not_found_age` | duration | `10m` | Min age before 404-consecutive removal (filerepo) |
 
 ---
 

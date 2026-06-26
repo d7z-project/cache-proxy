@@ -56,7 +56,7 @@ func NewHandler(name string, expireAfter config.Expiration, upstreams []string, 
 		Transport:       transport,
 		BusyPolicy:      policy.ModuleBusyPolicy,
 		DefaultFreshFor: policy.ModuleFreshFor,
-	}, store, &resolver{policy: policy}, stats)
+	}, store, &resolver{policy: policy}, stats, nil)
 	return &Handler{name: name, policy: policy, store: store, base: base}, nil
 }
 

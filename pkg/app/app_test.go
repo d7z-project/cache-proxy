@@ -15,14 +15,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func TestValidateRejectsConflictingPaths(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "one", "/files", "https://example.com", fileproxy.Policy{}),
-		fileInstance(t, "two", "/files", "https://example.org", fileproxy.Policy{}),
+		fileInstance(t, "one", "/files", "https://example.com", file.Policy{}),
+		fileInstance(t, "two", "/files", "https://example.org", file.Policy{}),
 	})
 	err := Validate(doc)
 	require.ErrorContains(t, err, "listen path /files conflicts")
@@ -40,7 +40,7 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	defer upstream.Close()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, fileproxy.Policy{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{
 			DefaultPolicy: config.PolicyImmutable,
 			BusyPolicy:    config.BusyPolicyBypass,
 		}),
@@ -59,7 +59,7 @@ func TestAppCleanupRemovesExpiredObjects(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
 	doc.Storage.Cleanup.Enabled = true
 
@@ -117,10 +117,10 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{
 			DefaultPolicy: config.PolicyImmutable,
 			BusyPolicy:    config.BusyPolicyStale,
-			Rules: []fileproxy.Rule{
+			Rules: []file.Rule{
 				{Match: "**/*.tgz", Policy: config.PolicyRevalidate},
 			},
 		}),
@@ -149,7 +149,7 @@ func TestHomePageUsesPublicURL(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
 	doc.Server.PublicURL = "https://cache.home.lan"
 	app, err := Open(ctx, doc)
@@ -254,7 +254,7 @@ func TestAppCleanupHonorsCanceledContext(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
 	doc.Storage.Cleanup.Enabled = true
 
@@ -424,7 +424,7 @@ func testDocument(backend string, instances []config.Instance) *config.Document 
 	}
 }
 
-func fileInstance(t *testing.T, name, path, upstream string, policy fileproxy.Policy) config.Instance {
+func fileInstance(t *testing.T, name, path, upstream string, policy file.Policy) config.Instance {
 	t.Helper()
 	mode := map[string]any{
 		"expire_after": config.Expiration(time.Hour),

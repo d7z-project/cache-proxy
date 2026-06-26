@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	fileproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/file"
-	httpproxy "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -26,7 +26,7 @@ func TestHomePageShowsStatsAfterRequests(t *testing.T) {
 	defer upstream.Close()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, fileproxy.Policy{}),
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
 	})
 	app, err := Open(ctx, doc)
 	require.NoError(t, err)
@@ -53,7 +53,7 @@ func TestHomePageWithEmptyStats(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", fileproxy.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
 	app, err := Open(ctx, doc)
 	require.NoError(t, err)
@@ -154,19 +154,19 @@ func TestFormatHitRate(t *testing.T) {
 }
 
 func TestInstanceStatusNonIndexed(t *testing.T) {
-	s := httpproxy.InstanceStats{UpstreamRequests: 100, UpstreamErrors: 0}
+	s := httpcache.InstanceStats{UpstreamRequests: 100, UpstreamErrors: 0}
 	color, label, extra := instanceStatus(s, i18nMaps["en"])
 	require.Equal(t, "green", color)
 	require.Equal(t, "upstream OK", label)
 	require.Empty(t, extra)
 
-	s = httpproxy.InstanceStats{UpstreamRequests: 100, UpstreamErrors: 10}
+	s = httpcache.InstanceStats{UpstreamRequests: 100, UpstreamErrors: 10}
 	color, label, extra = instanceStatus(s, i18nMaps["en"])
 	require.Equal(t, "yellow", color)
 	require.Equal(t, "10 err", label)
 	require.Empty(t, extra)
 
-	s = httpproxy.InstanceStats{}
+	s = httpcache.InstanceStats{}
 	color, label, extra = instanceStatus(s, i18nMaps["en"])
 	require.Empty(t, color)
 	require.Equal(t, "\u2014", label)
@@ -175,7 +175,7 @@ func TestInstanceStatusNonIndexed(t *testing.T) {
 
 func TestInstanceStatusIndexed(t *testing.T) {
 	now := time.Now()
-	s := httpproxy.InstanceStats{
+	s := httpcache.InstanceStats{
 		MetadataState: "ready",
 		LastRefreshAt: now.Add(-2 * time.Minute),
 	}
@@ -184,7 +184,7 @@ func TestInstanceStatusIndexed(t *testing.T) {
 	require.Equal(t, "ready", label)
 	require.NotEmpty(t, extra)
 
-	s = httpproxy.InstanceStats{
+	s = httpcache.InstanceStats{
 		MetadataState: "refreshing",
 		LastRefreshAt: now.Add(-30 * time.Second),
 	}
@@ -192,13 +192,13 @@ func TestInstanceStatusIndexed(t *testing.T) {
 	require.Equal(t, "blue", color)
 	require.Equal(t, "refreshing", label)
 
-	s = httpproxy.InstanceStats{MetadataState: "degraded"}
+	s = httpcache.InstanceStats{MetadataState: "degraded"}
 	color, label, extra = instanceStatus(s, i18nMaps["en"])
-	require.Equal(t, "red", color)
+	require.Equal(t, "yellow", color)
 	require.Equal(t, "degraded", label)
 	require.Empty(t, extra)
 
-	s = httpproxy.InstanceStats{MetadataState: "booting"}
+	s = httpcache.InstanceStats{MetadataState: "booting"}
 	color, label, _ = instanceStatus(s, i18nMaps["en"])
 	require.Equal(t, "gray", color)
 	require.Equal(t, "loading", label)
@@ -228,7 +228,7 @@ func TestFormatCompact(t *testing.T) {
 
 func TestStatsLastRefreshAtIsSet(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	stats := httpproxy.NewStats(reg)
+	stats := httpcache.NewStats(reg)
 
 	stats.SetMetadataState("test", "apk", "booting", false)
 	snap := stats.Snapshot()

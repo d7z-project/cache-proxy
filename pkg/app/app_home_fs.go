@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -35,9 +36,18 @@ func init() {
 		i18nMaps[pair.lang] = m
 	}
 
-	htmlData, _ := homeAssets.ReadFile("assets/home.html")
-	cssData, _ := homeAssets.ReadFile("assets/style.css")
-	jsData, _ := homeAssets.ReadFile("assets/script.js")
+	htmlData, err := homeAssets.ReadFile("assets/home.html")
+	if err != nil {
+		panic(err)
+	}
+	cssData, err := homeAssets.ReadFile("assets/style.css")
+	if err != nil {
+		panic(err)
+	}
+	jsData, err := homeAssets.ReadFile("assets/script.js")
+	if err != nil {
+		panic(err)
+	}
 
 	homeTemplate = template.Must(template.New("home").Funcs(template.FuncMap{
 		"css": func() template.CSS { return template.CSS(cssData) },
@@ -67,7 +77,11 @@ func renderHome(w http.ResponseWriter, data homeData) {
 		i18n = i18nMaps["en"]
 	}
 
-	tpl, _ := homeTemplate.Clone()
+	tpl, err := homeTemplate.Clone()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	tpl.Funcs(template.FuncMap{
 		"t": func(key string, args ...any) string {
 			msg, ok := i18n[key]
@@ -81,7 +95,9 @@ func renderHome(w http.ResponseWriter, data homeData) {
 		},
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = tpl.Execute(w, data)
+	if err := tpl.Execute(w, data); err != nil {
+		slog.Warn("home template execute failed", "err", err)
+	}
 }
 
 func detectLocale(req *http.Request) string {

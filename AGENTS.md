@@ -35,3 +35,45 @@
 
 - 生产环境默认 JSON 格式 (`slog.NewJSONHandler`)，`LOG_LEVEL=debug` 切换为 text 格式
 - 上游请求 URL 使用 `httpcache.redactedURL` 脱敏后记录
+
+## 健康检查 (pkg/health)
+
+`ServiceHealth` 提供统一的服务健康管理，包括：
+- **上游传输层健康**：per URL 的状态机 (Healthy/Degraded/Unhealthy/HalfOpen)，EWMA 延迟追踪，降权，主动 HEAD/GET 探测
+- **资源级健康**：per repo 的状态机 (Pending/Active/Suspect/Blocked/Removed)，错误计数，熔断恢复
+- **透明故障转移**：`WeightedUpstreams()` 按权重排序上游列表，权重 0 的跳过，全部 0 时 bypass 兜底
+
+核心 API：
+- `health.New(name, mode, config, upstreams, stats, ua)` — 创建，config 从 `health.DefaultConfig()` 开始覆盖
+- `health.Start()` / `health.Stop(ctx)` — 启动/停止探测定时器
+- `health.WeightedUpstreams(upstreams)` — 取权重排序的上游列表
+- `health.RecordResult(url, status, latency)` / `health.RecordFailure(url, err)` — 被动记录请求结果
+- `health.TryStartRefresh(path)` / `health.FinishRefresh(path, gen, err, targets)` — CAS 防重入的刷新生命周期 (filerepo)
+- `health.AddResource(path, targets, upstreams)` — 注册新资源
+- `health.DashboardStatus()` — 返回仪表盘 (color, label, extra)
+- `health.AggregateState()` — 返回整体状态 (Healthy/Degraded/Unhealthy)
+
+配置嵌入 `TransportConfig.Health`:
+```yaml
+transport:
+  health:
+    enabled: true
+    probe_interval: 30s
+    probe_timeout: 5s
+    probe_path: /v2/
+    failure_threshold: 3
+    success_threshold: 2
+    degrade_latency: 2s
+    min_weight: 0.1
+    ewma_alpha: 0.2
+    removal_threshold: 3
+    block_interval: 1h
+    max_dynamic_paths: 8
+    min_not_found_age: 10m
+```
+
+编写健康检查相关逻辑时：
+- 探测路径根据 mode 自动选择：OCI→`/v2/`、Cargo→`config.json`、filerepo→从 ResourceHealth.LastTargets 动态学习、其余→HEAD base URL
+- 探测结果 404/403 不标记上游不健康，而是更新对应的 ResourceHealth
+- `context.Canceled` 不计入故障计数
+- 全部测试需用 `-race` 验证，ServiceHealth 使用单一 `sync.RWMutex` 无死锁

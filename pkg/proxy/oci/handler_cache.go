@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -85,6 +86,11 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	pr, pw := io.Pipe()
 	h.wait.Add(1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("oci download goroutine panic", "path", objectPath, "panic", r)
+			}
+		}()
 		h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
 		defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
 		defer h.wait.Done()
@@ -97,7 +103,9 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		_, copyErr := io.Copy(pw, tee)
 		if copyErr == nil {
 			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
-				h.putObjectFromReader(context.Background(), objectPath, tempFile, contentLen, respHeader, nil)
+				if err := h.putObjectFromReader(context.Background(), objectPath, tempFile, contentLen, respHeader, nil); err != nil {
+					slog.Warn("oci store write failed", "path", objectPath, "err", err)
+				}
 			}
 		}
 		tempFile.Close()

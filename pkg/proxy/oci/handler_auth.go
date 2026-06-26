@@ -14,6 +14,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
+const maxTokenResponseSize = 1 << 20 // 1MB
+
 func (h *handler) retryChallenge(ctx context.Context, method, targetURL string, headers map[string]string, response *http.Response) (*http.Response, error) {
 	challenge, ok := parseOCIChallenge(response.Header.Get("WWW-Authenticate"))
 	if !ok {
@@ -88,7 +90,11 @@ func (h *handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 	if err != nil {
 		return "", err
 	}
-	return value.(string), nil
+	token, ok := value.(string)
+	if !ok {
+		return "", errors.New("token type assertion failed")
+	}
+	return token, nil
 }
 
 func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, now time.Time) (string, time.Time, error) {
@@ -126,7 +132,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 		ExpiresIn   int64  `json:"expires_in"`
 		IssuedAt    string `json:"issued_at"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxTokenResponseSize)).Decode(&payload); err != nil {
 		return "", time.Time{}, err
 	}
 	token := payload.Token

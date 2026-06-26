@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,11 +33,6 @@ type handler struct {
 	userAgent   string
 	wait        sync.WaitGroup
 	downloads   sync.Map
-}
-
-type cargoConfig struct {
-	DL           string `json:"dl"`
-	AuthRequired bool   `json:"auth-required,omitempty"`
 }
 
 func newHandler(name, upstream string, transport *config.TransportConfig, policy *Policy, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) (*handler, error) {
@@ -229,6 +225,11 @@ func (h *handler) fetchCrateToFile(ctx context.Context, objectPath, rawURL strin
 	pr, pw := io.Pipe()
 	h.wait.Add(1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("cargo download goroutine panic", "path", objectPath, "panic", r)
+			}
+		}()
 		defer h.wait.Done()
 		defer close(done)
 		defer h.downloads.Delete(objectPath)
@@ -239,7 +240,9 @@ func (h *handler) fetchCrateToFile(ctx context.Context, objectPath, rawURL strin
 		written, copyErr := io.Copy(pw, tee)
 		if copyErr == nil {
 			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
-				h.storeCrate(context.Background(), objectPath, tempFile, written)
+				if err := h.storeCrate(context.Background(), objectPath, tempFile, written); err != nil {
+					slog.Warn("cargo store write failed", "path", objectPath, "err", err)
+				}
 			}
 		}
 		tempFile.Close()
@@ -269,7 +272,7 @@ func (h *handler) storeCrate(ctx context.Context, objectPath string, reader io.R
 }
 
 func (h *handler) rewriteConfig(req *http.Request, data []byte) ([]byte, error) {
-	cfg := cargoConfig{}
+	cfg := httpcache.CargoConfig{}
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, err
@@ -282,11 +285,11 @@ func (h *handler) rewriteConfig(req *http.Request, data []byte) ([]byte, error) 
 	return json.Marshal(cfg)
 }
 
-func (h *handler) fetchConfig(ctx context.Context) (cargoConfig, error) {
+func (h *handler) fetchConfig(ctx context.Context) (httpcache.CargoConfig, error) {
 	const objectPath = "cargo/internal/config.json"
 	if body, _, fresh, err := h.openFreshCached(ctx, objectPath, h.policy.IndexFreshFor); err == nil && fresh {
 		defer body.Close()
-		var cfg cargoConfig
+		var cfg httpcache.CargoConfig
 		return cfg, json.NewDecoder(body).Decode(&cfg)
 	}
 	data, _, err := h.fetchRawConfig(ctx)
@@ -294,21 +297,21 @@ func (h *handler) fetchConfig(ctx context.Context) (cargoConfig, error) {
 		if h.policy.IndexBusyPolicy == config.BusyPolicyStale {
 			if body, _, _, openErr := h.openFreshCached(ctx, objectPath, config.FreshnessForever); openErr == nil {
 				defer body.Close()
-				var cfg cargoConfig
+				var cfg httpcache.CargoConfig
 				return cfg, json.NewDecoder(body).Decode(&cfg)
 			}
 		}
-		return cargoConfig{}, err
+		return httpcache.CargoConfig{}, err
 	}
-	var cfg cargoConfig
+	var cfg httpcache.CargoConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cargoConfig{}, err
+		return httpcache.CargoConfig{}, err
 	}
 	if err := h.putCached(ctx, objectPath, data, map[string]string{
 		"Content-Type": "application/json",
 		"fetched-at":   time.Now().UTC().Format(time.RFC3339Nano),
 	}); err != nil {
-		return cargoConfig{}, err
+		return httpcache.CargoConfig{}, err
 	}
 	return cfg, nil
 }
@@ -340,7 +343,11 @@ func (h *handler) openCached(ctx context.Context, objectPath string) (io.ReadClo
 	if err != nil {
 		return nil, nil, err
 	}
-	return reader, cloneHeaders(reader.Info().Options), nil
+	opts := make(map[string]string, len(reader.Info().Options))
+	for k, v := range reader.Info().Options {
+		opts[k] = v
+	}
+	return reader, opts, nil
 }
 
 func (h *handler) openFreshCached(ctx context.Context, objectPath string, freshFor config.Freshness) (io.ReadCloser, map[string]string, bool, error) {

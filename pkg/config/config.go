@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.in/yaml.v3"
 )
 
@@ -100,9 +101,10 @@ type Instance struct {
 }
 
 type TransportConfig struct {
-	Proxy     string   `yaml:"proxy,omitempty"`
-	UserAgent string   `yaml:"ua,omitempty"`
-	Timeout   Duration `yaml:"timeout,omitempty"`
+	Proxy     string           `yaml:"proxy,omitempty"`
+	UserAgent string           `yaml:"ua,omitempty"`
+	Timeout   Duration         `yaml:"timeout,omitempty"`
+	Health    *health.Config   `yaml:"health,omitempty"`
 }
 
 type SelectedMode struct {
