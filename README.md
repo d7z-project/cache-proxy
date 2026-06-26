@@ -1,6 +1,6 @@
 # cache-proxy
 
-`cache-proxy` is a caching reverse proxy for package registries and artifact repositories. Single binary, single YAML config, BlobFS-backed storage.
+A caching reverse proxy for package registries and artifact repositories. Single binary, single YAML config.
 
 ## Features
 
@@ -43,11 +43,11 @@ instances:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `server.bind` | `host:port` | `127.0.0.1:18080` | Main HTTP listener |
-| `server.backend` | path | `/tmp/cache-proxy` | BlobFS storage directory |
+| `server.backend` | path | `/tmp/cache-proxy` | Storage directory |
 | `server.public_url` | URL | — | Override scheme+host shown on home page (e.g. `https://cache.home.lan`) |
 | `metrics.path` | path | `/metrics` | Prometheus endpoint |
 | `metrics.token` | string | — | Bearer token for `/metrics` |
-| `storage.gc.blob` | duration | `24h` | BlobFS GC interval |
+| `storage.gc.interval` | duration | `24h` | Storage GC interval |
 | `storage.cleanup.enabled` | bool | `false` | Enable stale-object cleanup |
 | `storage.cleanup.interval` | duration | `6h` | Cleanup scan interval |
 | `storage.cleanup.dry_run` | bool | `false` | Log deletions without removing |
@@ -55,8 +55,6 @@ instances:
 | `storage.cleanup.workers` | int | `0` | Concurrency (`0` = auto) |
 
 ### Value types
-
-Values appearing across all mode tables:
 
 | Category | Format | Examples | Special values |
 | --- | --- | --- | --- |
@@ -100,34 +98,35 @@ instances:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `name` | string | required | Instance name (metrics label, UI) |
+| `name` | string | required | Instance name (metrics label, home page) |
 | `enabled` | bool | required | `false` = skip at runtime |
 | `<mode>` | block | required | One of `file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman` |
 | `expire_after` | expiration | `720h` | Upper bound on cached object lifetime |
 | `route.path` | path | required* | Mount under `server.bind` (* `oci` uses `bind` instead) |
 | `bind` | `host:port` | required* | Dedicated listener (* `oci` only) |
 | `transport.proxy` | URL | — | Outbound HTTP proxy |
-| `transport.ua` | string | `per mode` | Override User-Agent (per-mode: docker/27.0.0, npm/10.8.0, cargo/1.79.0, Go-http-client/2.0, cache-proxy) |
+| `transport.ua` | string | per mode | Override User-Agent |
 | `transport.timeout` | duration | `3s` | Upstream TCP dial timeout |
-| `transport.health.enabled` | bool | `true` | Enable active health probing |
-| `transport.health.degrade_rate` | float | `0.1` | Error rate threshold to start reducing upstream weight |
-| `transport.health.trip_rate` | float | `0.3` | Error rate threshold to open circuit (zero traffic) |
-| `transport.health.evaluation_window` | duration | `2m` | Sliding window for error rate calculation |
-| `transport.health.degrade_latency` | duration | `2s` | EWMA latency above this reduces weight |
-| `transport.health.min_weight` | float | `0.1` | Minimum weight for degraded upstream |
-| `transport.health.canary_cooldown` | duration | `30s` | Cooldown before probing a tripped upstream |
-| `transport.health.canary_step` | float | `0.1` | Weight increase per canary success (0.1→0.5→restore) |
-| `transport.health.probe_interval` | duration | `2m` | Active probe interval for closed/degraded upstreams |
-| `transport.health.probe_timeout` | duration | `5s` | Single probe request timeout |
+| `transport.health.enabled` | bool | `true` | Enable active health monitoring and failover |
+| `transport.health.degrade_rate` | float | `0.1` | Error rate threshold to reduce upstream traffic |
+| `transport.health.trip_rate` | float | `0.3` | Error rate threshold to stop all traffic to upstream |
+| `transport.health.evaluation_window` | duration | `2m` | Time window for error rate calculation |
+| `transport.health.degrade_latency` | duration | `2s` | Latency threshold to reduce upstream traffic |
+| `transport.health.min_weight` | float | `0.1` | Minimum traffic weight for a degraded upstream |
+| `transport.health.canary_cooldown` | duration | `30s` | Cooldown before testing a tripped upstream |
+| `transport.health.canary_step` | float | `0.1` | Traffic weight increment per successful health check |
+| `transport.health.probe_interval` | duration | `2m` | Health check interval for healthy upstreams |
+| `transport.health.probe_timeout` | duration | `5s` | Health check request timeout |
 | `transport.health.resource_block_interval` | duration | `2m` | Blocked repo retry interval (filerepo modes) |
-| `transport.health.resource_remove_age` | duration | `5m` | Min age before 404-consecutive removal (filerepo) |
-| `transport.health.resource_remove_count` | int | `5` | Consecutive 404s to remove repo (filerepo) |
+| `transport.health.resource_remove_age` | duration | `5m` | Minimum age before removing a missing repo |
+| `transport.health.resource_remove_count` | int | `5` | Consecutive missed updates to remove a repo |
 
 ---
 
 ## Mode Reference
 
-### `file` — generic HTTP
+<details open>
+<summary><b>file</b> — generic HTTP</summary>
 
 ```yaml
 file:
@@ -146,18 +145,21 @@ file:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstreams` | `[]string` | required | Upstream base URLs, tried in order |
+| `upstreams` | `[]URL` | required | Upstream base URLs, tried in order |
 | `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
 | `default_policy` | Policy | `bypass` | Default cache policy |
-| `fresh_for` | Freshness | — | How long cached response is considered fresh |
-| `busy_policy` | Busy | `bypass` | Serve stale while download in progress? |
-| `rules[].match` | string | required | Doublestar path pattern |
+| `fresh_for` | Freshness | — | Cached response freshness |
+| `busy_policy` | Busy | `bypass` | Behavior while another request is already downloading |
+| `rules[].match` | glob | required | Path pattern |
 | `rules[].policy` | Policy | — | Override policy for matched paths |
 | `rules[].fresh_for` | Freshness | — | Override freshness for matched paths |
 | `rules[].busy_policy` | Busy | — | Override busy policy for matched paths |
 | `rules[].expire_after` | Expiration | — | Override expiration for matched paths |
 
-### `oci` — Docker / OCI registries
+</details>
+
+<details open>
+<summary><b>oci</b> — Docker / OCI registries</summary>
 
 ```yaml
 oci:
@@ -177,25 +179,28 @@ oci:
       expire_after: 168h
 ```
 
-Rules match repository names (doublestar). Client: `docker pull cache.lan:5000/library/alpine:latest`.
+Client: `docker pull cache.lan:5000/library/alpine:latest`.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstream` | URL | required | Single upstream registry |
-| `display_url` | URL | — | URL shown on home page (overrides auto-derived address) |
+| `upstream` | URL | required | Upstream registry |
+| `display_url` | URL | — | Home page URL (overrides auto-detected address) |
 | `default_policy` | Policy | `bypass` | Default cache policy |
-| `fresh_for` | Freshness | — | Freshness for cached manifests/blobs |
-| `busy_policy` | Busy | `bypass` | Serve stale while download in progress? |
+| `fresh_for` | Freshness | — | Freshness for cached manifests and layers |
+| `busy_policy` | Busy | `bypass` | Behavior while another request is downloading |
 | `auth.type` | Enum | — | `none` \| `basic` \| `bearer` |
 | `auth.username` | string | — | Required for `basic` |
 | `auth.password` | string | — | Required for `basic` |
 | `auth.token` | string | — | Required for `bearer` |
-| `rules[].match` | string | required | Doublestar repo-name pattern |
+| `rules[].match` | glob | required | Repository name pattern |
 | `rules[].policy` | Policy | `bypass` | Override policy for matched repos |
 | `rules[].fresh_for` | Freshness | — | Override freshness for matched repos |
 | `rules[].expire_after` | Expiration | — | Override expiration for matched repos |
 
-### `npm`
+</details>
+
+<details>
+<summary><b>npm</b></summary>
 
 ```yaml
 npm:
@@ -211,13 +216,16 @@ Client: `npm config set registry http://cache.lan:8080/npm`
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstream` | URL | required | Single upstream registry |
+| `upstream` | URL | required | Upstream registry |
 | `metadata_policy` | Policy | `revalidate` | Cache policy for package metadata |
 | `metadata_fresh_for` | Freshness | — | Freshness for metadata |
 | `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
 | `tarball_policy` | Policy | `immutable` | Cache policy for `.tgz` files |
 
-### `go` — GOPROXY + SumDB
+</details>
+
+<details>
+<summary><b>go</b> — GOPROXY + SumDB</summary>
 
 ```yaml
 go:
@@ -249,14 +257,17 @@ Client: `go env -w GOPROXY=http://cache.lan:8080/go`
 | `module_busy_policy` | Busy | `stale` | Busy policy for module metadata |
 | `zip_policy` | Policy | `immutable` | Policy for `.zip` archives |
 | `sumdb.enabled` | bool | `true` | Proxy checksum database requests |
-| `sumdb.name` | string | `sum.golang.org` | SumDB name exposed in URL prefix |
-| `sumdb.url` | URL | `https://sum.golang.org` | Upstream SumDB (http/https only) |
+| `sumdb.name` | string | `sum.golang.org` | SumDB name in URL prefix |
+| `sumdb.url` | URL | `https://sum.golang.org` | Upstream SumDB |
 | `sumdb_fresh_for` | Freshness | `30s` | Freshness for SumDB responses |
 | `sumdb_busy_policy` | Busy | `stale` | Busy policy for SumDB |
-| `goprivate` | `[]string` | — | Patterns for private modules (skipped by proxy) |
+| `goprivate` | `[]glob` | — | Patterns for private modules (skipped by proxy) |
 | `disable_module_fetch_header` | bool | `false` | Honor `Disable-Module-Fetch` request header |
 
-### `maven`
+</details>
+
+<details>
+<summary><b>maven</b></summary>
 
 ```yaml
 maven:
@@ -276,7 +287,7 @@ Client: set `<mirror><url>http://cache.lan:8080/maven</url></mirror>` in `~/.m2/
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstream` | URL | required | Single upstream repository root |
+| `upstream` | URL | required | Upstream repository root |
 | `release_policy` | Policy | `immutable` | Policy for release artifacts |
 | `snapshot_policy` | Policy | `revalidate` | Policy for `-SNAPSHOT` artifacts |
 | `snapshot_fresh_for` | Freshness | — | Freshness for snapshot artifacts |
@@ -286,7 +297,10 @@ Client: set `<mirror><url>http://cache.lan:8080/maven</url></mirror>` in `~/.m2/
 | `metadata_fresh_for` | Freshness | — | Freshness for `maven-metadata.xml` |
 | `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
 
-### `cargo`
+</details>
+
+<details>
+<summary><b>cargo</b></summary>
 
 ```yaml
 cargo:
@@ -302,13 +316,16 @@ Client: `registry = "sparse+http://cache.lan:8080/cargo/"` in `.cargo/config.tom
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstream` | URL | required | Single upstream sparse index |
+| `upstream` | URL | required | Upstream sparse index |
 | `crate_policy` | Policy | `immutable` | Policy for crate download files |
 | `index_fresh_for` | Freshness | — | Freshness for index entries and `config.json` |
 | `index_busy_policy` | Busy | `stale` | Busy policy for index |
-| `auth_required` | bool | `false` | Set `auth-required: true` in rewritten `config.json` |
+| `auth_required` | bool | `false` | Set `auth-required: true` in returned `config.json` |
 
-### `pypi`
+</details>
+
+<details>
+<summary><b>pypi</b></summary>
 
 ```yaml
 pypi:
@@ -330,19 +347,22 @@ Client: `pip install --index-url http://cache.lan:8080/pypi/simple <pkg>`
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstream` | URL | required | Single upstream PyPI base URL |
+| `upstream` | URL | required | Upstream PyPI base URL |
 | `index_policy` | Policy | `revalidate` | Policy for `/simple/` index pages |
 | `index_fresh_for` | Freshness | `1m` | Freshness for index pages |
 | `index_busy_policy` | Busy | `stale` | Busy policy for index pages |
 | `file_policy` | Policy | `immutable` | Policy for package files |
-| `companion_policy` | Policy | `revalidate` | Policy for sidecar files (signatures, metadata) |
+| `companion_policy` | Policy | `revalidate` | Policy for sidecar files |
 | `companion_fresh_for` | Freshness | `30s` | Freshness for sidecar files |
 | `companion_busy_policy` | Busy | `stale` | Busy policy for sidecars |
-| `proxy_json` | bool | `true` | Enable JSON Simple API (`/simple/<pkg>/json`) |
-| `proxy_core_metadata` | bool | `false` | Proxy `.metadata` / `.json` / `.attestation` / `.provenance` as sidecars |
-| `proxy_signatures` | bool | `false` | Proxy `.asc` / `.sig` / `.minisig` as sidecars |
+| `proxy_json` | bool | `true` | Enable JSON API (`/simple/<pkg>/json`) |
+| `proxy_core_metadata` | bool | `false` | Proxy core metadata files as sidecars |
+| `proxy_signatures` | bool | `false` | Proxy signature files as sidecars |
 
-### `apk` — Alpine
+</details>
+
+<details>
+<summary><b>apk</b> — Alpine</summary>
 
 ```yaml
 apk:
@@ -356,12 +376,12 @@ apk:
   auxiliary_policy: revalidate
 ```
 
-Client repo line: `http://cache.lan:8080/apk/v3.20/main`. Roots auto-discovered from `APKINDEX.tar.gz` requests.
+Client: `http://cache.lan:8080/apk/v3.20/main`. Repositories are auto-discovered from `APKINDEX.tar.gz` requests.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `upstreams` | `[]URL` | required | Upstream mirrors, tried in order |
-| `refresh_interval` | duration | `1h` | Background metadata refresh cadence |
+| `refresh_interval` | duration | `1h` | Background metadata refresh interval |
 | `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
 | `metadata_policy` | Policy | `revalidate` | Policy for `APKINDEX.tar.gz` and repo metadata |
 | `metadata_fresh_for` | Freshness | `1m` | Freshness for metadata |
@@ -371,12 +391,15 @@ Client repo line: `http://cache.lan:8080/apk/v3.20/main`. Roots auto-discovered 
 | `artifact_fresh_for` | Freshness | — | Freshness for artifacts |
 | `artifact_busy_policy` | Busy | `bypass` | Busy policy for artifacts |
 | `artifact_expire_after` | Expiration | — | Override expiration for artifacts |
-| `auxiliary_policy` | Policy | `revalidate` | Policy for signatures / checksums |
+| `auxiliary_policy` | Policy | `revalidate` | Policy for signatures and checksums |
 | `auxiliary_fresh_for` | Freshness | `30s` | Freshness for auxiliary files |
 | `auxiliary_busy_policy` | Busy | `stale` | Busy policy for auxiliary files |
 | `auxiliary_expire_after` | Expiration | — | Override expiration for auxiliary files |
 
-### `deb` — Debian / Ubuntu
+</details>
+
+<details>
+<summary><b>deb</b> — Debian / Ubuntu</summary>
 
 ```yaml
 deb:
@@ -390,11 +413,14 @@ deb:
   auxiliary_policy: revalidate
 ```
 
-Client: `deb http://cache.lan:8080/deb bookworm main`. Roots auto-discovered from `InRelease` / `Packages*` / `Sources*`.
+Client: `deb http://cache.lan:8080/deb bookworm main`. Repositories auto-discovered from `InRelease` / `Packages*` / `Sources*`.
 
 Same field table as `apk`, except `metadata_fresh_for` defaults to `2m`.
 
-### `rpm` — RHEL / Rocky / Fedora
+</details>
+
+<details>
+<summary><b>rpm</b> — RHEL / Rocky / Fedora</summary>
 
 ```yaml
 rpm:
@@ -408,11 +434,14 @@ rpm:
   auxiliary_policy: revalidate
 ```
 
-Client: `baseurl=http://cache.lan:8080/rpm/9/BaseOS/x86_64/os`. Roots auto-discovered from `repomd.xml`.
+Client: `baseurl=http://cache.lan:8080/rpm/9/BaseOS/x86_64/os`. Repositories auto-discovered from `repomd.xml`.
 
 Same field table as `apk`.
 
-### `pacman` — Arch
+</details>
+
+<details>
+<summary><b>pacman</b> — Arch</summary>
 
 ```yaml
 pacman:
@@ -426,18 +455,20 @@ pacman:
   auxiliary_policy: revalidate
 ```
 
-Client: `Server = http://cache.lan:8080/pacman/$repo/os/$arch`. Roots auto-discovered from `.db` / `.files` requests.
+Client: `Server = http://cache.lan:8080/pacman/$repo/os/$arch`. Repositories auto-discovered from `.db` / `.files` requests.
 
 Same field table as `apk`, except `refresh_interval` defaults to `2m`.
 
+</details>
+
 ### Package repository lifecycle
 
-For `apk`, `deb`, `rpm`, `pacman`: configure `upstreams` and the proxy discovers roots from client metadata requests. Each root transitions through `pending` → `active` → `suspect` → `removed` states automatically:
+For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically from client metadata requests and tracked through a lifecycle:
 
-- New metadata requests create roots in `pending`; first successful refresh promotes to `active`.
-- Transient failures keep the last snapshot and mark as `suspect` (still serves stale).
-- Repeated `404` responses remove the root entirely.
-- Re-requesting metadata for a removed root recreates it automatically.
+- New metadata requests create repositories in `pending`; first successful refresh promotes to `active`.
+- Transient failures keep the last snapshot (serves stale data, marked `suspect`).
+- Repeated missed updates remove the repository entirely.
+- Re-requesting metadata for a removed repo recreates it automatically.
 
 ## Development
 
