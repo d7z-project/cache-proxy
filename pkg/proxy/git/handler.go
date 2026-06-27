@@ -42,7 +42,8 @@ type gitHandler struct {
 	syncerCancel context.CancelFunc
 	syncerDone   chan struct{}
 
-	stats *gitStats
+	requestWait sync.WaitGroup
+	stats       *gitStats
 }
 
 func newGitHandler(cfg gitConfig) *gitHandler {
@@ -96,7 +97,18 @@ func (h *gitHandler) Stop(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	return nil
+
+	doneCh := make(chan struct{})
+	go func() {
+		h.requestWait.Wait()
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (h *gitHandler) Cleanup(_ context.Context) error {
@@ -104,6 +116,9 @@ func (h *gitHandler) Cleanup(_ context.Context) error {
 }
 
 func (h *gitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.requestWait.Add(1)
+	defer h.requestWait.Done()
+
 	h.mu.RLock()
 	state := h.state
 	h.mu.RUnlock()

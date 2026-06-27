@@ -80,6 +80,8 @@ type Entry struct {
 	ExpireAfter config.Expiration
 	Runtime     Instance
 	Home        HomeEntry
+	Ctx         context.Context
+	Cancel      context.CancelFunc
 }
 
 type Result struct {
@@ -118,7 +120,7 @@ func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, mainBind, metri
 
 func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMode) (*InstancePlan, error) {
 	name := strings.TrimSpace(selected.Name)
-	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+	if !config.ValidInstanceName(name) {
 		return nil, fmt.Errorf("invalid instance name %q", selected.Name)
 	}
 	if _, exists := p.entries[name]; exists {

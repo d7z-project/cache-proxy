@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -28,6 +31,23 @@ func TestValidateRejectsConflictingPaths(t *testing.T) {
 	require.ErrorContains(t, err, "listen path /files conflicts")
 }
 
+func TestValidateRejectsInvalidName(t *testing.T) {
+	_, err := config.Decode(strings.NewReader(`
+server:
+  bind: 127.0.0.1:8080
+  backend: /tmp/cache
+instances:
+  - name: my-proxy
+    enabled: true
+    file:
+      route:
+        path: /files
+      upstreams:
+        - https://example.com
+`))
+	require.ErrorContains(t, err, "invalid instance name")
+}
+
 func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -45,8 +65,7 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 			BusyPolicy:    config.BusyPolicyBypass,
 		}),
 	})
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/a.txt"))
@@ -63,12 +82,11 @@ func TestAppCleanupRemovesExpiredObjects(t *testing.T) {
 	})
 	doc.Storage.Cleanup.Enabled = true
 
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	now := time.Now()
-	_, err = app.store.Put(ctx, "files", "expired.txt", strings.NewReader("expired"), map[string]string{
+	_, err := app.store.Put(ctx, "files", "expired.txt", strings.NewReader("expired"), map[string]string{
 		"fetched-at": now.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
 	})
 	require.NoError(t, err)
@@ -96,8 +114,7 @@ func TestMetricsRequireBearerToken(t *testing.T) {
 	doc := testDocument(t.TempDir(), nil)
 	doc.Metrics.Token = "secret"
 
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -125,8 +142,7 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 			},
 		}),
 	})
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -152,8 +168,7 @@ func TestHomePageUsesPublicURL(t *testing.T) {
 		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
 	doc.Server.PublicURL = "https://cache.home.lan"
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -187,6 +202,7 @@ func TestHomePageShowsBindDisplayURL(t *testing.T) {
 		pathHandlers: map[string]http.Handler{},
 		bindHandlers: map[string]http.Handler{},
 	}
+	app.ready.Store(true)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -196,6 +212,23 @@ func TestHomePageShowsBindDisplayURL(t *testing.T) {
 	require.Contains(t, body, "https://cache.home.lan:5000")
 	require.Contains(t, body, "docker pull")
 	require.Contains(t, body, `class="badge badge-oci"`)
+}
+
+func TestHomePageReturns503WhenNotReady(t *testing.T) {
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/files/test.txt", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "5", rec.Header().Get("Retry-After"))
 }
 
 func TestSetupCommandGeneration(t *testing.T) {
@@ -258,12 +291,11 @@ func TestAppCleanupHonorsCanceledContext(t *testing.T) {
 	})
 	doc.Storage.Cleanup.Enabled = true
 
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	now := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-	_, err = app.store.Put(ctx, "files", "expired.txt", strings.NewReader("expired"), map[string]string{
+	_, err := app.store.Put(ctx, "files", "expired.txt", strings.NewReader("expired"), map[string]string{
 		"fetched-at": now,
 	})
 	require.NoError(t, err)
@@ -293,11 +325,11 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestPrepareHandlersUsesLifecycleContext(t *testing.T) {
+func TestPrepareHandlersUsesPerInstanceContext(t *testing.T) {
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	started := atomic.Bool{}
+	var startedCtx context.Context
 	entry := &proxyruntime.Entry{
 		Name:    "test",
 		Mode:    config.ModeFile,
@@ -305,7 +337,7 @@ func TestPrepareHandlersUsesLifecycleContext(t *testing.T) {
 		Path:    "/files",
 		Runtime: startContextInstance{
 			onStart: func(ctx context.Context) error {
-				started.Store(ctx == lifecycleCtx)
+				startedCtx = ctx
 				return nil
 			},
 		},
@@ -319,7 +351,15 @@ func TestPrepareHandlersUsesLifecycleContext(t *testing.T) {
 	}
 
 	require.NoError(t, app.prepareHandlers(lifecycleCtx))
-	require.True(t, started.Load())
+	require.NotNil(t, startedCtx, "Start should have been called")
+	require.NotNil(t, entry.Ctx, "per-instance context should be set")
+	require.NotNil(t, entry.Cancel, "per-instance cancel should be set")
+	entry.Cancel()
+	select {
+	case <-startedCtx.Done():
+	default:
+		t.Fatal("per-instance context should be cancelled by entry.Cancel()")
+	}
 }
 
 func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
@@ -349,6 +389,7 @@ func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
 			"registry": entry,
 		},
 	}
+	app.ready.Store(true)
 
 	require.NoError(t, app.prepareHandlers(context.Background()))
 
@@ -394,6 +435,7 @@ func TestBindHomePageHeadReturnsOK(t *testing.T) {
 			"registry": entry,
 		},
 	}
+	app.ready.Store(true)
 
 	require.NoError(t, app.prepareHandlers(context.Background()))
 
@@ -403,6 +445,242 @@ func TestBindHomePageHeadReturnsOK(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Empty(t, rec.Body.String())
 	require.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+}
+
+func TestDiffInstances(t *testing.T) {
+	old := []config.Instance{
+		{Name: "keep", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/keep"}, "upstreams": []string{"https://a.com"}})}},
+		{Name: "remove", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/remove"}, "upstreams": []string{"https://b.com"}})}},
+		{Name: "change", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/old"}, "upstreams": []string{"https://c.com"}})}},
+	}
+	new_ := []config.Instance{
+		{Name: "keep", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/keep"}, "upstreams": []string{"https://a.com"}})}},
+		{Name: "change", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/new"}, "upstreams": []string{"https://c.com"}})}},
+		{Name: "added", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/added"}, "upstreams": []string{"https://d.com"}})}},
+	}
+	added, removed, modified := config.DiffInstances(old, new_)
+	require.ElementsMatch(t, []string{"remove"}, removed)
+	require.ElementsMatch(t, []string{"added"}, added)
+	require.ElementsMatch(t, []string{"change"}, modified)
+}
+
+func TestDiffInstancesModeSwitch(t *testing.T) {
+	old := []config.Instance{
+		{Name: "proxy", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/files"}, "upstreams": []string{"https://a.com"}})}},
+	}
+	new_ := []config.Instance{
+		{Name: "proxy", Enabled: true, NPM: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/npm"}, "upstreams": []string{"https://b.com"}})}},
+	}
+	added, removed, modified := config.DiffInstances(old, new_)
+	require.Empty(t, added)
+	require.Empty(t, removed)
+	require.ElementsMatch(t, []string{"proxy"}, modified)
+}
+
+func TestReloadInvalidConfigPreservesRunningInstances(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+	}))
+	defer upstream.Close()
+
+	doc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+	})
+	doc.Storage.Cleanup.Enabled = true
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeYAML(t, cfgPath, doc)
+	app := openAppWithConfig(t, ctx, doc, cfgPath)
+	defer closeApp(t, app)
+
+	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
+
+	badDoc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+		fileInstance(t, "dup", "/files", "https://other.com", file.Policy{}),
+	})
+	writeYAML(t, cfgPath, badDoc)
+	err := app.Reload(ctx)
+	require.Error(t, err)
+
+	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
+}
+
+func TestReloadClosedReturnsError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	doc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
+	})
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeYAML(t, cfgPath, doc)
+	app := openAppWithConfig(t, ctx, doc, cfgPath)
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := app.Close(closeCtx)
+	closeCancel()
+	require.NoError(t, err)
+
+	err = app.Reload(ctx)
+	require.ErrorContains(t, err, "app is closed")
+}
+
+func TestReloadConcurrentServeHTTPNoRace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	doc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+	})
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeYAML(t, cfgPath, doc)
+	app := openAppWithConfig(t, ctx, doc, cfgPath)
+	defer closeApp(t, app)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/files/test.txt", nil)
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+		}
+	}()
+
+	newDoc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+		fileInstance(t, "newf", "/newf", upstream.URL, file.Policy{}),
+	})
+	writeYAML(t, cfgPath, newDoc)
+	err := app.Reload(ctx)
+	require.NoError(t, err)
+	<-done
+}
+
+func TestMultipleReloads(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	doc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+	})
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeYAML(t, cfgPath, doc)
+	app := openAppWithConfig(t, ctx, doc, cfgPath)
+	defer closeApp(t, app)
+
+	for i := 0; i < 3; i++ {
+		newDoc := testDocument(dir, []config.Instance{
+			fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+		})
+		writeYAML(t, cfgPath, newDoc)
+		err := app.Reload(ctx)
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, "ok", requestBody(t, app, http.MethodGet, "/files/test.txt"))
+}
+
+func TestReloadAddsAndRemovesInstances(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	doc := testDocument(dir, []config.Instance{
+		fileInstance(t, "one", "/one", upstream.URL, file.Policy{}),
+	})
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeYAML(t, cfgPath, doc)
+	app := openAppWithConfig(t, ctx, doc, cfgPath)
+	defer closeApp(t, app)
+
+	require.Equal(t, "ok", requestBody(t, app, http.MethodGet, "/one/test.txt"))
+
+	newDoc := testDocument(dir, []config.Instance{
+		fileInstance(t, "two", "/two", upstream.URL, file.Policy{}),
+	})
+	writeYAML(t, cfgPath, newDoc)
+	err := app.Reload(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, "ok", requestBody(t, app, http.MethodGet, "/two/test.txt"))
+
+	req := httptest.NewRequest(http.MethodGet, "/one/test.txt", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
+	return openAppWithConfig(t, ctx, doc, "")
+}
+
+func openAppWithConfig(t *testing.T, ctx context.Context, doc *config.Document, configPath string) *App {
+	t.Helper()
+	app, err := Open(ctx, doc, configPath)
+	require.NoError(t, err)
+	app.ready.Store(true)
+	return app
+}
+
+func writeYAML(t *testing.T, path string, doc *config.Document) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("server:\n")
+	b.WriteString("  bind: " + doc.Server.Bind + "\n")
+	b.WriteString("  backend: " + doc.Server.Backend + "\n")
+	if doc.Server.PublicURL != "" {
+		b.WriteString("  public_url: " + doc.Server.PublicURL + "\n")
+	}
+	b.WriteString("metrics:\n")
+	b.WriteString("  path: " + doc.Metrics.Path + "\n")
+	b.WriteString("storage:\n")
+	b.WriteString("  gc:\n")
+	b.WriteString("    blob: 1h\n")
+	b.WriteString("  cleanup:\n")
+	b.WriteString("    enabled: " + fmt.Sprintf("%v", doc.Storage.Cleanup.Enabled) + "\n")
+	b.WriteString("    interval: 6h\n")
+	b.WriteString("instances:\n")
+	for _, inst := range doc.Instances {
+		sel, err := inst.SelectMode()
+		require.NoError(t, err)
+		b.WriteString("  - name: " + inst.Name + "\n")
+		b.WriteString("    enabled: " + fmt.Sprintf("%v", inst.Enabled) + "\n")
+		b.WriteString("    " + sel.Mode + ":\n")
+		if sel.Block != nil {
+			data, err := yaml.Marshal(sel.Block.Node)
+			require.NoError(t, err)
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if line != "" {
+					b.WriteString("      " + line + "\n")
+				}
+			}
+		}
+	}
+	require.NoError(t, os.WriteFile(path, []byte(b.String()), 0o644))
 }
 
 func testDocument(backend string, instances []config.Instance) *config.Document {

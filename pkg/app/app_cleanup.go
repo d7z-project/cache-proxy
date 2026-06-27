@@ -5,52 +5,23 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
-	"time"
-
-	"gopkg.d7z.net/blobfs"
 
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-func (a *App) gcLoop() {
-	defer close(a.gcDone)
-	ticker := time.NewTicker(a.config.Storage.GC.Blob.Duration())
-	defer ticker.Stop()
-	for {
-		select {
-		case <-a.lifecycleCtx.Done():
-			return
-		case <-ticker.C:
-			if _, err := a.store.RunGC(a.lifecycleCtx, blobfs.GCOptions{Compact: true}); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Info("blob gc failed", "err", err)
-			}
-		}
-	}
-}
-
-func (a *App) cleanupLoop() {
-	defer close(a.cleanupDone)
-	ticker := time.NewTicker(a.config.Storage.Cleanup.Interval.Duration())
-	defer ticker.Stop()
-	for {
-		select {
-		case <-a.lifecycleCtx.Done():
-			return
-		case <-ticker.C:
-			if a.config.Storage.Cleanup.Enabled {
-				a.runCleanup(a.lifecycleCtx)
-			}
-		}
-	}
-}
-
 func (a *App) runCleanup(ctx context.Context) {
-	if !a.config.Storage.Cleanup.Enabled || ctx.Err() != nil {
+	if ctx.Err() != nil {
 		return
 	}
 	workers := a.config.Storage.Cleanup.Workers
+
+	a.routesMu.RLock()
+	handlers := make([]proxyruntime.Instance, len(a.handlers))
+	copy(handlers, a.handlers)
+	a.routesMu.RUnlock()
+
 	if workers <= 0 {
-		workers = len(a.handlers)
+		workers = len(handlers)
 	}
 	if workers <= 0 {
 		return
@@ -58,7 +29,7 @@ func (a *App) runCleanup(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, workers)
-	for _, handler := range a.handlers {
+	for _, handler := range handlers {
 		if ctx.Err() != nil {
 			break
 		}

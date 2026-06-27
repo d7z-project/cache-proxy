@@ -34,23 +34,29 @@ const (
 )
 
 type App struct {
-	config       *config.Document
-	store        *blobfs.Store
-	stats        *httpcache.Stats
-	metricsReg   *prometheus.Registry
-	entries      map[string]*proxyruntime.Entry
-	handlers     []proxyruntime.Instance
-	pathHandlers map[string]http.Handler
-	pathPrefixes []string
-	bindHandlers map[string]http.Handler
-	bindServers  map[string]*http.Server
-	mainServer   *http.Server
-	lifecycleCtx context.Context
-	stopRuntime  context.CancelFunc
-	started      bool
-	closed       atomic.Bool
-	gcDone       chan struct{}
-	cleanupDone  chan struct{}
+	config        *config.Document
+	configPath    string
+	store         *blobfs.Store
+	stats         *httpcache.Stats
+	metricsReg    *prometheus.Registry
+	entries       map[string]*proxyruntime.Entry
+	handlers      []proxyruntime.Instance
+	routesMu      sync.RWMutex
+	pathHandlers  map[string]http.Handler
+	pathPrefixes  []string
+	bindHandlers  map[string]http.Handler
+	bindServers   map[string]*http.Server
+	bindListeners map[string]net.Listener
+	mainServer    *http.Server
+	mainListener  net.Listener
+	lifecycleCtx  context.Context
+	stopRuntime   context.CancelFunc
+	started       bool
+	ready         atomic.Bool
+	reloading     atomic.Bool
+	closed        atomic.Bool
+	gcDone        chan struct{}
+	cleanupDone   chan struct{}
 
 	tuMu       sync.Mutex
 	tuCachedAt time.Time
@@ -85,7 +91,7 @@ func Validate(doc *config.Document) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }() // ephemeral temp dir, best-effort cleanup
 
 	copy := *doc
 	copy.Server.Backend = dir
@@ -93,7 +99,7 @@ func Validate(doc *config.Document) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }() // ephemeral validation store
 
 	registry := prometheus.NewRegistry()
 	stats := httpcache.NewStats(registry)
@@ -101,7 +107,7 @@ func Validate(doc *config.Document) error {
 	return err
 }
 
-func Open(ctx context.Context, doc *config.Document) (*App, error) {
+func Open(ctx context.Context, doc *config.Document, configPath string) (*App, error) {
 	if doc == nil {
 		return nil, errors.New("config document is nil")
 	}
@@ -129,30 +135,72 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
 	app := &App{
-		config:       doc,
-		store:        store,
-		stats:        stats,
-		metricsReg:   metricsReg,
-		entries:      entries,
-		pathHandlers: map[string]http.Handler{},
-		bindHandlers: map[string]http.Handler{},
-		bindServers:  map[string]*http.Server{},
-		lifecycleCtx: lifecycleCtx,
-		stopRuntime:  stopRuntime,
-		gcDone:       make(chan struct{}),
-		cleanupDone:  make(chan struct{}),
+		config:        doc,
+		configPath:    configPath,
+		store:         store,
+		stats:         stats,
+		metricsReg:    metricsReg,
+		entries:       entries,
+		pathHandlers:  map[string]http.Handler{},
+		bindHandlers:  map[string]http.Handler{},
+		bindServers:   map[string]*http.Server{},
+		bindListeners: map[string]net.Listener{},
+		lifecycleCtx:  lifecycleCtx,
+		stopRuntime:   stopRuntime,
+		gcDone:        make(chan struct{}),
+		cleanupDone:   make(chan struct{}),
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
 	app.mainServer = &http.Server{Addr: doc.Server.Bind, Handler: app}
-	go app.gcLoop()
-	go app.cleanupLoop()
+	gcInterval := doc.Storage.GC.Blob.Duration()
+	cleanupInterval := doc.Storage.Cleanup.Interval.Duration()
+	cleanupEnabled := doc.Storage.Cleanup.Enabled
+	go func() {
+		defer close(app.gcDone)
+		ticker := time.NewTicker(gcInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-app.lifecycleCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := app.store.RunGC(app.lifecycleCtx, blobfs.GCOptions{Compact: true}); err != nil && !errors.Is(err, context.Canceled) {
+					slog.Info("blob gc failed", "err", err)
+				}
+			}
+		}
+	}()
+	go func() {
+		defer close(app.cleanupDone)
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-app.lifecycleCtx.Done():
+				return
+			case <-ticker.C:
+				if cleanupEnabled {
+					app.runCleanup(app.lifecycleCtx)
+				}
+			}
+		}
+	}()
+	app.checkOrphans(lifecycleCtx)
 	return app, nil
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if !a.ready.Load() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "proxy not ready", http.StatusServiceUnavailable)
+		return
+	}
+	a.routesMu.RLock()
+	defer a.routesMu.RUnlock()
+
 	if req.Method == http.MethodGet && req.URL.Path == "/" {
 		a.serveHome(w, req)
 		return
@@ -165,14 +213,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	prefix := a.matchProxyPrefix(req.URL.Path)
-	if prefix == "" {
+	handler := a.pathHandlers[prefix]
+	if handler == nil {
 		http.NotFound(w, req)
 		return
 	}
 	next := req.Clone(req.Context())
 	next.Header = req.Header.Clone()
 	next.Header.Set("X-Cache-Proxy-Prefix", prefix)
-	http.StripPrefix(prefix, a.pathHandlers[prefix]).ServeHTTP(w, next)
+	http.StripPrefix(prefix, handler).ServeHTTP(w, next)
 }
 
 func (a *App) Start() error {
@@ -183,6 +232,7 @@ func (a *App) Start() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", a.config.Server.Bind, err)
 	}
+	a.mainListener = mainListener
 	prepared := make(map[string]net.Listener, len(a.bindHandlers))
 	for addr := range a.bindHandlers {
 		listener, err := net.Listen("tcp", addr)
@@ -194,9 +244,11 @@ func (a *App) Start() error {
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
 		prepared[addr] = listener
+		a.bindListeners[addr] = listener
 	}
 
 	a.started = true
+	a.ready.Store(true)
 	go func() {
 		if err := a.mainServer.Serve(mainListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("main server error", "addr", a.config.Server.Bind, "err", err)
@@ -218,16 +270,27 @@ func (a *App) Close(ctx context.Context) error {
 	if a.closed.Swap(true) {
 		return nil
 	}
+	a.ready.Store(false)
 	a.stopRuntime()
 
 	var joined error
 	if a.mainServer != nil {
 		joined = errors.Join(joined, a.mainServer.Shutdown(ctx))
 	}
-	for _, server := range a.bindServers {
-		joined = errors.Join(joined, server.Shutdown(ctx))
+	if a.mainListener != nil {
+		joined = errors.Join(joined, a.mainListener.Close())
 	}
-	for _, handler := range a.handlers {
+	for addr, server := range a.bindServers {
+		joined = errors.Join(joined, server.Shutdown(ctx))
+		if ln, ok := a.bindListeners[addr]; ok {
+			joined = errors.Join(joined, ln.Close())
+		}
+	}
+	a.routesMu.RLock()
+	handlers := make([]proxyruntime.Instance, len(a.handlers))
+	copy(handlers, a.handlers)
+	a.routesMu.RUnlock()
+	for _, handler := range handlers {
 		joined = errors.Join(joined, handler.Stop(ctx))
 	}
 	select {
@@ -266,7 +329,10 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 		if !entry.Enabled || entry.Runtime == nil {
 			continue
 		}
-		if err := entry.Runtime.Start(ctx); err != nil {
+		entryCtx, entryCancel := context.WithCancel(ctx)
+		entry.Ctx = entryCtx
+		entry.Cancel = entryCancel
+		if err := entry.Runtime.Start(entryCtx); err != nil {
 			a.stopHandlers()
 			return fmt.Errorf("instance %s: %w", entry.Name, err)
 		}

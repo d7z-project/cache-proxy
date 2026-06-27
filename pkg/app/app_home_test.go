@@ -28,8 +28,7 @@ func TestHomePageShowsStatsAfterRequests(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
 	})
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/files/test.txt", nil)
@@ -55,8 +54,7 @@ func TestHomePageWithEmptyStats(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
-	app, err := Open(ctx, doc)
-	require.NoError(t, err)
+	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -90,6 +88,7 @@ func TestHomePageWithNilStats(t *testing.T) {
 		bindHandlers: map[string]http.Handler{},
 		stats:        nil,
 	}
+	app.ready.Store(true)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -123,6 +122,7 @@ func TestBindHomePageShowsSingleInstanceView(t *testing.T) {
 		pathHandlers: map[string]http.Handler{},
 		bindHandlers: map[string]http.Handler{},
 	}
+	app.ready.Store(true)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "proxy.example.test"

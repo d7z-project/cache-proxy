@@ -37,7 +37,7 @@ func handleInfoRefs(w http.ResponseWriter, r *http.Request, svr transport.Transp
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }() // Close error is non-actionable after session use
 
 	ar, err := session.AdvertisedReferencesContext(r.Context())
 	if err != nil {
@@ -63,7 +63,7 @@ func handleUploadPack(w http.ResponseWriter, r *http.Request, svr transport.Tran
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }() // Close error is non-actionable after session use
 
 	req := packp.NewUploadPackRequest()
 	if err := req.Decode(r.Body); err != nil {

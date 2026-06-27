@@ -2,15 +2,23 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.in/yaml.v3"
 )
+
+var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+func ValidInstanceName(name string) bool {
+	return name != "" && validNameRE.MatchString(name)
+}
 
 const (
 	ModeFile   = "file"
@@ -70,11 +78,12 @@ type GCConfig struct {
 }
 
 type CleanupConfig struct {
-	Enabled   bool     `yaml:"enabled"`
-	Interval  Duration `yaml:"interval"`
-	DryRun    bool     `yaml:"dry_run"`
-	BatchSize int      `yaml:"batch_size"`
-	Workers   int      `yaml:"workers"`
+	Enabled      bool     `yaml:"enabled"`
+	Interval     Duration `yaml:"interval"`
+	DryRun       bool     `yaml:"dry_run"`
+	BatchSize    int      `yaml:"batch_size"`
+	Workers      int      `yaml:"workers"`
+	OrphanPolicy string   `yaml:"orphan_policy"`
 }
 
 func DefaultCleanupConfig() CleanupConfig {
@@ -146,6 +155,10 @@ func (b *ModeBlock) DecodeStrict(target any) error {
 }
 
 func (i Instance) SelectMode() (SelectedMode, error) {
+	name := strings.TrimSpace(i.Name)
+	if !ValidInstanceName(name) {
+		return SelectedMode{}, fmt.Errorf("invalid instance name %q: must match %s", i.Name, validNameRE.String())
+	}
 	candidates := []struct {
 		mode  string
 		block *ModeBlock
@@ -172,7 +185,7 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 			return SelectedMode{}, fmt.Errorf("instance %q must define exactly one mode block", i.Name)
 		}
 		selected = SelectedMode{
-			Name:    strings.TrimSpace(i.Name),
+			Name:    name,
 			Mode:    candidate.mode,
 			Enabled: i.Enabled,
 			Block:   candidate.block,
@@ -184,12 +197,53 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 	return selected, nil
 }
 
+func (i Instance) Fingerprint() string {
+	sel, err := i.SelectMode()
+	if err != nil {
+		return "invalid:" + err.Error()
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%t", sel.Enabled)
+	fmt.Fprintf(h, "%s", sel.Mode)
+	if sel.Block != nil {
+		data, err := yaml.Marshal(sel.Block.Node)
+		if err != nil {
+			return "marshal-error:" + err.Error()
+		}
+		h.Write(data)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func DiffInstances(old, new []Instance) (added, removed, modified []string) {
+	oldMap := make(map[string]Instance, len(old))
+	for _, inst := range old {
+		oldMap[inst.Name] = inst
+	}
+	newMap := make(map[string]Instance, len(new))
+	for _, inst := range new {
+		newMap[inst.Name] = inst
+		if _, exists := oldMap[inst.Name]; !exists {
+			added = append(added, inst.Name)
+		}
+	}
+	for _, inst := range old {
+		newInst, exists := newMap[inst.Name]
+		if !exists {
+			removed = append(removed, inst.Name)
+		} else if newInst.Fingerprint() != inst.Fingerprint() {
+			modified = append(modified, inst.Name)
+		}
+	}
+	return
+}
+
 func LoadFile(path string) (*Document, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // read-only os.File; close error is harmless
 	return Decode(file)
 }
 
@@ -199,6 +253,11 @@ func Decode(r io.Reader) (*Document, error) {
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, err
+	}
+	for _, inst := range doc.Instances {
+		if !ValidInstanceName(strings.TrimSpace(inst.Name)) {
+			return nil, fmt.Errorf("invalid instance name %q: must match %s", inst.Name, validNameRE.String())
+		}
 	}
 	return &doc, nil
 }

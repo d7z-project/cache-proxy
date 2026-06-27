@@ -38,7 +38,7 @@ func main() {
 		return
 	}
 
-	runtime, err := app.Open(context.Background(), doc)
+	runtime, err := app.Open(context.Background(), doc, *configPath)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -53,13 +53,25 @@ func main() {
 	slog.Info("cache proxy started", "bind", doc.Server.Bind, "backend", doc.Server.Backend, "metrics_path", doc.Metrics.Path)
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	<-sigs
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := runtime.Close(shutdownCtx); err != nil {
-		slog.Error("shutdown failed", "err", err)
-		os.Exit(1)
+	for {
+		sig := <-sigs
+		switch sig {
+		case syscall.SIGHUP:
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := runtime.Reload(ctx); err != nil {
+				slog.Error("config reload failed", "err", err)
+			}
+			cancel()
+		case syscall.SIGINT, syscall.SIGTERM:
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := runtime.Close(shutdownCtx); err != nil {
+				slog.Error("shutdown failed", "err", err)
+				os.Exit(1)
+			}
+			return
+		}
 	}
 }
