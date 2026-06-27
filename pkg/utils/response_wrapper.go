@@ -36,6 +36,10 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 		}
 	}
 	transport := defaultTransport.Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
+	transport.MaxConnsPerHost = 200
+	transport.IdleConnTimeout = 90 * time.Second
 	transport.DialContext = DefaultDialContext(3 * time.Second)
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	return &HttpClientWrapper{

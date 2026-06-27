@@ -3,6 +3,7 @@ package httpcache
 import (
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -79,11 +80,31 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 	return mc
 }
 
+type instanceEntry struct {
+	mu   sync.Mutex
+	data InstanceStats
+}
+
 type Stats struct {
-	mu        sync.RWMutex
-	total     InstanceStats
-	instances map[string]InstanceStats
+	instances sync.Map // string -> *instanceEntry
 	mc        *metricsCollector
+
+	totalRequests      atomic.Uint64
+	totalErrors        atomic.Uint64
+	totalResponseBytes atomic.Uint64
+	totalUpstreamReqs  atomic.Uint64
+	totalUpstreamErrs  atomic.Uint64
+	totalActiveDown    atomic.Int64
+	totalRefreshes     atomic.Uint64
+	totalRefreshFails  atomic.Uint64
+	totalSnapshotReady atomic.Bool
+
+	totalMu          sync.Mutex
+	totalMetadataState string
+	totalLastRefresh   string
+	totalLastRefreshAt time.Time
+	totalCache         map[string]uint64
+	totalUpstreamSt    map[string]uint64
 }
 
 type StatsSnapshot struct {
@@ -111,9 +132,9 @@ type InstanceStats struct {
 
 func NewStats(reg prometheus.Registerer) *Stats {
 	return &Stats{
-		total:     emptyInstanceStats(""),
-		instances: map[string]InstanceStats{},
-		mc:        newMetricsCollector(reg),
+		mc:              newMetricsCollector(reg),
+		totalCache:      map[string]uint64{},
+		totalUpstreamSt: map[string]uint64{},
 	}
 }
 
@@ -130,22 +151,22 @@ func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, 
 		s.mc.responseBytesTotal.WithLabelValues(instance, mode, cache).Add(float64(bytes))
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item := s.instance(instance, mode)
-	item.Requests++
-	item.ResponseBytes += bytes
-	item.Cache[cache]++
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	entry.data.Requests++
+	entry.data.ResponseBytes += bytes
+	entry.data.Cache[cache]++
 	if status >= 500 {
-		item.Errors++
+		entry.data.Errors++
 	}
-	s.total.Requests++
-	s.total.ResponseBytes += bytes
-	s.total.Cache[cache]++
+	entry.mu.Unlock()
+
+	s.totalRequests.Add(1)
+	s.totalResponseBytes.Add(bytes)
+	s.incrTotalCache(cache)
 	if status >= 500 {
-		s.total.Errors++
+		s.totalErrors.Add(1)
 	}
-	s.instances[instance] = item
 }
 
 func (s *Stats) RecordUpstream(instance, mode, method string, status int) {
@@ -158,20 +179,20 @@ func (s *Stats) RecordUpstream(instance, mode, method string, status int) {
 	}
 	s.mc.upstreamRequestsTotal.WithLabelValues(instance, mode, method, statusText).Inc()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item := s.instance(instance, mode)
-	item.UpstreamRequests++
-	item.UpstreamStatus[statusText]++
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	entry.data.UpstreamRequests++
+	entry.data.UpstreamStatus[statusText]++
 	if status == 0 || status >= 500 {
-		item.UpstreamErrors++
+		entry.data.UpstreamErrors++
 	}
-	s.total.UpstreamRequests++
-	s.total.UpstreamStatus[statusText]++
+	entry.mu.Unlock()
+
+	s.totalUpstreamReqs.Add(1)
+	s.incrTotalUpstreamStatus(statusText)
 	if status == 0 || status >= 500 {
-		s.total.UpstreamErrors++
+		s.totalUpstreamErrs.Add(1)
 	}
-	s.instances[instance] = item
 }
 
 func (s *Stats) AddActiveDownload(instance, mode string, delta int64) {
@@ -179,12 +200,13 @@ func (s *Stats) AddActiveDownload(instance, mode string, delta int64) {
 		return
 	}
 	s.mc.activeDownloads.WithLabelValues(instance, mode).Add(float64(delta))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item := s.instance(instance, mode)
-	item.ActiveDownloads += delta
-	s.total.ActiveDownloads += delta
-	s.instances[instance] = item
+
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	entry.data.ActiveDownloads += delta
+	entry.mu.Unlock()
+
+	s.totalActiveDown.Add(delta)
 }
 
 func (s *Stats) RecordMetadataRefresh(instance, mode, result string, duration time.Duration, ready bool) {
@@ -196,49 +218,59 @@ func (s *Stats) RecordMetadataRefresh(instance, mode, result string, duration ti
 	}
 	s.mc.metadataRefreshTotal.WithLabelValues(instance, mode, result).Inc()
 	s.mc.metadataRefreshTime.WithLabelValues(instance, mode).Observe(duration.Seconds())
+	readyVal := float64(0)
 	if ready {
-		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(1)
-	} else {
-		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(0)
+		readyVal = 1
 	}
+	s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(readyVal)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item := s.instance(instance, mode)
-	item.Refreshes++
-	item.LastRefresh = result
-	item.LastRefreshAt = time.Now()
-	item.SnapshotReady = ready
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	entry.data.Refreshes++
+	entry.data.LastRefresh = result
+	entry.data.LastRefreshAt = time.Now()
+	entry.data.SnapshotReady = ready
 	if result != "success" {
-		item.RefreshFailures++
+		entry.data.RefreshFailures++
 	}
-	s.total.Refreshes++
-	s.total.LastRefresh = result
+	entry.mu.Unlock()
+
+	s.totalRefreshes.Add(1)
+	s.totalMu.Lock()
+	s.totalLastRefresh = result
+	s.totalLastRefreshAt = time.Now()
 	if result != "success" {
-		s.total.RefreshFailures++
+		s.totalRefreshFails.Add(1)
 	}
-	s.instances[instance] = item
+	if ready {
+		s.totalSnapshotReady.Store(true)
+	}
+	s.totalMu.Unlock()
 }
 
 func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
 	if s == nil {
 		return
 	}
+	readyVal := float64(0)
 	if ready {
-		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(1)
-	} else {
-		s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(0)
+		readyVal = 1
 	}
+	s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(readyVal)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item := s.instance(instance, mode)
-	item.MetadataState = state
-	item.LastRefreshAt = time.Now()
-	item.SnapshotReady = ready
-	s.total.MetadataState = state
-	s.total.SnapshotReady = ready
-	s.instances[instance] = item
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	entry.data.MetadataState = state
+	entry.data.LastRefreshAt = time.Now()
+	entry.data.SnapshotReady = ready
+	entry.mu.Unlock()
+
+	s.totalMu.Lock()
+	s.totalMetadataState = state
+	if ready {
+		s.totalSnapshotReady.Store(true)
+	}
+	s.totalMu.Unlock()
 }
 
 func (s *Stats) SetUpstreamHealth(instance, mode, upstream string, state int, weight, errorRate, latencySecs float64) {
@@ -262,24 +294,61 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	if s == nil {
 		return StatsSnapshot{Total: emptyInstanceStats(""), Instances: map[string]InstanceStats{}}
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	snapshot := StatsSnapshot{Total: cloneInstanceStats(s.total), Instances: map[string]InstanceStats{}}
-	for name, item := range s.instances {
-		snapshot.Instances[name] = cloneInstanceStats(item)
+	total := InstanceStats{
+		Requests:         s.totalRequests.Load(),
+		Errors:           s.totalErrors.Load(),
+		ResponseBytes:    s.totalResponseBytes.Load(),
+		UpstreamRequests: s.totalUpstreamReqs.Load(),
+		UpstreamErrors:   s.totalUpstreamErrs.Load(),
+		ActiveDownloads:  s.totalActiveDown.Load(),
+		Refreshes:        s.totalRefreshes.Load(),
+		RefreshFailures:  s.totalRefreshFails.Load(),
+		SnapshotReady:    s.totalSnapshotReady.Load(),
 	}
-	return snapshot
+	s.totalMu.Lock()
+	total.MetadataState = s.totalMetadataState
+	total.LastRefresh = s.totalLastRefresh
+	total.LastRefreshAt = s.totalLastRefreshAt
+	total.Cache = cloneMap(s.totalCache)
+	total.UpstreamStatus = cloneMap(s.totalUpstreamSt)
+	s.totalMu.Unlock()
+
+	result := StatsSnapshot{Total: total, Instances: map[string]InstanceStats{}}
+	s.instances.Range(func(key, value interface{}) bool {
+		entry := value.(*instanceEntry)
+		entry.mu.Lock()
+		result.Instances[key.(string)] = cloneInstanceStats(entry.data)
+		entry.mu.Unlock()
+		return true
+	})
+	return result
 }
 
-func (s *Stats) instance(name, mode string) InstanceStats {
-	item, ok := s.instances[name]
-	if !ok {
-		item = emptyInstanceStats(mode)
+func (s *Stats) getOrCreateEntry(name, mode string) *instanceEntry {
+	if entry, ok := s.instances.Load(name); ok {
+		e := entry.(*instanceEntry)
+		e.mu.Lock()
+		if e.data.Mode == "" {
+			e.data.Mode = mode
+		}
+		e.mu.Unlock()
+		return e
 	}
-	if item.Mode == "" {
-		item.Mode = mode
-	}
-	return item
+	entry := &instanceEntry{data: emptyInstanceStats(mode)}
+	actual, _ := s.instances.LoadOrStore(name, entry)
+	return actual.(*instanceEntry)
+}
+
+func (s *Stats) incrTotalCache(cache string) {
+	s.totalMu.Lock()
+	s.totalCache[cache]++
+	s.totalMu.Unlock()
+}
+
+func (s *Stats) incrTotalUpstreamStatus(status string) {
+	s.totalMu.Lock()
+	s.totalUpstreamSt[status]++
+	s.totalMu.Unlock()
 }
 
 func emptyInstanceStats(mode string) InstanceStats {
@@ -288,13 +357,18 @@ func emptyInstanceStats(mode string) InstanceStats {
 
 func cloneInstanceStats(item InstanceStats) InstanceStats {
 	clone := item
-	clone.Cache = map[string]uint64{}
-	for key, value := range item.Cache {
-		clone.Cache[key] = value
-	}
-	clone.UpstreamStatus = map[string]uint64{}
-	for key, value := range item.UpstreamStatus {
-		clone.UpstreamStatus[key] = value
-	}
+	clone.Cache = cloneMap(item.Cache)
+	clone.UpstreamStatus = cloneMap(item.UpstreamStatus)
 	return clone
+}
+
+func cloneMap(src map[string]uint64) map[string]uint64 {
+	if len(src) == 0 {
+		return map[string]uint64{}
+	}
+	dst := make(map[string]uint64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

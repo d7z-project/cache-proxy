@@ -1,6 +1,7 @@
 package httpcache
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"log/slog"
@@ -48,8 +49,10 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 			defer cfg.StatsDone()
 		}
 
-		tee := io.TeeReader(cfg.Body, tempFile)
+		bw := bufio.NewWriterSize(tempFile, 256<<10)
+		tee := io.TeeReader(cfg.Body, bw)
 		if _, copyErr := io.Copy(pw, tee); copyErr == nil {
+			bw.Flush()
 			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
 				if err := cfg.StoreFn(context.Background(), tempFile); err != nil {
 					slog.Warn("cache store write failed", "path", cfg.ObjectPath, "err", err)

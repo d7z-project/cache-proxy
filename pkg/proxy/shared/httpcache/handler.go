@@ -90,6 +90,13 @@ func ConfigureClientTransport(client *utils.HttpClientWrapper, name, mode string
 	if transport.Timeout > 0 {
 		baseTransport.DialContext = utils.DefaultDialContext(transport.Timeout.Duration())
 	}
+	if transport.MaxIdleConns > 0 {
+		baseTransport.MaxIdleConns = transport.MaxIdleConns
+		baseTransport.MaxIdleConnsPerHost = transport.MaxIdleConns
+	}
+	if transport.MaxConnsPerHost > 0 {
+		baseTransport.MaxConnsPerHost = transport.MaxConnsPerHost
+	}
 }
 
 func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {

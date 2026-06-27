@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+var validNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func ValidInstanceName(name string) bool {
 	return name != "" && validNameRE.MatchString(name)
@@ -114,10 +114,12 @@ type Instance struct {
 }
 
 type TransportConfig struct {
-	Proxy     string         `yaml:"proxy,omitempty"`
-	UserAgent string         `yaml:"ua,omitempty"`
-	Timeout   Duration       `yaml:"timeout,omitempty"`
-	Health    *health.Config `yaml:"health,omitempty"`
+	Proxy           string         `yaml:"proxy,omitempty"`
+	UserAgent       string         `yaml:"ua,omitempty"`
+	Timeout         Duration       `yaml:"timeout,omitempty"`
+	MaxIdleConns    int            `yaml:"max_idle_conns,omitempty"`
+	MaxConnsPerHost int            `yaml:"max_conns_per_host,omitempty"`
+	Health          *health.Config `yaml:"health,omitempty"`
 }
 
 type SelectedMode struct {

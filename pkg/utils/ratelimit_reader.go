@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,12 +19,14 @@ type RateLimitReader struct {
 	inner          io.ReadCloser
 	minBytesPerSec int64
 	window         time.Duration
+	startedAt      time.Time
 
-	mu         sync.Mutex
-	totalBytes int64
-	startedAt  time.Time
-	lastReadAt time.Time
-	dead       bool
+	totalBytes  atomic.Int64
+	lastReadAt  atomic.Int64
+	dead        atomic.Bool
+	lastChecked atomic.Int64
+
+	mu sync.Mutex
 }
 
 func NewRateLimitReader(inner io.ReadCloser) *RateLimitReader {
@@ -31,13 +34,11 @@ func NewRateLimitReader(inner io.ReadCloser) *RateLimitReader {
 }
 
 func NewRateLimitReaderWithConfig(inner io.ReadCloser, minBytesPerSec int64, window time.Duration) *RateLimitReader {
-	now := time.Now()
 	return &RateLimitReader{
 		inner:          inner,
 		minBytesPerSec: minBytesPerSec,
 		window:         window,
-		startedAt:      now,
-		lastReadAt:     now,
+		startedAt:      time.Now(),
 	}
 }
 
@@ -47,13 +48,11 @@ func (r *RateLimitReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.inner.Read(p)
 	if n > 0 {
-		r.mu.Lock()
-		r.totalBytes += int64(n)
-		r.lastReadAt = time.Now()
-		r.mu.Unlock()
+		r.totalBytes.Add(int64(n))
+		r.lastReadAt.Store(time.Now().UnixNano())
 	}
 	if err != nil {
-		if r.dead {
+		if r.dead.Load() {
 			return n, ErrReadRateTooSlow
 		}
 		return n, err
@@ -61,23 +60,34 @@ func (r *RateLimitReader) Read(p []byte) (int, error) {
 	if n == 0 {
 		return 0, nil
 	}
-	r.checkRate()
+	r.maybeCheck()
 	return n, nil
+}
+
+func (r *RateLimitReader) maybeCheck() {
+	lastChecked := r.lastChecked.Load()
+	now := time.Now().UnixNano()
+	if now-lastChecked < r.window.Nanoseconds()/20 {
+		return
+	}
+	if r.lastChecked.CompareAndSwap(lastChecked, now) {
+		r.checkRate()
+	}
 }
 
 func (r *RateLimitReader) checkRate() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.dead {
+	if r.dead.Load() {
 		return
 	}
 	elapsed := time.Since(r.startedAt)
 	if elapsed < r.window {
 		return
 	}
-	rate := float64(r.totalBytes) / elapsed.Seconds()
+	rate := float64(r.totalBytes.Load()) / elapsed.Seconds()
 	if rate < float64(r.minBytesPerSec) {
-		r.dead = true
+		r.dead.Store(true)
 	}
 }
 

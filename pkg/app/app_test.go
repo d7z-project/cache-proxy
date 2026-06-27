@@ -37,7 +37,7 @@ server:
   bind: 127.0.0.1:8080
   backend: /tmp/cache
 instances:
-  - name: my-proxy
+  - name: my proxy
     enabled: true
     file:
       route:
