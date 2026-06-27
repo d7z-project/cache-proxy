@@ -39,6 +39,8 @@
   --badge-cargo-text: #7a5334;
   --badge-pypi-bg: #e4edf5;
   --badge-pypi-text: #365f87;
+  --badge-git-bg: #f5e6dd;
+  --badge-git-text: #8b5e3c;
 
   --dot-ready: #529564;
   --dot-refreshing: #3e8091;
@@ -88,6 +90,8 @@
   --badge-cargo-text: #d9b692;
   --badge-pypi-bg: #243340;
   --badge-pypi-text: #8eb8e0;
+  --badge-git-bg: #3a2e24;
+  --badge-git-text: #d9b892;
 
   --dot-ready: #74c08b;
   --dot-refreshing: #69b7ca;
@@ -479,6 +483,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 .badge-maven{background:var(--badge-maven-bg);color:var(--badge-maven-text)}
 .badge-cargo{background:var(--badge-cargo-bg);color:var(--badge-cargo-text)}
 .badge-pypi{background:var(--badge-pypi-bg);color:var(--badge-pypi-text)}
+.badge-git{background:var(--badge-git-bg);color:var(--badge-git-text)}
 .badge-file{background:var(--badge-file-bg);color:var(--badge-file-text)}
 .badge-apk,.badge-deb,.badge-rpm,.badge-pacman{background:var(--badge-pkg-bg);color:var(--badge-pkg-text)}
 

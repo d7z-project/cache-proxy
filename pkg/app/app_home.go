@@ -130,7 +130,11 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 	hi.Requests = formatCompact(s.Requests)
 	hi.HitRate = formatHitRate(s.Cache)
 	hi.DiskUsage = formatBytes(diskBytes)
-	hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+	if src, ok := entry.Runtime.(proxyruntime.StatusSource); ok {
+		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = src.DashboardStatus()
+	} else {
+		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+	}
 	return hi
 }
 
@@ -192,6 +196,8 @@ func bindURL(req *http.Request, bind string) string {
 func setupCommand(mode, url string) (note, cmd string) {
 	url = strings.TrimRight(url, "/")
 	switch mode {
+	case "git":
+		return "# Clone the repository", "git clone " + url
 	case "npm":
 		return "# Set the npm registry to this proxy", "npm config set registry " + url
 	case "go":

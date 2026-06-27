@@ -23,6 +23,12 @@ type Instance interface {
 	Cleanup(context.Context) error
 }
 
+// StatusSource allows an Instance to provide custom dashboard status
+// for modes that don't use httpcache stats or health.ServiceHealth.
+type StatusSource interface {
+	DashboardStatus() (color, label, extra string)
+}
+
 type HandlerInstance struct {
 	Handler      http.Handler
 	Close        func() error

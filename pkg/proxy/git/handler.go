@@ -131,3 +131,18 @@ func (h *gitHandler) serveCloneStatus(w http.ResponseWriter, state gitState) {
 func (h *gitHandler) redactedUpstream() string {
 	return redactURL(h.upstream)
 }
+
+func (h *gitHandler) DashboardStatus() (color, label, extra string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	switch h.state {
+	case gitStateCloning:
+		return "blue", "cloning...", ""
+	case gitStateReady:
+		return "green", "ready", ""
+	case gitStateFailed:
+		return "red", "failed", ""
+	default:
+		return "gray", "unknown", ""
+	}
+}
