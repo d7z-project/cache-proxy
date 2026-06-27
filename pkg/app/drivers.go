@@ -6,6 +6,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/cargo"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/deb"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/git"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/maven"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
@@ -22,6 +23,7 @@ func builtinDrivers() map[string]proxyruntime.ModeDriver {
 		config.ModeCargo:  cargo.NewDriver(),
 		config.ModeDEB:    deb.NewDriver(),
 		config.ModeFile:   file.NewDriver(),
+		config.ModeGit:    git.NewDriver(),
 		config.ModeGo:     gomod.NewDriver(),
 		config.ModeMaven:  maven.NewDriver(),
 		config.ModeNPM:    npm.NewDriver(),

@@ -4,7 +4,7 @@ A caching reverse proxy for package registries and artifact repositories. Single
 
 ## Features
 
-- 11 proxy modes in one process: `file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`
+- 12 proxy modes in one process: `file`, `git`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`
 - Path-mounted and dedicated-listener instances
 - Per-resource cache policies (`bypass` / `immutable` / `revalidate`) with freshness and concurrency controls
 - Prometheus metrics, background GC, expired-object cleanup
@@ -100,7 +100,7 @@ instances:
 | --- | --- | --- | --- |
 | `name` | string | required | Instance name (metrics label, home page) |
 | `enabled` | bool | required | `false` = skip at runtime |
-| `<mode>` | block | required | One of `file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman` |
+| `<mode>` | block | required | One of `file`, `git`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman` |
 | `expire_after` | expiration | `720h` | Upper bound on cached object lifetime |
 | `route.path` | path | required* | Mount under `server.bind` (* `oci` uses `bind` instead) |
 | `bind` | `host:port` | required* | Dedicated listener (* `oci` only) |
@@ -457,6 +457,43 @@ pacman:
 Client: `Server = http://cache.lan:8080/pacman/$repo/os/$arch`. Repositories auto-discovered from `.db` / `.files` requests.
 
 Same field table as `apk`, except `refresh_interval` defaults to `2m`.
+
+</details>
+
+<details>
+<summary><b>git</b> — Git repository mirror</summary>
+
+```yaml
+git:
+  route: { path: /git }
+  upstream: https://github.com/user/repo.git
+  auth:
+    type: token
+    password: $GITHUB_TOKEN
+  proxy: socks5://proxy:1080
+  sync_interval: 5m
+  force_overwrite: true
+```
+
+Client: `git clone http://cache.lan:8080/git/`.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `upstream` | URL | required | Remote git repository URL |
+| `auth.type` | Enum | — | `none` \| `basic` \| `token` |
+| `auth.username` | string | — | Username for `basic` auth |
+| `auth.password` | string | — | Password/token (supports `$ENV` expansion) |
+| `proxy` | URL | — | HTTP/SOCKS5 proxy for upstream connection |
+| `sync_interval` | Duration | `0` | Periodic sync interval (`0` = only initial clone) |
+| `force_overwrite` | bool | `true` | Force overwrite local refs on incompatible remote changes |
+| `route.path` | path | required | URL prefix for git clone |
+
+Notes:
+- One remote repository per instance. Read-only mirror (no push support).
+- Configurable `sync_interval` keeps the local mirror in sync with the remote; set to `0` for manual-only.
+- With `force_overwrite: true` and `sync_interval > 0`, the mirror stays byte-identical to the remote including force-pushed history and deleted branches (prune).
+- Repository storage is backed by the configured `server.backend` via the internal afero filesystem layer.
+- Clone status and sync results are exposed as Prometheus metrics (`cache_proxy_git_clone_success_total`, `cache_proxy_git_sync_success_total`, `cache_proxy_git_last_sync_timestamp_seconds`).
 
 </details>
 

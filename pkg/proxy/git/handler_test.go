@@ -1,0 +1,583 @@
+package git
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/spf13/afero"
+	"github.com/stretchr/testify/require"
+)
+
+func createTestSourceRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test repo\n"), 0o644)
+	require.NoError(t, err)
+	_, err = wt.Add("README.md")
+	require.NoError(t, err)
+	_, err = wt.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	return dir
+}
+
+func newTestHandler(t *testing.T, upstreamURL string) *gitHandler {
+	t.Helper()
+	baseFs := afero.NewOsFs()
+	bfs := newBillyAdapter(afero.NewBasePathFs(baseFs, t.TempDir()), "")
+	return newGitHandler(gitConfig{
+		name:           "test",
+		billyFs:        bfs,
+		upstream:       upstreamURL,
+		forceOverwrite: true,
+	})
+}
+
+func waitForClone(t *testing.T, h *gitHandler) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timeout waiting for clone")
+		case <-ticker.C:
+			h.mu.Lock()
+			s := h.state
+			h.mu.Unlock()
+			if s == gitStateReady {
+				return
+			}
+			if s == gitStateFailed {
+				t.Fatal("clone failed unexpectedly")
+			}
+		}
+	}
+}
+
+func TestCloneAndServe(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/x-git-upload-pack-advertisement", rec.Header().Get("Content-Type"))
+	require.Contains(t, rec.Body.String(), "service=git-upload-pack")
+}
+
+func TestServeBeforeCloneReady(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+
+	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "10", rec.Header().Get("Retry-After"))
+}
+
+func TestCloneFailure(t *testing.T) {
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	h := newGitHandler(gitConfig{
+		name:           "fail",
+		billyFs:        bfs,
+		upstream:       "http://nonexistent.example.com/repo.git",
+		forceOverwrite: true,
+	})
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			require.Fail(t, "timeout waiting for clone failure")
+		case <-ticker.C:
+			h.mu.Lock()
+			s := h.state
+			h.mu.Unlock()
+			if s != gitStateCloning {
+				require.Equal(t, gitStateFailed, s)
+				return
+			}
+		}
+	}
+}
+
+func TestSyncAfterClone(t *testing.T) {
+	source := createTestSourceRepo(t)
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	h := newGitHandler(gitConfig{
+		name:           "sync",
+		billyFs:        bfs,
+		upstream:       "file://" + source,
+		forceOverwrite: true,
+	})
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	h.mu.RLock()
+	headBefore, err := h.repo.Head()
+	h.mu.RUnlock()
+	require.NoError(t, err)
+
+	repo, err := git.PlainOpen(source)
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(source, "new.txt"), []byte("new"), 0o644)
+	require.NoError(t, err)
+	_, err = wt.Add("new.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("update", &git.CommitOptions{
+		Author: &object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	h.doSync(context.Background())
+
+	h.mu.RLock()
+	headAfter, _ := h.repo.Head()
+	h.mu.RUnlock()
+	require.NotEqual(t, headBefore.Hash(), headAfter.Hash(), "sync should have fetched new commit")
+}
+
+func TestBillyAdapterReadWrite(t *testing.T) {
+	afs := afero.NewMemMapFs()
+	bfs := newBillyAdapter(afs, "/root")
+
+	f, err := bfs.Create("test.txt")
+	require.NoError(t, err)
+	_, err = f.Write([]byte("hello world"))
+	require.NoError(t, err)
+	f.Close()
+
+	f, err = bfs.Open("test.txt")
+	require.NoError(t, err)
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+	require.Equal(t, "hello world", string(data))
+	f.Close()
+
+	require.NotNil(t, filesystem.NewStorage(bfs, cache.NewObjectLRUDefault()))
+	require.NoError(t, bfs.MkdirAll("subdir", 0o755))
+
+	info, err := bfs.Stat("test.txt")
+	require.NoError(t, err)
+	require.Equal(t, int64(11), info.Size())
+
+	require.NoError(t, bfs.Rename("test.txt", "renamed.txt"))
+	_, err = bfs.Stat("test.txt")
+	require.Error(t, err)
+	info, err = bfs.Stat("renamed.txt")
+	require.NoError(t, err)
+	require.Equal(t, "renamed.txt", info.Name())
+
+	require.NoError(t, bfs.Remove("renamed.txt"))
+	_, err = bfs.Stat("renamed.txt")
+	require.Error(t, err)
+
+	require.Equal(t, "renamed.txt", bfs.Base("/root/renamed.txt"))
+	require.Equal(t, "/root", bfs.Dir("/root/renamed.txt"))
+	require.Equal(t, "a/b/c", bfs.Join("a", "b", "c"))
+	require.Equal(t, "/root", bfs.Root())
+
+	chroot, err := bfs.Chroot("subdir")
+	require.NoError(t, err)
+	require.Equal(t, "subdir", chroot.Root())
+	_, err = chroot.Create("nested.txt")
+	require.NoError(t, err)
+}
+
+func TestURLRedact(t *testing.T) {
+	require.Equal(t, "https://github.com/user/repo.git", redactURL("https://token:x-oauth-basic@github.com/user/repo.git"))
+	require.Equal(t, "https://example.com/repo.git", redactURL("https://user:pass@example.com/repo.git?foo=bar"))
+	require.Equal(t, "invalid", redactURL("invalid"))
+}
+
+func TestAuthBuilder(t *testing.T) {
+	auth, err := buildAuth(nil)
+	require.NoError(t, err)
+	require.Nil(t, auth)
+
+	auth, err = buildAuth(&AuthConfig{Type: "basic", Username: "user", Password: "pass"})
+	require.NoError(t, err)
+	require.NotNil(t, auth)
+	require.Equal(t, "http-basic-auth", auth.Name())
+
+	auth, err = buildAuth(&AuthConfig{Type: "token", Password: "tok"})
+	require.NoError(t, err)
+	require.NotNil(t, auth)
+	require.Equal(t, "http-token-auth", auth.Name())
+
+	_, err = buildAuth(&AuthConfig{Type: "bad"})
+	require.Error(t, err)
+}
+
+func TestServeUnknownPath(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/unknown-path", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestCloneAndServePktLineFormat(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	require.True(t, strings.Contains(body, "service=git-upload-pack"), "body should contain service=git-upload-pack")
+	require.True(t, strings.Contains(body, "HEAD"), "body should contain HEAD ref")
+}
+
+func TestStopDuringClone(t *testing.T) {
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	h := newGitHandler(gitConfig{
+		name:           "stop-clone",
+		billyFs:        bfs,
+		upstream:       "http://nonexistent.example.com/repo.git",
+		forceOverwrite: true,
+	})
+	h.Start(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := h.Stop(ctx)
+	require.NoError(t, err)
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	require.True(t, h.state == gitStateFailed || h.state == gitStateCloning)
+}
+
+func TestDoubleStartIdempotent(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	err := h.Start(context.Background())
+	require.NoError(t, err)
+	err = h.Start(context.Background())
+	require.NoError(t, err)
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	h.mu.RLock()
+	require.Equal(t, gitStateReady, h.state)
+	h.mu.RUnlock()
+}
+
+func TestEmptyUpstreamRepo(t *testing.T) {
+	emptyDir := t.TempDir()
+	_, err := git.PlainInit(emptyDir, true)
+	require.NoError(t, err)
+
+	h := newTestHandler(t, "file://"+emptyDir)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timeout")
+		case <-ticker.C:
+			h.mu.RLock()
+			s := h.state
+			h.mu.RUnlock()
+			if s != gitStateCloning {
+				require.Equal(t, gitStateFailed, s, "empty repo clone should fail")
+				return
+			}
+		}
+	}
+}
+
+func TestSyncPrunesDeletedRefs(t *testing.T) {
+	source := createTestSourceRepo(t)
+
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	h := newGitHandler(gitConfig{
+		name:           "prune",
+		billyFs:        bfs,
+		upstream:       "file://" + source,
+		forceOverwrite: true,
+	})
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	h.mu.RLock()
+	headBefore, err := h.repo.Head()
+	h.mu.RUnlock()
+	require.NoError(t, err)
+
+	h.doSync(context.Background())
+
+	h.mu.RLock()
+	headAfter, err := h.repo.Head()
+	h.mu.RUnlock()
+	require.NoError(t, err)
+	require.Equal(t, headBefore.Hash(), headAfter.Hash(), "sync with no changes should keep HEAD unchanged")
+}
+
+func TestServeConcurrentRequests(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+func TestAuthEnvVarExpansion(t *testing.T) {
+	os.Setenv("TEST_GIT_USER", "myuser")
+	os.Setenv("TEST_GIT_TOKEN", "mytoken")
+	defer os.Unsetenv("TEST_GIT_USER")
+	defer os.Unsetenv("TEST_GIT_TOKEN")
+
+	auth, err := buildAuth(&AuthConfig{
+		Type:     "basic",
+		Username: "$TEST_GIT_USER",
+		Password: "$TEST_GIT_TOKEN",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, auth)
+	require.Equal(t, "http-basic-auth", auth.Name())
+}
+
+func TestProxyOptionsParsing(t *testing.T) {
+	// No proxy
+	opts := proxyOptions("")
+	require.Equal(t, transport.ProxyOptions{}, opts)
+
+	// Plain URL
+	opts = proxyOptions("socks5://proxy:1080")
+	require.Equal(t, transport.ProxyOptions{URL: "socks5://proxy:1080"}, opts)
+
+	// URL with auth
+	opts = proxyOptions("socks5://user:pass@proxy:1080")
+	require.Equal(t, transport.ProxyOptions{URL: "socks5://user:pass@proxy:1080", Username: "user", Password: "pass"}, opts)
+
+	// Invalid URL treated as raw
+	opts = proxyOptions("://invalid")
+	require.Equal(t, transport.ProxyOptions{URL: "://invalid"}, opts)
+}
+
+func TestRedactURL(t *testing.T) {
+	// Empty URL
+	require.Equal(t, "", redactURL(""))
+
+	// URL with port
+	require.Equal(t, "https://example.com:8080/repo.git", redactURL("https://user:pass@example.com:8080/repo.git"))
+
+	// URL with fragment
+	require.Equal(t, "https://example.com/repo.git", redactURL("https://token@example.com/repo.git#frag"))
+}
+
+func TestStateDoesNotChangeAfterSyncError(t *testing.T) {
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	h := newGitHandler(gitConfig{
+		name:           "state-stable",
+		billyFs:        bfs,
+		upstream:       "http://nonexistent.example.com/repo.git",
+		forceOverwrite: true,
+	})
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timeout")
+		case <-ticker.C:
+			h.mu.RLock()
+			s := h.state
+			h.mu.RUnlock()
+			if s != gitStateCloning {
+				require.Equal(t, gitStateFailed, s)
+				return
+			}
+		}
+	}
+}
+
+func TestUploadPackEndpoint(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	req := httptest.NewRequest(http.MethodPost, "/git-upload-pack", strings.NewReader(""))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestInfoRefsWithoutServiceParam(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	req := httptest.NewRequest(http.MethodGet, "/info/refs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestServeFailedStateResponse(t *testing.T) {
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	h := newGitHandler(gitConfig{
+		name:           "failed-serve",
+		billyFs:        bfs,
+		upstream:       "http://nonexistent.example.com/repo.git",
+		forceOverwrite: true,
+	})
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timeout")
+		case <-ticker.C:
+			h.mu.RLock()
+			s := h.state
+			h.mu.RUnlock()
+			if s == gitStateFailed {
+				req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				require.Equal(t, http.StatusInternalServerError, rec.Code)
+				return
+			}
+		}
+	}
+}
+
+func TestBillyAdapterOpenFileCreate(t *testing.T) {
+	afs := afero.NewMemMapFs()
+	bfs := newBillyAdapter(afs, "/root")
+
+	f, err := bfs.OpenFile("deep/nested/file.txt", os.O_RDWR|os.O_CREATE, 0644)
+	require.NoError(t, err)
+	_, err = f.Write([]byte("data"))
+	require.NoError(t, err)
+	f.Close()
+
+	f, err = bfs.Open("deep/nested/file.txt")
+	require.NoError(t, err)
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+	require.Equal(t, "data", string(data))
+	f.Close()
+}
+
+func TestBillyAdapterReadDirEmpty(t *testing.T) {
+	afs := afero.NewMemMapFs()
+	bfs := newBillyAdapter(afs, "/root")
+	bfs.MkdirAll("emptydir", 0755)
+
+	entries, err := bfs.ReadDir("emptydir")
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestBillyAdapterSymlinkNotSupported(t *testing.T) {
+	afs := afero.NewMemMapFs()
+	bfs := newBillyAdapter(afs, "/root")
+
+	err := bfs.Symlink("target", "link")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not supported")
+
+	_, err = bfs.Readlink("link")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not supported")
+}
+
+func TestBillyAdapterLstatFile(t *testing.T) {
+	afs := afero.NewMemMapFs()
+	bfs := newBillyAdapter(afs, "/root")
+	f, _ := bfs.Create("lstat_test.txt")
+	f.Close()
+
+	info, err := bfs.Lstat("lstat_test.txt")
+	require.NoError(t, err)
+	require.Equal(t, "lstat_test.txt", info.Name())
+	require.False(t, info.IsDir())
+}
+
+func TestNewEndpoint(t *testing.T) {
+	ep, err := transport.NewEndpoint("file://")
+	require.NoError(t, err)
+	require.NotNil(t, ep)
+}

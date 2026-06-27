@@ -14,6 +14,7 @@ import (
 
 const (
 	ModeFile   = "file"
+	ModeGit    = "git"
 	ModeOCI    = "oci"
 	ModeNPM    = "npm"
 	ModeGo     = "go"
@@ -90,6 +91,7 @@ type Instance struct {
 	Name    string     `yaml:"name"`
 	Enabled bool       `yaml:"enabled"`
 	File    *ModeBlock `yaml:"file,omitempty"`
+	Git     *ModeBlock `yaml:"git,omitempty"`
 	OCI     *ModeBlock `yaml:"oci,omitempty"`
 	NPM     *ModeBlock `yaml:"npm,omitempty"`
 	Go      *ModeBlock `yaml:"go,omitempty"`
@@ -149,6 +151,7 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 		block *ModeBlock
 	}{
 		{mode: ModeFile, block: i.File},
+		{mode: ModeGit, block: i.Git},
 		{mode: ModeOCI, block: i.OCI},
 		{mode: ModeNPM, block: i.NPM},
 		{mode: ModeGo, block: i.Go},
