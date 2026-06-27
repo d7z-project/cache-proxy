@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
@@ -69,21 +70,37 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
 		foundPrimary := false
 		for _, item := range root.Data {
-			if item.Location.Href == "" {
+			itemHref := item.Location.Href
+			if itemHref == "" {
 				continue
 			}
-			metadataPath := path.Join(repoRoot, item.Location.Href)
+			metadataPath := path.Join(repoRoot, itemHref)
 			snapshot.Metadata[metadataPath] = struct{}{}
+
+			blob, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: metadataPath})
+			if err != nil {
+				if item.Type == "primary" {
+					return nil, err
+				}
+				continue
+			}
+			snapshot.Metadata[blob.Path] = struct{}{}
+
+			if err := session.Store(ctx, metadataPath, blob.Body, map[string]string{
+				"fetched-at": time.Now().UTC().Format(time.RFC3339Nano),
+			}); err != nil {
+				if item.Type == "primary" {
+					return nil, fmt.Errorf("store primary %s: %w", metadataPath, err)
+				}
+				continue
+			}
+
 			if item.Type != "primary" {
 				continue
 			}
 			foundPrimary = true
-			primary, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: metadataPath})
-			if err != nil {
-				return nil, err
-			}
-			snapshot.Metadata[primary.Path] = struct{}{}
-			reader, err := filerepo.OpenCompressed(primary.Body, primary.Path)
+
+			reader, err := filerepo.OpenCompressed(blob.Body, metadataPath)
 			if err != nil {
 				return nil, err
 			}

@@ -1,8 +1,10 @@
 package filerepo
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"path"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -92,6 +94,12 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 		lastErr = errors.New("metadata upstream fetch failed")
 	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: lastErr}
+}
+
+func (s *RefreshSession) Store(ctx context.Context, cleanPath string, body []byte, meta map[string]string) error {
+	storePath := path.Join(s.handler.objectRoot, cleanPath)
+	_, err := s.handler.store.Put(ctx, s.handler.name, storePath, bytes.NewReader(body), meta)
+	return err
 }
 
 type RootSpec interface {

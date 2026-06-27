@@ -73,6 +73,8 @@ func TestRefreshKeepsRepodataCompanionsDuringCleanup(t *testing.T) {
     <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
   </package>
 </metadata>`))
+		case "/9/BaseOS/x86_64/os/repodata/filelists.xml.gz":
+			_, _ = w.Write(mustGzip(t, `<filelists xmlns="http://linux.duke.edu/metadata/filelists"><package pkgid="abc123"></package></filelists>`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -106,21 +108,20 @@ func TestRefreshKeepsRepodataCompanionsDuringCleanup(t *testing.T) {
 
 	require.NoError(t, handler.Refresh(ctx))
 	require.NoError(t, store.MkdirAll("repo/repo/9/BaseOS/x86_64/os/repodata", 0o755))
-	for _, name := range []string{
-		"repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc",
-		"repo/9/BaseOS/x86_64/os/repodata/filelists.xml.gz",
-	} {
-		_, err = store.Put(ctx, "repo", name, strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-		require.NoError(t, err)
-	}
+
+	// filelists was pre-fetched during refresh
+	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/filelists.xml.gz")
+	require.NoError(t, err)
+
+	// manually store companion
+	_, err = store.Put(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc", strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
+	require.NoError(t, err)
+
 	require.NoError(t, handler.Cleanup(ctx))
-	for _, name := range []string{
-		"repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc",
-		"repo/9/BaseOS/x86_64/os/repodata/filelists.xml.gz",
-	} {
-		_, err = store.OpenObject(ctx, "repo", name)
-		require.NoError(t, err)
-	}
+	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc")
+	require.NoError(t, err)
+	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/filelists.xml.gz")
+	require.NoError(t, err)
 }
 
 func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
