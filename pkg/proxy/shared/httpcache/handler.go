@@ -43,11 +43,11 @@ type RuntimeConfig struct {
 }
 
 type Handler struct {
-	name   string
-	config RuntimeConfig
-	store  *blobfs.Store
-	client *utils.HttpClientWrapper
-	locks  *utils.RWLockGroup
+	name      string
+	config    RuntimeConfig
+	store     *blobfs.Store
+	client    *utils.HttpClientWrapper
+	locks     *utils.RWLockGroup
 	resolver  Resolver
 	stats     *Stats
 	health    *health.ServiceHealth
@@ -63,29 +63,33 @@ type remoteOptions struct {
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
 	client := utils.DefaultHttpClientWrapper()
-	client.UserAgent = ModeUserAgent(runtime.Mode)
-	if runtime.Transport != nil {
-		if runtime.Transport.UserAgent != "" {
-			client.UserAgent = runtime.Transport.UserAgent
-		}
-		transport, ok := client.Transport.(*http.Transport)
-		if !ok {
-			slog.Warn("cannot configure transport options, unexpected transport type", "instance", name)
+	ConfigureClientTransport(client, name, runtime.Mode, runtime.Transport)
+	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth}
+}
+
+func ConfigureClientTransport(client *utils.HttpClientWrapper, name, mode string, transport *config.TransportConfig) {
+	client.UserAgent = ModeUserAgent(mode)
+	if transport == nil {
+		return
+	}
+	if transport.UserAgent != "" {
+		client.UserAgent = transport.UserAgent
+	}
+	baseTransport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		slog.Warn("cannot configure transport, unexpected transport type", "instance", name)
+		return
+	}
+	if transport.Proxy != "" {
+		if proxyURL, err := url.Parse(transport.Proxy); err == nil {
+			baseTransport.Proxy = http.ProxyURL(proxyURL)
 		} else {
-			if runtime.Transport.Proxy != "" {
-				proxyURL, err := url.Parse(runtime.Transport.Proxy)
-				if err == nil {
-					transport.Proxy = http.ProxyURL(proxyURL)
-				} else {
-					slog.Warn("invalid transport proxy URL", "instance", name, "proxy", runtime.Transport.Proxy, "err", err)
-				}
-			}
-			if runtime.Transport.Timeout > 0 {
-				transport.DialContext = utils.DefaultDialContext(runtime.Transport.Timeout.Duration())
-			}
+			slog.Warn("invalid transport proxy URL", "instance", name, "proxy", transport.Proxy, "err", err)
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth}
+	if transport.Timeout > 0 {
+		baseTransport.DialContext = utils.DefaultDialContext(transport.Timeout.Duration())
+	}
 }
 
 func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {

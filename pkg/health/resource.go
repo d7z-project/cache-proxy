@@ -8,7 +8,7 @@ import (
 type ResourceState int
 
 const (
-	RPending  ResourceState = iota
+	RPending ResourceState = iota
 	RActive
 	RSuspect
 	RBlocked
@@ -64,15 +64,15 @@ type ResourceHealth struct {
 }
 
 type ResourceSnapshot struct {
-	Path                string           `yaml:"path"`
-	State               string           `yaml:"state"`
-	LastRefreshAt       time.Time        `yaml:"last_refresh_at"`
-	LastSuccessAt       time.Time        `yaml:"last_success_at"`
-	ConsecutiveNotFound int              `yaml:"consecutive_not_found"`
-	ConsecutiveInvalid  int              `yaml:"consecutive_invalid"`
-	ConsecutiveTransient int             `yaml:"consecutive_transient"`
-	LastError           string           `yaml:"last_error,omitempty"`
-	UpstreamURLs        []string         `yaml:"upstream_urls,omitempty"`
+	Path                 string    `yaml:"path"`
+	State                string    `yaml:"state"`
+	LastRefreshAt        time.Time `yaml:"last_refresh_at"`
+	LastSuccessAt        time.Time `yaml:"last_success_at"`
+	ConsecutiveNotFound  int       `yaml:"consecutive_not_found"`
+	ConsecutiveInvalid   int       `yaml:"consecutive_invalid"`
+	ConsecutiveTransient int       `yaml:"consecutive_transient"`
+	LastError            string    `yaml:"last_error,omitempty"`
+	UpstreamURLs         []string  `yaml:"upstream_urls,omitempty"`
 }
 
 func (rh *ResourceHealth) Snapshot() ResourceSnapshot {

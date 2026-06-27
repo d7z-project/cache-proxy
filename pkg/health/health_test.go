@@ -13,9 +13,9 @@ import (
 )
 
 type testStats struct {
-	health   map[string]float64
-	events   []string
-	mu       sync.Mutex
+	health map[string]float64
+	events []string
+	mu     sync.Mutex
 }
 
 func (s *testStats) RecordUpstream(instance, mode, method string, status int) {}
@@ -42,7 +42,7 @@ func TestNewServiceHealth(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com", "https://b.example.com"}, &testStats{}, "test-ua")
 	require.NotNil(t, h)
 	require.Equal(t, StateHealthy, h.AggregateState())
-	require.Equal(t, 2, h.UpstreamCount())
+	require.Len(t, h.upstreams, 2)
 }
 
 func TestWeightedUpstreamsAllHealthy(t *testing.T) {
@@ -90,13 +90,13 @@ func TestDegradeByErrorRate(t *testing.T) {
 	for range 9 {
 		uh.recordSuccess(10*time.Millisecond, cfg)
 	}
-	require.Equal(t, SClosed, uh.State, "all successes keeps closed")
+	require.Equal(t, SClosed, uh.State)
 
 	uh.recordFailure(fmt.Errorf("err"), cfg)
-	require.Equal(t, SClosed, uh.State, "1 failure with 10 samples = 10%% <= degrade 10%%")
+	require.Equal(t, SClosed, uh.State)
 
 	uh.recordFailure(fmt.Errorf("err"), cfg)
-	require.Equal(t, SDegraded, uh.State, "2 failures with 11 samples = 18%% > degrade 10%%")
+	require.Equal(t, SDegraded, uh.State)
 }
 
 func TestTripByErrorRate(t *testing.T) {
@@ -110,7 +110,7 @@ func TestTripByErrorRate(t *testing.T) {
 	for range 3 {
 		uh.recordFailure(fmt.Errorf("err"), cfg)
 	}
-	require.Equal(t, SOpen, uh.State, "30%% error rate should trip")
+	require.Equal(t, SOpen, uh.State)
 	require.Equal(t, 0.0, uh.weight)
 }
 
@@ -165,6 +165,23 @@ func TestCanaryFailureRevertsToOpen(t *testing.T) {
 	require.Equal(t, 0.0, uh.weight)
 }
 
+func TestOpenStateFailureStaysOpen(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EvaluationWindow = time.Second
+	uh := newUpstreamHealth("https://a.example.com", cfg.EvaluationWindow)
+
+	for range 7 {
+		uh.recordSuccess(10*time.Millisecond, cfg)
+	}
+	for range 3 {
+		uh.recordFailure(fmt.Errorf("err"), cfg)
+	}
+	require.Equal(t, SOpen, uh.State)
+
+	uh.recordFailure(fmt.Errorf("err"), cfg)
+	require.Equal(t, SOpen, uh.State, "failure while open must stay open, not jump to closed")
+}
+
 func TestDegradeByLatency(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DegradeLatency = 100 * time.Millisecond
@@ -181,7 +198,19 @@ func TestDegradeByLatency(t *testing.T) {
 	for range 20 {
 		uh.recordSuccess(50*time.Millisecond, cfg)
 	}
-	require.Equal(t, SClosed, uh.State, "low latency should recover to closed")
+	require.Equal(t, SClosed, uh.State)
+}
+
+func TestDegradeByLatencyNeedsMinSamples(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DegradeLatency = 100 * time.Millisecond
+	cfg.EvaluationWindow = time.Second
+	uh := newUpstreamHealth("https://a.example.com", cfg.EvaluationWindow)
+
+	for range 9 {
+		uh.recordSuccess(200*time.Millisecond, cfg)
+	}
+	require.Equal(t, SClosed, uh.State, "latency samples < minSampleSize should not degrade")
 }
 
 func TestCanaryCooldownNotElapsed(t *testing.T) {
@@ -199,18 +228,7 @@ func TestCanaryCooldownNotElapsed(t *testing.T) {
 	require.Equal(t, SOpen, uh.State)
 
 	uh.recordSuccess(10*time.Millisecond, cfg)
-	require.Equal(t, SOpen, uh.State, "cooldown not elapsed, should stay open")
-}
-
-func TestShouldProbe(t *testing.T) {
-	uh := newUpstreamHealth("https://a.example.com", time.Second)
-	require.True(t, uh.shouldProbe(30*time.Second))
-
-	uh.lastProbeAt = time.Now()
-	require.False(t, uh.shouldProbe(30*time.Second))
-
-	uh.lastProbeAt = time.Now().Add(-90 * time.Second)
-	require.True(t, uh.shouldProbe(30*time.Second))
+	require.Equal(t, SOpen, uh.State)
 }
 
 func TestResourceStateTransitions(t *testing.T) {
@@ -248,7 +266,7 @@ func TestResourceNotFoundRemoval(t *testing.T) {
 
 	h.FinishRefresh(rh.Path, gen, ErrResourceNotFound, nil)
 	_, ok = h.ResourceState(rh.Path)
-	require.False(t, ok, "second 404 should remove")
+	require.False(t, ok)
 }
 
 func TestResourceForbiddenBlocked(t *testing.T) {
@@ -259,10 +277,6 @@ func TestResourceForbiddenBlocked(t *testing.T) {
 	state, ok := h.ResourceState(rh.Path)
 	require.True(t, ok)
 	require.Equal(t, RBlocked, state)
-
-	nextRefresh, _ := h.ResourceNextRefresh(rh.Path)
-	require.True(t, nextRefresh.After(time.Now()))
-	require.True(t, nextRefresh.Before(time.Now().Add(3*time.Minute)))
 }
 
 func TestResourceTransientToBlocked(t *testing.T) {
@@ -350,13 +364,13 @@ func TestRecordResultUpdatesUpstream(t *testing.T) {
 
 	h.RecordResult("https://a.example.com", 500, 0)
 	uh = h.upstreams["https://a.example.com"]
-	require.Equal(t, SClosed, uh.State, "one 500 should not trip")
+	require.Equal(t, SClosed, uh.State)
 
 	for range 9 {
 		h.RecordResult("https://a.example.com", 500, 0)
 	}
 	uh = h.upstreams["https://a.example.com"]
-	require.Equal(t, SOpen, uh.State, "10/30=33%% > 30%% trip")
+	require.Equal(t, SOpen, uh.State)
 }
 
 func TestRecordFailure(t *testing.T) {
@@ -367,13 +381,42 @@ func TestRecordFailure(t *testing.T) {
 	}
 	h.RecordFailure("https://a.example.com", context.DeadlineExceeded)
 	uh := h.upstreams["https://a.example.com"]
-	require.Equal(t, SClosed, uh.State, "one failure with 20 successes keeps closed")
+	require.Equal(t, SClosed, uh.State)
 
 	for range 9 {
 		h.RecordFailure("https://a.example.com", context.DeadlineExceeded)
 	}
 	uh = h.upstreams["https://a.example.com"]
-	require.Equal(t, SOpen, uh.State, "10/30=33%% > trip")
+	require.Equal(t, SOpen, uh.State)
+}
+
+func TestContextCanceledNotRecorded(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+
+	for range 20 {
+		h.RecordResult("https://a.example.com", 200, 10*time.Millisecond)
+	}
+	for range 5 {
+		h.RecordFailure("https://a.example.com", context.Canceled)
+	}
+	uh := h.upstreams["https://a.example.com"]
+	require.Equal(t, SClosed, uh.State, "context.Canceled must not count as failure")
+}
+
+func TestCircuitEventEmitted(t *testing.T) {
+	ts := &testStats{}
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, ts, "ua")
+
+	for range 7 {
+		h.RecordResult("https://a.example.com", 200, 10*time.Millisecond)
+	}
+	for range 3 {
+		h.RecordResult("https://a.example.com", 500, 0)
+	}
+
+	ts.mu.Lock()
+	require.NotEmpty(t, ts.events)
+	ts.mu.Unlock()
 }
 
 func TestStopCleanShutdown(t *testing.T) {
@@ -421,21 +464,45 @@ func TestProbeHead404IsSuccess(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
 	h.probeOne(h.upstreams[server.URL])
 	uh := h.upstreams[server.URL]
-	require.Equal(t, SClosed, uh.State, "404 on HEAD means upstream is reachable")
+	require.Equal(t, SClosed, uh.State)
 }
 
 func TestProbeDirectConnectionFailure(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"http://127.0.0.1:1"}, &testStats{}, "ua")
 	h.probeOne(h.upstreams["http://127.0.0.1:1"])
 	uh := h.upstreams["http://127.0.0.1:1"]
-	require.Equal(t, SClosed, uh.State, "one connection failure should not trip")
+	require.Equal(t, SClosed, uh.State)
 	require.NotEmpty(t, uh.lastProbeErr)
+}
+
+func TestProbeRecoversBlockedResource(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	rh := h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})
+	h.FinishRefresh(rh.Path, rh.Generation, ErrResourceForbidden, nil)
+
+	state, _ := h.ResourceState(rh.Path)
+	require.Equal(t, RBlocked, state)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	h.mu.Lock()
+	h.upstreams[server.URL] = newUpstreamHealth(server.URL, time.Minute)
+	h.resources["dists/bookworm"].UpstreamURLs = []string{server.URL}
+	h.mu.Unlock()
+
+	h.probeOne(h.upstreams[server.URL])
+
+	state, _ = h.ResourceState(rh.Path)
+	require.Equal(t, RPending, state, "successful probe should recover blocked resource to pending")
 }
 
 func TestResourceSnapshotRoundtrip(t *testing.T) {
 	rh := &ResourceHealth{
-		Path:    "dists/bookworm",
-		State:   RActive,
+		Path:         "dists/bookworm",
+		State:        RActive,
 		LastTargets:  []ProbeTarget{{Path: "dists/bookworm/InRelease"}},
 		UpstreamURLs: []string{"https://a.example.com"},
 	}
@@ -468,7 +535,7 @@ func TestRateWindowBasics(t *testing.T) {
 	for range 11 {
 		rw.record(true)
 	}
-	require.Equal(t, 0.0, rw.errorRate(), "all success = 0 error rate")
+	require.Equal(t, 0.0, rw.errorRate())
 
 	rw.record(false)
 	require.Greater(t, rw.errorRate(), 0.0)
@@ -477,7 +544,7 @@ func TestRateWindowBasics(t *testing.T) {
 func TestRateWindowMinSamples(t *testing.T) {
 	rw := newRateWindow(time.Minute)
 	rw.record(false)
-	require.Equal(t, 0.0, rw.errorRate(), "below minSampleSize should return 0")
+	require.Equal(t, 0.0, rw.errorRate())
 }
 
 func TestConcurrentAccessSafety(t *testing.T) {
@@ -526,6 +593,12 @@ func TestMetricsEmission(t *testing.T) {
 	require.Equal(t, 0.0, ts.health["error_rate"])
 	require.Greater(t, ts.health["state"], -1.0)
 	ts.mu.Unlock()
+}
+
+func TestAggregateStateString(t *testing.T) {
+	require.Equal(t, "healthy", StateHealthy.String())
+	require.Equal(t, "degraded", StateDegraded.String())
+	require.Equal(t, "unhealthy", StateUnhealthy.String())
 }
 
 func upstreamURLs(t *testing.T, h *ServiceHealth) []string {

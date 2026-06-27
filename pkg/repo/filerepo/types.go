@@ -109,6 +109,8 @@ type staticRootSpec struct {
 	targets []MetadataTarget
 }
 
-func (s staticRootSpec) Key() string     { return s.key }
-func (s staticRootSpec) Targets() []MetadataTarget { return append([]MetadataTarget(nil), s.targets...) }
-func (s staticRootSpec) Merge(_ RootSpec) bool      { return false }
+func (s staticRootSpec) Key() string { return s.key }
+func (s staticRootSpec) Targets() []MetadataTarget {
+	return append([]MetadataTarget(nil), s.targets...)
+}
+func (s staticRootSpec) Merge(_ RootSpec) bool { return false }

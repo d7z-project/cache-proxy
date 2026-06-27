@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -94,13 +93,4 @@ func validateMetricsPath(path string) error {
 		return fmt.Errorf("metrics path %q conflicts with proxy root", path)
 	}
 	return nil
-}
-
-func sortedEntryNames(entries map[string]*proxyruntime.Entry) []string {
-	names := make([]string, 0, len(entries))
-	for name := range entries {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }

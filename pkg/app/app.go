@@ -52,9 +52,9 @@ type App struct {
 	gcDone       chan struct{}
 	cleanupDone  chan struct{}
 
-	tuMu         sync.Mutex
-	tuCachedAt   time.Time
-	tuCache      map[string]int64
+	tuMu       sync.Mutex
+	tuCachedAt time.Time
+	tuCache    map[string]int64
 }
 
 func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
@@ -261,7 +261,7 @@ func (h bindHomeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (a *App) prepareHandlers(ctx context.Context) error {
-	for _, name := range sortedEntryNames(a.entries) {
+	for _, name := range proxyruntime.SortedNames(a.entries) {
 		entry := a.entries[name]
 		if !entry.Enabled || entry.Runtime == nil {
 			continue

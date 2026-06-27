@@ -136,7 +136,7 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 
 func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry {
 	items := make([]*proxyruntime.Entry, 0, len(entries))
-	for _, name := range sortedEntryNames(entries) {
+	for _, name := range proxyruntime.SortedNames(entries) {
 		items = append(items, entries[name])
 	}
 	return items

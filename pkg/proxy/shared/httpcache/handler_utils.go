@@ -17,8 +17,8 @@ import (
 
 var internalHeaders = map[string]struct{}{
 	"fetched-at":       {},
-	"mode":            {},
-	"cache":           {},
+	"mode":             {},
+	"cache":            {},
 	"indexed-identity": {},
 }
 

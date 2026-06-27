@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 
 	"gopkg.d7z.net/blobfs"
 
@@ -18,6 +19,10 @@ type resolver struct {
 	policy *Policy
 	store  *blobfs.Store
 	name   string
+
+	cfgMu     sync.Mutex
+	cfgCached bool
+	cfgDL     string
 }
 
 func newResolver(policy *Policy, store *blobfs.Store, name string) *resolver {
@@ -64,13 +69,22 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 }
 
 func (r *resolver) crateTargetURL(upstreamPath string) string {
-	reader, err := r.store.OpenObject(context.Background(), r.name, "cargo/index/config.json")
-	if err != nil {
-		return ""
+	r.cfgMu.Lock()
+	defer r.cfgMu.Unlock()
+	if !r.cfgCached {
+		r.cfgCached = true
+		reader, err := r.store.OpenObject(context.Background(), r.name, "cargo/index/config.json")
+		if err != nil {
+			return ""
+		}
+		defer reader.Close()
+		var cfg httpcache.CargoConfig
+		if err := json.NewDecoder(reader).Decode(&cfg); err != nil || cfg.DL == "" {
+			return ""
+		}
+		r.cfgDL = cfg.DL
 	}
-	defer reader.Close()
-	var cfg httpcache.CargoConfig
-	if err := json.NewDecoder(reader).Decode(&cfg); err != nil || cfg.DL == "" {
+	if r.cfgDL == "" {
 		return ""
 	}
 	parts := strings.SplitN(strings.TrimPrefix(upstreamPath, "api/v1/crates/"), "/", 3)
@@ -82,5 +96,5 @@ func (r *resolver) crateTargetURL(upstreamPath string) string {
 		"{version}", parts[1],
 		"{prefix}", "",
 		"{lowerprefix}", "",
-	).Replace(cfg.DL)
+	).Replace(r.cfgDL)
 }

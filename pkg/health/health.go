@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -20,7 +21,7 @@ type StatsRecorder interface {
 type AggregateState int
 
 const (
-	StateHealthy   AggregateState = iota
+	StateHealthy AggregateState = iota
 	StateDegraded
 	StateUnhealthy
 )
@@ -55,7 +56,6 @@ type ServiceHealth struct {
 	resources map[string]*ResourceHealth
 
 	aggregate AggregateState
-	aggReady  bool
 
 	probeClient *http.Client
 	ctx         context.Context
@@ -145,25 +145,35 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 	if !ok {
 		return
 	}
+	var event string
 	if status >= 500 || status == 0 {
-		uh.recordFailure(fmtStatusError(status), h.config)
+		event = uh.recordFailure(fmtStatusError(status), h.config)
 	} else {
-		uh.recordSuccess(latency, h.config)
+		event = uh.recordSuccess(latency, h.config)
 	}
 	_ = h.emitUpstreamMetrics(uh)
-	h.recomputeAggregateLocked()
+	if event != "" {
+		h.stats.RecordCircuitEvent(h.name, h.mode, url, event)
+		h.recomputeAggregateLocked()
+	}
 }
 
 func (h *ServiceHealth) RecordFailure(url string, err error) {
+	if err != nil && errors.Is(err, context.Canceled) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	uh, ok := h.upstreams[url]
 	if !ok {
 		return
 	}
-	uh.recordFailure(err, h.config)
+	event := uh.recordFailure(err, h.config)
 	_ = h.emitUpstreamMetrics(uh)
-	h.recomputeAggregateLocked()
+	if event != "" {
+		h.stats.RecordCircuitEvent(h.name, h.mode, url, event)
+		h.recomputeAggregateLocked()
+	}
 }
 
 func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstreams []string) *ResourceHealth {
@@ -233,42 +243,7 @@ func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, target
 		return
 	}
 
-	rh.LastError = err.Error()
-	switch {
-	case IsResourceNotFound(err):
-		rh.ConsecutiveNotFound++
-		if rh.FirstNotFoundAt.IsZero() {
-			rh.FirstNotFoundAt = time.Now()
-		}
-		now := time.Now()
-		if rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount && now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge {
-			rh.State = RRemoved
-			rh.Generation++
-		} else {
-			rh.State = RSuspect
-		}
-	case IsResourceForbidden(err):
-		rh.ConsecutiveInvalid++
-		rh.State = RBlocked
-		rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
-	case IsResourceTransient(err):
-		rh.ConsecutiveTransient++
-		if rh.ConsecutiveTransient >= resourceFailCount {
-			rh.State = RBlocked
-			rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
-		} else {
-			rh.State = RSuspect
-		}
-	default:
-		rh.ConsecutiveInvalid++
-		if rh.ConsecutiveInvalid >= resourceFailCount {
-			rh.State = RBlocked
-			rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
-		} else {
-			rh.State = RSuspect
-		}
-	}
-	h.recomputeAggregateLocked()
+	h.applyResourceErrorLocked(rh, err)
 }
 
 func (h *ServiceHealth) ResourceState(path string) (ResourceState, bool) {
@@ -402,22 +377,16 @@ func (h *ServiceHealth) recomputeAggregateLocked() {
 	default:
 		h.aggregate = StateHealthy
 	}
-	h.aggReady = true
-}
-
-func (h *ServiceHealth) UpstreamCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.upstreams)
 }
 
 func (h *ServiceHealth) recordResourceResultLocked(rh *ResourceHealth, err error) {
-	if rh == nil {
+	if rh == nil || err == nil {
 		return
 	}
-	if err == nil {
-		return
-	}
+	h.applyResourceErrorLocked(rh, err)
+}
+
+func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) {
 	rh.LastError = err.Error()
 	switch {
 	case IsResourceNotFound(err):
@@ -429,13 +398,22 @@ func (h *ServiceHealth) recordResourceResultLocked(rh *ResourceHealth, err error
 		if rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount && now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge {
 			rh.State = RRemoved
 			rh.Generation++
+			delete(h.resources, rh.Path)
 		} else {
 			rh.State = RSuspect
 		}
 	case IsResourceForbidden(err):
-		rh.State = RBlocked
 		rh.ConsecutiveInvalid++
+		rh.State = RBlocked
 		rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
+	case IsResourceTransient(err):
+		rh.ConsecutiveTransient++
+		if rh.ConsecutiveTransient >= resourceFailCount {
+			rh.State = RBlocked
+			rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
+		} else {
+			rh.State = RSuspect
+		}
 	default:
 		rh.ConsecutiveTransient++
 		if rh.ConsecutiveTransient >= resourceFailCount {

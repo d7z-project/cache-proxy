@@ -133,7 +133,7 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 
 func (p *PlanContext) Finalize() (*Result, error) {
 	entries := make([]*Entry, 0, len(p.entries))
-	for _, name := range sortedNames(p.entries) {
+	for _, name := range SortedNames(p.entries) {
 		entry := p.entries[name]
 		if !entry.Enabled {
 			entries = append(entries, entry)
@@ -266,7 +266,7 @@ func ValidateBindAddress(bind string) error {
 	return nil
 }
 
-func sortedNames[T any](items map[string]T) []string {
+func SortedNames[T any](items map[string]T) []string {
 	names := make([]string, 0, len(items))
 	for name := range items {
 		names = append(names, name)

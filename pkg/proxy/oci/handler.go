@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -22,22 +21,7 @@ import (
 
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) *handler {
 	client := utils.DefaultHttpClientWrapper()
-	client.UserAgent = httpcache.ModeUserAgent(config.ModeOCI)
-	if block.Transport != nil {
-		if block.Transport.UserAgent != "" {
-			client.UserAgent = block.Transport.UserAgent
-		}
-		if transport, ok := client.Transport.(*http.Transport); ok {
-			if block.Transport.Proxy != "" {
-				if proxyURL, err := url.Parse(block.Transport.Proxy); err == nil {
-					transport.Proxy = http.ProxyURL(proxyURL)
-				}
-			}
-			if block.Transport.Timeout > 0 {
-				transport.DialContext = utils.DefaultDialContext(block.Transport.Timeout.Duration())
-			}
-		}
-	}
+	httpcache.ConfigureClientTransport(client, name, config.ModeOCI, block.Transport)
 	return &handler{
 		name:        name,
 		upstream:    strings.TrimRight(block.Upstream, "/"),

@@ -33,7 +33,9 @@ const (
 	BusyPolicyStale  = "stale"
 )
 
-func ValidPolicy(v string) bool { return v == PolicyBypass || v == PolicyImmutable || v == PolicyRevalidate }
+func ValidPolicy(v string) bool {
+	return v == PolicyBypass || v == PolicyImmutable || v == PolicyRevalidate
+}
 
 func ValidBusyPolicy(v string) bool { return v == "" || v == BusyPolicyBypass || v == BusyPolicyStale }
 
@@ -101,10 +103,10 @@ type Instance struct {
 }
 
 type TransportConfig struct {
-	Proxy     string           `yaml:"proxy,omitempty"`
-	UserAgent string           `yaml:"ua,omitempty"`
-	Timeout   Duration         `yaml:"timeout,omitempty"`
-	Health    *health.Config   `yaml:"health,omitempty"`
+	Proxy     string         `yaml:"proxy,omitempty"`
+	UserAgent string         `yaml:"ua,omitempty"`
+	Timeout   Duration       `yaml:"timeout,omitempty"`
+	Health    *health.Config `yaml:"health,omitempty"`
 }
 
 type SelectedMode struct {
@@ -126,13 +128,6 @@ func (b *ModeBlock) UnmarshalYAML(value *yaml.Node) error {
 	clone := *value
 	b.Node = &clone
 	return nil
-}
-
-func (b ModeBlock) MarshalYAML() (any, error) {
-	if b.Node == nil {
-		return nil, nil
-	}
-	return b.Node, nil
 }
 
 func (b *ModeBlock) DecodeStrict(target any) error {

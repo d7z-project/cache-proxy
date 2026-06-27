@@ -17,7 +17,7 @@ import (
 const stateFileName = "_state.yaml"
 
 type persistedState struct {
-	Version int                      `yaml:"version"`
+	Version int                       `yaml:"version"`
 	Roots   []health.ResourceSnapshot `yaml:"roots"`
 }
 

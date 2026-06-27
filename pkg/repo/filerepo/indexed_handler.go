@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -105,22 +104,7 @@ func NewIndexedHandler(name, mode, objectRoot string, metadataFreshFor config.Fr
 		Classifier: classifier,
 	}), stats, svcHealth)
 	handler.client = utils.DefaultHttpClientWrapper()
-	handler.client.UserAgent = httpcache.ModeUserAgent(mode)
-	if transport != nil {
-		if transport.UserAgent != "" {
-			handler.client.UserAgent = transport.UserAgent
-		}
-		if baseTransport, ok := handler.client.Transport.(*http.Transport); ok {
-			if transport.Proxy != "" {
-				if proxyURL, err := url.Parse(transport.Proxy); err == nil {
-					baseTransport.Proxy = http.ProxyURL(proxyURL)
-				}
-			}
-			if transport.Timeout > 0 {
-				baseTransport.DialContext = utils.DefaultDialContext(transport.Timeout.Duration())
-			}
-		}
-	}
+	httpcache.ConfigureClientTransport(handler.client, name, mode, transport)
 	for _, seed := range seeds {
 		handler.addRoot(seed.Key(), seed.Targets())
 	}
@@ -369,7 +353,7 @@ func (h *IndexedHandler) refreshMetadataObject(ctx context.Context, cleanPath st
 			}
 			continue
 		}
-		body, err := io.ReadAll(response.Body)
+		body, err := io.ReadAll(io.LimitReader(response.Body, 50<<20))
 		_ = response.Body.Close()
 		if err != nil {
 			return MetadataBlob{}, err
@@ -482,7 +466,7 @@ func (h *IndexedHandler) putObject(ctx context.Context, cleanPath string, body [
 		"content-type":   headers["Content-Type"],
 		"content-length": headers["Content-Length"],
 		"last-modified":  headers["Last-Modified"],
-			"etag":           headers["Etag"],
+		"etag":           headers["Etag"],
 		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
 		"mode":           h.mode,
 		"cache":          "REFRESH",
@@ -621,6 +605,19 @@ func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnl
 			firstErr = err
 		}
 	}
+	h.mu.Lock()
+	cleaned := false
+	for path := range h.targets {
+		if _, exists := h.health.ResourceState(path); !exists {
+			delete(h.targets, path)
+			delete(h.rootSnapshots, path)
+			cleaned = true
+		}
+	}
+	if cleaned {
+		h.rebuildAggregateLocked()
+	}
+	h.mu.Unlock()
 	return refreshed, firstErr
 }
 

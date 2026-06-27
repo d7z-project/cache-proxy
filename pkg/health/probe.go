@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -63,30 +64,49 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 	resp, err := h.probeDo(ctx, uh)
 	latency := time.Since(start)
 
+	if err != nil {
+		h.mu.Lock()
+		event := uh.recordProbe(false, 0, h.config)
+		uh.lastProbeErr = err.Error()
+		_ = h.emitUpstreamMetrics(uh)
+		if event != "" {
+			h.stats.RecordCircuitEvent(h.name, h.mode, uh.URL, event)
+		}
+		h.recomputeAggregateLocked()
+		h.mu.Unlock()
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if err != nil {
-		uh.recordProbe(false, 0, h.config)
-		uh.lastProbeErr = err.Error()
-		goto emit
-	}
-
+	var event string
 	switch {
 	case resp.StatusCode >= 500:
-		uh.recordProbe(false, 0, h.config)
+		event = uh.recordProbe(false, 0, h.config)
 		uh.lastProbeErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	case resp.StatusCode == 404 || resp.StatusCode == 403 || resp.StatusCode == 410:
-		uh.recordProbe(true, latency, h.config)
+		event = uh.recordProbe(true, latency, h.config)
 		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil {
 			h.recordResourceResultLocked(rh, statusToResourceError(resp.StatusCode))
 		}
 	default:
-		uh.recordProbe(true, latency, h.config)
+		event = uh.recordProbe(true, latency, h.config)
+		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil && rh.State == RBlocked {
+			rh.State = RPending
+			rh.NextRefreshAt = time.Time{}
+			rh.ConsecutiveTransient = 0
+			rh.ConsecutiveInvalid = 0
+			rh.ConsecutiveNotFound = 0
+		}
 	}
 
-emit:
 	_ = h.emitUpstreamMetrics(uh)
+	if event != "" {
+		h.stats.RecordCircuitEvent(h.name, h.mode, uh.URL, event)
+	}
 	h.recomputeAggregateLocked()
 }
 

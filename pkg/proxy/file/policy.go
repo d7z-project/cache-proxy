@@ -3,10 +3,7 @@ package file
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
-
-	"github.com/bmatcuk/doublestar/v4"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
@@ -56,12 +53,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.BusyPolicy == "" {
 		block.BusyPolicy = config.BusyPolicyBypass
 	}
-	if err := validate(&block.Policy); err != nil {
-		return fmt.Errorf("instance %s: %w", plan.Name(), err)
-	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
+	}
+	packagePolicy := toPackagePolicy(block.Policy)
+	if err := filerepo.Validate(config.ModeFile, packagePolicy); err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
 	handler := filerepo.NewHandler(
 		plan.Name(),
@@ -72,7 +70,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		block.Upstreams,
 		block.Transport,
 		expireAfter,
-		toPackagePolicy(block.Policy),
+		packagePolicy,
 		plan.Store(),
 		plan.Stats(),
 	)
@@ -83,35 +81,6 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		CloseContext: handler.CloseContext,
 		CleanupFn:    handler.Cleanup,
 	})
-}
-
-func validate(policy *Policy) error {
-	if err := filerepo.ValidatePolicy(config.ModeFile, policy.DefaultPolicy); err != nil {
-		return err
-	}
-	if err := filerepo.ValidateBusyPolicy(config.ModeFile, policy.BusyPolicy); err != nil {
-		return err
-	}
-	if err := filerepo.ValidatePassHeaders(policy.PassHeaders); err != nil {
-		return err
-	}
-	for i, rule := range policy.Rules {
-		if strings.TrimSpace(rule.Match) == "" {
-			return fmt.Errorf("%s rule %d: match is empty", config.ModeFile, i)
-		}
-		if !doublestar.ValidatePattern(rule.Match) {
-			return fmt.Errorf("%s rule %d: invalid match %q", config.ModeFile, i, rule.Match)
-		}
-		if rule.Policy != "" {
-			if err := filerepo.ValidatePolicy(config.ModeFile, rule.Policy); err != nil {
-				return err
-			}
-		}
-		if err := filerepo.ValidateBusyPolicy(config.ModeFile, rule.BusyPolicy); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func toPackagePolicy(policy Policy) *filerepo.Policy {

@@ -9,7 +9,7 @@ import (
 type UpstreamState int
 
 const (
-	SClosed    UpstreamState = iota
+	SClosed UpstreamState = iota
 	SDegraded
 	SOpen
 	SHalfOpen
@@ -40,15 +40,13 @@ type UpstreamHealth struct {
 
 	consecutiveOk int
 
-	openedAt       time.Time
-	lastSuccessAt  time.Time
-	lastProbeAt    time.Time
-	lastProbeErr   string
+	openedAt      time.Time
+	lastSuccessAt time.Time
+	lastProbeAt   time.Time
+	lastProbeErr  string
 
-	totalRequests  int64
-	failedRequests int64
-	weight         float64
-	probeIdx       int32
+	weight   float64
+	probeIdx int32
 }
 
 func newUpstreamHealth(url string, evalWindow time.Duration) *UpstreamHealth {
@@ -60,7 +58,7 @@ func newUpstreamHealth(url string, evalWindow time.Duration) *UpstreamHealth {
 	}
 }
 
-func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) {
+func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) string {
 	wasState := uh.State
 
 	if uh.latencySamples == 0 {
@@ -71,20 +69,19 @@ func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) {
 	}
 	uh.latencySamples++
 	uh.lastSuccessAt = time.Now()
-	uh.totalRequests++
 	uh.window.record(true)
 
 	switch uh.State {
 	case SOpen:
 		if time.Since(uh.openedAt) >= cfg.CanaryCooldown {
-			uh.transition(SHalfOpen)
+			uh.State = SHalfOpen
 			uh.consecutiveOk = 1
 		}
 	case SHalfOpen:
 		uh.consecutiveOk++
 		w := cfg.CanaryStep * float64(uh.consecutiveOk)
 		if float64(uh.consecutiveOk) >= float64(canarySuccessMin) && w >= canaryCeiling {
-			uh.transition(SClosed)
+			uh.State = SClosed
 			uh.consecutiveOk = 0
 		}
 	default:
@@ -94,22 +91,23 @@ func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) {
 	uh.computeWeight(cfg)
 	if wasState != uh.State {
 		uh.logChange(wasState, "success", "")
+		return wasState.String() + "->" + uh.State.String()
 	}
+	return ""
 }
 
-func (uh *UpstreamHealth) recordFailure(err error, cfg Config) {
+func (uh *UpstreamHealth) recordFailure(err error, cfg Config) string {
 	wasState := uh.State
 
 	uh.window.record(false)
 	if err != nil {
 		uh.lastProbeErr = err.Error()
 	}
-	uh.failedRequests++
-	uh.totalRequests++
 
 	switch uh.State {
+	case SOpen:
 	case SHalfOpen:
-		uh.transition(SOpen)
+		uh.State = SOpen
 		uh.openedAt = time.Now()
 		uh.consecutiveOk = 0
 	default:
@@ -118,17 +116,22 @@ func (uh *UpstreamHealth) recordFailure(err error, cfg Config) {
 
 	uh.computeWeight(cfg)
 	if wasState != uh.State {
-		uh.logChange(wasState, "failure", err.Error())
+		detail := ""
+		if err != nil {
+			detail = err.Error()
+		}
+		uh.logChange(wasState, "failure", detail)
+		return wasState.String() + "->" + uh.State.String()
 	}
+	return ""
 }
 
-func (uh *UpstreamHealth) recordProbe(success bool, latency time.Duration, cfg Config) {
+func (uh *UpstreamHealth) recordProbe(success bool, latency time.Duration, cfg Config) string {
 	uh.lastProbeAt = time.Now()
 	if success {
-		uh.recordSuccess(latency, cfg)
-	} else {
-		uh.recordFailure(nil, cfg)
+		return uh.recordSuccess(latency, cfg)
 	}
+	return uh.recordFailure(nil, cfg)
 }
 
 func (uh *UpstreamHealth) evaluateRate(cfg Config) {
@@ -137,20 +140,20 @@ func (uh *UpstreamHealth) evaluateRate(cfg Config) {
 
 	if samples >= minSampleSize {
 		if rate >= cfg.TripRate {
-			uh.transition(SOpen)
+			uh.State = SOpen
 			uh.openedAt = time.Now()
 			return
 		}
 		if rate > cfg.DegradeRate {
-			uh.transition(SDegraded)
+			uh.State = SDegraded
 			return
 		}
 	}
 
-	if uh.latencySamples > 0 && float64(uh.ewmaLatency) > float64(cfg.DegradeLatency) {
-		uh.transition(SDegraded)
-	} else {
-		uh.transition(SClosed)
+	if uh.latencySamples >= minSampleSize && float64(uh.ewmaLatency) > float64(cfg.DegradeLatency) {
+		uh.State = SDegraded
+	} else if samples >= minSampleSize {
+		uh.State = SClosed
 	}
 }
 
@@ -193,10 +196,6 @@ func (uh *UpstreamHealth) errorWeight(cfg Config) float64 {
 	return 1.0 - r*(1.0-cfg.MinWeight)
 }
 
-func (uh *UpstreamHealth) transition(state UpstreamState) {
-	uh.State = state
-}
-
 func (uh *UpstreamHealth) logChange(wasState UpstreamState, reason, detail string) {
 	attrs := []any{
 		"url", uh.URL,
@@ -211,8 +210,4 @@ func (uh *UpstreamHealth) logChange(wasState UpstreamState, reason, detail strin
 		attrs = append(attrs, "detail", detail)
 	}
 	slog.Debug("upstream state change", attrs...)
-}
-
-func (uh *UpstreamHealth) shouldProbe(interval time.Duration) bool {
-	return time.Since(uh.lastProbeAt) >= interval
 }

@@ -67,14 +67,14 @@ func (a *App) runCleanup(ctx context.Context) {
 		case <-ctx.Done():
 			wg.Done()
 		case sem <- struct{}{}:
-		go func(handler proxyruntime.Instance) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("cleanup panic", "panic", r)
-				}
-			}()
+			go func(handler proxyruntime.Instance) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("cleanup panic", "panic", r)
+					}
+				}()
 				if err := handler.Cleanup(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Info("instance cleanup failed", "err", err)
 				}

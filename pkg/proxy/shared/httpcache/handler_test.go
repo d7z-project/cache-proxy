@@ -33,14 +33,14 @@ func TestHeaderName(t *testing.T) {
 
 func TestStripInternal(t *testing.T) {
 	headers := map[string]string{
-		"Content-Type":      "application/json",
-		"Content-Length":    "123",
-		"ETag":              "\"abc\"",
-		"fetched-at":        "2024-01-01T00:00:00Z",
-		"mode":              "test",
-		"cache":             "HIT",
-		"indexed-identity":  "sha256:xyz",
-		"X-Cache":           "HIT",
+		"Content-Type":     "application/json",
+		"Content-Length":   "123",
+		"ETag":             "\"abc\"",
+		"fetched-at":       "2024-01-01T00:00:00Z",
+		"mode":             "test",
+		"cache":            "HIT",
+		"indexed-identity": "sha256:xyz",
+		"X-Cache":          "HIT",
 	}
 	StripInternal(headers)
 	require.Equal(t, "application/json", headers["Content-Type"])

@@ -24,14 +24,14 @@ type Config struct {
 }
 
 const (
-	minSampleSize       = 10
-	ewmaAlpha           = 0.20
-	canaryCeiling       = 0.50
-	canarySuccessMin    = 3
-	maxDynamicPaths     = 8
-	resourceFailCount   = 5
-	bucketDuration      = time.Second
-	maxBuckets          = 600
+	minSampleSize     = 10
+	ewmaAlpha         = 0.20
+	canaryCeiling     = 0.50
+	canarySuccessMin  = 3
+	maxDynamicPaths   = 8
+	resourceFailCount = 5
+	bucketDuration    = time.Second
+	maxBuckets        = 600
 )
 
 func DefaultConfig() Config {

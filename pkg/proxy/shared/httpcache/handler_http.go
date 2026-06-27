@@ -2,7 +2,6 @@ package httpcache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -78,111 +77,133 @@ func publicBaseURL(req *http.Request) string {
 }
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
-	var lastErr error
 	if options.TargetURL != "" {
-		request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("User-Agent", h.client.UserAgent)
-		for key, value := range headers {
-			request.Header.Set(key, value)
-		}
-		response, err := h.client.Do(request)
-		if err != nil {
-			if options.Record {
-				h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
-			}
-			return nil, err
-		}
-		if options.Record {
-			h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
-		}
-		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
-			_ = response.Body.Close()
-			return nil, fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
-		}
-		return responseFromHTTP(response), nil
+		return h.doTargetURL(ctx, method, options, headers)
 	}
 
 	pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
-	var upstreams []struct {
-		URL    string
-		Weight float64
+	upstreams := h.buildUpstreamList()
+
+	var lastErr error
+	for i, candidate := range upstreams {
+		result, err := h.tryUpstream(ctx, method, pathPart, rawQuery, candidate, i, len(upstreams), options, headers)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
 	}
+	if lastErr == nil {
+		return nil, fmt.Errorf("no upstream url configured")
+	}
+	return nil, lastErr
+}
+
+func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
+	request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", h.client.UserAgent)
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	response, err := h.client.Do(request)
+	if err != nil {
+		if options.Record {
+			h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
+		}
+		return nil, err
+	}
+	if options.Record {
+		h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
+	}
+	if !options.AcceptErrors && response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
+	}
+	return responseFromHTTP(response), nil
+}
+
+func (h *Handler) buildUpstreamList() []struct {
+	URL    string
+	Weight float64
+} {
 	if h.health != nil {
 		weighted := h.health.WeightedUpstreams(h.config.Upstreams)
+		upstreams := make([]struct {
+			URL    string
+			Weight float64
+		}, 0, len(weighted))
 		for _, wu := range weighted {
 			upstreams = append(upstreams, struct {
 				URL    string
 				Weight float64
 			}{wu.URL, wu.Weight})
 		}
-	} else {
-		for _, url := range h.config.Upstreams {
-			upstreams = append(upstreams, struct {
-				URL    string
-				Weight float64
-			}{url, 1.0})
-		}
+		return upstreams
 	}
+	upstreams := make([]struct {
+		URL    string
+		Weight float64
+	}, 0, len(h.config.Upstreams))
+	for _, url := range h.config.Upstreams {
+		upstreams = append(upstreams, struct {
+			URL    string
+			Weight float64
+		}{url, 1.0})
+	}
+	return upstreams
+}
 
-	for i, candidate := range upstreams {
-		targetURL := strings.TrimRight(candidate.URL, "/") + "/" + EscapePath(pathPart)
-		if rawQuery != "" {
-			targetURL += "?" + rawQuery
-		}
-		request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
-		if err != nil {
-			lastErr = err
-			slog.Debug("upstream request build failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
-			if i+1 < len(upstreams) {
-				slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "to", upstreams[i+1].URL)
-			}
-			continue
-		}
-		request.Header.Set("User-Agent", h.client.UserAgent)
-		for key, value := range headers {
-			request.Header.Set(key, value)
-		}
-		start := time.Now()
-		response, err := h.client.Do(request)
-		latency := time.Since(start)
-		if err != nil {
-			if options.Record {
-				h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
-			}
-			if h.health != nil {
-				h.health.RecordFailure(candidate.URL, err)
-			}
-			lastErr = err
-			slog.Debug("upstream request failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
-			if i+1 < len(upstreams) {
-				slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "to", upstreams[i+1].URL)
-			}
-			continue
-		}
-		slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
+func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery string, candidate struct {
+	URL    string
+	Weight float64
+}, idx, total int, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
+	targetURL := strings.TrimRight(candidate.URL, "/") + "/" + EscapePath(pathPart)
+	if rawQuery != "" {
+		targetURL += "?" + rawQuery
+	}
+	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+	if err != nil {
+		slog.Debug("upstream request build failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
+		return nil, err
+	}
+	request.Header.Set("User-Agent", h.client.UserAgent)
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	start := time.Now()
+	response, err := h.client.Do(request)
+	latency := time.Since(start)
+	if err != nil {
 		if options.Record {
-			h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
+			h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
 		}
 		if h.health != nil {
-			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
+			h.health.RecordFailure(candidate.URL, err)
 		}
-		if !options.AcceptErrors && response.StatusCode != http.StatusOK {
-			_ = response.Body.Close()
-			lastErr = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
-			if i+1 < len(upstreams) {
-				slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "to", upstreams[i+1].URL)
-			}
-			continue
+		slog.Debug("upstream request failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
+		if idx+1 < total {
+			slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL))
 		}
-		return responseFromHTTP(response), nil
+		return nil, err
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no upstream url configured")
+	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "status", response.StatusCode)
+	if options.Record {
+		h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
 	}
-	return nil, lastErr
+	if h.health != nil {
+		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
+	}
+	if !options.AcceptErrors && response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		err = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
+		if idx+1 < total {
+			slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL))
+		}
+		return nil, err
+	}
+	return responseFromHTTP(response), nil
 }
 
 func (h *Handler) requestHeaders(req *http.Request) map[string]string {

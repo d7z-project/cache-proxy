@@ -15,9 +15,9 @@ const (
 var ErrReadRateTooSlow = errors.New("read rate below minimum threshold")
 
 type RateLimitReader struct {
-	inner         io.ReadCloser
+	inner          io.ReadCloser
 	minBytesPerSec int64
-	window        time.Duration
+	window         time.Duration
 
 	mu         sync.Mutex
 	totalBytes int64
@@ -33,11 +33,11 @@ func NewRateLimitReader(inner io.ReadCloser) *RateLimitReader {
 func NewRateLimitReaderWithConfig(inner io.ReadCloser, minBytesPerSec int64, window time.Duration) *RateLimitReader {
 	now := time.Now()
 	return &RateLimitReader{
-		inner:         inner,
+		inner:          inner,
 		minBytesPerSec: minBytesPerSec,
-		window:        window,
-		startedAt:     now,
-		lastReadAt:    now,
+		window:         window,
+		startedAt:      now,
+		lastReadAt:     now,
 	}
 }
 

@@ -282,8 +282,8 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 		handlers: []proxyruntime.Instance{
 			blockingInstance{},
 		},
-		gcDone:      closedChan(),
-		cleanupDone: closedChan(),
+		gcDone:      makeClosedChan(),
+		cleanupDone: makeClosedChan(),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -503,7 +503,7 @@ func (s startContextInstance) Start(ctx context.Context) error {
 	return nil
 }
 
-func closedChan() chan struct{} {
+func makeClosedChan() chan struct{} {
 	ch := make(chan struct{})
 	close(ch)
 	return ch
