@@ -32,10 +32,10 @@ func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
     <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
   </package>
 </metadata>`
-	require.NoError(t, parsePrimary(strings.NewReader(input), snapshot))
-	require.Equal(t, "abc123", snapshot.Artifacts["Packages/h/hello-1.0-1.x86_64.rpm"])
-	require.Equal(t, "abc123", snapshot.Auxiliary["Packages/h/hello-1.0-1.x86_64.rpm.sig"])
-	require.Equal(t, "abc123", snapshot.Auxiliary["Packages/h/hello-1.0-1.x86_64.rpm.sha256"])
+	require.NoError(t, parsePrimary(strings.NewReader(input), snapshot, "repo/os"))
+	require.Equal(t, "abc123", snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"])
+	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sig"])
+	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sha256"])
 }
 
 func TestDiscovererDetectsRPMRoot(t *testing.T) {

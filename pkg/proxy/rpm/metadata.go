@@ -87,7 +87,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			if err != nil {
 				return nil, err
 			}
-			err = parsePrimary(reader, snapshot)
+			err = parsePrimary(reader, snapshot, repoRoot)
 			_ = reader.Close()
 			if err != nil {
 				return nil, err
@@ -100,7 +100,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 	return snapshot, nil
 }
 
-func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
+func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot string) error {
 	var metadata struct {
 		Packages []struct {
 			Checksum string `xml:"checksum"`
@@ -116,9 +116,10 @@ func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 		if pkg.Location.Href == "" {
 			continue
 		}
-		snapshot.Artifacts[pkg.Location.Href] = strings.TrimSpace(pkg.Checksum)
+		artifactPath := path.Join(repoRoot, pkg.Location.Href)
+		snapshot.Artifacts[artifactPath] = strings.TrimSpace(pkg.Checksum)
 		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512", ".md5"} {
-			snapshot.Auxiliary[pkg.Location.Href+suffix] = strings.TrimSpace(pkg.Checksum)
+			snapshot.Auxiliary[artifactPath+suffix] = strings.TrimSpace(pkg.Checksum)
 		}
 	}
 	return nil

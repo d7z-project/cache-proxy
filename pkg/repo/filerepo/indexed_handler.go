@@ -280,11 +280,6 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, targets []MetadataTa
 	if snapshot.Companions == nil {
 		snapshot.Companions = map[string][]string{}
 	}
-	for _, companions := range snapshot.Companions {
-		for _, companion := range companions {
-			h.deleteObject(ctx, companion)
-		}
-	}
 	return snapshot, nil
 }
 
@@ -578,6 +573,12 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, path string, now time.
 	h.rootSnapshots[path] = snapshot
 	h.rebuildAggregateLocked()
 	h.mu.Unlock()
+
+	for _, companions := range snapshot.Companions {
+		for _, companion := range companions {
+			h.deleteObject(ctx, companion)
+		}
+	}
 
 	h.health.FinishRefresh(path, rhs.Generation, nil, targetsToProbe(targets))
 	return true, nil
