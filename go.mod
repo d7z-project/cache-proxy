@@ -14,7 +14,7 @@ require (
 	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/mod v0.37.0
 	golang.org/x/sync v0.21.0
-	gopkg.d7z.net/blobfs v0.0.0-20260627050258-227864d9f157
+	gopkg.d7z.net/blobfs v0.0.0-20260627190714-c647e6dd4994
 	gopkg.in/yaml.v3 v3.0.1
 )
 

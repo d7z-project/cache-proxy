@@ -134,7 +134,7 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 		h.health.Start()
 	}
 	h.restoreRoots(ctx)
-	h.runRefreshCycle(ctx)
+	go h.runRefreshCycle(ctx)
 	if h.policy.Interval <= 0 || h.build == nil {
 		return nil
 	}
