@@ -136,6 +136,9 @@ func (h *gitHandler) serveCloneStatus(w http.ResponseWriter, state gitState) {
 	case gitStateCloning:
 		w.Header().Set("Retry-After", "10")
 		http.Error(w, "repository is being cloned, retry later", http.StatusServiceUnavailable)
+	case gitStateSyncing:
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "repository is syncing, retry later", http.StatusServiceUnavailable)
 	case gitStateFailed:
 		http.Error(w, "clone failed", http.StatusInternalServerError)
 	default:
