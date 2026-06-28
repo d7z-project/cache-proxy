@@ -99,7 +99,7 @@ func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
 	}
 }
 
-func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
+func TestRefreshPrefetchesCompanions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -107,6 +107,12 @@ func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
 		switch r.URL.Path {
 		case "/core/os/x86_64/core.db":
 			_, _ = w.Write(mustGzipTar(t, "hello-1.0-1/desc", "%FILENAME%\nhello-1.0-1-x86_64.pkg.tar.zst\n%SHA256SUM%\nabc123\n"))
+		case "/core/os/x86_64/core.db.sig":
+			_, _ = w.Write([]byte("db-sig"))
+		case "/core/os/x86_64/core.files":
+			_, _ = w.Write([]byte("files-data"))
+		case "/core/os/x86_64/core.files.sig":
+			_, _ = w.Write([]byte("files-sig"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -138,22 +144,16 @@ func TestRefreshInvalidatesCompanionsAfterRefresh(t *testing.T) {
 		svcHealth,
 	)
 
-	require.NoError(t, store.MkdirAll("repo/repo/core/os/x86_64", 0o755))
+	require.NoError(t, handler.Refresh(ctx))
+
 	companions := []string{
 		"repo/core/os/x86_64/core.db.sig",
 		"repo/core/os/x86_64/core.files",
 		"repo/core/os/x86_64/core.files.sig",
 	}
 	for _, name := range companions {
-		_, err = store.Put(ctx, "repo", name, strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-		require.NoError(t, err)
-	}
-
-	require.NoError(t, handler.Refresh(ctx))
-
-	for _, name := range companions {
 		_, err = store.OpenObject(ctx, "repo", name)
-		require.Error(t, err, "companion %q should be invalidated after refresh", name)
+		require.NoError(t, err, "companion %q should be pre-fetched during refresh", name)
 	}
 }
 

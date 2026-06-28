@@ -44,7 +44,7 @@ func TestDiscovererRejectsAPKArtifactPath(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
+func TestRefreshPrefetchesCompanion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -52,6 +52,8 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 		switch r.URL.Path {
 		case "/v3.20/main/x86_64/APKINDEX.tar.gz":
 			_, _ = w.Write(mustGzipTar(t, "APKINDEX", "P:busybox\nV:1.36.1-r2\nC:sha256:abc\n\n"))
+		case "/v3.20/main/x86_64/APKINDEX.tar.gz.sig":
+			_, _ = w.Write([]byte("sig-data"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -83,14 +85,9 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 		svcHealth,
 	)
 
-	require.NoError(t, store.MkdirAll("repo/repo/v3.20/main/x86_64", 0o755))
-	_, err = store.Put(ctx, "repo", "repo/v3.20/main/x86_64/APKINDEX.tar.gz.sig", strings.NewReader("sig"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-	require.NoError(t, err)
-
 	require.NoError(t, handler.Refresh(ctx))
-
 	_, err = store.OpenObject(ctx, "repo", "repo/v3.20/main/x86_64/APKINDEX.tar.gz.sig")
-	require.Error(t, err, "companion should be invalidated after refresh")
+	require.NoError(t, err, "companion should be pre-fetched during refresh")
 }
 
 func mustGzipTar(t *testing.T, name, body string) []byte {

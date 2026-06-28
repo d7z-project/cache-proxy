@@ -280,6 +280,14 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, targets []MetadataTa
 	if snapshot.Companions == nil {
 		snapshot.Companions = map[string][]string{}
 	}
+	for _, companions := range snapshot.Companions {
+		for _, companion := range companions {
+			_, fetchErr := h.refreshMetadataObject(ctx, companion)
+			if fetchErr != nil {
+				slog.Debug("companion pre-fetch failed", "instance", h.name, "mode", h.mode, "path", companion, "err", fetchErr)
+			}
+		}
+	}
 	return snapshot, nil
 }
 
@@ -574,12 +582,6 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, path string, now time.
 	h.rebuildAggregateLocked()
 	h.mu.Unlock()
 
-	for _, companions := range snapshot.Companions {
-		for _, companion := range companions {
-			h.deleteObject(ctx, companion)
-		}
-	}
-
 	h.health.FinishRefresh(path, rhs.Generation, nil, targetsToProbe(targets))
 	return true, nil
 }
@@ -624,9 +626,10 @@ func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnl
 
 func (h *IndexedHandler) rebuildAggregateLocked() {
 	aggregate := &LiveSnapshot{
-		Metadata:  map[string]struct{}{},
-		Artifacts: map[string]string{},
-		Auxiliary: map[string]string{},
+		Metadata:   map[string]struct{}{},
+		Artifacts:  map[string]string{},
+		Auxiliary:  map[string]string{},
+		Companions: map[string][]string{},
 	}
 	for _, snap := range h.rootSnapshots {
 		for p := range snap.Metadata {
@@ -637,6 +640,9 @@ func (h *IndexedHandler) rebuildAggregateLocked() {
 		}
 		for p, identity := range snap.Auxiliary {
 			aggregate.Auxiliary[p] = identity
+		}
+		for k, v := range snap.Companions {
+			aggregate.Companions[k] = append(aggregate.Companions[k], v...)
 		}
 	}
 	h.snapshot = aggregate

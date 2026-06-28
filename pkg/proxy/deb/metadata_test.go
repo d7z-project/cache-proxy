@@ -19,18 +19,22 @@ import (
 )
 
 func TestParsePackagesRecordsArtifactChecksum(t *testing.T) {
-	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]string{}}
+	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]string{}, Auxiliary: map[string]string{}}
 	input := "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\nSHA256: abc123\n\n"
 	require.NoError(t, parsePackages(strings.NewReader(input), snapshot))
 	require.Equal(t, "abc123", snapshot.Artifacts["pool/main/h/hello/hello_1.0_amd64.deb"])
+	require.Equal(t, "abc123", snapshot.Auxiliary["pool/main/h/hello/hello_1.0_amd64.deb.sha256"])
+	require.Equal(t, "abc123", snapshot.Auxiliary["pool/main/h/hello/hello_1.0_amd64.deb.md5sum"])
 }
 
 func TestParseSourcesRecordsArtifacts(t *testing.T) {
-	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]string{}}
+	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]string{}, Auxiliary: map[string]string{}}
 	input := "Package: hello\nDirectory: pool/main/h/hello\nChecksums-Sha256:\n abc111 123 hello_1.0.dsc\n def222 456 hello_1.0.orig.tar.xz\n\n"
 	require.NoError(t, parseSources(strings.NewReader(input), snapshot))
 	require.Equal(t, "abc111", snapshot.Artifacts["pool/main/h/hello/hello_1.0.dsc"])
 	require.Equal(t, "def222", snapshot.Artifacts["pool/main/h/hello/hello_1.0.orig.tar.xz"])
+	require.Equal(t, "abc111", snapshot.Auxiliary["pool/main/h/hello/hello_1.0.dsc.sha256"])
+	require.Equal(t, "def222", snapshot.Auxiliary["pool/main/h/hello/hello_1.0.orig.tar.xz.md5sum"])
 }
 
 func TestDiscovererDetectsDebianSuiteRoot(t *testing.T) {
@@ -122,7 +126,7 @@ func TestRefreshKeepsReleaseSignatureDuringCleanup(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
+func TestRefreshPrefetchesCompanion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -132,6 +136,8 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 			http.NotFound(w, r)
 		case "/dists/bookworm/Release":
 			_, _ = w.Write([]byte("Suite: bookworm\n"))
+		case "/dists/bookworm/Release.gpg":
+			_, _ = w.Write([]byte("gpg-sig"))
 		case "/dists/bookworm/main/binary-amd64/Packages.xz":
 			http.NotFound(w, r)
 		case "/dists/bookworm/main/binary-amd64/Packages.gz":
@@ -169,12 +175,7 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 		svcHealth,
 	)
 
-	require.NoError(t, store.MkdirAll("repo/repo/dists/bookworm", 0o755))
-	_, err = store.Put(ctx, "repo", "repo/dists/bookworm/Release.gpg", strings.NewReader("sig"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-	require.NoError(t, err)
-
 	require.NoError(t, handler.Refresh(ctx))
-
 	_, err = store.OpenObject(ctx, "repo", "repo/dists/bookworm/Release.gpg")
-	require.Error(t, err, "companion should be invalidated after refresh")
+	require.NoError(t, err, "companion should be pre-fetched during refresh")
 }

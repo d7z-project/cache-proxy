@@ -7,7 +7,6 @@ import (
 	"io"
 	"path"
 	"strings"
-	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
@@ -85,15 +84,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			snapshot.Metadata[blob.Path] = struct{}{}
-
-			if err := session.Store(ctx, metadataPath, blob.Body, map[string]string{
-				"fetched-at": time.Now().UTC().Format(time.RFC3339Nano),
-			}); err != nil {
-				if item.Type == "primary" {
-					return nil, fmt.Errorf("store primary %s: %w", metadataPath, err)
-				}
-				continue
-			}
 
 			if item.Type != "primary" {
 				continue

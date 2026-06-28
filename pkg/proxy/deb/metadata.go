@@ -163,7 +163,11 @@ func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 		if filename == "" {
 			return
 		}
-		snapshot.Artifacts[filename] = strings.TrimSpace(fields["SHA256"])
+		checksum := strings.TrimSpace(fields["SHA256"])
+		snapshot.Artifacts[filename] = checksum
+		for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
+			snapshot.Auxiliary[filename+suffix] = checksum
+		}
 	})
 }
 
@@ -178,7 +182,11 @@ func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 			if len(parts) < 3 {
 				continue
 			}
-			snapshot.Artifacts[path.Join(directory, parts[2])] = parts[0]
+			artifactPath := path.Join(directory, parts[2])
+			snapshot.Artifacts[artifactPath] = parts[0]
+			for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
+				snapshot.Auxiliary[artifactPath+suffix] = parts[0]
+			}
 		}
 	})
 }

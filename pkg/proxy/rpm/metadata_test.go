@@ -124,7 +124,7 @@ func TestRefreshKeepsRepodataCompanionsDuringCleanup(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
+func TestRefreshPrefetchesCompanion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -145,6 +145,8 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
     <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
   </package>
 </metadata>`))
+		case "/9/BaseOS/x86_64/os/repodata/repomd.xml.asc":
+			_, _ = w.Write([]byte("asc-data"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -176,14 +178,9 @@ func TestRefreshInvalidatesCompanionAfterRefresh(t *testing.T) {
 		svcHealth,
 	)
 
-	require.NoError(t, store.MkdirAll("repo/repo/9/BaseOS/x86_64/os/repodata", 0o755))
-	_, err = store.Put(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc", strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-	require.NoError(t, err)
-
 	require.NoError(t, handler.Refresh(ctx))
-
 	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc")
-	require.Error(t, err, "companion should be invalidated after refresh")
+	require.NoError(t, err, "companion should be pre-fetched during refresh")
 }
 
 func mustGzip(t *testing.T, body string) []byte {
