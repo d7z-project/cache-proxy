@@ -54,11 +54,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
-		ascPath := repomd.Path + ".asc"
-		if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: ascPath}); err != nil {
+		if companion, err := session.FetchDerived(ctx, repomd.Path+".asc"); err != nil {
 			return nil, err
+		} else if companion.Path != "" {
+			snapshot.Metadata[companion.Path] = companion
 		}
-		snapshot.Metadata[ascPath] = filerepo.MetadataObject{Path: ascPath, Required: true}
 		var root struct {
 			Data []struct {
 				Type     string `xml:"type,attr"`

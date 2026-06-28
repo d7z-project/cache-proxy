@@ -92,6 +92,52 @@ func TestRefreshPrefetchesCompanion(t *testing.T) {
 	require.Equal(t, "sig-data", rec.Body.String())
 }
 
+func TestRefreshSucceedsWithoutSig(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3.20/main/x86_64/APKINDEX.tar.gz":
+			_, _ = w.Write(mustGzipTar(t, "APKINDEX", "P:busybox\nV:1.36.1-r2\nC:sha256:abc\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	svcHealth := health.New("repo", "apk", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
+	handler := filerepo.NewIndexedHandler(
+		"repo", "apk", "repo",
+		config.Freshness(time.Minute),
+		classify,
+		[]string{server.URL},
+		nil,
+		config.Expiration(time.Hour),
+		&filerepo.Policy{},
+		filerepo.RefreshPolicy{Interval: time.Hour},
+		discoverer{},
+		[]filerepo.RootSpec{&rootSpec{Branch: "v3.20", Repo: "main", Arch: "x86_64"}},
+		buildSnapshot,
+		store, stats, svcHealth,
+	)
+
+	require.NoError(t, handler.Refresh(ctx))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v3.20/main/x86_64/APKINDEX.tar.gz", nil))
+	require.Equal(t, http.StatusOK, rec.Code, "main index should be served without sig companion")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v3.20/main/x86_64/APKINDEX.tar.gz.sig", nil))
+	require.Equal(t, http.StatusNotFound, rec.Code, "missing sig companion should return 404")
+}
+
 func mustGzipTar(t *testing.T, name, body string) []byte {
 	t.Helper()
 

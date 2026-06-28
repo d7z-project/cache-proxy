@@ -39,7 +39,7 @@ func TestDiscovererRejectsPacmanArtifactPath(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestRefreshFailsWhenRequiredPacmanMetadataIsMissing(t *testing.T) {
+func TestRefreshSucceedsWithoutCompanions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -60,9 +60,7 @@ func TestRefreshFailsWhenRequiredPacmanMetadataIsMissing(t *testing.T) {
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	svcHealth := health.New("repo", "pacman", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
-		"repo",
-		"pacman",
-		"repo",
+		"repo", "pacman", "repo",
 		config.Freshness(time.Minute),
 		classify,
 		[]string{server.URL},
@@ -73,12 +71,22 @@ func TestRefreshFailsWhenRequiredPacmanMetadataIsMissing(t *testing.T) {
 		discoverer{},
 		[]filerepo.RootSpec{&rootSpec{Repo: "core", Arch: "x86_64"}},
 		buildSnapshot,
-		store,
-		stats,
-		svcHealth,
+		store, stats, svcHealth,
 	)
 
-	require.Error(t, handler.Refresh(ctx))
+	require.NoError(t, handler.Refresh(ctx))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/core/os/x86_64/core.db", nil))
+	require.Equal(t, http.StatusOK, rec.Code, "main database should be served without companions")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/core/os/x86_64/core.db.sig", nil))
+	require.Equal(t, http.StatusNotFound, rec.Code, "missing companion should return 404")
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/core/os/x86_64/core.files", nil))
+	require.Equal(t, http.StatusNotFound, rec.Code, "missing companion should return 404")
 }
 
 func TestRefreshPrefetchesCompanions(t *testing.T) {

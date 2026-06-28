@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"path"
 	"time"
 
@@ -120,6 +121,19 @@ func (s *RefreshSession) Store(ctx context.Context, cleanPath string, body []byt
 	storePath := s.handler.generationMetadataPath(s.rootKey, s.generation, cleanPath)
 	_, err := s.handler.store.Put(ctx, s.handler.name, storePath, bytes.NewReader(body), meta)
 	return err
+}
+
+func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (MetadataObject, error) {
+	blob, err := s.Fetch(ctx, MetadataTarget{URL: derivedPath})
+	if err != nil {
+		var mfe MetadataFetchError
+		if errors.As(err, &mfe) && errors.Is(mfe.Err, errMetadataNotFound) {
+			slog.Debug("derived metadata not available", "path", derivedPath, "root", s.rootKey, "upstream", s.upstream)
+			return MetadataObject{}, nil
+		}
+		return MetadataObject{}, err
+	}
+	return MetadataObject{Path: blob.Path, Required: false}, nil
 }
 
 type RootSpec interface {

@@ -127,11 +127,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
 		if strings.HasSuffix(blob.Path, "/Release") {
-			gpgPath := blob.Path + ".gpg"
-			if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: gpgPath}); err != nil {
+			if companion, err := session.FetchDerived(ctx, blob.Path+".gpg"); err != nil {
 				return nil, err
+			} else if companion.Path != "" {
+				snapshot.Metadata[companion.Path] = companion
 			}
-			snapshot.Metadata[gpgPath] = filerepo.MetadataObject{Path: gpgPath, Required: true}
 		}
 		switch target.Kind {
 		case "release":

@@ -64,15 +64,13 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
 		if target.Repo != "" && target.Arch != "" {
 			basePath := path.Join(target.Repo, "os", target.Arch)
-			for _, companion := range []string{
-				path.Join(basePath, target.Repo+".db.sig"),
-				path.Join(basePath, target.Repo+".files"),
-				path.Join(basePath, target.Repo+".files.sig"),
-			} {
-				if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: companion}); err != nil {
+			for _, suffix := range []string{".db.sig", ".files", ".files.sig"} {
+				companionPath := path.Join(basePath, target.Repo+suffix)
+				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
 					return nil, err
+				} else if companion.Path != "" {
+					snapshot.Metadata[companion.Path] = companion
 				}
-				snapshot.Metadata[companion] = filerepo.MetadataObject{Path: companion, Required: true}
 			}
 		}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
