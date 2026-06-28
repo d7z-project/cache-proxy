@@ -52,6 +52,9 @@ func ApplyDefaults(policy *Policy) {
 	if policy.ArtifactBusyPolicy == "" {
 		policy.ArtifactBusyPolicy = config.BusyPolicyBypass
 	}
+	if policy.ArtifactExpireAfter.IsUnset() {
+		policy.ArtifactExpireAfter = config.DefaultExpireAfter
+	}
 	if policy.AuxiliaryPolicy == "" {
 		policy.AuxiliaryPolicy = config.PolicyRevalidate
 	}
@@ -60,6 +63,9 @@ func ApplyDefaults(policy *Policy) {
 	}
 	if policy.AuxiliaryBusyPolicy == "" {
 		policy.AuxiliaryBusyPolicy = config.BusyPolicyBypass
+	}
+	if policy.AuxiliaryExpireAfter.IsUnset() {
+		policy.AuxiliaryExpireAfter = config.DefaultExpireAfter
 	}
 }
 

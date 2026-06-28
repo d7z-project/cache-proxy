@@ -102,7 +102,20 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		h.mu.Lock()
 		h.rootSnapshots[snapshot.RootKey] = &snapshot
 		h.rebuildAggregateLocked()
+		if entry, ok := h.roots[snapshot.RootKey]; ok && len(entry.targets) == 0 && len(snapshot.Targets) > 0 {
+			entry.targets = snapshot.Targets
+		}
 		h.mu.Unlock()
+
+		if h.sh != nil {
+			rhs, unlock, ok := h.sh.TryStartRefresh(snapshot.RootKey)
+			if ok {
+				h.sh.FinishRefresh(snapshot.RootKey, rhs.Generation, nil, nil)
+				h.sh.ScheduleRefresh(snapshot.RootKey, h.policy.Interval)
+				unlock()
+			}
+		}
+		h.reportMetadataState()
 		return nil
 	})
 	if err != nil && !strings.Contains(err.Error(), "not exist") {

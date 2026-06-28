@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +24,14 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
+
+type rootEntry struct {
+	spec    RootSpec
+	targets []MetadataTarget
+}
 
 type IndexedHandler struct {
 	name       string
@@ -43,7 +50,7 @@ type IndexedHandler struct {
 
 	mu            sync.RWMutex
 	snapshot      *LiveSnapshot
-	targets       map[string][]MetadataTarget
+	roots         map[string]*rootEntry
 	rootSnapshots map[string]*LiveSnapshot
 	firstRefreshReady map[string]chan struct{}
 	lifecycleCtx  context.Context
@@ -64,7 +71,7 @@ func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classi
 		policy:        refreshPolicy,
 		build:         builder,
 		sh:            svcHealth,
-		targets:       map[string][]MetadataTarget{},
+		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
 		firstRefreshReady: map[string]chan struct{}{},
 	}
@@ -127,6 +134,21 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 		}()
 		defer h.wait.Done()
 		h.restoreGenerations(ctx)
+
+		if h.build != nil {
+			var needRefresh []string
+			h.mu.RLock()
+			for key := range h.roots {
+				if _, ok := h.rootSnapshots[key]; !ok {
+					needRefresh = append(needRefresh, key)
+				}
+			}
+			h.mu.RUnlock()
+			for _, key := range needRefresh {
+				h.ensureFirstRefresh(key)
+			}
+		}
+
 		if h.policy.Interval <= 0 || h.build == nil {
 			return
 		}
@@ -182,8 +204,12 @@ func (h *IndexedHandler) Cleanup(ctx context.Context) error {
 				return nil
 			}
 		case ResourceAuxiliary:
-			if _, keep := snapshot.Auxiliary[cleanPath]; keep {
-				return nil
+			for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
+				if base := strings.TrimSuffix(cleanPath, suffix); base != cleanPath {
+					if _, keep := snapshot.Artifacts[base]; keep {
+						return nil
+					}
+				}
 			}
 		default:
 			return nil
@@ -198,39 +224,18 @@ func (h *IndexedHandler) Cleanup(ctx context.Context) error {
 func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) {
 	snapshot := h.currentSnapshot()
 	if snapshot == nil {
-		if spec, ok := h.discover.Discover(cleanPath); ok {
-			rootKey := spec.Key()
-			if !h.rootHasSnapshot(rootKey) {
-				ready := h.waitForFirstRefresh(req.Context(), rootKey)
-				if ready {
-					snapshot = h.currentSnapshot()
-				}
-			} else {
-				snapshot = h.currentSnapshot()
-			}
-		}
-	}
-	if snapshot == nil {
-		w.Header().Set("Retry-After", "5")
-		httpcache.ErrorResponse(http.StatusServiceUnavailable, errors.New("metadata generation is not ready")).FlushClose(req, w)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusServiceUnavailable, 0)
+		h.base.ProxyPassthrough(w, req, cleanPath, "")
 		return
 	}
 	obj, ok := snapshot.Metadata[cleanPath]
 	if !ok {
-		if spec, disc := h.discover.Discover(cleanPath); disc {
-			rootKey := spec.Key()
-			if !h.rootHasSnapshot(rootKey) {
-				ready := h.waitForFirstRefresh(req.Context(), rootKey)
-				if ready {
-					obj, ok = h.currentSnapshot().Metadata[cleanPath]
-				}
-			}
-		}
+		preferred := snapshot.Upstream
+		h.base.ProxyPassthrough(w, req, cleanPath, preferred)
+		return
 	}
-	if !ok {
-		http.NotFound(w, req)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "MISS", http.StatusNotFound, 0)
+	if obj.Path != cleanPath {
+		http.Redirect(w, req, req.Header.Get("X-Cache-Proxy-Prefix")+"/"+obj.Path, http.StatusFound)
+		h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusFound, 0)
 		return
 	}
 	objectPath := obj.StorePath
@@ -256,6 +261,9 @@ func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request,
 }
 
 func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
+	if h.build == nil {
+		return
+	}
 	h.mu.Lock()
 	if _, exists := h.firstRefreshReady[rootKey]; !exists {
 		h.firstRefreshReady[rootKey] = make(chan struct{})
@@ -263,28 +271,15 @@ func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
 	h.mu.Unlock()
 	h.wait.Add(1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("first refresh panic", "instance", h.name, "root", rootKey, "panic", r)
+			}
+		}()
+		defer h.signalFirstRefresh(rootKey)
 		defer h.wait.Done()
 		_, _ = h.refreshRoot(h.lifecycleCtx, rootKey, time.Now())
 	}()
-}
-
-func (h *IndexedHandler) waitForFirstRefresh(ctx context.Context, rootKey string) bool {
-	if h.rootHasSnapshot(rootKey) {
-		return true
-	}
-	h.mu.Lock()
-	ch, exists := h.firstRefreshReady[rootKey]
-	if !exists {
-		ch = make(chan struct{})
-		h.firstRefreshReady[rootKey] = ch
-	}
-	h.mu.Unlock()
-	select {
-	case <-ch:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }
 
 func (h *IndexedHandler) signalFirstRefresh(rootKey string) {
@@ -294,13 +289,6 @@ func (h *IndexedHandler) signalFirstRefresh(rootKey string) {
 		delete(h.firstRefreshReady, rootKey)
 	}
 	h.mu.Unlock()
-}
-
-func (h *IndexedHandler) rootHasSnapshot(rootKey string) bool {
-	h.mu.RLock()
-	_, ok := h.rootSnapshots[rootKey]
-	h.mu.RUnlock()
-	return ok
 }
 
 func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
@@ -314,6 +302,18 @@ func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
 func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 	startedAt := time.Now()
 	refreshed, err := h.refreshRoots(ctx, startedAt, !allRoots)
+
+	if h.sh != nil {
+		h.mu.Lock()
+		for key := range h.roots {
+			if state, ok := h.sh.ResourceState(key); !ok || state == health.RRemoved {
+				delete(h.roots, key)
+				delete(h.rootSnapshots, key)
+			}
+		}
+		h.rebuildAggregateLocked()
+		h.mu.Unlock()
+	}
 
 	snapshotReady := h.currentSnapshot() != nil
 
@@ -333,22 +333,37 @@ func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 
 func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now time.Time) (bool, error) {
 	if h.sh == nil {
+		h.signalFirstRefresh(rootKey)
 		return false, nil
 	}
 	rhs, unlock, ok := h.sh.TryStartRefresh(rootKey)
 	if !ok {
-		return false, nil
+		h.mu.Lock()
+		ch, exists := h.firstRefreshReady[rootKey]
+		h.mu.Unlock()
+		if !exists {
+			return false, nil
+		}
+		select {
+		case <-ch:
+			return h.refreshRoot(ctx, rootKey, now)
+		case <-ctx.Done():
+			return false, nil
+		}
 	}
 	defer unlock()
 
 	h.mu.RLock()
-	targets, ok := h.targets[rootKey]
+	entry, ok := h.roots[rootKey]
 	h.mu.RUnlock()
-	if !ok || len(targets) == 0 {
+	if !ok || entry == nil || len(entry.targets) == 0 {
 		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, nil)
+		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
 		h.signalFirstRefresh(rootKey)
+		slog.Debug("root refresh skipped (no targets)", "instance", h.name, "mode", h.mode, "root", rootKey)
 		return false, nil
 	}
+	targets := entry.targets
 
 	upstreams := h.refreshUpstreams()
 	generation := strconv.FormatUint(rhs.Generation, 10)
@@ -370,11 +385,14 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 		}
 		h.mu.Lock()
 		h.rootSnapshots[rootKey] = snapshot
-		h.rebuildAggregateLocked()
 		h.mu.Unlock()
 		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, targetsToProbe(targets))
 		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
+		h.mu.Lock()
+		h.rebuildAggregateLocked()
+		h.mu.Unlock()
 		h.signalFirstRefresh(rootKey)
+		h.reportMetadataState()
 		slog.Debug("root refresh succeeded", "instance", h.name, "mode", h.mode, "root", rootKey, "generation", generation, "upstream", upstream)
 		return true, nil
 	}
@@ -384,6 +402,7 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 	h.sh.FinishRefresh(rootKey, rhs.Generation, refreshHealthError(firstErr), nil)
 	h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
 	h.signalFirstRefresh(rootKey)
+	h.reportMetadataState()
 	return false, firstErr
 }
 
@@ -409,22 +428,15 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation,
 	if snapshot.Artifacts == nil {
 		snapshot.Artifacts = map[string]RepoObject{}
 	}
-	if snapshot.Auxiliary == nil {
-		snapshot.Auxiliary = map[string]RepoObject{}
-	}
 	snapshot.RootKey = rootKey
 	snapshot.Generation = generation
 	snapshot.Upstream = upstream
 	snapshot.Published = time.Now().UTC()
+	snapshot.Targets = targets
 	for path, obj := range snapshot.Artifacts {
 		obj.Path = path
 		obj.Upstream = upstream
 		snapshot.Artifacts[path] = obj
-	}
-	for path, obj := range snapshot.Auxiliary {
-		obj.Path = path
-		obj.Upstream = upstream
-		snapshot.Auxiliary[path] = obj
 	}
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {
@@ -598,8 +610,14 @@ func (h *IndexedHandler) currentRepoObject(cleanPath string, class ResourceClass
 		obj, ok := snapshot.Artifacts[cleanPath]
 		return obj, ok
 	case ResourceAuxiliary:
-		obj, ok := snapshot.Auxiliary[cleanPath]
-		return obj, ok
+		for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
+			if base := strings.TrimSuffix(cleanPath, suffix); base != cleanPath {
+				if artifact, ok := snapshot.Artifacts[base]; ok {
+					return RepoObject{Path: cleanPath, Identity: artifact.Identity}, true
+				}
+			}
+		}
+		return RepoObject{}, false
 	default:
 		return RepoObject{}, false
 	}
@@ -651,7 +669,14 @@ func targetsToProbe(targets []MetadataTarget) []health.ProbeTarget {
 
 func (h *IndexedHandler) addRoot(rootKey string, targets []MetadataTarget) {
 	h.mu.Lock()
-	h.targets[rootKey] = targets
+	if entry, ok := h.roots[rootKey]; ok {
+		if len(targets) > 0 {
+			entry.targets = targets
+		}
+		h.mu.Unlock()
+		return
+	}
+	h.roots[rootKey] = &rootEntry{targets: targets}
 	h.mu.Unlock()
 	if h.sh != nil {
 		h.sh.AddResource(rootKey, targetsToProbe(targets), h.upstreams)
@@ -667,33 +692,46 @@ func (h *IndexedHandler) discoverRoot(cleanPath string) {
 		return
 	}
 	key := spec.Key()
-	targets := spec.Targets()
+	newTargets := spec.Targets()
+
 	h.mu.Lock()
-	existingTargets, existing := h.targets[key]
-	if existing && len(existingTargets) > 0 {
+	entry, exists := h.roots[key]
+	if exists {
+		changed := false
+		if entry.spec != nil {
+			changed = entry.spec.Merge(spec)
+		} else {
+			entry.spec = spec
+			changed = true
+		}
+		if changed {
+			entry.targets = entry.spec.Targets()
+		}
 		h.mu.Unlock()
-		if !h.rootHasSnapshot(key) {
-			slog.Debug("discovered root (needs refresh)", "instance", h.name, "mode", h.mode, "root", key)
+		if changed {
+			slog.Debug("discovered root (merged)", "instance", h.name, "mode", h.mode, "root", key, "targets", len(entry.targets))
 			h.ensureFirstRefresh(key)
 		}
 		return
 	}
-	h.targets[key] = targets
+
+	h.roots[key] = &rootEntry{spec: spec, targets: newTargets}
 	h.mu.Unlock()
 	slog.Debug("discovered new root", "instance", h.name, "mode", h.mode, "root", key)
 	if h.sh != nil {
-		h.sh.AddResource(key, targetsToProbe(targets), h.upstreams)
+		h.sh.AddResource(key, targetsToProbe(newTargets), h.upstreams)
 	}
-	if !h.rootHasSnapshot(key) {
-		h.ensureFirstRefresh(key)
-	}
+	h.ensureFirstRefresh(key)
 }
 
 func (h *IndexedHandler) rebuildAggregateLocked() {
+	if len(h.rootSnapshots) == 0 {
+		h.snapshot = nil
+		return
+	}
 	aggregate := &LiveSnapshot{
 		Metadata:  map[string]MetadataObject{},
 		Artifacts: map[string]RepoObject{},
-		Auxiliary: map[string]RepoObject{},
 	}
 	for _, snap := range h.rootSnapshots {
 		for p, obj := range snap.Metadata {
@@ -701,9 +739,6 @@ func (h *IndexedHandler) rebuildAggregateLocked() {
 		}
 		for p, obj := range snap.Artifacts {
 			aggregate.Artifacts[p] = obj
-		}
-		for p, obj := range snap.Auxiliary {
-			aggregate.Auxiliary[p] = obj
 		}
 	}
 	h.snapshot = aggregate
@@ -726,13 +761,52 @@ func (h *IndexedHandler) reportMetadataState() {
 			case health.StateDegraded:
 				stateStr = "degraded"
 			case health.StateUnhealthy:
-				stateStr = "booting"
+				stateStr = "degraded"
 			}
 		} else {
 			stateStr = "ready"
 		}
 	}
 	h.stats.SetMetadataState(h.name, h.mode, stateStr, ready)
+}
+
+func (h *IndexedHandler) RootReleases() []runtime.RootRelease {
+	h.mu.RLock()
+	releases := make([]runtime.RootRelease, 0, len(h.rootSnapshots))
+	for rootKey, snap := range h.rootSnapshots {
+		releases = append(releases, runtime.RootRelease{
+			Key:           rootKey,
+			Generation:    snap.Generation,
+			Published:     snap.Published,
+			Upstream:      snap.Upstream,
+			ArtifactCount: len(snap.Artifacts),
+			MetadataCount: len(snap.Metadata),
+		})
+	}
+	h.mu.RUnlock()
+
+	resources := h.sh.SnapshotResources()
+	for i, rr := range releases {
+		for _, res := range resources {
+			if res.Path == rr.Key {
+				releases[i].State = res.State
+				releases[i].LastSuccessAt = res.LastSuccessAt
+				releases[i].LastRefreshAt = res.LastRefreshAt
+				break
+			}
+		}
+	}
+
+	stateOrder := map[string]int{"active": 0, "suspect": 1, "blocked": 2, "pending": 3}
+	sort.Slice(releases, func(i, j int) bool {
+		oi := stateOrder[releases[i].State]
+		oj := stateOrder[releases[j].State]
+		if oi != oj {
+			return oi < oj
+		}
+		return releases[i].Key < releases[j].Key
+	})
+	return releases
 }
 
 func refreshHealthError(err error) error {

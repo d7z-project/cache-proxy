@@ -75,7 +75,7 @@ type LiveSnapshot struct {
 	Published  time.Time                 `yaml:"published"`
 	Metadata   map[string]MetadataObject `yaml:"metadata"`
 	Artifacts  map[string]RepoObject     `yaml:"artifacts"`
-	Auxiliary  map[string]RepoObject     `yaml:"auxiliary"`
+	Targets    []MetadataTarget          `yaml:"targets,omitempty"`
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession) (*LiveSnapshot, error)
@@ -139,6 +139,12 @@ func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (
 		return MetadataObject{}, err
 	}
 	return MetadataObject{Path: blob.Path, Required: false}, nil
+}
+
+func (s *RefreshSession) Release(target MetadataTarget) {
+	for _, key := range append([]string{target.URL}, target.Candidates...) {
+		delete(s.blobs, key)
+	}
 }
 
 func DeduceCompanions(basePath string) []string {

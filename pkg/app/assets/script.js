@@ -20,6 +20,10 @@ function copyCode(btn, txt) {
     }, 1500);
 }
 
+function toggleReleases(btn) {
+    btn.classList.toggle('open');
+}
+
 function toggleTheme() {
     var root = document.documentElement;
     var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';

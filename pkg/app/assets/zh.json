@@ -29,5 +29,10 @@
   "just_now": "刚刚",
   "s_ago": "%d秒前",
   "m_ago": "%d分钟前",
-  "h_ago": "%d小时前"
+  "h_ago": "%d小时前",
+  "releases": "仓库发布",
+  "packages": "个包",
+  "upstream": "上游",
+  "gen": "代",
+  "last_ok": "最近成功"
 }

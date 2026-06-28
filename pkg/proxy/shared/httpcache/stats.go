@@ -324,6 +324,26 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	return result
 }
 
+func (s *Stats) RemoveInstance(name string) {
+	if s == nil {
+		return
+	}
+	s.instances.Delete(name)
+	label := prometheus.Labels{"instance": name}
+	s.mc.requestsTotal.DeletePartialMatch(label)
+	s.mc.responseBytesTotal.DeletePartialMatch(label)
+	s.mc.upstreamRequestsTotal.DeletePartialMatch(label)
+	s.mc.activeDownloads.DeletePartialMatch(label)
+	s.mc.metadataRefreshTotal.DeletePartialMatch(label)
+	s.mc.metadataRefreshTime.DeletePartialMatch(label)
+	s.mc.metadataSnapshotReady.DeletePartialMatch(label)
+	s.mc.upstreamHealth.DeletePartialMatch(label)
+	s.mc.upstreamWeight.DeletePartialMatch(label)
+	s.mc.upstreamErrorRate.DeletePartialMatch(label)
+	s.mc.upstreamLatency.DeletePartialMatch(label)
+	s.mc.circuitEvents.DeletePartialMatch(label)
+}
+
 func (s *Stats) getOrCreateEntry(name, mode string) *instanceEntry {
 	if entry, ok := s.instances.Load(name); ok {
 		e := entry.(*instanceEntry)

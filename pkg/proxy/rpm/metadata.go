@@ -46,7 +46,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata:  map[string]filerepo.MetadataObject{},
 		Artifacts: map[string]filerepo.RepoObject{},
-		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	for _, target := range session.Targets() {
 		repomd, err := session.Fetch(ctx, target)
@@ -76,6 +75,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		if err := xml.Unmarshal(repomd.Body, &root); err != nil {
 			return nil, err
 		}
+		session.Release(target)
 		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
 		foundPrimary := false
 		for _, item := range root.Data {
@@ -84,8 +84,9 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			metadataPath := path.Join(repoRoot, itemHref)
+			metaTarget := filerepo.MetadataTarget{URL: metadataPath}
 
-			blob, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: metadataPath})
+			blob, err := session.Fetch(ctx, metaTarget)
 			if err != nil {
 				if item.Type == "primary" {
 					return nil, err
@@ -98,6 +99,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
 
 			if item.Type != "primary" {
+				session.Release(metaTarget)
 				continue
 			}
 			foundPrimary = true
@@ -108,6 +110,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			}
 			err = parsePrimary(reader, snapshot, repoRoot)
 			_ = reader.Close()
+			session.Release(metaTarget)
 			if err != nil {
 				return nil, err
 			}
@@ -138,10 +141,6 @@ func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot str
 		artifactPath := path.Join(repoRoot, pkg.Location.Href)
 		identity := strings.TrimSpace(pkg.Checksum)
 		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: identity, ContentHash: identity}
-		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512", ".md5"} {
-			auxPath := artifactPath + suffix
-			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: identity}
-		}
 	}
 	return nil
 }

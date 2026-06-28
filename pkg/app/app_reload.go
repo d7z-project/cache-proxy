@@ -197,17 +197,27 @@ func (a *App) Reload(ctx context.Context) error {
 			newBindListeners[addr] = a.bindListeners[addr]
 		}
 	}
+	var newStarted []string
 	for addr, handler := range newBindHandlers {
 		if _, exists := newBindServers[addr]; exists {
 			continue
 		}
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
+			for _, a := range newStarted {
+				if srv, ok := newBindServers[a]; ok {
+					srv.Shutdown(context.Background())
+				}
+				if l, ok := newBindListeners[a]; ok {
+					l.Close()
+				}
+			}
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
 		newBindListeners[addr] = listener
 		srv := &http.Server{Addr: addr, Handler: handler}
 		newBindServers[addr] = srv
+		newStarted = append(newStarted, addr)
 		go func(server *http.Server, listener net.Listener) {
 			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("bind server error", "addr", server.Addr, "err", err)
@@ -239,16 +249,18 @@ func (a *App) Reload(ctx context.Context) error {
 		cancel()
 	}
 
-	// Phase 9: Clean up old tenants.
+	// Phase 9: Clean up old tenants and stats.
 	for _, name := range removed {
 		if err := a.store.DeleteTenant(ctx, name); err != nil {
 			slog.Warn("delete tenant failed", "tenant", name, "err", err)
 		}
+		a.stats.RemoveInstance(name)
 	}
 	for _, name := range modified {
 		if err := a.store.DeleteTenant(ctx, name); err != nil {
 			slog.Warn("delete tenant failed", "tenant", name, "err", err)
 		}
+		a.stats.RemoveInstance(name)
 	}
 
 	// Phase 10: Finalize.

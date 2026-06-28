@@ -36,7 +36,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if response.StatusCode != http.StatusOK {
 		return h.copyRemote(w, req, response, "BYPASS")
 	}
-	body, err := io.ReadAll(response.Body)
+	body, err := io.ReadAll(io.LimitReader(response.Body, 50<<20))
 	if err != nil {
 		return 0, 0, err
 	}

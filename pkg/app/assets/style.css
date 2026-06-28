@@ -428,6 +428,60 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;
 }
 
+.card-releases{
+  border-top:1px solid var(--border-light);
+  background:var(--card-bg);
+}
+.release-toggle{
+  display:flex;align-items:center;gap:8px;
+  width:100%;padding:12px 24px;
+  border:none;background:none;
+  cursor:pointer;
+  font-size:11px;font-weight:700;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--text-secondary);
+  text-align:left;
+  transition:color var(--t);
+  user-select:none;
+}
+.release-toggle:hover{color:var(--text)}
+.release-arrow{
+  font-size:9px;transition:transform var(--t);display:inline-block;
+}
+.release-toggle.open .release-arrow{
+  transform:rotate(90deg);
+}
+.release-body{
+  overflow:hidden;max-height:0;
+  transition:max-height .25s ease;
+}
+.release-toggle.open + .release-body{
+  max-height:600px;
+  overflow-y:auto;
+}
+.release-row{
+  padding:10px 24px 10px 52px;
+  border-top:1px solid var(--border-light);
+}
+.release-row:first-child{border-top:none}
+.release-row-top{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.release-key{
+  font:12px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  color:var(--text);word-break:break-all;flex:1;min-width:0;
+}
+.release-gen{
+  font:11px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  color:var(--text-muted);flex-shrink:0;
+}
+.release-state{
+  font-size:11px;font-weight:600;color:var(--text-secondary);flex-shrink:0;
+}
+.release-row-meta{
+  display:flex;gap:12px;flex-wrap:wrap;margin-top:4px;
+  font-size:11px;color:var(--text-muted);
+}
+
 .card-cmd-wrap{
   flex:1;
   min-height:0;

@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,22 @@ type Instance interface {
 // for modes that don't use httpcache stats or health.ServiceHealth.
 type StatusSource interface {
 	DashboardStatus() (color, label, extra string)
+}
+
+type RootRelease struct {
+	Key           string
+	Generation    string
+	Published     time.Time
+	Upstream      string
+	ArtifactCount int
+	MetadataCount int
+	State         string
+	LastSuccessAt time.Time
+	LastRefreshAt time.Time
+}
+
+type RootReleaseSource interface {
+	RootReleases() []RootRelease
 }
 
 type HandlerInstance struct {

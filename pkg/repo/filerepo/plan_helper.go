@@ -35,7 +35,7 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler := NewIndexedHandler(plan.Name(), mode, mode, defaultFreshFor, classify, upstreams, block.Transport, expireAfter, policy, RefreshPolicy{
+	handler := NewIndexedHandler(plan.Name(), mode, mode, defaultFreshFor, classify, upstreams, block.Transport, config.ExpirationNever, policy, RefreshPolicy{
 		Interval: ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval),
 	}, discover, nil, build, plan.Store(), plan.Stats(), NewServiceHealth(block.Transport, upstreams, plan, mode))
 	plan.SetHomeSnippet(plan.RenderSnippet())

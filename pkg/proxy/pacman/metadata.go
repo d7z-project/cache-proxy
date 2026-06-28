@@ -64,7 +64,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata:  map[string]filerepo.MetadataObject{},
 		Artifacts: map[string]filerepo.RepoObject{},
-		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
@@ -119,10 +118,9 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			}
 			artifactPath := path.Join(path.Dir(blob.Path), filename)
 			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum, ContentHash: checksum}
-			sigPath := artifactPath + ".sig"
-			snapshot.Auxiliary[sigPath] = filerepo.RepoObject{Path: sigPath, Identity: checksum}
 		}
 		_ = reader.Close()
+		session.Release(target)
 		if !found {
 			return nil, fmt.Errorf("%s: desc entries not found", blob.Path)
 		}

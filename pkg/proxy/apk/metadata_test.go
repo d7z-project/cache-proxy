@@ -21,16 +21,14 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func TestParseIndexBuildsArtifactsAndAuxiliary(t *testing.T) {
+func TestParseIndexBuildsArtifacts(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata:  map[string]filerepo.MetadataObject{},
 		Artifacts: map[string]filerepo.RepoObject{},
-		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	input := "P:busybox\nV:1.36.1-r2\nC:sha256:abc\n\n"
 	require.NoError(t, parseIndex("v3.20/main/x86_64", strings.NewReader(input), snapshot))
 	require.Equal(t, "sha256:abc", snapshot.Artifacts["v3.20/main/x86_64/busybox-1.36.1-r2.apk"].Identity)
-	require.Equal(t, "sha256:abc", snapshot.Auxiliary["v3.20/main/x86_64/busybox-1.36.1-r2.apk.sig"].Identity)
 }
 
 func TestDiscovererDetectsAPKRoot(t *testing.T) {

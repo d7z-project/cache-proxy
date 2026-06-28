@@ -117,7 +117,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata:  map[string]filerepo.MetadataObject{},
 		Artifacts: map[string]filerepo.RepoObject{},
-		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	releaseSums := map[string]string{}
 	for _, target := range session.Targets() {
@@ -126,6 +125,13 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
+		if target.Kind == "packages" || target.Kind == "sources" {
+			for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+				if candidate != blob.Path {
+					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: blob.Path, Required: false}
+				}
+			}
+		}
 		if strings.HasSuffix(blob.Path, "/Release") {
 			for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
 				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
@@ -138,6 +144,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		switch target.Kind {
 		case "release":
 			releaseSums = parseReleaseSHA256(blob.Body)
+			session.Release(target)
 			continue
 		case "packages", "sources":
 			if err := verifyReleaseChecksum(releaseSums, blob.Path, blob.Body); err != nil {
@@ -153,6 +160,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				err = parseSources(reader, snapshot)
 			}
 			_ = reader.Close()
+			session.Release(target)
 			if err != nil {
 				return nil, err
 			}
@@ -171,10 +179,6 @@ func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 		}
 		checksum := strings.TrimSpace(fields["SHA256"])
 		snapshot.Artifacts[filename] = filerepo.RepoObject{Path: filename, Identity: checksum, ContentHash: checksum}
-		for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
-			auxPath := filename + suffix
-			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: checksum}
-		}
 	})
 }
 
@@ -191,10 +195,6 @@ func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 			}
 			artifactPath := path.Join(directory, parts[2])
 			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: parts[0], ContentHash: parts[0]}
-			for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
-				auxPath := artifactPath + suffix
-				snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: parts[0]}
-			}
 		}
 	})
 }

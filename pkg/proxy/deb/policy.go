@@ -25,7 +25,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 
 func classify(cleanPath string) filerepo.ResourceClass {
 	switch {
-	case strings.HasPrefix(cleanPath, "dists/"):
+	case strings.Count(cleanPath, "/") >= 2 && strings.HasPrefix(cleanPath, "dists/"):
 		return filerepo.ResourceMetadata
 	case strings.HasPrefix(cleanPath, "pool/") && (strings.HasSuffix(cleanPath, ".deb") || strings.HasSuffix(cleanPath, ".udeb") || strings.HasSuffix(cleanPath, ".ddeb") || strings.HasSuffix(cleanPath, ".dsc") || strings.Contains(cleanPath, ".orig.tar.") || strings.Contains(cleanPath, ".debian.tar.") || strings.HasSuffix(cleanPath, ".diff.gz")):
 		return filerepo.ResourceArtifact

@@ -50,7 +50,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata:  map[string]filerepo.MetadataObject{},
 		Artifacts: map[string]filerepo.RepoObject{},
-		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
@@ -91,6 +90,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			break
 		}
 		_ = reader.Close()
+		session.Release(target)
 		if !found {
 			return nil, fmt.Errorf("%s: APKINDEX entry not found", blob.Path)
 		}
@@ -108,10 +108,6 @@ func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapsho
 		}
 		artifactPath := path.Join(basePath, name+"-"+version+".apk")
 		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum, ContentHash: checksum}
-		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512"} {
-			auxPath := artifactPath + suffix
-			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: checksum}
-		}
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(nil, 10<<20)

@@ -2,16 +2,30 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
+
+type homeRelease struct {
+	Key        string
+	Gen        string
+	Published  string
+	Packages   string
+	Upstream   string
+	StateLabel string
+	StateColor string
+	LastOK     string
+}
 
 type homeInstance struct {
 	Name        string
@@ -26,6 +40,8 @@ type homeInstance struct {
 	StatusColor string
 	StatusLabel string
 	StatusExtra string
+	HasReleases bool
+	Releases    []homeRelease
 }
 
 func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
@@ -134,6 +150,35 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = src.DashboardStatus()
 	} else {
 		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+	}
+	if src, ok := entry.Runtime.(proxyruntime.RootReleaseSource); ok {
+		releases := src.RootReleases()
+		hi.HasReleases = true
+		hi.Releases = make([]homeRelease, len(releases))
+		for i, r := range releases {
+			pub := ""
+			if !r.Published.IsZero() {
+				pub = relativeTime(time.Since(r.Published), i18n)
+			}
+			lok := ""
+			if !r.LastSuccessAt.IsZero() {
+				lok = relativeTime(time.Since(r.LastSuccessAt), i18n)
+			}
+			upstream := r.Upstream
+			if u, err := url.Parse(upstream); err == nil && u.Host != "" {
+				upstream = u.Host
+			}
+			hi.Releases[i] = homeRelease{
+				Key:        r.Key,
+				Gen:        fmt.Sprintf("gen:%s", r.Generation),
+				Published:  pub,
+				Packages:   fmt.Sprintf("%d %s", r.ArtifactCount, i18nStr(i18n, "packages")),
+				Upstream:   upstream,
+				StateLabel: r.State,
+				StateColor: formatRootStateColor(r.State),
+				LastOK:     lok,
+			}
+		}
 	}
 	return hi
 }

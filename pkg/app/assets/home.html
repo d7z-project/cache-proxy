@@ -113,6 +113,31 @@
           <div class="stat-val">{{.DiskUsage}}</div>
         </div>
       </div>
+      {{if .HasReleases}}
+      <div class="card-releases">
+        <button class="release-toggle" type="button" onclick="toggleReleases(this)">
+          <span class="release-arrow">&#9654;</span>
+          {{t "releases"}} ({{len .Releases}})
+        </button>
+        <div class="release-body">
+          {{range .Releases}}
+          <div class="release-row">
+            <div class="release-row-top">
+              <span class="release-key">{{.Key}}</span>
+              <span class="release-gen">{{.Gen}}</span>
+              <span class="dot dot-{{.StateColor}}"></span>
+              <span class="release-state">{{.StateLabel}}</span>
+            </div>
+            <div class="release-row-meta">
+              {{if .Published}}<span>{{.Published}}</span>{{end}}
+              <span>{{.Packages}}</span>
+              <span>{{t "upstream"}}: {{.Upstream}}</span>
+            </div>
+          </div>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
       <div class="card-section card-section-setup">
         <div class="section-head">
           <span class="section-title">{{t "setup"}}</span>

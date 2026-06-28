@@ -11,10 +11,9 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
+func TestParsePrimaryRecordsArtifacts(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
 		Artifacts: map[string]filerepo.RepoObject{},
-		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	input := `
 <metadata>
@@ -25,8 +24,6 @@ func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
 </metadata>`
 	require.NoError(t, parsePrimary(strings.NewReader(input), snapshot, "repo/os"))
 	require.Equal(t, "abc123", snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"].Identity)
-	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sig"].Identity)
-	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sha256"].Identity)
 }
 
 func TestDiscovererDetectsRPMRoot(t *testing.T) {

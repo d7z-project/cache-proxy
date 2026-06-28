@@ -457,6 +457,9 @@ func (h *ServiceHealth) ScheduleRefresh(path string, refreshInterval time.Durati
 	if rh == nil || rh.State == RRemoved {
 		return
 	}
+	if rh.State == RBlocked {
+		refreshInterval = h.config.ResourceBlockInterval
+	}
 	rh.NextRefreshAt = time.Now().Add(refreshInterval)
 }
 

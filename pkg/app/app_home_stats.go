@@ -109,6 +109,19 @@ func formatBytes(n int64) string {
 	}
 }
 
+func formatRootStateColor(state string) string {
+	switch state {
+	case "active":
+		return "green"
+	case "suspect":
+		return "yellow"
+	case "blocked":
+		return "red"
+	default:
+		return "gray"
+	}
+}
+
 func collectTenantUsage(ctx context.Context, tenants []string, store *blobfs.Store) map[string]int64 {
 	usage := make(map[string]int64)
 	for _, tenant := range tenants {
