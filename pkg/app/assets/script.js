@@ -1,4 +1,4 @@
-function copyURL(btn, txt) {
+function copyToClipboard(btn, txt) {
     navigator.clipboard.writeText(txt);
     var t = window.I18N;
     btn.textContent = t.copied;
@@ -9,19 +9,12 @@ function copyURL(btn, txt) {
     }, 1500);
 }
 
-function copyCode(btn, txt) {
-    navigator.clipboard.writeText(txt);
-    var t = window.I18N;
-    btn.textContent = t.copied;
-    btn.classList.add('copied');
-    setTimeout(function() {
-        btn.textContent = t.copy;
-        btn.classList.remove('copied');
-    }, 1500);
-}
+function copyURL(btn, txt) { copyToClipboard(btn, txt); }
+function copyCode(btn, txt) { copyToClipboard(btn, txt); }
 
 function toggleReleases(btn) {
-    btn.classList.toggle('open');
+    var open = btn.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open);
 }
 
 function toggleTheme() {

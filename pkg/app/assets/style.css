@@ -371,7 +371,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 }
 .card-section-setup{
   margin-top:auto;
-  height:176px;
+  min-height:176px;
   display:flex;
   flex-direction:column;
   padding-top:12px;

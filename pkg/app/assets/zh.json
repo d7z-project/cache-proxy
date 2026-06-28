@@ -34,5 +34,10 @@
   "packages": "个包",
   "upstream": "上游",
   "gen": "代",
-  "last_ok": "最近成功"
+  "last_ok": "最近成功",
+  "release_state_active": "活跃",
+  "release_state_suspect": "可疑",
+  "release_state_blocked": "阻塞",
+  "release_state_pending": "等待中",
+  "release_state_removed": "已移除"
 }

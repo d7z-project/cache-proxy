@@ -34,5 +34,10 @@
   "packages": "packages",
   "upstream": "upstream",
   "gen": "gen",
-  "last_ok": "last OK"
+  "last_ok": "last OK",
+  "release_state_active": "active",
+  "release_state_suspect": "suspect",
+  "release_state_blocked": "blocked",
+  "release_state_pending": "pending",
+  "release_state_removed": "removed"
 }

@@ -152,7 +152,7 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 
 	body := rec.Body.String()
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, body, "cache-proxy")
+	require.Contains(t, body, "Cache Proxy")
 	require.Contains(t, body, "files")
 	require.Contains(t, body, "http://proxy.example.test/files")
 	require.Contains(t, body, `class="badge badge-file"`)

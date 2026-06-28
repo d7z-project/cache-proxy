@@ -170,11 +170,11 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 			}
 			hi.Releases[i] = homeRelease{
 				Key:        r.Key,
-				Gen:        fmt.Sprintf("gen:%s", r.Generation),
+				Gen:        fmt.Sprintf("%s:%s", i18nStr(i18n, "gen"), r.Generation),
 				Published:  pub,
 				Packages:   fmt.Sprintf("%d %s", r.ArtifactCount, i18nStr(i18n, "packages")),
 				Upstream:   upstream,
-				StateLabel: r.State,
+				StateLabel: i18nStr(i18n, "release_state_"+r.State),
 				StateColor: formatRootStateColor(r.State),
 				LastOK:     lok,
 			}
