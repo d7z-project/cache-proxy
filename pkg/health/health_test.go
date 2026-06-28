@@ -45,6 +45,20 @@ func TestNewServiceHealth(t *testing.T) {
 	require.Len(t, h.upstreams, 2)
 }
 
+func TestApplyConfigPatchKeepsDefaults(t *testing.T) {
+	enabled := false
+	tripRate := 0.42
+	defaults := DefaultConfig()
+	cfg := ApplyConfigPatch(defaults, &ConfigPatch{
+		Enabled:  &enabled,
+		TripRate: &tripRate,
+	})
+	require.False(t, cfg.Enabled)
+	require.Equal(t, 0.42, cfg.TripRate)
+	require.Equal(t, defaults.DegradeRate, cfg.DegradeRate)
+	require.Equal(t, defaults.ProbeTimeout, cfg.ProbeTimeout)
+}
+
 func TestWeightedUpstreamsAllHealthy(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com", "https://b.example.com", "https://c.example.com"}, &testStats{}, "ua")
 	result := h.WeightedUpstreams(upstreamURLs(t, h))

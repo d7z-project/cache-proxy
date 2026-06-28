@@ -163,7 +163,7 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
-	if _, downloading := h.downloads.Load(objectPath); downloading {
+	if _, downloading := h.downloads.LoadOrStore(objectPath, struct{}{}); downloading {
 		slog.Debug("oci blob already downloading, bypass", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}

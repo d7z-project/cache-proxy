@@ -121,6 +121,44 @@ instances:
 	require.Equal(t, "immutable", cfg.DefaultPolicy)
 }
 
+func TestDecodeTransportHealthPatch(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: files
+    enabled: true
+    file:
+      route:
+        path: /files
+      upstreams:
+        - https://example.com
+      transport:
+        health:
+          enabled: false
+          trip_rate: 0.5
+          probe_timeout: 7s
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	var cfg struct {
+		Route struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Upstreams []string         `yaml:"upstreams"`
+		Transport *TransportConfig `yaml:"transport"`
+	}
+	require.NoError(t, selected.Block.DecodeStrict(&cfg))
+	require.NotNil(t, cfg.Transport)
+	require.NotNil(t, cfg.Transport.Health)
+	require.NotNil(t, cfg.Transport.Health.Enabled)
+	require.False(t, *cfg.Transport.Health.Enabled)
+	require.NotNil(t, cfg.Transport.Health.TripRate)
+	require.Equal(t, 0.5, *cfg.Transport.Health.TripRate)
+	require.NotNil(t, cfg.Transport.Health.ProbeTimeout)
+	require.Equal(t, 7*time.Second, *cfg.Transport.Health.ProbeTimeout)
+	require.Nil(t, cfg.Transport.Health.DegradeRate)
+}
+
 func TestDecodePackageRepositoryConfig(t *testing.T) {
 	doc, err := Decode(strings.NewReader(`
 instances:

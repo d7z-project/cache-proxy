@@ -85,7 +85,7 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 			return nil
 		}
 		defer reader.Close()
-		data, err := io.ReadAll(reader)
+		data, err := io.ReadAll(reader) // foreseeable: no size limit; snapshots are typically small
 		if err != nil {
 			return nil
 		}

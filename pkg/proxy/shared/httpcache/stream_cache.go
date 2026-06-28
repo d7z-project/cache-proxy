@@ -27,10 +27,8 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 		return nil, err
 	}
 
-	done := make(chan struct{})
-	cfg.Downloads.Store(cfg.ObjectPath, done)
-
 	pr, pw := io.Pipe()
+	done := make(chan struct{})
 	cfg.Wait.Add(1)
 	if cfg.StatsStart != nil {
 		cfg.StatsStart()
@@ -48,6 +46,8 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 		defer cfg.Downloads.Delete(cfg.ObjectPath)
 		defer cfg.Body.Close()
 		defer pw.Close()
+		defer tempFile.Close()
+		defer os.Remove(tempFile.Name())
 		if cfg.StatsDone != nil {
 			defer cfg.StatsDone()
 		}
@@ -55,28 +55,32 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 		bw := bufio.NewWriterSize(tempFile, 256<<10)
 		tee := io.TeeReader(cfg.Body, bw)
 		if _, copyErr := io.Copy(pw, tee); copyErr == nil {
-			bw.Flush()
-			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
-				if cfg.VerifyFn != nil {
-					if err := cfg.VerifyFn(tempFile); err != nil {
-						slog.Warn("cache store verification failed", "path", cfg.ObjectPath, "err", err)
-						return
-					}
-					if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr != nil {
-						return
-					}
-				}
-				if err := cfg.StoreFn(storeCtx, tempFile); err != nil {
-					slog.Warn("cache store write failed", "path", cfg.ObjectPath, "err", err)
+			if err := bw.Flush(); err != nil {
+				slog.Warn("download temp flush failed", "path", cfg.ObjectPath, "err", err)
+				return
+			}
+			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr != nil {
+				slog.Warn("download temp rewind failed", "path", cfg.ObjectPath, "err", seekErr)
+				return
+			}
+			if cfg.VerifyFn != nil {
+				if err := cfg.VerifyFn(tempFile); err != nil {
+					slog.Warn("cache store verification failed", "path", cfg.ObjectPath, "err", err)
 					return
 				}
-				slog.Debug("download completed", "path", cfg.ObjectPath)
+				if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr != nil {
+					slog.Warn("download temp rewind failed", "path", cfg.ObjectPath, "err", seekErr)
+					return
+				}
 			}
+			if err := cfg.StoreFn(storeCtx, tempFile); err != nil {
+				slog.Warn("cache store write failed", "path", cfg.ObjectPath, "err", err)
+				return
+			}
+			slog.Debug("download completed", "path", cfg.ObjectPath)
 		} else {
 			slog.Debug("download aborted", "path", cfg.ObjectPath, "err", copyErr)
 		}
-		tempFile.Close()
-		os.Remove(tempFile.Name())
 	}()
 
 	return pr, nil

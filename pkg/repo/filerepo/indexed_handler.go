@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -27,6 +28,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
+
+const maxMetadataObjectSize = 512 << 20
 
 type rootEntry struct {
 	spec    RootSpec
@@ -48,32 +51,30 @@ type IndexedHandler struct {
 	build      SnapshotBuilder
 	sh         *health.ServiceHealth
 
-	mu            sync.RWMutex
-	snapshot      *LiveSnapshot
-	roots         map[string]*rootEntry
-	rootSnapshots map[string]*LiveSnapshot
-	firstRefreshReady map[string]chan struct{}
-	lifecycleCtx  context.Context
-	wait          sync.WaitGroup
+	mu                sync.RWMutex
+	snapshot          *LiveSnapshot
+	roots             map[string]*rootEntry
+	rootSnapshots     map[string]*LiveSnapshot
+	lifecycleCtx      context.Context
+	wait              sync.WaitGroup
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
-		name:          name,
-		mode:          mode,
-		objectRoot:    objectRoot,
-		store:         store,
-		stats:         stats,
-		classifier:    classifier,
-		upstreams:     append([]string(nil), upstreams...),
-		discover:      discover,
-		policy:        refreshPolicy,
-		build:         builder,
-		sh:            svcHealth,
-		roots:         map[string]*rootEntry{},
+		name:        name,
+		mode:        mode,
+		objectRoot:  objectRoot,
+		store:       store,
+		stats:       stats,
+		classifier:  classifier,
+		upstreams:   append([]string(nil), upstreams...),
+		discover:    discover,
+		policy:      refreshPolicy,
+		build:       builder,
+		sh:          svcHealth,
+		roots:       map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
-		firstRefreshReady: map[string]chan struct{}{},
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:         mode,
@@ -111,9 +112,13 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if class == ResourceMetadata {
-		h.discoverRoot(cleanPath)
-		h.serveMetadata(w, req, cleanPath)
-		return
+		rootKey, discovered := h.discoverRoot(cleanPath)
+		if discovered {
+			h.ensureFirstRefresh(rootKey)
+		}
+		if h.tryServeMetadata(w, req, cleanPath) {
+			return
+		}
 	}
 	h.prepareRequest(req.Context(), cleanPath, class)
 	h.base.ServeHTTP(w, req)
@@ -221,29 +226,26 @@ func (h *IndexedHandler) Cleanup(ctx context.Context) error {
 	})
 }
 
-func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) {
+func (h *IndexedHandler) tryServeMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) bool {
 	snapshot := h.currentSnapshot()
 	if snapshot == nil {
-		h.base.ProxyPassthrough(w, req, cleanPath, "")
-		return
+		return false
 	}
 	obj, ok := snapshot.Metadata[cleanPath]
 	if !ok {
-		preferred := snapshot.Upstream
-		h.base.ProxyPassthrough(w, req, cleanPath, preferred)
-		return
+		return false
 	}
 	if obj.Path != cleanPath {
 		http.Redirect(w, req, req.Header.Get("X-Cache-Proxy-Prefix")+"/"+obj.Path, http.StatusFound)
 		h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusFound, 0)
-		return
+		return true
 	}
 	objectPath := obj.StorePath
 	reader, err := h.store.OpenObject(req.Context(), h.name, objectPath)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusInternalServerError, 0)
-		return
+		return true
 	}
 	size := reader.Info().Size
 	headers := map[string]string{
@@ -258,17 +260,19 @@ func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request,
 	result.FlushClose(req, w)
 	slog.Debug("metadata served", "instance", h.name, "mode", h.mode, "path", cleanPath, "size", size)
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
+	return true
 }
 
 func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
 	if h.build == nil {
 		return
 	}
-	h.mu.Lock()
-	if _, exists := h.firstRefreshReady[rootKey]; !exists {
-		h.firstRefreshReady[rootKey] = make(chan struct{})
+	h.mu.RLock()
+	_, hasSnap := h.rootSnapshots[rootKey]
+	h.mu.RUnlock()
+	if hasSnap {
+		return
 	}
-	h.mu.Unlock()
 	h.wait.Add(1)
 	go func() {
 		defer func() {
@@ -276,20 +280,14 @@ func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
 				slog.Error("first refresh panic", "instance", h.name, "root", rootKey, "panic", r)
 			}
 		}()
-		defer h.signalFirstRefresh(rootKey)
 		defer h.wait.Done()
-		_, _ = h.refreshRoot(h.lifecycleCtx, rootKey, time.Now())
+		refreshCtx, cancel := context.WithTimeout(context.Background(), defaultFirstRefreshTimeout)
+		defer cancel()
+		_, _ = h.refreshRoot(refreshCtx, rootKey, time.Now())
 	}()
 }
 
-func (h *IndexedHandler) signalFirstRefresh(rootKey string) {
-	h.mu.Lock()
-	if ch, ok := h.firstRefreshReady[rootKey]; ok {
-		close(ch)
-		delete(h.firstRefreshReady, rootKey)
-	}
-	h.mu.Unlock()
-}
+const defaultFirstRefreshTimeout = 30 * time.Minute
 
 func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
 	if h.build == nil || ctx.Err() != nil {
@@ -303,13 +301,19 @@ func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 	startedAt := time.Now()
 	refreshed, err := h.refreshRoots(ctx, startedAt, !allRoots)
 
+	var remove []string
 	if h.sh != nil {
-		h.mu.Lock()
 		for key := range h.roots {
 			if state, ok := h.sh.ResourceState(key); !ok || state == health.RRemoved {
-				delete(h.roots, key)
-				delete(h.rootSnapshots, key)
+				remove = append(remove, key)
 			}
+		}
+	}
+	if h.sh != nil {
+		h.mu.Lock()
+		for _, key := range remove {
+			delete(h.roots, key)
+			delete(h.rootSnapshots, key)
 		}
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
@@ -333,23 +337,11 @@ func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 
 func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now time.Time) (bool, error) {
 	if h.sh == nil {
-		h.signalFirstRefresh(rootKey)
 		return false, nil
 	}
 	rhs, unlock, ok := h.sh.TryStartRefresh(rootKey)
 	if !ok {
-		h.mu.Lock()
-		ch, exists := h.firstRefreshReady[rootKey]
-		h.mu.Unlock()
-		if !exists {
-			return false, nil
-		}
-		select {
-		case <-ch:
-			return h.refreshRoot(ctx, rootKey, now)
-		case <-ctx.Done():
-			return false, nil
-		}
+		return false, nil
 	}
 	defer unlock()
 
@@ -359,7 +351,6 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 	if !ok || entry == nil || len(entry.targets) == 0 {
 		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, nil)
 		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
-		h.signalFirstRefresh(rootKey)
 		slog.Debug("root refresh skipped (no targets)", "instance", h.name, "mode", h.mode, "root", rootKey)
 		return false, nil
 	}
@@ -391,7 +382,6 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 		h.mu.Lock()
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
-		h.signalFirstRefresh(rootKey)
 		h.reportMetadataState()
 		slog.Debug("root refresh succeeded", "instance", h.name, "mode", h.mode, "root", rootKey, "generation", generation, "upstream", upstream)
 		return true, nil
@@ -401,7 +391,6 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 	}
 	h.sh.FinishRefresh(rootKey, rhs.Generation, refreshHealthError(firstErr), nil)
 	h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
-	h.signalFirstRefresh(rootKey)
 	h.reportMetadataState()
 	return false, firstErr
 }
@@ -412,9 +401,10 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation,
 		rootKey:    rootKey,
 		upstream:   upstream,
 		generation: generation,
-		blobs:      map[string]MetadataBlob{},
+		blobs:      map[string]*MetadataBlob{},
 		targets:    append([]MetadataTarget(nil), targets...),
 	}
+	defer session.Close()
 	snapshot, err := h.build(ctx, session)
 	if err != nil {
 		return nil, err
@@ -487,9 +477,19 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("HTTP %d from upstream: %w", response.StatusCode, errMetadataTransient)}
 		}
 	}
-	body, err := io.ReadAll(io.LimitReader(utils.NewRateLimitReader(response.Body), 50<<20))
+	tempFile, size, err := utils.TempFileFromReader(io.LimitReader(utils.NewRateLimitReader(response.Body), maxMetadataObjectSize+1))
 	if err != nil {
 		return MetadataBlob{}, err
+	}
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = tempFile.Close()
+			_ = os.Remove(tempFile.Name())
+		}
+	}()
+	if size > maxMetadataObjectSize {
+		return MetadataBlob{}, fmt.Errorf("%s: metadata object exceeds %d bytes", cleanPath, maxMetadataObjectSize)
 	}
 	headers := map[string]string{}
 	for key, value := range response.Header {
@@ -497,13 +497,14 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 			headers[http.CanonicalHeaderKey(key)] = value[0]
 		}
 	}
-	if err := h.putMetadataObject(ctx, rootKey, generation, cleanPath, body, headers); err != nil {
+	if err := h.putMetadataObject(ctx, rootKey, generation, cleanPath, tempFile, size, headers); err != nil {
 		return MetadataBlob{}, err
 	}
-	return MetadataBlob{Path: cleanPath, Body: body, Headers: headers}, nil
+	cleanupTemp = false
+	return MetadataBlob{Path: cleanPath, file: tempFile, temp: tempFile.Name(), Headers: headers}, nil
 }
 
-func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootKey, generation, cleanPath string, body []byte, headers map[string]string) error {
+func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootKey, generation, cleanPath string, body io.ReadSeeker, size int64, headers map[string]string) error {
 	objectPath := h.generationMetadataPath(rootKey, generation, cleanPath)
 	meta := map[string]string{
 		"content-type":   headers["Content-Type"],
@@ -515,14 +516,20 @@ func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootKey, generat
 		"cache":          "GENERATION",
 	}
 	if meta["content-length"] == "" {
-		meta["content-length"] = strconv.Itoa(len(body))
+		meta["content-length"] = strconv.FormatInt(size, 10)
 	}
 	if parent := path.Dir(objectPath); parent != "." {
 		if err := h.store.MkdirAll(path.Join(h.name, parent), 0o755); err != nil {
 			return err
 		}
 	}
-	_, err := h.store.Put(ctx, h.name, objectPath, bytes.NewReader(body), meta)
+	if _, err := body.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	_, err := h.store.Put(ctx, h.name, objectPath, body, meta)
+	if _, seekErr := body.Seek(0, io.SeekStart); seekErr != nil && err == nil {
+		err = seekErr
+	}
 	return err
 }
 
@@ -683,13 +690,13 @@ func (h *IndexedHandler) addRoot(rootKey string, targets []MetadataTarget) {
 	}
 }
 
-func (h *IndexedHandler) discoverRoot(cleanPath string) {
+func (h *IndexedHandler) discoverRoot(cleanPath string) (string, bool) {
 	if h.discover == nil {
-		return
+		return "", false
 	}
 	spec, ok := h.discover.Discover(cleanPath)
 	if !ok {
-		return
+		return "", false
 	}
 	key := spec.Key()
 	newTargets := spec.Targets()
@@ -712,7 +719,7 @@ func (h *IndexedHandler) discoverRoot(cleanPath string) {
 			slog.Debug("discovered root (merged)", "instance", h.name, "mode", h.mode, "root", key, "targets", len(entry.targets))
 			h.ensureFirstRefresh(key)
 		}
-		return
+		return key, true
 	}
 
 	h.roots[key] = &rootEntry{spec: spec, targets: newTargets}
@@ -722,6 +729,7 @@ func (h *IndexedHandler) discoverRoot(cleanPath string) {
 		h.sh.AddResource(key, targetsToProbe(newTargets), h.upstreams)
 	}
 	h.ensureFirstRefresh(key)
+	return key, true
 }
 
 func (h *IndexedHandler) rebuildAggregateLocked() {
@@ -797,7 +805,7 @@ func (h *IndexedHandler) RootReleases() []runtime.RootRelease {
 		}
 	}
 
-	stateOrder := map[string]int{"active": 0, "suspect": 1, "blocked": 2, "pending": 3}
+	stateOrder := map[string]int{"active": 0, "suspect": 1, "blocked": 2, "pending": 3, "removed": 4}
 	sort.Slice(releases, func(i, j int) bool {
 		oi := stateOrder[releases[i].State]
 		oj := stateOrder[releases[j].State]

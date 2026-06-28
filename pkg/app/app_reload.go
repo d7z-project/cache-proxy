@@ -80,32 +80,22 @@ func (a *App) Reload(ctx context.Context) error {
 		plannedEntries[entry.Name] = entry
 	}
 
-	// Phase 2: Enter draining.
-	a.ready.Store(false)
-
 	addSet := setOf(added)
 	modSet := setOf(modified)
 	stopSet := setOf(append(removed, modified...))
 
-	// Phase 3: Capture old entries to stop later + stop old bind servers.
-	a.routesMu.Lock()
+	// Phase 2: Capture old entries. They keep serving until commit.
+	a.routesMu.RLock()
 	var oldEntriesToStop []*proxyruntime.Entry
 	for _, name := range append(removed, modified...) {
 		if entry := a.entries[name]; entry != nil {
 			oldEntriesToStop = append(oldEntriesToStop, entry)
-			if entry.Bind != "" {
-				if srv, ok := a.bindServers[entry.Bind]; ok {
-					if err := srv.Shutdown(ctx); err != nil {
-						slog.Warn("bind server shutdown error", "addr", entry.Bind, "err", err)
-					}
-					delete(a.bindServers, entry.Bind)
-				}
-			}
 		}
 	}
-	a.routesMu.Unlock()
+	a.routesMu.RUnlock()
 
-	// Phase 4: Start new handlers for added + modified instances.
+	// Phase 3: Start new handlers for added + modified instances.
+	var startedEntries []*proxyruntime.Entry
 	for _, inst := range newDoc.Instances {
 		entry, ok := plannedEntries[inst.Name]
 		if !ok || !entry.Enabled || entry.Runtime == nil {
@@ -121,11 +111,18 @@ func (a *App) Reload(ctx context.Context) error {
 		entry.Cancel = entryCancel
 		if err := entry.Runtime.Start(entryCtx); err != nil {
 			entryCancel()
+			stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			if stopErr := entry.Runtime.Stop(stopCtx); stopErr != nil {
+				slog.Warn("failed instance cleanup after start error", "instance", entry.Name, "err", stopErr)
+			}
+			cancel()
+			stopPreparedEntries(startedEntries)
 			return fmt.Errorf("instance %s: start failed: %w", entry.Name, err)
 		}
+		startedEntries = append(startedEntries, entry)
 	}
 
-	// Phase 5: Build new routing tables.
+	// Phase 4: Build new routing tables.
 	newEntries := make(map[string]*proxyruntime.Entry, len(a.entries))
 	newPathHandlers := make(map[string]http.Handler, len(a.pathHandlers))
 	newPathPrefixes := make([]string, 0, len(a.pathPrefixes))
@@ -178,44 +175,35 @@ func (a *App) Reload(ctx context.Context) error {
 		return len(newPathPrefixes[i]) > len(newPathPrefixes[j])
 	})
 
-	// Phase 6: Start new bind servers for added + modified bind instances.
-	stoppedAddrs := make(map[string]struct{}, len(oldEntriesToStop))
+	// Phase 5: Start listeners for newly introduced bind addresses. Existing
+	// bind servers use bindDispatchHandler and pick up the swapped handler.
+	removedAddrs := make(map[string]struct{}, len(oldEntriesToStop))
 	for _, e := range oldEntriesToStop {
 		if e.Bind != "" {
-			stoppedAddrs[e.Bind] = struct{}{}
+			removedAddrs[e.Bind] = struct{}{}
 		}
 	}
 	newBindServers := make(map[string]*http.Server, len(a.bindServers))
 	newBindListeners := make(map[string]net.Listener, len(a.bindListeners))
 	for addr := range a.bindServers {
-		if _, ok := stoppedAddrs[addr]; !ok {
-			newBindServers[addr] = a.bindServers[addr]
-		}
+		newBindServers[addr] = a.bindServers[addr]
 	}
 	for addr := range a.bindListeners {
-		if _, ok := stoppedAddrs[addr]; !ok {
-			newBindListeners[addr] = a.bindListeners[addr]
-		}
+		newBindListeners[addr] = a.bindListeners[addr]
 	}
 	var newStarted []string
-	for addr, handler := range newBindHandlers {
+	for addr := range newBindHandlers {
 		if _, exists := newBindServers[addr]; exists {
 			continue
 		}
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
-			for _, a := range newStarted {
-				if srv, ok := newBindServers[a]; ok {
-					srv.Shutdown(context.Background())
-				}
-				if l, ok := newBindListeners[a]; ok {
-					l.Close()
-				}
-			}
+			closePreparedBindServers(newStarted, newBindServers, newBindListeners)
+			stopPreparedEntries(startedEntries)
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
 		newBindListeners[addr] = listener
-		srv := &http.Server{Addr: addr, Handler: handler}
+		srv := &http.Server{Addr: addr, Handler: bindDispatchHandler{app: a, addr: addr}}
 		newBindServers[addr] = srv
 		newStarted = append(newStarted, addr)
 		go func(server *http.Server, listener net.Listener) {
@@ -225,7 +213,9 @@ func (a *App) Reload(ctx context.Context) error {
 		}(srv, listener)
 	}
 
-	// Phase 7: Atomic swap.
+	// Phase 6: Atomic swap. Requests see either the old complete routing table
+	// or the new complete routing table.
+	a.ready.Store(false)
 	a.routesMu.Lock()
 	a.entries = newEntries
 	a.handlers = newHandlers
@@ -236,8 +226,30 @@ func (a *App) Reload(ctx context.Context) error {
 	a.bindListeners = newBindListeners
 	a.config = newDoc
 	a.routesMu.Unlock()
+	a.ready.Store(true)
 
-	// Phase 8: Stop old handlers. Routes already swapped — no new requests can reach them.
+	// Phase 7: Stop bind servers that no remaining instance owns.
+	for addr := range removedAddrs {
+		if _, stillUsed := newBindHandlers[addr]; stillUsed {
+			continue
+		}
+		a.routesMu.Lock()
+		srv := a.bindServers[addr]
+		listener := a.bindListeners[addr]
+		delete(a.bindServers, addr)
+		delete(a.bindListeners, addr)
+		a.routesMu.Unlock()
+		if srv != nil {
+			if err := srv.Shutdown(ctx); err != nil {
+				slog.Warn("bind server shutdown error", "addr", addr, "err", err)
+			}
+		}
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}
+
+	// Phase 8: Stop old handlers. Routes already swapped; no new requests can reach them.
 	for _, entry := range oldEntriesToStop {
 		if entry.Cancel != nil {
 			entry.Cancel()
@@ -249,14 +261,9 @@ func (a *App) Reload(ctx context.Context) error {
 		cancel()
 	}
 
-	// Phase 9: Clean up old tenants and stats.
+	// Phase 9: Clean up removed tenants and stats. Modified instances keep the
+	// same tenant so the freshly prepared runtime cannot have its state deleted.
 	for _, name := range removed {
-		if err := a.store.DeleteTenant(ctx, name); err != nil {
-			slog.Warn("delete tenant failed", "tenant", name, "err", err)
-		}
-		a.stats.RemoveInstance(name)
-	}
-	for _, name := range modified {
 		if err := a.store.DeleteTenant(ctx, name); err != nil {
 			slog.Warn("delete tenant failed", "tenant", name, "err", err)
 		}
@@ -265,9 +272,34 @@ func (a *App) Reload(ctx context.Context) error {
 
 	// Phase 10: Finalize.
 	saveRegistry(ctx, a.store, newDoc)
-	a.ready.Store(true)
 	slog.Info("config reload complete", "added", len(added), "removed", len(removed), "modified", len(modified))
 	return nil
+}
+
+func stopPreparedEntries(entries []*proxyruntime.Entry) {
+	for _, entry := range entries {
+		if entry.Cancel != nil {
+			entry.Cancel()
+		}
+		stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		if err := entry.Runtime.Stop(stopCtx); err != nil {
+			slog.Warn("prepared instance stop failed", "instance", entry.Name, "err", err)
+		}
+		cancel()
+	}
+}
+
+func closePreparedBindServers(addrs []string, servers map[string]*http.Server, listeners map[string]net.Listener) {
+	for _, addr := range addrs {
+		if srv, ok := servers[addr]; ok {
+			_ = srv.Shutdown(context.Background())
+			delete(servers, addr)
+		}
+		if listener, ok := listeners[addr]; ok {
+			_ = listener.Close()
+			delete(listeners, addr)
+		}
+	}
 }
 
 func setOf(names []string) map[string]struct{} {

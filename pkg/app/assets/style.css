@@ -52,6 +52,9 @@
   --copied-bg: #e6f3ee;
   --copied-border: #a7cfbf;
   --copied-text: #256857;
+  --copy-failed-bg: #f8e7e4;
+  --copy-failed-border: #d9aaa2;
+  --copy-failed-text: #9b4638;
   color-scheme: light;
 }
 
@@ -103,6 +106,9 @@
   --copied-bg: #1d3932;
   --copied-border: #2d6558;
   --copied-text: #84d0bb;
+  --copy-failed-bg: #3a2424;
+  --copy-failed-border: #75443e;
+  --copy-failed-text: #e69a8d;
   color-scheme: dark;
 }
 
@@ -396,6 +402,9 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 .section-action:hover{background:var(--border-light);color:var(--text);transform:translateY(-1px)}
 .section-action.copied{
   background:var(--copied-bg);border-color:var(--copied-border);color:var(--copied-text);
+}
+.section-action.copy-failed{
+  background:var(--copy-failed-bg);border-color:var(--copy-failed-border);color:var(--copy-failed-text);
 }
 
 .card-url{

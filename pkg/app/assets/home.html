@@ -93,7 +93,7 @@
       <div class="card-section">
         <div class="section-head">
           <span class="section-title">{{t "endpoint"}}</span>
-          <button class="section-action" onclick="copyURL(this,'{{.URL}}')">{{t "copy"}}</button>
+          <button class="section-action" data-copy="{{.URL}}" onclick="copyURL(this)">{{t "copy"}}</button>
         </div>
         <div class="card-url">
           <a href="{{.URL}}">{{.URL}}</a>
@@ -142,7 +142,7 @@
       <div class="card-section card-section-setup">
         <div class="section-head">
           <span class="section-title">{{t "setup"}}</span>
-          <button class="section-action" onclick="copyCode(this,'{{.SetupCopy}}')">{{t "copy"}}</button>
+          <button class="section-action" data-copy="{{.SetupCopy}}" onclick="copyCode(this)">{{t "copy"}}</button>
         </div>
         <div class="card-cmd-wrap">
           {{if .SetupNote}}<div class="card-cmd-note">{{.SetupNote}}</div>{{end}}

@@ -5,6 +5,7 @@
   "lang_switch": "切换语言",
   "copy": "复制",
   "copied": "已复制",
+  "copy_failed": "失败",
   "no_instances": "未启用任何实例，请在 YAML 配置中添加实例。",
   "search_label": "搜索实例",
   "search_placeholder": "按名称、模式、地址或接入配置筛选",
@@ -39,5 +40,6 @@
   "release_state_suspect": "可疑",
   "release_state_blocked": "阻塞",
   "release_state_pending": "等待中",
-  "release_state_removed": "已移除"
+  "release_state_removed": "已移除",
+  "release_state_unknown": "未知"
 }

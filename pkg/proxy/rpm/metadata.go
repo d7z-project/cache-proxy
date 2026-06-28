@@ -72,7 +72,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				} `xml:"location"`
 			} `xml:"data"`
 		}
-		if err := xml.Unmarshal(repomd.Body, &root); err != nil {
+		repomdBody, err := repomd.ReadAll()
+		if err != nil {
+			return nil, err
+		}
+		if err := xml.Unmarshal(repomdBody, &root); err != nil {
 			return nil, err
 		}
 		session.Release(target)
@@ -93,7 +97,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				}
 				continue
 			}
-			if err := verifyRepomdChecksum(metadataPath, item.Checksum.Type, strings.TrimSpace(item.Checksum.Value), blob.Body); err != nil {
+			if err := verifyRepomdChecksum(metadataPath, item.Checksum.Type, strings.TrimSpace(item.Checksum.Value), blob); err != nil {
 				return nil, err
 			}
 			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
@@ -104,7 +108,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			}
 			foundPrimary = true
 
-			reader, err := filerepo.OpenCompressed(blob.Body, metadataPath)
+			blobReader, err := blob.Open()
+			if err != nil {
+				return nil, err
+			}
+			reader, err := filerepo.OpenCompressed(blobReader, metadataPath)
 			if err != nil {
 				return nil, err
 			}
@@ -123,37 +131,86 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 }
 
 func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot string) error {
-	var metadata struct {
-		Packages []struct {
-			Checksum string `xml:"checksum"`
-			Location struct {
-				Href string `xml:"href,attr"`
-			} `xml:"location"`
-		} `xml:"package"`
-	}
-	if err := xml.NewDecoder(input).Decode(&metadata); err != nil {
-		return err
-	}
-	for _, pkg := range metadata.Packages {
-		if pkg.Location.Href == "" {
+	decoder := xml.NewDecoder(input)
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "package" {
 			continue
 		}
-		artifactPath := path.Join(repoRoot, pkg.Location.Href)
-		identity := strings.TrimSpace(pkg.Checksum)
+
+		href, checksum, err := parsePrimaryPackage(decoder)
+		if err != nil {
+			return err
+		}
+		if href == "" {
+			continue
+		}
+		artifactPath := path.Join(repoRoot, href)
+		identity := strings.TrimSpace(checksum)
 		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: identity, ContentHash: identity}
 	}
-	return nil
 }
 
-func verifyRepomdChecksum(path, sumType, expected string, body []byte) error {
+func parsePrimaryPackage(decoder *xml.Decoder) (string, string, error) {
+	var href string
+	var checksum string
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", "", err
+		}
+		switch item := token.(type) {
+		case xml.StartElement:
+			switch item.Name.Local {
+			case "location":
+				for _, attr := range item.Attr {
+					if attr.Name.Local == "href" {
+						href = attr.Value
+						break
+					}
+				}
+			case "checksum":
+				var value string
+				if err := decoder.DecodeElement(&value, &item); err != nil {
+					return "", "", err
+				}
+				checksum = value
+			default:
+				if err := decoder.Skip(); err != nil {
+					return "", "", err
+				}
+			}
+		case xml.EndElement:
+			if item.Name.Local == "package" {
+				return href, checksum, nil
+			}
+		}
+	}
+}
+
+func verifyRepomdChecksum(path, sumType, expected string, blob filerepo.MetadataBlob) error {
 	if expected == "" {
 		return fmt.Errorf("%s: missing repomd checksum", path)
 	}
 	if sumType != "" && sumType != "sha256" {
 		return nil
 	}
-	sum := sha256.Sum256(body)
-	actual := hex.EncodeToString(sum[:])
+	reader, err := blob.Open()
+	if err != nil {
+		return err
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, reader); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(sum.Sum(nil))
 	if !strings.EqualFold(expected, actual) {
 		return fmt.Errorf("%s: repomd checksum mismatch", path)
 	}

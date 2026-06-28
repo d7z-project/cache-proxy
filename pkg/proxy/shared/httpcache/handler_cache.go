@@ -43,7 +43,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		return h.bypass(ctx, req, route)
 	}
 
-	if _, downloading := h.downloads.Load(route.ObjectPath); downloading {
+	if _, downloading := h.downloads.LoadOrStore(route.ObjectPath, struct{}{}); downloading {
 		return h.lockBusy(ctx, req, route)
 	}
 
@@ -53,10 +53,12 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		return h.streamDownload(ctx, req, route, "MISS")
 	}
 	if route.Policy == config.PolicyImmutable {
+		h.downloads.Delete(route.ObjectPath)
 		cached.Headers["X-Cache"] = "HIT"
 		return h.rewriteResponse(req, route, cached), nil
 	}
 	if h.fresh(route, cached.Headers) {
+		h.downloads.Delete(route.ObjectPath)
 		cached.Headers["X-Cache"] = "FRESH"
 		return h.rewriteResponse(req, route, cached), nil
 	}
@@ -66,12 +68,14 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 		slog.Debug("cache validation error, serving stale", "instance", h.name, "object", route.ObjectPath, "err", err)
 		staleCached, openErr := h.openCached(ctx, route)
 		if openErr == nil {
+			h.downloads.Delete(route.ObjectPath)
 			staleCached.Headers["X-Cache"] = "STALE"
 			return h.rewriteResponse(req, route, staleCached), nil
 		}
 		return ErrorResponse(http.StatusServiceUnavailable, err), nil
 	}
 	if valid {
+		h.downloads.Delete(route.ObjectPath)
 		cached.Headers["X-Cache"] = "HIT"
 		return h.rewriteResponse(req, route, cached), nil
 	}

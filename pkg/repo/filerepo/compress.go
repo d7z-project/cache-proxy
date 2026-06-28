@@ -10,18 +10,23 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-func OpenCompressed(body []byte, name string) (io.ReadCloser, error) {
-	reader := bytes.NewReader(body)
+func OpenCompressed(reader io.ReadSeeker, name string) (io.ReadCloser, error) {
+	header := make([]byte, 6)
+	n, _ := reader.Read(header)
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	header = header[:n]
 	switch {
-	case strings.HasSuffix(name, ".gz"), looksLikeGzip(body):
+	case strings.HasSuffix(name, ".gz"), looksLikeGzip(header):
 		return gzip.NewReader(reader)
-	case strings.HasSuffix(name, ".xz"), looksLikeXZ(body):
+	case strings.HasSuffix(name, ".xz"), looksLikeXZ(header):
 		decoded, err := xz.NewReader(reader)
 		if err != nil {
 			return nil, err
 		}
 		return io.NopCloser(decoded), nil
-	case strings.HasSuffix(name, ".zst"), strings.HasSuffix(name, ".zstd"), looksLikeZstd(body):
+	case strings.HasSuffix(name, ".zst"), strings.HasSuffix(name, ".zstd"), looksLikeZstd(header):
 		decoded, err := zstd.NewReader(reader)
 		if err != nil {
 			return nil, err

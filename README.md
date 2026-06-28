@@ -121,6 +121,8 @@ instances:
 | `transport.health.resource_remove_age` | duration | `5m` | Minimum age before removing a missing repo |
 | `transport.health.resource_remove_count` | int | `5` | Consecutive missed updates to remove a repo |
 
+`transport.health` is a patch over the built-in defaults: unspecified fields keep their default values.
+
 ---
 
 ### Safety semantics
@@ -129,6 +131,8 @@ instances:
 - Upstream failover retries network errors, `429`, and `5xx`; `404`/`403` are returned as-is.
 - Known SHA256/digest objects are streamed to clients immediately, but mismatched content is not written to cache.
 - OCI manifests with `Docker-Content-Digest` and OCI blobs requested by digest are verified before cache state/object writes.
+- Reload is prepared before commit: new runtimes and new listeners must all start successfully before routing changes. If preparation fails, the old routing table remains active.
+- Linux repository metadata is served only from a validated snapshot. If a repository has not finished its first refresh, metadata requests return `503 Retry-After` instead of passthrough.
 
 ---
 
@@ -384,8 +388,6 @@ apk:
 
 Client: `http://cache.lan:8080/apk/v3.20/main`. Repositories are auto-discovered from `APKINDEX.tar.gz` requests.
 
-Linux repository metadata is refreshed as an upstream-affine generation: all metadata, signatures, and index files for one repository root are fetched from the same upstream and published atomically only after required files and checksums validate. Clients see either the previous complete generation or the next complete generation, never a mixed set of files from different mirrors.
-
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `upstreams` | `[]URL` | required | Upstream mirrors; each metadata generation uses exactly one upstream, with root-level failover |
@@ -415,7 +417,9 @@ deb:
   auxiliary_policy: revalidate
 ```
 
-Client: `deb http://cache.lan:8080/deb bookworm main`. Repositories auto-discovered from `InRelease` / `Packages*` / `Sources*`.
+Client: `deb http://cache.lan:8080/deb bookworm main`. Repositories are discovered from `Release` / `InRelease`; package and source indexes are derived from the Release checksum section and refreshed in the background.
+
+A Debian snapshot is published only after at least one `Packages*` or `Sources*` index is fetched and validated. Before the first snapshot is ready, clients receive `503 Retry-After` and should retry.
 
 Same field table as `apk`.
 
@@ -498,14 +502,12 @@ Notes:
 
 ### Package repository lifecycle
 
-For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically from client metadata requests and tracked through a generation lifecycle:
+For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically from client metadata requests.
 
-- New metadata requests create repositories in `pending`; first successful refresh promotes to `active`.
-- Each refresh chooses one upstream for the whole root. If that upstream is incomplete or fails validation, the entire staging generation is discarded and the next upstream is tried from the beginning.
-- Required signatures and checksums are part of the generation. Missing or mismatched metadata does not publish.
-- Transient failures keep serving the last published generation (marked `suspect`).
-- Repeated missed updates remove the repository entirely.
-- Re-requesting metadata for a removed repo recreates it automatically.
+- Metadata is refreshed in the background and served only after validation.
+- If no validated snapshot is available yet, clients receive `503 Retry-After`.
+- Refresh failures keep serving the last valid snapshot when one exists.
+- Re-requesting metadata for a removed repository recreates it automatically.
 
 ## Development
 

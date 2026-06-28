@@ -89,7 +89,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			}
 		}
 
-		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
+		blobReader, err := blob.Open()
+		if err != nil {
+			return nil, err
+		}
+		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 		if err != nil {
 			return nil, err
 		}

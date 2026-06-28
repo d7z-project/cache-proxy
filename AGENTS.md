@@ -33,7 +33,8 @@
 - required companion（如 pacman `.db.sig`、apk `APKINDEX.tar.gz.sig`、deb `Release.gpg`、rpm `repomd.xml.asc`）缺失或校验失败时，本次 generation 必须失败，继续服务旧 generation
 - artifact / auxiliary 下载必须绑定 current generation 的 upstream 和 identity；能得到 SHA256 时必须校验后才写入缓存
 - 伴生文件推导：每个主元数据文件 X 自动推导并尝试缓存 X.sig、X.asc、X.gpg（FetchDerived 处理 404/403 为非致命）；模式可追加额外伴生（如 RPM 加 .key）
-- 元数据刷新为纯定时器驱动，用户请求仅负责路径发现；首次发现的 root 阻塞等待首次刷新完成
+- 元数据刷新为后台驱动，用户请求仅负责路径发现；无 current generation 时返回 `503 Retry-After`，禁止 passthrough 或在请求路径同步解析大型 metadata
+- metadata 下载与解压解析必须使用临时文件/reader 流式处理，禁止对 Packages/primary 等大型 metadata 使用 `io.ReadAll` 全量读入内存
 - 伴生文件 `FetchDerived` 同时处理 404 和 403（均为非致命），403 不会导致 generation 失败
 
 ## 测试

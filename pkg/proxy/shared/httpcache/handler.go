@@ -49,16 +49,16 @@ type RuntimeConfig struct {
 }
 
 type Handler struct {
-	name      string
-	config    RuntimeConfig
-	store     *blobfs.Store
-	client    *utils.HttpClientWrapper
-	locks     *utils.RWLockGroup
-	resolver  Resolver
-	stats     *Stats
-	health    *health.ServiceHealth
-	wait      sync.WaitGroup
-	downloads sync.Map
+	name                string
+	config              RuntimeConfig
+	store               *blobfs.Store
+	client              *utils.HttpClientWrapper
+	locks               *utils.RWLockGroup
+	resolver            Resolver
+	stats               *Stats
+	health              *health.ServiceHealth
+	wait                sync.WaitGroup
+	downloads           sync.Map
 	parsedUpstreamHosts []string
 }
 

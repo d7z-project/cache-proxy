@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"log/slog"
+	"os"
 	"path"
 	"time"
 
@@ -50,8 +52,27 @@ type MetadataTarget struct {
 
 type MetadataBlob struct {
 	Path    string
-	Body    []byte
+	file    *os.File
+	temp    string
 	Headers map[string]string
+}
+
+func (b MetadataBlob) Open() (io.ReadSeeker, error) {
+	if b.file == nil {
+		return nil, errors.New("metadata blob is closed")
+	}
+	if _, err := b.file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return b.file, nil
+}
+
+func (b MetadataBlob) ReadAll() ([]byte, error) {
+	reader, err := b.Open()
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(reader)
 }
 
 type MetadataObject struct {
@@ -85,7 +106,7 @@ type RefreshSession struct {
 	rootKey    string
 	upstream   string
 	generation string
-	blobs      map[string]MetadataBlob
+	blobs      map[string]*MetadataBlob
 	targets    []MetadataTarget
 }
 
@@ -97,7 +118,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 	candidates := append([]string{target.URL}, target.Candidates...)
 	for _, candidate := range candidates {
 		if blob, ok := s.blobs[candidate]; ok {
-			return blob, nil
+			return *blob, nil
 		}
 	}
 	var lastErr error
@@ -108,7 +129,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 			continue
 		}
 		for _, key := range candidates {
-			s.blobs[key] = blob
+			s.blobs[key] = &blob
 		}
 		return blob, nil
 	}
@@ -142,8 +163,38 @@ func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (
 }
 
 func (s *RefreshSession) Release(target MetadataTarget) {
+	seen := map[string]*MetadataBlob{}
 	for _, key := range append([]string{target.URL}, target.Candidates...) {
+		if blob := s.blobs[key]; blob != nil {
+			seen[blob.temp] = blob
+		}
 		delete(s.blobs, key)
+	}
+	for _, blob := range seen {
+		if blob.file != nil {
+			_ = blob.file.Close()
+		}
+		if blob.temp != "" {
+			_ = os.Remove(blob.temp)
+		}
+	}
+}
+
+func (s *RefreshSession) Close() {
+	seen := map[string]*MetadataBlob{}
+	for key, blob := range s.blobs {
+		if blob != nil {
+			seen[blob.temp] = blob
+		}
+		delete(s.blobs, key)
+	}
+	for _, blob := range seen {
+		if blob.file != nil {
+			_ = blob.file.Close()
+		}
+		if blob.temp != "" {
+			_ = os.Remove(blob.temp)
+		}
 	}
 }
 

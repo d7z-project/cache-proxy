@@ -9,8 +9,8 @@ import (
 
 func NewServiceHealth(transport *config.TransportConfig, upstreams []string, plan *proxyruntime.InstancePlan, mode string) *health.ServiceHealth {
 	cfg := health.DefaultConfig()
-	if transport != nil && transport.Health != nil {
-		cfg = *transport.Health
+	if transport != nil {
+		cfg = health.ApplyConfigPatch(cfg, transport.Health)
 	}
 	return health.New(plan.Name(), mode, cfg, upstreams, plan.Stats(), httpcache.ModeUserAgent(mode))
 }

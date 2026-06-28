@@ -255,7 +255,7 @@ func (a *App) Start() error {
 		}
 	}()
 	for addr, listener := range prepared {
-		server := &http.Server{Addr: addr, Handler: a.bindHandlers[addr]}
+		server := &http.Server{Addr: addr, Handler: bindDispatchHandler{app: a, addr: addr}}
 		a.bindServers[addr] = server
 		go func(server *http.Server, listener net.Listener) {
 			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -315,6 +315,27 @@ func (h bindHomeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	h.next.ServeHTTP(w, req)
+}
+
+type bindDispatchHandler struct {
+	app  *App
+	addr string
+}
+
+func (h bindDispatchHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if !h.app.ready.Load() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "proxy not ready", http.StatusServiceUnavailable)
+		return
+	}
+	h.app.routesMu.RLock()
+	next := h.app.bindHandlers[h.addr]
+	h.app.routesMu.RUnlock()
+	if next == nil {
+		http.NotFound(w, req)
+		return
+	}
+	next.ServeHTTP(w, req)
 }
 
 func (a *App) prepareHandlers(ctx context.Context) error {

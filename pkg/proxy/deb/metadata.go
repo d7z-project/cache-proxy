@@ -24,30 +24,11 @@ type rootSpec struct {
 func (s *rootSpec) Key() string { return s.Suite }
 
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
-	targets := []filerepo.MetadataTarget{{
+	return []filerepo.MetadataTarget{{
 		URL:        path.Join("dists", s.Suite, "InRelease"),
 		Candidates: []string{path.Join("dists", s.Suite, "Release")},
 		Kind:       "release",
 	}}
-	for _, component := range s.Components {
-		for _, arch := range s.Architectures {
-			basePath := path.Join("dists", s.Suite, component, "binary-"+arch, "Packages")
-			targets = append(targets, filerepo.MetadataTarget{
-				URL:        basePath + ".xz",
-				Candidates: []string{basePath + ".gz", basePath},
-				Kind:       "packages",
-			})
-		}
-		if s.Source {
-			basePath := path.Join("dists", s.Suite, component, "source", "Sources")
-			targets = append(targets, filerepo.MetadataTarget{
-				URL:        basePath + ".xz",
-				Candidates: []string{basePath + ".gz", basePath},
-				Kind:       "sources",
-			})
-		}
-	}
-	return targets
 }
 
 func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
@@ -118,18 +99,18 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		Metadata:  map[string]filerepo.MetadataObject{},
 		Artifacts: map[string]filerepo.RepoObject{},
 	}
-	releaseSums := map[string]string{}
 	for _, target := range session.Targets() {
+		if target.Kind != "release" {
+			return nil, fmt.Errorf("%s: unsupported seed metadata target kind %q", target.URL, target.Kind)
+		}
 		blob, err := session.Fetch(ctx, target)
 		if err != nil {
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-		if target.Kind == "packages" || target.Kind == "sources" {
-			for _, candidate := range append([]string{target.URL}, target.Candidates...) {
-				if candidate != blob.Path {
-					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: blob.Path, Required: false}
-				}
+		for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+			if candidate != blob.Path {
+				snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: blob.Path, Required: false}
 			}
 		}
 		if strings.HasSuffix(blob.Path, "/Release") {
@@ -141,34 +122,125 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				}
 			}
 		}
-		switch target.Kind {
-		case "release":
-			releaseSums = parseReleaseSHA256(blob.Body)
-			session.Release(target)
-			continue
-		case "packages", "sources":
-			if err := verifyReleaseChecksum(releaseSums, blob.Path, blob.Body); err != nil {
-				return nil, err
-			}
-			reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
+		releaseBody, err := blob.ReadAll()
+		if err != nil {
+			return nil, err
+		}
+		releaseSums := parseReleaseSHA256(releaseBody)
+		session.Release(target)
+
+		targets := releaseIndexTargets(blob.Path, releaseSums)
+		if len(targets) == 0 {
+			return nil, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
+		}
+		for _, indexTarget := range targets {
+			indexBlob, err := session.Fetch(ctx, indexTarget)
 			if err != nil {
 				return nil, err
 			}
-			if target.Kind == "packages" {
+			if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
+				return nil, err
+			}
+			snapshot.Metadata[indexBlob.Path] = filerepo.MetadataObject{Path: indexBlob.Path, Required: true}
+			for _, candidate := range append([]string{indexTarget.URL}, indexTarget.Candidates...) {
+				if candidate != indexBlob.Path {
+					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: indexBlob.Path, Required: false}
+				}
+			}
+			blobReader, err := indexBlob.Open()
+			if err != nil {
+				return nil, err
+			}
+			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
+			if err != nil {
+				return nil, err
+			}
+			if indexTarget.Kind == "packages" {
 				err = parsePackages(reader, snapshot)
 			} else {
 				err = parseSources(reader, snapshot)
 			}
 			_ = reader.Close()
-			session.Release(target)
+			session.Release(indexTarget)
 			if err != nil {
 				return nil, err
 			}
-		default:
-			return nil, fmt.Errorf("%s: unsupported metadata target kind %q", blob.Path, target.Kind)
 		}
 	}
 	return snapshot, nil
+}
+
+func releaseIndexTargets(releasePath string, sums map[string]string) []filerepo.MetadataTarget {
+	suitePrefix := strings.TrimSuffix(releasePath, "/InRelease")
+	suitePrefix = strings.TrimSuffix(suitePrefix, "/Release")
+	type group struct {
+		kind  string
+		paths map[string]string
+	}
+	groups := map[string]*group{}
+	for item := range sums {
+		kind, base, ok := releaseIndexBase(item)
+		if !ok {
+			continue
+		}
+		g := groups[base]
+		if g == nil {
+			g = &group{kind: kind, paths: map[string]string{}}
+			groups[base] = g
+		}
+		g.paths[item] = path.Join(suitePrefix, item)
+	}
+	var targets []filerepo.MetadataTarget
+	for _, base := range sortedKeys(groups) {
+		g := groups[base]
+		var selected string
+		for _, suffix := range []string{".xz", ".gz", ""} {
+			if full := g.paths[base+suffix]; full != "" {
+				selected = full
+				break
+			}
+		}
+		if selected == "" {
+			continue
+		}
+		var candidates []string
+		for _, suffix := range []string{".xz", ".gz", ""} {
+			full := g.paths[base+suffix]
+			if full != "" && full != selected {
+				candidates = append(candidates, full)
+			}
+		}
+		targets = append(targets, filerepo.MetadataTarget{URL: selected, Candidates: candidates, Kind: g.kind})
+	}
+	return targets
+}
+
+func releaseIndexBase(item string) (kind, base string, ok bool) {
+	switch {
+	case strings.HasSuffix(item, "/Packages"):
+		return "packages", item, true
+	case strings.HasSuffix(item, "/Packages.gz"):
+		return "packages", strings.TrimSuffix(item, ".gz"), true
+	case strings.HasSuffix(item, "/Packages.xz"):
+		return "packages", strings.TrimSuffix(item, ".xz"), true
+	case strings.HasSuffix(item, "/Sources"):
+		return "sources", item, true
+	case strings.HasSuffix(item, "/Sources.gz"):
+		return "sources", strings.TrimSuffix(item, ".gz"), true
+	case strings.HasSuffix(item, "/Sources.xz"):
+		return "sources", strings.TrimSuffix(item, ".xz"), true
+	default:
+		return "", "", false
+	}
+}
+
+func sortedKeys[T any](items map[string]T) []string {
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
@@ -224,7 +296,7 @@ func parseReleaseSHA256(body []byte) map[string]string {
 	return result
 }
 
-func verifyReleaseChecksum(sums map[string]string, cleanPath string, body []byte) error {
+func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filerepo.MetadataBlob) error {
 	if len(sums) == 0 {
 		return fmt.Errorf("%s: Release SHA256 section is missing", cleanPath)
 	}
@@ -237,8 +309,15 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, body []byte
 	if expected == "" {
 		return fmt.Errorf("%s: missing Release SHA256", cleanPath)
 	}
-	sum := sha256.Sum256(body)
-	actual := hex.EncodeToString(sum[:])
+	reader, err := blob.Open()
+	if err != nil {
+		return err
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, reader); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(sum.Sum(nil))
 	if !strings.EqualFold(expected, actual) {
 		return fmt.Errorf("%s: Release SHA256 mismatch", cleanPath)
 	}

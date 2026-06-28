@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -510,6 +511,41 @@ func TestReloadInvalidConfigPreservesRunningInstances(t *testing.T) {
 	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
 }
 
+func TestReloadPrepareFailurePreservesRunningInstances(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+	}))
+	defer upstream.Close()
+
+	doc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+	})
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeYAML(t, cfgPath, doc)
+	app := openAppWithConfig(t, ctx, doc, cfgPath)
+	defer closeApp(t, app)
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close()
+
+	newDoc := testDocument(dir, []config.Instance{
+		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
+		ociInstance(t, "registry", occupied.Addr().String(), "https://registry-1.docker.io"),
+	})
+	writeYAML(t, cfgPath, newDoc)
+	err = app.Reload(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "listen "+occupied.Addr().String())
+
+	require.True(t, app.ready.Load())
+	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
+}
+
 func TestReloadClosedReturnsError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -728,6 +764,18 @@ func fileInstance(t *testing.T, name, path, upstream string, policy file.Policy)
 		Name:    name,
 		Enabled: true,
 		File:    &config.ModeBlock{Node: yamlNode(t, mode)},
+	}
+}
+
+func ociInstance(t *testing.T, name, bind, upstream string) config.Instance {
+	t.Helper()
+	return config.Instance{
+		Name:    name,
+		Enabled: true,
+		OCI: &config.ModeBlock{Node: yamlNode(t, map[string]any{
+			"bind":     bind,
+			"upstream": upstream,
+		})},
 	}
 }
 

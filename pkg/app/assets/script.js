@@ -1,16 +1,55 @@
-function copyToClipboard(btn, txt) {
-    navigator.clipboard.writeText(txt);
+function fallbackCopy(txt) {
+    var node = document.createElement('textarea');
+    node.value = txt;
+    node.setAttribute('readonly', '');
+    node.style.position = 'fixed';
+    node.style.left = '-9999px';
+    document.body.appendChild(node);
+    node.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(node);
+    return ok;
+}
+
+function setCopyState(btn, key, cls) {
     var t = window.I18N;
-    btn.textContent = t.copied;
-    btn.classList.add('copied');
+    btn.textContent = t[key] || key;
+    btn.classList.add(cls);
     setTimeout(function() {
         btn.textContent = t.copy;
-        btn.classList.remove('copied');
+        btn.classList.remove(cls);
     }, 1500);
 }
 
-function copyURL(btn, txt) { copyToClipboard(btn, txt); }
-function copyCode(btn, txt) { copyToClipboard(btn, txt); }
+function copyToClipboard(btn) {
+    var txt = btn.getAttribute('data-copy') || '';
+    var copied = false;
+    var done = function(ok) {
+        setCopyState(btn, ok ? 'copied' : 'copy_failed', ok ? 'copied' : 'copy-failed');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(function() {
+            done(true);
+        }).catch(function() {
+            try {
+                copied = fallbackCopy(txt);
+            } catch (e) {
+                copied = false;
+            }
+            done(copied);
+        });
+        return;
+    }
+    try {
+        copied = fallbackCopy(txt);
+    } catch (e) {
+        copied = false;
+    }
+    done(copied);
+}
+
+function copyURL(btn) { copyToClipboard(btn); }
+function copyCode(btn) { copyToClipboard(btn); }
 
 function toggleReleases(btn) {
     var open = btn.classList.toggle('open');

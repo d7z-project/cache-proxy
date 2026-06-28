@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +258,38 @@ func TestMetadataStateAfterFailedRefresh(t *testing.T) {
 	require.Equal(t, "booting", snap.Instances["repo"].MetadataState)
 }
 
+func TestFailedRefreshCleansMetadataTempFiles(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/meta/index.txt" {
+			_, _ = io.WriteString(w, strings.Repeat("index\n", 1024))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+		_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+		require.NoError(t, err)
+		return nil, errors.New("builder failed")
+	})
+
+	require.Error(t, handler.Refresh(ctx))
+	entries, err := os.ReadDir(tmp)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
 func TestRestoreGenerationsHealthTransition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -321,8 +355,7 @@ func TestRestoreGenerationsHealthTransition(t *testing.T) {
 
 func TestEnsureFirstRefreshWithNilBuilder(t *testing.T) {
 	handler := &IndexedHandler{
-		build:            nil,
-		firstRefreshReady: map[string]chan struct{}{},
+		build: nil,
 	}
 	handler.ensureFirstRefresh("test-key")
 }
@@ -363,4 +396,70 @@ func TestMetadataPassthroughWhenNoSnapshot(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "from-upstream", rec.Body.String())
+}
+
+func TestMetadataRequestWaitsForFirstRefresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/meta/index.txt" {
+			_, _ = io.WriteString(w, "generated")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		config.Freshness(time.Minute),
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "meta/") {
+				return ResourceMetadata
+			}
+			return ResourceArtifact
+		},
+		[]string{server.URL}, nil,
+		config.Expiration(time.Hour), &Policy{},
+		RefreshPolicy{Interval: time.Hour},
+		testDiscoverer{spec: staticRootSpec{key: "root", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		nil,
+		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{
+				Metadata: map[string]MetadataObject{
+					blob.Path: {Path: blob.Path, Required: true},
+				},
+			}, nil
+		},
+		store, stats,
+		health.New("repo", "test", health.DefaultConfig(), []string{server.URL}, stats, "test"),
+	)
+	require.NoError(t, handler.Start(ctx))
+	defer func() {
+		cancel()
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		require.NoError(t, handler.Stop(stopCtx))
+	}()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "generated", rec.Body.String())
+}
+
+type testDiscoverer struct {
+	spec RootSpec
+}
+
+func (d testDiscoverer) Discover(string) (RootSpec, bool) {
+	return d.spec, true
 }

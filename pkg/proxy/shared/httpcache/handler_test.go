@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -470,6 +472,36 @@ func TestErrorResponseHidesInternalDetails(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "internal error", string(body))
 	require.Equal(t, "ERROR", resp.Headers["X-Cache"])
+}
+
+func TestStreamToPipeRemovesTempFileOnVerifyFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+
+	var downloads sync.Map
+	var wait sync.WaitGroup
+	reader, err := StreamToPipe(context.Background(), StreamConfig{
+		Body:       io.NopCloser(strings.NewReader("bad-content")),
+		ObjectPath: "test/object",
+		Downloads:  &downloads,
+		Wait:       &wait,
+		VerifyFn: func(io.ReadSeeker) error {
+			return errors.New("verify failed")
+		},
+		StoreFn: func(context.Context, io.Reader) error {
+			t.Fatal("store must not run after verify failure")
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	_, err = io.Copy(io.Discard, reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	wait.Wait()
+
+	entries, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
 }
 
 func Test503WhenAllUpstreamsUnavailable(t *testing.T) {
