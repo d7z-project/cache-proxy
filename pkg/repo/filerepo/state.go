@@ -85,12 +85,8 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 			return nil
 		}
 		defer reader.Close()
-		data, err := io.ReadAll(reader) // foreseeable: no size limit; snapshots are typically small
-		if err != nil {
-			return nil
-		}
 		var snapshot LiveSnapshot
-		if err := yaml.Unmarshal(data, &snapshot); err != nil || snapshot.RootKey == "" {
+		if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootKey == "" {
 			return nil
 		}
 		for key, obj := range snapshot.Metadata {

@@ -67,19 +67,18 @@ func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int6
 	a.tuMu.Lock()
 	prev := a.tuCachedAt
 	a.tuMu.Unlock()
-	if time.Since(prev) < 30*time.Second {
+	if time.Since(prev) >= 5*time.Minute {
+		usage := collectTenantUsage(ctx, tenants, a.store)
 		a.tuMu.Lock()
-		defer a.tuMu.Unlock()
-		if time.Since(a.tuCachedAt) < 30*time.Second {
-			return a.tuCache
-		}
+		a.tuCache = usage
+		a.tuCachedAt = time.Now()
+		a.tuMu.Unlock()
+		return usage
 	}
-	usage := collectTenantUsage(ctx, tenants, a.store)
 	a.tuMu.Lock()
-	a.tuCache = usage
-	a.tuCachedAt = time.Now()
+	result := a.tuCache
 	a.tuMu.Unlock()
-	return usage
+	return result
 }
 
 func Load(path string) (*config.Document, error) {

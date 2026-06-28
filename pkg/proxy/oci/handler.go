@@ -1,7 +1,6 @@
 package oci
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -61,6 +60,7 @@ func (h *handler) purgeExpiredTokens() {
 			delete(h.auth.tokens, key)
 		}
 	}
+	h.purgeBlobIndex()
 }
 
 func (h *handler) Stop(ctx context.Context) error {
@@ -204,17 +204,7 @@ func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *h
 	return status, cache, bytes, err
 }
 
-func (h *handler) putObject(ctx context.Context, objectPath string, body []byte, headers http.Header, extra map[string]string) error {
-	meta := ociObjectMeta(int64(len(body)), headers, extra)
-	return h.storeObject(ctx, objectPath, bytes.NewReader(body), meta)
-}
-
 func (h *handler) putObjectFromReader(ctx context.Context, objectPath string, body io.Reader, size int64, headers http.Header, extra map[string]string) error {
-	meta := ociObjectMeta(size, headers, extra)
-	return h.storeObject(ctx, objectPath, body, meta)
-}
-
-func ociObjectMeta(size int64, headers http.Header, extra map[string]string) map[string]string {
 	meta := map[string]string{
 		"content-type":   headers.Get("Content-Type"),
 		"content-length": strconv.FormatInt(size, 10),
@@ -230,7 +220,7 @@ func ociObjectMeta(size int64, headers http.Header, extra map[string]string) map
 			meta[key] = value
 		}
 	}
-	return meta
+	return h.storeObject(ctx, objectPath, body, meta)
 }
 
 func (h *handler) storeObject(ctx context.Context, objectPath string, body io.Reader, meta map[string]string) error {
@@ -241,10 +231,6 @@ func (h *handler) storeObject(ctx context.Context, objectPath string, body io.Re
 	}
 	_, err := h.store.Put(ctx, h.name, objectPath, body, meta)
 	return err
-}
-
-func (h *handler) putRaw(ctx context.Context, objectPath string, body []byte, meta map[string]string) error {
-	return h.storeObject(ctx, objectPath, bytes.NewReader(body), meta)
 }
 
 func (h *handler) refStatePath(repo, ref string) string {

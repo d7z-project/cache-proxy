@@ -55,4 +55,10 @@ type handler struct {
 	wait        sync.WaitGroup
 	auth        authHandler
 	downloads   sync.Map
+	blobIndex   sync.Map // digest(string) -> blobRef
+}
+
+type blobRef struct {
+	repo string
+	ref  string
 }

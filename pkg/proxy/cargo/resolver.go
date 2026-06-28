@@ -51,7 +51,7 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		}, nil
 	case strings.HasPrefix(lookupPath, "api/v1/crates/") && strings.HasSuffix(lookupPath, "/download"):
 		objectPath := "cargo/crates/" + strings.TrimPrefix(lookupPath, "api/v1/crates/")
-		targetURL := r.crateTargetURL(lookupPath)
+		targetURL := r.crateTargetURL(req.Context(), lookupPath)
 		return httpcache.Route{
 			ObjectPath:         objectPath,
 			UpstreamPath:       lookupPath,
@@ -79,12 +79,12 @@ func targetHost(rawURL string) []string {
 	return []string{parsed.Host}
 }
 
-func (r *resolver) crateTargetURL(upstreamPath string) string {
+func (r *resolver) crateTargetURL(ctx context.Context, upstreamPath string) string {
 	r.cfgMu.Lock()
 	defer r.cfgMu.Unlock()
 	if !r.cfgCached {
 		r.cfgCached = true
-		reader, err := r.store.OpenObject(context.Background(), r.name, "cargo/index/config.json")
+		reader, err := r.store.OpenObject(ctx, r.name, "cargo/index/config.json")
 		if err != nil {
 			return ""
 		}

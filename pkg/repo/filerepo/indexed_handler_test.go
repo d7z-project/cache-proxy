@@ -399,7 +399,7 @@ func TestMetadataPassthroughWhenNoSnapshot(t *testing.T) {
 }
 
 func TestMetadataRequestWaitsForFirstRefresh(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +432,9 @@ func TestMetadataRequestWaitsForFirstRefresh(t *testing.T) {
 		nil,
 		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
 			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
-			require.NoError(t, err)
+			if err != nil {
+				return nil, err
+			}
 			return &LiveSnapshot{
 				Metadata: map[string]MetadataObject{
 					blob.Path: {Path: blob.Path, Required: true},

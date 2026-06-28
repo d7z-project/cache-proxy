@@ -281,8 +281,8 @@ func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
 			}
 		}()
 		defer h.wait.Done()
-		refreshCtx, cancel := context.WithTimeout(context.Background(), defaultFirstRefreshTimeout)
-		defer cancel()
+		refreshCtx, refreshCancel := context.WithTimeout(h.lifecycleCtx, defaultFirstRefreshTimeout)
+		defer refreshCancel()
 		_, _ = h.refreshRoot(refreshCtx, rootKey, time.Now())
 	}()
 }

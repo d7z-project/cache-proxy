@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, uint64, error) {
@@ -36,32 +38,88 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if response.StatusCode != http.StatusOK {
 		return h.copyRemote(w, req, response, "BYPASS")
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 50<<20))
+
+	tempFile, size, err := utils.TempFileFromReader(io.LimitReader(response.Body, 50<<20))
 	if err != nil {
 		return 0, 0, err
 	}
+	defer tempFile.Close()
+	defer os.Remove(tempFile.Name())
+	if size > 50<<20 {
+		return 0, 0, fmt.Errorf("oci manifest exceeds size limit")
+	}
+
 	manifestDigest := response.Header.Get("Docker-Content-Digest")
+	if manifestDigest != "" {
+		if err := verifyDigestReader(manifestDigest, tempFile); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+			return 0, 0, err
+		}
+	}
 	if manifestDigest == "" {
-		sum := sha256.Sum256(body)
-		manifestDigest = "sha256:" + hex.EncodeToString(sum[:])
-	} else if err := verifyDigestBytes(manifestDigest, body); err != nil {
+		sum := sha256.New()
+		if _, err := io.Copy(sum, tempFile); err != nil {
+			return 0, 0, err
+		}
+		manifestDigest = "sha256:" + hex.EncodeToString(sum.Sum(nil))
+		if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+			return 0, 0, err
+		}
+	}
+
+	blobDigests := collectBlobDigests(tempFile)
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return 0, 0, err
 	}
+
 	state := refState{
 		Repo:           resolved.repo,
 		Ref:            resolved.ref,
 		FetchedAt:      time.Now().UTC(),
 		ExpireAfter:    effectiveExpire(resolved.match.expireAfter, h.expireAfter),
 		ManifestDigest: manifestDigest,
-		BlobDigests:    collectBlobDigests(body),
+		BlobDigests:    blobDigests,
 	}
-	if err := h.putObject(ctx, h.refManifestPath(resolved.repo, resolved.ref), body, response.Header, map[string]string{"docker-content-digest": manifestDigest}); err != nil {
+
+	meta := map[string]string{
+		"content-type":          response.Header.Get("Content-Type"),
+		"content-length":        strconv.FormatInt(size, 10),
+		"fetched-at":            time.Now().UTC().Format(time.RFC3339Nano),
+		"docker-content-digest": manifestDigest,
+	}
+	if v := response.Header.Get("ETag"); v != "" {
+		meta["etag"] = v
+	}
+	if v := response.Header.Get("Last-Modified"); v != "" {
+		meta["last-modified"] = v
+	}
+	if err := h.storeObject(ctx, h.refManifestPath(resolved.repo, resolved.ref), tempFile, meta); err != nil {
 		return 0, 0, err
 	}
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, err
+	}
+
 	if err := h.writeState(ctx, state); err != nil {
 		return 0, 0, err
 	}
-	return h.writeResponse(w, req.Method, http.StatusOK, manifestHeaders(response.Header, body, manifestDigest), bytes.NewReader(body))
+
+	for _, d := range blobDigests {
+		h.blobIndex.Store(d, blobRef{repo: state.Repo, ref: state.Ref})
+	}
+
+	headers := map[string]string{
+		"Content-Type":          response.Header.Get("Content-Type"),
+		"Content-Length":        strconv.FormatInt(size, 10),
+		"ETag":                  response.Header.Get("ETag"),
+		"Last-Modified":         response.Header.Get("Last-Modified"),
+		"X-Cache":               "MISS",
+		"Docker-Content-Digest": manifestDigest,
+	}
+	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, tempFile)
+	return status, bytes, err
 }
 
 func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
@@ -141,10 +199,18 @@ func (h *handler) writeState(ctx context.Context, state refState) error {
 	if err != nil {
 		return err
 	}
-	return h.putRaw(ctx, h.refStatePath(state.Repo, state.Ref), data, map[string]string{"content-type": "application/yaml"})
+	return h.storeObject(ctx, h.refStatePath(state.Repo, state.Ref), bytes.NewReader(data), map[string]string{"content-type": "application/yaml"})
 }
 
 func (h *handler) findBlobState(ctx context.Context, repo, digest string) (refState, error) {
+	if v, ok := h.blobIndex.Load(digest); ok {
+		ref := v.(blobRef)
+		state, err := h.readState(ctx, h.refStatePath(ref.repo, ref.ref))
+		if err == nil && !h.stateExpired(state) {
+			return state, nil
+		}
+		h.blobIndex.Delete(digest)
+	}
 	base := path.Join("oci/refs", repo)
 	var matched refState
 	err := fs.WalkDir(h.store.TenantFS(h.name), base, func(current string, entry fs.DirEntry, err error) error {
@@ -158,6 +224,7 @@ func (h *handler) findBlobState(ctx context.Context, repo, digest string) (refSt
 		for _, item := range state.BlobDigests {
 			if item == digest {
 				matched = state
+				h.blobIndex.Store(digest, blobRef{repo: state.Repo, ref: state.Ref})
 				return fs.SkipAll
 			}
 		}
@@ -196,13 +263,24 @@ func (h *handler) deleteTree(ctx context.Context, prefix string) error {
 	return nil
 }
 
-func collectBlobDigests(body []byte) []string {
+func (h *handler) purgeBlobIndex() {
+	h.blobIndex.Range(func(key, value any) bool {
+		ref := value.(blobRef)
+		state, err := h.readState(context.TODO(), h.refStatePath(ref.repo, ref.ref))
+		if err != nil || h.stateExpired(state) {
+			h.blobIndex.Delete(key)
+		}
+		return true
+	})
+}
+
+func collectBlobDigests(r io.Reader) []string {
 	var doc struct {
 		Config descriptor   `json:"config"`
 		Layers []descriptor `json:"layers"`
 		Blobs  []descriptor `json:"blobs"`
 	}
-	if err := json.Unmarshal(body, &doc); err != nil {
+	if err := json.NewDecoder(r).Decode(&doc); err != nil {
 		return nil
 	}
 	seen := map[string]struct{}{}
@@ -239,14 +317,6 @@ func objectHeaders(headers http.Header, length int, cache string) map[string]str
 		result["Content-Length"] = strconv.Itoa(length)
 	}
 	if digest := headers.Get("Docker-Content-Digest"); digest != "" {
-		result["Docker-Content-Digest"] = digest
-	}
-	return result
-}
-
-func manifestHeaders(headers http.Header, body []byte, digest string) map[string]string {
-	result := objectHeaders(headers, len(body), "MISS")
-	if digest != "" {
 		result["Docker-Content-Digest"] = digest
 	}
 	return result
