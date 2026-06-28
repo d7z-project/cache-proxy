@@ -2,6 +2,8 @@ package rpm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -42,22 +44,28 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:   map[string]struct{}{},
-		Artifacts:  map[string]string{},
-		Auxiliary:  map[string]string{},
-		Companions: map[string][]string{},
+		Metadata:  map[string]filerepo.MetadataObject{},
+		Artifacts: map[string]filerepo.RepoObject{},
+		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	for _, target := range session.Targets() {
 		repomd, err := session.Fetch(ctx, target)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[repomd.Path] = struct{}{}
-		snapshot.Metadata[repomd.Path+".asc"] = struct{}{}
-		snapshot.Companions[repomd.Path] = []string{repomd.Path + ".asc"}
+		snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
+		ascPath := repomd.Path + ".asc"
+		if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: ascPath}); err != nil {
+			return nil, err
+		}
+		snapshot.Metadata[ascPath] = filerepo.MetadataObject{Path: ascPath, Required: true}
 		var root struct {
 			Data []struct {
 				Type     string `xml:"type,attr"`
+				Checksum struct {
+					Type  string `xml:"type,attr"`
+					Value string `xml:",chardata"`
+				} `xml:"checksum"`
 				Location struct {
 					Href string `xml:"href,attr"`
 				} `xml:"location"`
@@ -74,7 +82,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			metadataPath := path.Join(repoRoot, itemHref)
-			snapshot.Metadata[metadataPath] = struct{}{}
+			snapshot.Metadata[metadataPath] = filerepo.MetadataObject{Path: metadataPath, Required: item.Type == "primary"}
 
 			blob, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: metadataPath})
 			if err != nil {
@@ -83,7 +91,10 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				}
 				continue
 			}
-			snapshot.Metadata[blob.Path] = struct{}{}
+			if err := verifyRepomdChecksum(metadataPath, item.Checksum.Type, strings.TrimSpace(item.Checksum.Value), blob.Body); err != nil {
+				return nil, err
+			}
+			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
 
 			if item.Type != "primary" {
 				continue
@@ -124,10 +135,27 @@ func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot str
 			continue
 		}
 		artifactPath := path.Join(repoRoot, pkg.Location.Href)
-		snapshot.Artifacts[artifactPath] = strings.TrimSpace(pkg.Checksum)
+		identity := strings.TrimSpace(pkg.Checksum)
+		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: identity}
 		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512", ".md5"} {
-			snapshot.Auxiliary[artifactPath+suffix] = strings.TrimSpace(pkg.Checksum)
+			auxPath := artifactPath + suffix
+			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: identity}
 		}
+	}
+	return nil
+}
+
+func verifyRepomdChecksum(path, sumType, expected string, body []byte) error {
+	if expected == "" {
+		return fmt.Errorf("%s: missing repomd checksum", path)
+	}
+	if sumType != "" && sumType != "sha256" {
+		return nil
+	}
+	sum := sha256.Sum256(body)
+	actual := hex.EncodeToString(sum[:])
+	if !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("%s: repomd checksum mismatch", path)
 	}
 	return nil
 }

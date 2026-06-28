@@ -48,19 +48,21 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:   map[string]struct{}{},
-		Artifacts:  map[string]string{},
-		Auxiliary:  map[string]string{},
-		Companions: map[string][]string{},
+		Metadata:  map[string]filerepo.MetadataObject{},
+		Artifacts: map[string]filerepo.RepoObject{},
+		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[blob.Path] = struct{}{}
-		snapshot.Metadata[blob.Path+".sig"] = struct{}{}
-		snapshot.Companions[blob.Path] = []string{blob.Path + ".sig"}
+		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
+		sigPath := blob.Path + ".sig"
+		if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: sigPath}); err != nil {
+			return nil, err
+		}
+		snapshot.Metadata[sigPath] = filerepo.MetadataObject{Path: sigPath, Required: true}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 		if err != nil {
 			return nil, err
@@ -103,9 +105,10 @@ func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapsho
 			return
 		}
 		artifactPath := path.Join(basePath, name+"-"+version+".apk")
-		snapshot.Artifacts[artifactPath] = checksum
+		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum}
 		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512"} {
-			snapshot.Auxiliary[artifactPath+suffix] = checksum
+			auxPath := artifactPath + suffix
+			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: checksum}
 		}
 	}
 	scanner := bufio.NewScanner(input)

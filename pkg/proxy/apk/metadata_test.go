@@ -23,14 +23,14 @@ import (
 
 func TestParseIndexBuildsArtifactsAndAuxiliary(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]struct{}{},
-		Artifacts: map[string]string{},
-		Auxiliary: map[string]string{},
+		Metadata:  map[string]filerepo.MetadataObject{},
+		Artifacts: map[string]filerepo.RepoObject{},
+		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	input := "P:busybox\nV:1.36.1-r2\nC:sha256:abc\n\n"
 	require.NoError(t, parseIndex("v3.20/main/x86_64", strings.NewReader(input), snapshot))
-	require.Equal(t, "sha256:abc", snapshot.Artifacts["v3.20/main/x86_64/busybox-1.36.1-r2.apk"])
-	require.Equal(t, "sha256:abc", snapshot.Auxiliary["v3.20/main/x86_64/busybox-1.36.1-r2.apk.sig"])
+	require.Equal(t, "sha256:abc", snapshot.Artifacts["v3.20/main/x86_64/busybox-1.36.1-r2.apk"].Identity)
+	require.Equal(t, "sha256:abc", snapshot.Auxiliary["v3.20/main/x86_64/busybox-1.36.1-r2.apk.sig"].Identity)
 }
 
 func TestDiscovererDetectsAPKRoot(t *testing.T) {
@@ -86,8 +86,10 @@ func TestRefreshPrefetchesCompanion(t *testing.T) {
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
-	_, err = store.OpenObject(ctx, "repo", "repo/v3.20/main/x86_64/APKINDEX.tar.gz.sig")
-	require.NoError(t, err, "companion should be pre-fetched during refresh")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v3.20/main/x86_64/APKINDEX.tar.gz.sig", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "sig-data", rec.Body.String())
 }
 
 func mustGzipTar(t *testing.T, name, body string) []byte {

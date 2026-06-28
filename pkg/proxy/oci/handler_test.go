@@ -2,6 +2,8 @@ package oci
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -219,6 +221,73 @@ func TestOCIBypassesBlobWithoutActiveRef(t *testing.T) {
 	require.False(t, strings.Contains(rec.Body.String(), "Bad Gateway"))
 }
 
+func TestOCIManifestDigestMismatchFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Content-Digest", sha256Digest("different"))
+		_, _ = io.WriteString(w, `{"schemaVersion":2}`)
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	_, err = store.OpenObject(ctx, handler.name, handler.refStatePath("library/alpine", "latest"))
+	require.Error(t, err)
+}
+
+func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	blobDigest := sha256Digest("expected")
+	manifestBody := `{"schemaVersion":2,"layers":[{"digest":"` + blobDigest + `"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/library/alpine/manifests/latest":
+			_, _ = io.WriteString(w, manifestBody)
+		case "/v2/library/alpine/blobs/" + blobDigest:
+			_, _ = io.WriteString(w, "wrong")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "wrong", rec.Body.String())
+	require.Eventually(t, func() bool {
+		_, err := store.OpenObject(ctx, handler.name, handler.refBlobPath("library/alpine", "latest", blobDigest))
+		return err != nil
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestOCITokenPurgeExpired(t *testing.T) {
 	handler := &handler{auth: authHandler{tokens: map[string]ociToken{}}}
 
@@ -233,4 +302,9 @@ func TestOCITokenPurgeExpired(t *testing.T) {
 	require.Empty(t, handler.auth.tokens["just-expired"].value)
 	require.Equal(t, "tok2", handler.auth.tokens["valid"].value)
 	require.Len(t, handler.auth.tokens, 1)
+}
+
+func sha256Digest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

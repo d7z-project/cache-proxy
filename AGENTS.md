@@ -23,6 +23,15 @@
 - 枚举值 (policy / busy policy) 在代码中定义为 `config.Policy*` / `config.BusyPolicy*` 常量
 - 时长类型使用 `config.Duration` / `config.Expiration` / `config.Freshness`
 - 每新增或修改字段，同步更新 README 对应 mode 的字段速查表（Field / Type / Default / Description 四列）
+- Linux 仓库模式 (`apk` / `deb` / `rpm` / `pacman`) 的 metadata 不再暴露 `metadata_policy` / `metadata_fresh_for` / `metadata_busy_policy`；metadata 始终按 root generation 刷新和服务
+
+## Linux 仓库 metadata generation
+
+- 同一个 root generation 内的所有 metadata、签名、校验文件必须从同一个 upstream 获取；多 upstream 只能在 root generation 级别 failover，禁止单文件混用 upstream
+- metadata refresh 必须先写 staging generation，所有 required metadata 和校验通过后才能发布 current generation
+- 客户端 metadata 请求只允许读取 current generation；禁止走通用 httpcache 单文件 revalidate
+- required companion（如 pacman `.db.sig`、apk `APKINDEX.tar.gz.sig`、deb `Release.gpg`、rpm `repomd.xml.asc`）缺失或校验失败时，本次 generation 必须失败，继续服务旧 generation
+- artifact / auxiliary 下载必须绑定 current generation 的 upstream 和 identity；能得到 SHA256 时必须校验后才写入缓存
 
 ## 测试
 
@@ -36,7 +45,10 @@
 - 路径解析必须先 `path.Clean`，再用 `httpcache.SafePath` 检查
 - 5xx 错误响应使用 `httpcache.ErrorResponse`（对外显示 `"internal error"`）
 - 大文件下载（OCI blob / Cargo crate）必须通过 `utils.TempFileFromReader` 流式落盘，禁止 `io.ReadAll` 全量读入内存
-- 直接 `TargetURL` 仅允许 host 匹配已配置上游，其他一律走 `UpstreamPath`
+- 直接 `TargetURL` 必须由 `httpcache` 统一校验，host 只能匹配已配置上游或 route-scoped allowlist；不允许各 resolver 自行放行未知 host
+- upstream failover 只对网络错误、`429`、`5xx` 重试；`403`/`404` 直接返回
+- 已知 SHA256/digest 的大文件保持首包流式返回，但校验失败不得写入缓存
+- OCI manifest 的 `Docker-Content-Digest` 和 OCI blob 请求 digest 必须校验后才写入 state/cache
 - 启动时调用 `utils.CleanStaleTempFiles(24h)` 清理残留临时文件
 
 ## 日志

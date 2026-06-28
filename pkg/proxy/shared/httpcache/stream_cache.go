@@ -16,6 +16,7 @@ type StreamConfig struct {
 	Wait       *sync.WaitGroup
 	StatsStart func()
 	StatsDone  func()
+	VerifyFn   func(io.ReadSeeker) error
 	StoreFn    func(ctx context.Context, r io.Reader) error
 }
 
@@ -54,6 +55,15 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 		if _, copyErr := io.Copy(pw, tee); copyErr == nil {
 			bw.Flush()
 			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr == nil {
+				if cfg.VerifyFn != nil {
+					if err := cfg.VerifyFn(tempFile); err != nil {
+						slog.Warn("cache store verification failed", "path", cfg.ObjectPath, "err", err)
+						return
+					}
+					if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr != nil {
+						return
+					}
+				}
 				if err := cfg.StoreFn(context.Background(), tempFile); err != nil {
 					slog.Warn("cache store write failed", "path", cfg.ObjectPath, "err", err)
 				}

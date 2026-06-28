@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -40,6 +42,8 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if manifestDigest == "" {
 		sum := sha256.Sum256(body)
 		manifestDigest = "sha256:" + hex.EncodeToString(sum[:])
+	} else if err := verifyDigestBytes(manifestDigest, body); err != nil {
+		return 0, 0, err
 	}
 	state := refState{
 		Repo:           resolved.repo,
@@ -80,6 +84,9 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		Wait:       &h.wait,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
+		VerifyFn: func(r io.ReadSeeker) error {
+			return verifyDigestReader(resolved.digest, r)
+		},
 		StoreFn: func(ctx context.Context, r io.Reader) error {
 			return h.putObjectFromReader(ctx, objectPath, r, contentLen, respHeader, nil)
 		},
@@ -91,6 +98,26 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	headers := objectHeaders(respHeader, int(contentLen), "MISS")
 	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, pr)
 	return status, "MISS", bytes, err
+}
+
+func verifyDigestBytes(digest string, body []byte) error {
+	return verifyDigestReader(digest, bytes.NewReader(body))
+}
+
+func verifyDigestReader(digest string, reader io.Reader) error {
+	algo, expected, ok := strings.Cut(digest, ":")
+	if !ok || algo != "sha256" || len(expected) != 64 {
+		return nil
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, reader); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(sum.Sum(nil))
+	if !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("digest mismatch: expected %s got sha256:%s", digest, actual)
+	}
+	return nil
 }
 
 func (h *handler) readState(ctx context.Context, objectPath string) (refState, error) {

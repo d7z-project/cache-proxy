@@ -99,6 +99,9 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 }
 
 func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
+	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
+		return nil, err
+	}
 	request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
 	if err != nil {
 		return nil, err
@@ -122,6 +125,29 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 		return nil, fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
 	}
 	return responseFromHTTP(response), nil
+}
+
+func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid target url")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("target url must use http or https")
+	}
+	allowed := append([]string(nil), h.config.AllowedTargetHosts...)
+	allowed = append(allowed, routeAllowed...)
+	for _, upstream := range h.config.Upstreams {
+		if parsedUpstream, err := url.Parse(upstream); err == nil && parsedUpstream.Host != "" {
+			allowed = append(allowed, parsedUpstream.Host)
+		}
+	}
+	for _, host := range allowed {
+		if strings.EqualFold(parsed.Host, host) {
+			return nil
+		}
+	}
+	return fmt.Errorf("target url host %q is not allowed", parsed.Host)
 }
 
 func (h *Handler) buildUpstreamList() []struct {
@@ -195,6 +221,12 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 	}
+	if options.AcceptErrors && shouldFailoverStatus(response.StatusCode) && idx+1 < total {
+		_ = response.Body.Close()
+		err = fmt.Errorf("upstream %s returned retryable status %d", method, response.StatusCode)
+		slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "status", response.StatusCode)
+		return nil, err
+	}
 	if !options.AcceptErrors && response.StatusCode != http.StatusOK {
 		_ = response.Body.Close()
 		err = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
@@ -204,6 +236,10 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 		return nil, err
 	}
 	return responseFromHTTP(response), nil
+}
+
+func shouldFailoverStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
 }
 
 func (h *Handler) requestHeaders(req *http.Request) map[string]string {

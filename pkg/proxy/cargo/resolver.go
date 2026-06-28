@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
@@ -50,12 +51,14 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		}, nil
 	case strings.HasPrefix(lookupPath, "api/v1/crates/") && strings.HasSuffix(lookupPath, "/download"):
 		objectPath := "cargo/crates/" + strings.TrimPrefix(lookupPath, "api/v1/crates/")
+		targetURL := r.crateTargetURL(lookupPath)
 		return httpcache.Route{
-			ObjectPath:   objectPath,
-			UpstreamPath: lookupPath,
-			TargetURL:    r.crateTargetURL(lookupPath),
-			Policy:       r.policy.CratePolicy,
-			BusyPolicy:   config.BusyPolicyBypass,
+			ObjectPath:         objectPath,
+			UpstreamPath:       lookupPath,
+			TargetURL:          targetURL,
+			AllowedTargetHosts: targetHost(targetURL),
+			Policy:             r.policy.CratePolicy,
+			BusyPolicy:         config.BusyPolicyBypass,
 		}, nil
 	default:
 		return httpcache.Route{
@@ -66,6 +69,14 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 			BusyPolicy:   r.policy.IndexBusyPolicy,
 		}, nil
 	}
+}
+
+func targetHost(rawURL string) []string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return nil
+	}
+	return []string{parsed.Host}
 }
 
 func (r *resolver) crateTargetURL(upstreamPath string) string {

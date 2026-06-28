@@ -2,10 +2,16 @@ package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"time"
+	"net/http"
+	"path"
+	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
@@ -57,23 +63,18 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	packagePolicy := toPackagePolicy(block.Policy)
-	if err := filerepo.Validate(config.ModeFile, packagePolicy); err != nil {
+	if err := validatePolicy(&block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	handler := filerepo.NewHandler(
-		plan.Name(),
-		config.ModeFile,
-		"file",
-		config.Freshness(time.Minute),
-		func(string) filerepo.ResourceClass { return filerepo.ResourceAuxiliary },
-		block.Upstreams,
-		block.Transport,
-		expireAfter,
-		packagePolicy,
-		plan.Store(),
-		plan.Stats(),
-	)
+	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+		Mode:            config.ModeFile,
+		ExpireAfter:     expireAfter,
+		Upstreams:       block.Upstreams,
+		Transport:       block.Transport,
+		PassHeaders:     append([]string(nil), block.PassHeaders...),
+		BusyPolicy:      block.BusyPolicy,
+		DefaultFreshFor: block.FreshFor,
+	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), nil)
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      handler,
@@ -83,29 +84,70 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	})
 }
 
-func toPackagePolicy(policy Policy) *filerepo.Policy {
-	rules := make([]filerepo.Rule, 0, len(policy.Rules))
-	for _, rule := range policy.Rules {
-		rules = append(rules, filerepo.Rule{
-			Match:         rule.Match,
-			ResourceClass: filerepo.ResourceAuxiliary,
-			Policy:        rule.Policy,
-			FreshFor:      rule.FreshFor,
-			BusyPolicy:    rule.BusyPolicy,
-			ExpireAfter:   rule.ExpireAfter,
-		})
+type fileResolver struct {
+	policy *Policy
+}
+
+func (r fileResolver) Resolve(req *http.Request) (httpcache.Route, error) {
+	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if cleanPath == "." || cleanPath == "" {
+		return httpcache.Route{}, errors.New("path is required")
 	}
-	return &filerepo.Policy{
-		PassHeaders:         append([]string(nil), policy.PassHeaders...),
-		MetadataPolicy:      policy.DefaultPolicy,
-		MetadataFreshFor:    policy.FreshFor,
-		MetadataBusyPolicy:  policy.BusyPolicy,
-		ArtifactPolicy:      policy.DefaultPolicy,
-		ArtifactFreshFor:    policy.FreshFor,
-		ArtifactBusyPolicy:  policy.BusyPolicy,
-		AuxiliaryPolicy:     policy.DefaultPolicy,
-		AuxiliaryFreshFor:   policy.FreshFor,
-		AuxiliaryBusyPolicy: policy.BusyPolicy,
-		Rules:               rules,
+	if !httpcache.SafePath(cleanPath) {
+		return httpcache.Route{}, errors.New("invalid file request path")
 	}
+	route := httpcache.Route{
+		ObjectPath:   "file/" + cleanPath,
+		UpstreamPath: cleanPath,
+		Policy:       r.policy.DefaultPolicy,
+		FreshFor:     r.policy.FreshFor,
+		BusyPolicy:   r.policy.BusyPolicy,
+	}
+	for _, rule := range r.policy.Rules {
+		if !doublestar.MatchUnvalidated(rule.Match, cleanPath) {
+			continue
+		}
+		if rule.Policy != "" {
+			route.Policy = rule.Policy
+		}
+		if rule.FreshFor != 0 {
+			route.FreshFor = rule.FreshFor
+		}
+		if rule.BusyPolicy != "" {
+			route.BusyPolicy = rule.BusyPolicy
+		}
+		if !rule.ExpireAfter.IsUnset() {
+			route.ExpireAfter = rule.ExpireAfter
+		}
+	}
+	return route, nil
+}
+
+func validatePolicy(policy *Policy) error {
+	if err := filerepo.ValidatePassHeaders(policy.PassHeaders); err != nil {
+		return err
+	}
+	if err := filerepo.ValidatePolicy(config.ModeFile, policy.DefaultPolicy); err != nil {
+		return err
+	}
+	if err := filerepo.ValidateBusyPolicy(config.ModeFile, policy.BusyPolicy); err != nil {
+		return err
+	}
+	for i, rule := range policy.Rules {
+		if strings.TrimSpace(rule.Match) == "" {
+			return fmt.Errorf("file rule %d: match is empty", i)
+		}
+		if !doublestar.ValidatePattern(rule.Match) {
+			return fmt.Errorf("file rule %d: invalid match %q", i, rule.Match)
+		}
+		if rule.Policy != "" {
+			if err := filerepo.ValidatePolicy(config.ModeFile, rule.Policy); err != nil {
+				return err
+			}
+		}
+		if err := filerepo.ValidateBusyPolicy(config.ModeFile, rule.BusyPolicy); err != nil {
+			return err
+		}
+	}
+	return nil
 }

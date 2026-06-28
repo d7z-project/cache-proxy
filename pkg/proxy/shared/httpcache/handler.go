@@ -2,6 +2,7 @@ package httpcache
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -15,16 +16,17 @@ import (
 )
 
 type Route struct {
-	ObjectPath     string
-	UpstreamPath   string
-	TargetURL      string
-	Policy         string
-	FreshFor       config.Freshness
-	BusyPolicy     string
-	ExpireAfter    config.Expiration
-	RequestHeaders map[string]string
-	RewriteKind    string
-	AuthRequired   bool
+	ObjectPath         string
+	UpstreamPath       string
+	TargetURL          string
+	AllowedTargetHosts []string
+	Policy             string
+	FreshFor           config.Freshness
+	BusyPolicy         string
+	ExpireAfter        config.Expiration
+	RequestHeaders     map[string]string
+	RewriteKind        string
+	AuthRequired       bool
 }
 
 type Resolver interface {
@@ -32,14 +34,16 @@ type Resolver interface {
 }
 
 type RuntimeConfig struct {
-	Mode            string
-	ExpireAfter     config.Expiration
-	Upstreams       []string
-	Transport       *config.TransportConfig
-	BusyPolicy      string
-	DefaultFreshFor config.Freshness
-	PassHeaders     []string
-	MetadataFunc    func(*http.Request, Route, map[string]string, string) map[string]string
+	Mode               string
+	ExpireAfter        config.Expiration
+	Upstreams          []string
+	Transport          *config.TransportConfig
+	BusyPolicy         string
+	DefaultFreshFor    config.Freshness
+	PassHeaders        []string
+	AllowedTargetHosts []string
+	MetadataFunc       func(*http.Request, Route, map[string]string, string) map[string]string
+	VerifyFunc         func(*http.Request, Route, io.ReadSeeker) error
 }
 
 type Handler struct {
@@ -56,9 +60,10 @@ type Handler struct {
 }
 
 type remoteOptions struct {
-	AcceptErrors bool
-	Record       bool
-	TargetURL    string
+	AcceptErrors       bool
+	Record             bool
+	TargetURL          string
+	AllowedTargetHosts []string
 }
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {

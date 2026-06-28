@@ -10,22 +10,13 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 )
 
-func TestHostInUpstreams(t *testing.T) {
-	upstreams := []string{"https://pypi.org", "https://files.pythonhosted.org"}
-	require.True(t, hostInUpstreams("pypi.org", upstreams))
-	require.True(t, hostInUpstreams("PyPI.ORG", upstreams))
-	require.True(t, hostInUpstreams("files.pythonhosted.org", upstreams))
-	require.False(t, hostInUpstreams("evil.com", upstreams))
-	require.False(t, hostInUpstreams("pypi.org.evil.com", upstreams))
-}
-
-func TestFileRouteRejectsForeignHost(t *testing.T) {
+func TestFileRouteLeavesForeignHostForHttpcacheValidation(t *testing.T) {
 	policy := &Policy{FilePolicy: config.PolicyImmutable}
 	upstreams := []string{"https://pypi.org"}
 
 	route := fileRoute(policy, upstreams, "packages/abc", "https://evil.com/malware")
-	require.Empty(t, route.TargetURL)
-	require.Equal(t, "packages/abc", route.UpstreamPath)
+	require.Equal(t, "https://evil.com/malware", route.TargetURL)
+	require.Empty(t, route.UpstreamPath)
 }
 
 func TestFileRouteAcceptsUpstreamHost(t *testing.T) {
@@ -50,8 +41,8 @@ func TestFileRouteAuxiliaryOnlyWithUpstreamHost(t *testing.T) {
 	require.Equal(t, config.PolicyRevalidate, auxRoute.Policy)
 
 	foreignRoute := fileRoute(policy, upstreams, "packages/abc.asc", "https://evil.com/packages/abc.asc")
-	require.Empty(t, foreignRoute.TargetURL)
-	require.Equal(t, config.PolicyImmutable, foreignRoute.Policy)
+	require.Equal(t, "https://evil.com/packages/abc.asc", foreignRoute.TargetURL)
+	require.Equal(t, config.PolicyRevalidate, foreignRoute.Policy)
 }
 
 func TestRouteForPathDefaultGoesThroughFileRoute(t *testing.T) {
@@ -92,6 +83,6 @@ func TestResolveWithUpstreams(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodGet, "/files/"+encodeSourceURL("https://evil.com/malware.tar.gz"), nil)
 	route, err = r.Resolve(req)
 	require.NoError(t, err)
-	require.Empty(t, route.TargetURL)
-	require.Equal(t, "files/"+encodeSourceURL("https://evil.com/malware.tar.gz"), route.UpstreamPath)
+	require.Equal(t, "https://evil.com/malware.tar.gz", route.TargetURL)
+	require.Empty(t, route.UpstreamPath)
 }

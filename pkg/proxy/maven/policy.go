@@ -89,7 +89,7 @@ func applyDefaults(policy *Policy) {
 		policy.ChecksumFreshFor = config.Freshness(30 * time.Second)
 	}
 	if policy.ChecksumBusyPolicy == "" {
-		policy.ChecksumBusyPolicy = config.BusyPolicyStale
+		policy.ChecksumBusyPolicy = config.BusyPolicyBypass
 	}
 	if policy.SnapshotPolicy == "" {
 		policy.SnapshotPolicy = config.PolicyRevalidate

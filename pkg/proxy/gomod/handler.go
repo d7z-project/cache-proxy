@@ -50,14 +50,26 @@ func NewHandler(name string, expireAfter config.Expiration, upstreams []string, 
 	}
 	applyDefaults(policy)
 	base := httpcache.NewHandler(name, httpcache.RuntimeConfig{
-		Mode:            config.ModeGo,
-		ExpireAfter:     expireAfter,
-		Upstreams:       append([]string(nil), upstreams...),
-		Transport:       transport,
-		BusyPolicy:      policy.ModuleBusyPolicy,
-		DefaultFreshFor: policy.ModuleFreshFor,
+		Mode:               config.ModeGo,
+		ExpireAfter:        expireAfter,
+		Upstreams:          append([]string(nil), upstreams...),
+		Transport:          transport,
+		BusyPolicy:         policy.ModuleBusyPolicy,
+		DefaultFreshFor:    policy.ModuleFreshFor,
+		AllowedTargetHosts: sumDBTargetHosts(policy),
 	}, store, &resolver{policy: policy}, stats, nil)
 	return &Handler{name: name, policy: policy, store: store, base: base}, nil
+}
+
+func sumDBTargetHosts(policy *Policy) []string {
+	if policy == nil || policy.SumDB == nil || !policy.SumDB.Enabled {
+		return nil
+	}
+	parsed, err := url.Parse(strings.TrimSpace(policy.SumDB.URL))
+	if err != nil || parsed.Host == "" {
+		return nil
+	}
+	return []string{parsed.Host}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {

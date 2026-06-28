@@ -99,7 +99,7 @@ type Stats struct {
 	totalRefreshFails  atomic.Uint64
 	totalSnapshotReady atomic.Bool
 
-	totalMu          sync.Mutex
+	totalMu            sync.Mutex
 	totalMetadataState string
 	totalLastRefresh   string
 	totalLastRefreshAt time.Time

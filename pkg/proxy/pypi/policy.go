@@ -101,7 +101,7 @@ func applyDefaults(policy *Policy) {
 		policy.CompanionFreshFor = config.Freshness(30 * time.Second)
 	}
 	if policy.CompanionBusyPolicy == "" {
-		policy.CompanionBusyPolicy = config.BusyPolicyStale
+		policy.CompanionBusyPolicy = config.BusyPolicyBypass
 	}
 	if policy.ProxyJSON == nil {
 		enabled := true
@@ -192,7 +192,7 @@ func routeForPath(policy *Policy, upstreams []string, lookupPath string) (httpca
 	}
 }
 
-func fileRoute(policy *Policy, upstreams []string, lookupPath, rawURL string) httpcache.Route {
+func fileRoute(policy *Policy, _ []string, lookupPath, rawURL string) httpcache.Route {
 	objectPath := "pypi/files/" + path.Base(lookupPath)
 	if !strings.HasPrefix(lookupPath, "files/") {
 		objectPath = "pypi/files/" + encodeSourceURL(rawURL)
@@ -202,31 +202,16 @@ func fileRoute(policy *Policy, upstreams []string, lookupPath, rawURL string) ht
 		Policy:     policy.FilePolicy,
 	}
 	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		if hostInUpstreams(parsed.Host, upstreams) {
-			route.TargetURL = rawURL
-			if isAuxiliaryPath(rawURL, policy) {
-				route.Policy = policy.CompanionPolicy
-				route.FreshFor = policy.CompanionFreshFor
-				route.BusyPolicy = policy.CompanionBusyPolicy
-			}
-			return route
+		route.TargetURL = rawURL
+		if isAuxiliaryPath(rawURL, policy) {
+			route.Policy = policy.CompanionPolicy
+			route.FreshFor = policy.CompanionFreshFor
+			route.BusyPolicy = policy.CompanionBusyPolicy
 		}
+		return route
 	}
 	route.UpstreamPath = lookupPath
 	return route
-}
-
-func hostInUpstreams(host string, upstreams []string) bool {
-	for _, u := range upstreams {
-		parsed, err := url.Parse(u)
-		if err != nil {
-			continue
-		}
-		if strings.EqualFold(parsed.Host, host) {
-			return true
-		}
-	}
-	return false
 }
 
 func isAuxiliaryPath(rawURL string, policy *Policy) bool {

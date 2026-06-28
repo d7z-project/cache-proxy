@@ -289,14 +289,133 @@ type staticResolver struct {
 func (r *staticResolver) Resolve(req *http.Request) (Route, error) {
 	clean := strings.TrimPrefix(req.URL.Path, "/")
 	return Route{
-		ObjectPath:   r.route.ObjectPath,
-		UpstreamPath: clean,
-		TargetURL:    r.route.TargetURL,
-		Policy:       r.route.Policy,
-		FreshFor:     r.route.FreshFor,
-		BusyPolicy:   r.route.BusyPolicy,
-		ExpireAfter:  r.route.ExpireAfter,
+		ObjectPath:         r.route.ObjectPath,
+		UpstreamPath:       clean,
+		TargetURL:          r.route.TargetURL,
+		AllowedTargetHosts: append([]string(nil), r.route.AllowedTargetHosts...),
+		Policy:             r.route.Policy,
+		FreshFor:           r.route.FreshFor,
+		BusyPolicy:         r.route.BusyPolicy,
+		ExpireAfter:        r.route.ExpireAfter,
 	}, nil
+}
+
+func TestTargetURLRejectsForeignHost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "foreign")
+	}))
+	defer foreign.Close()
+	allowed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "allowed")
+	}))
+	defer allowed.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{allowed.URL},
+	}, store, &staticResolver{route: Route{
+		ObjectPath: "test/object",
+		TargetURL:  foreign.URL + "/object",
+		Policy:     config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+func TestTargetURLAllowsRouteHost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "target")
+	}))
+	defer target.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test"}, store, &staticResolver{route: Route{
+		ObjectPath:         "test/object",
+		TargetURL:          target.URL + "/object",
+		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
+		Policy:             config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "target", rec.Body.String())
+}
+
+func TestFailoverRetriesRetryableStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer second.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{first.URL, second.URL},
+	}, store, &staticResolver{route: Route{
+		ObjectPath:   "test/object",
+		UpstreamPath: "object",
+		Policy:       config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "ok", rec.Body.String())
+}
+
+func TestFailoverDoesNotRetryNotFound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	first := httptest.NewServer(http.NotFoundHandler())
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer second.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{first.URL, second.URL},
+	}, store, &staticResolver{route: Route{
+		ObjectPath:   "test/object",
+		UpstreamPath: "object",
+		Policy:       config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestErrorResponseHidesInternalDetails(t *testing.T) {

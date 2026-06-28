@@ -3,6 +3,8 @@ package filerepo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path"
 	"time"
@@ -46,25 +48,43 @@ type MetadataTarget struct {
 }
 
 type MetadataBlob struct {
-	Path      string
-	Body      []byte
-	Headers   map[string]string
-	FetchedAt time.Time
+	Path    string
+	Body    []byte
+	Headers map[string]string
+}
+
+type MetadataObject struct {
+	Path      string `yaml:"path"`
+	Identity  string `yaml:"identity,omitempty"`
+	Required  bool   `yaml:"required"`
+	StorePath string `yaml:"store_path,omitempty"`
+}
+
+type RepoObject struct {
+	Path     string `yaml:"path"`
+	Identity string `yaml:"identity,omitempty"`
+	Upstream string `yaml:"upstream"`
 }
 
 type LiveSnapshot struct {
-	Metadata   map[string]struct{}
-	Artifacts  map[string]string
-	Auxiliary  map[string]string
-	Companions map[string][]string
+	RootKey    string                    `yaml:"root_key"`
+	Generation string                    `yaml:"generation"`
+	Upstream   string                    `yaml:"upstream"`
+	Published  time.Time                 `yaml:"published"`
+	Metadata   map[string]MetadataObject `yaml:"metadata"`
+	Artifacts  map[string]RepoObject     `yaml:"artifacts"`
+	Auxiliary  map[string]RepoObject     `yaml:"auxiliary"`
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession) (*LiveSnapshot, error)
 
 type RefreshSession struct {
-	handler *IndexedHandler
-	blobs   map[string]MetadataBlob
-	targets []MetadataTarget
+	handler    *IndexedHandler
+	rootKey    string
+	upstream   string
+	generation string
+	blobs      map[string]MetadataBlob
+	targets    []MetadataTarget
 }
 
 func (s *RefreshSession) Targets() []MetadataTarget {
@@ -80,7 +100,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		blob, err := s.handler.refreshMetadataObject(ctx, candidate)
+		blob, err := s.handler.fetchMetadataObject(ctx, s.rootKey, s.generation, s.upstream, candidate)
 		if err != nil {
 			lastErr = err
 			continue
@@ -97,7 +117,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 }
 
 func (s *RefreshSession) Store(ctx context.Context, cleanPath string, body []byte, meta map[string]string) error {
-	storePath := path.Join(s.handler.objectRoot, cleanPath)
+	storePath := s.handler.generationMetadataPath(s.rootKey, s.generation, cleanPath)
 	_, err := s.handler.store.Put(ctx, s.handler.name, storePath, bytes.NewReader(body), meta)
 	return err
 }
@@ -122,3 +142,12 @@ func (s staticRootSpec) Targets() []MetadataTarget {
 	return append([]MetadataTarget(nil), s.targets...)
 }
 func (s staticRootSpec) Merge(_ RootSpec) bool { return false }
+
+func metadataStorePath(root, rootKey, generation, cleanPath string) string {
+	return path.Join(root, ".roots", pathEscapeKey(rootKey), "generations", generation, "metadata", cleanPath)
+}
+
+func pathEscapeKey(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}

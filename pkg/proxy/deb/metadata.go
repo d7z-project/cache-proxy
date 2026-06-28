@@ -3,6 +3,8 @@ package deb
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"path"
@@ -113,30 +115,32 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:   map[string]struct{}{},
-		Artifacts:  map[string]string{},
-		Auxiliary:  map[string]string{},
-		Companions: map[string][]string{},
+		Metadata:  map[string]filerepo.MetadataObject{},
+		Artifacts: map[string]filerepo.RepoObject{},
+		Auxiliary: map[string]filerepo.RepoObject{},
 	}
+	releaseSums := map[string]string{}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[blob.Path] = struct{}{}
-		switch {
-		case strings.HasSuffix(blob.Path, "/InRelease"):
-			gpgPath := path.Join(path.Dir(blob.Path), "Release.gpg")
-			snapshot.Metadata[gpgPath] = struct{}{}
-			snapshot.Companions[blob.Path] = []string{gpgPath}
-		case strings.HasSuffix(blob.Path, "/Release"):
-			snapshot.Metadata[blob.Path+".gpg"] = struct{}{}
-			snapshot.Companions[blob.Path] = []string{blob.Path + ".gpg"}
+		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
+		if strings.HasSuffix(blob.Path, "/Release") {
+			gpgPath := blob.Path + ".gpg"
+			if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: gpgPath}); err != nil {
+				return nil, err
+			}
+			snapshot.Metadata[gpgPath] = filerepo.MetadataObject{Path: gpgPath, Required: true}
 		}
 		switch target.Kind {
 		case "release":
+			releaseSums = parseReleaseSHA256(blob.Body)
 			continue
 		case "packages", "sources":
+			if err := verifyReleaseChecksum(releaseSums, blob.Path, blob.Body); err != nil {
+				return nil, err
+			}
 			reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 			if err != nil {
 				return nil, err
@@ -164,9 +168,10 @@ func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 			return
 		}
 		checksum := strings.TrimSpace(fields["SHA256"])
-		snapshot.Artifacts[filename] = checksum
+		snapshot.Artifacts[filename] = filerepo.RepoObject{Path: filename, Identity: checksum}
 		for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
-			snapshot.Auxiliary[filename+suffix] = checksum
+			auxPath := filename + suffix
+			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: checksum}
 		}
 	})
 }
@@ -183,12 +188,58 @@ func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 				continue
 			}
 			artifactPath := path.Join(directory, parts[2])
-			snapshot.Artifacts[artifactPath] = parts[0]
+			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: parts[0]}
 			for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
-				snapshot.Auxiliary[artifactPath+suffix] = parts[0]
+				auxPath := artifactPath + suffix
+				snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: parts[0]}
 			}
 		}
 	})
+}
+
+func parseReleaseSHA256(body []byte) map[string]string {
+	result := map[string]string{}
+	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	inSHA256 := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "SHA256:") {
+			inSHA256 = true
+			continue
+		}
+		if inSHA256 && !strings.HasPrefix(line, " ") {
+			break
+		}
+		if !inSHA256 {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 3 {
+			result[parts[2]] = parts[0]
+		}
+	}
+	return result
+}
+
+func verifyReleaseChecksum(sums map[string]string, cleanPath string, body []byte) error {
+	if len(sums) == 0 {
+		return fmt.Errorf("%s: Release SHA256 section is missing", cleanPath)
+	}
+	trimmed := strings.TrimPrefix(cleanPath, "dists/")
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) == 2 {
+		trimmed = parts[1]
+	}
+	expected := sums[trimmed]
+	if expected == "" {
+		return fmt.Errorf("%s: missing Release SHA256", cleanPath)
+	}
+	sum := sha256.Sum256(body)
+	actual := hex.EncodeToString(sum[:])
+	if !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("%s: Release SHA256 mismatch", cleanPath)
+	}
+	return nil
 }
 
 func parseDebStanzas(input io.Reader, apply func(map[string]string)) error {

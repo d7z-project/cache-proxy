@@ -27,7 +27,7 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 		return fmt.Errorf("instance %s: %s mode requires at least one upstream", plan.Name(), mode)
 	}
 	policy := block.Policy.AsPolicy()
-	ApplyDefaults(policy, defaultFreshFor)
+	ApplyDefaults(policy)
 	if err := Validate(mode, policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}

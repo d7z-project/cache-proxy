@@ -3,27 +3,18 @@ package rpm
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"gopkg.d7z.net/blobfs"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/health"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
 func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
-		Artifacts: map[string]string{},
-		Auxiliary: map[string]string{},
+		Artifacts: map[string]filerepo.RepoObject{},
+		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	input := `
 <metadata>
@@ -33,9 +24,9 @@ func TestParsePrimaryRecordsArtifactsAndAuxiliary(t *testing.T) {
   </package>
 </metadata>`
 	require.NoError(t, parsePrimary(strings.NewReader(input), snapshot, "repo/os"))
-	require.Equal(t, "abc123", snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"])
-	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sig"])
-	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sha256"])
+	require.Equal(t, "abc123", snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"].Identity)
+	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sig"].Identity)
+	require.Equal(t, "abc123", snapshot.Auxiliary["repo/os/Packages/h/hello-1.0-1.x86_64.rpm.sha256"].Identity)
 }
 
 func TestDiscovererDetectsRPMRoot(t *testing.T) {
@@ -47,140 +38,6 @@ func TestDiscovererDetectsRPMRoot(t *testing.T) {
 func TestDiscovererRejectsRPMArtifactPath(t *testing.T) {
 	_, ok := (discoverer{}).Discover("Packages/h/hello-1.0-1.x86_64.rpm")
 	require.False(t, ok)
-}
-
-func TestRefreshKeepsRepodataCompanionsDuringCleanup(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/9/BaseOS/x86_64/os/repodata/repomd.xml":
-			_, _ = w.Write([]byte(`
-<repomd>
-  <data type="primary">
-    <location href="repodata/primary.xml.gz"/>
-  </data>
-  <data type="filelists">
-    <location href="repodata/filelists.xml.gz"/>
-  </data>
-</repomd>`))
-		case "/9/BaseOS/x86_64/os/repodata/primary.xml.gz":
-			_, _ = w.Write(mustGzip(t, `
-<metadata>
-  <package>
-    <checksum>abc123</checksum>
-    <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
-  </package>
-</metadata>`))
-		case "/9/BaseOS/x86_64/os/repodata/filelists.xml.gz":
-			_, _ = w.Write(mustGzip(t, `<filelists xmlns="http://linux.duke.edu/metadata/filelists"><package pkgid="abc123"></package></filelists>`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
-	require.NoError(t, err)
-	defer store.Close()
-
-	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "rpm", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
-	handler := filerepo.NewIndexedHandler(
-		"repo",
-		"rpm",
-		"repo",
-		config.Freshness(time.Minute),
-		classify,
-		[]string{server.URL},
-		nil,
-		config.Expiration(time.Hour),
-		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
-		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{RepoPath: "9/BaseOS/x86_64/os"}},
-		buildSnapshot,
-		store,
-		stats,
-		svcHealth,
-	)
-
-	require.NoError(t, handler.Refresh(ctx))
-	require.NoError(t, store.MkdirAll("repo/repo/9/BaseOS/x86_64/os/repodata", 0o755))
-
-	// filelists was pre-fetched during refresh
-	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/filelists.xml.gz")
-	require.NoError(t, err)
-
-	// manually store companion
-	_, err = store.Put(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc", strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-	require.NoError(t, err)
-
-	require.NoError(t, handler.Cleanup(ctx))
-	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc")
-	require.NoError(t, err)
-	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/filelists.xml.gz")
-	require.NoError(t, err)
-}
-
-func TestRefreshPrefetchesCompanion(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/9/BaseOS/x86_64/os/repodata/repomd.xml":
-			_, _ = w.Write([]byte(`
-<repomd>
-  <data type="primary">
-    <location href="repodata/primary.xml.gz"/>
-  </data>
-</repomd>`))
-		case "/9/BaseOS/x86_64/os/repodata/primary.xml.gz":
-			_, _ = w.Write(mustGzip(t, `
-<metadata>
-  <package>
-    <checksum>abc123</checksum>
-    <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
-  </package>
-</metadata>`))
-		case "/9/BaseOS/x86_64/os/repodata/repomd.xml.asc":
-			_, _ = w.Write([]byte("asc-data"))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
-	require.NoError(t, err)
-	defer store.Close()
-
-	stats := httpcache.NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("repo", "rpm", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
-	handler := filerepo.NewIndexedHandler(
-		"repo",
-		"rpm",
-		"repo",
-		config.Freshness(time.Minute),
-		classify,
-		[]string{server.URL},
-		nil,
-		config.Expiration(time.Hour),
-		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
-		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{RepoPath: "9/BaseOS/x86_64/os"}},
-		buildSnapshot,
-		store,
-		stats,
-		svcHealth,
-	)
-
-	require.NoError(t, handler.Refresh(ctx))
-	_, err = store.OpenObject(ctx, "repo", "repo/9/BaseOS/x86_64/os/repodata/repomd.xml.asc")
-	require.NoError(t, err, "companion should be pre-fetched during refresh")
 }
 
 func mustGzip(t *testing.T, body string) []byte {

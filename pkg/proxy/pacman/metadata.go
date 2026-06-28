@@ -52,26 +52,27 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:   map[string]struct{}{},
-		Artifacts:  map[string]string{},
-		Auxiliary:  map[string]string{},
-		Companions: map[string][]string{},
+		Metadata:  map[string]filerepo.MetadataObject{},
+		Artifacts: map[string]filerepo.RepoObject{},
+		Auxiliary: map[string]filerepo.RepoObject{},
 	}
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[blob.Path] = struct{}{}
+		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
 		if target.Repo != "" && target.Arch != "" {
 			basePath := path.Join(target.Repo, "os", target.Arch)
-			snapshot.Metadata[path.Join(basePath, target.Repo+".db.sig")] = struct{}{}
-			snapshot.Metadata[path.Join(basePath, target.Repo+".files")] = struct{}{}
-			snapshot.Metadata[path.Join(basePath, target.Repo+".files.sig")] = struct{}{}
-			snapshot.Companions[blob.Path] = []string{
+			for _, companion := range []string{
 				path.Join(basePath, target.Repo+".db.sig"),
 				path.Join(basePath, target.Repo+".files"),
 				path.Join(basePath, target.Repo+".files.sig"),
+			} {
+				if _, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: companion}); err != nil {
+					return nil, err
+				}
+				snapshot.Metadata[companion] = filerepo.MetadataObject{Path: companion, Required: true}
 			}
 		}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
@@ -102,8 +103,9 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			artifactPath := path.Join(path.Dir(blob.Path), filename)
-			snapshot.Artifacts[artifactPath] = checksum
-			snapshot.Auxiliary[artifactPath+".sig"] = checksum
+			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum}
+			sigPath := artifactPath + ".sig"
+			snapshot.Auxiliary[sigPath] = filerepo.RepoObject{Path: sigPath, Identity: checksum}
 		}
 		_ = reader.Close()
 		if !found {

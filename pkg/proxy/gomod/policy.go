@@ -93,7 +93,7 @@ func applyDefaults(cfg *Config) {
 		cfg.SumDBFreshFor = config.Freshness(30 * time.Second)
 	}
 	if cfg.SumDBBusyPolicy == "" {
-		cfg.SumDBBusyPolicy = config.BusyPolicyStale
+		cfg.SumDBBusyPolicy = config.BusyPolicyBypass
 	}
 	if cfg.SumDB == nil {
 		cfg.SumDB = &SumDBConfig{Enabled: true, Name: "sum.golang.org", URL: "https://sum.golang.org"}

@@ -39,7 +39,7 @@ func TestDiscovererRejectsPacmanArtifactPath(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
+func TestRefreshFailsWhenRequiredPacmanMetadataIsMissing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -78,25 +78,7 @@ func TestRefreshKeepsPacmanMetadataCompanionsDuringCleanup(t *testing.T) {
 		svcHealth,
 	)
 
-	require.NoError(t, handler.Refresh(ctx))
-	require.NoError(t, store.MkdirAll("repo/repo/core/os/x86_64", 0o755))
-	for _, name := range []string{
-		"repo/core/os/x86_64/core.db.sig",
-		"repo/core/os/x86_64/core.files",
-		"repo/core/os/x86_64/core.files.sig",
-	} {
-		_, err = store.Put(ctx, "repo", name, strings.NewReader("data"), map[string]string{"fetched-at": time.Now().UTC().Format(time.RFC3339Nano)})
-		require.NoError(t, err)
-	}
-	require.NoError(t, handler.Cleanup(ctx))
-	for _, name := range []string{
-		"repo/core/os/x86_64/core.db.sig",
-		"repo/core/os/x86_64/core.files",
-		"repo/core/os/x86_64/core.files.sig",
-	} {
-		_, err = store.OpenObject(ctx, "repo", name)
-		require.NoError(t, err)
-	}
+	require.Error(t, handler.Refresh(ctx))
 }
 
 func TestRefreshPrefetchesCompanions(t *testing.T) {
@@ -146,15 +128,10 @@ func TestRefreshPrefetchesCompanions(t *testing.T) {
 
 	require.NoError(t, handler.Refresh(ctx))
 
-	companions := []string{
-		"repo/core/os/x86_64/core.db.sig",
-		"repo/core/os/x86_64/core.files",
-		"repo/core/os/x86_64/core.files.sig",
-	}
-	for _, name := range companions {
-		_, err = store.OpenObject(ctx, "repo", name)
-		require.NoError(t, err, "companion %q should be pre-fetched during refresh", name)
-	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/core/os/x86_64/core.db.sig", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "db-sig", rec.Body.String())
 }
 
 func mustGzipTar(t *testing.T, name, body string) []byte {

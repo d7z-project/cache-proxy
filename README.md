@@ -123,6 +123,15 @@ instances:
 
 ---
 
+### Safety semantics
+
+- Direct `TargetURL` routes are checked centrally: the target must use `http`/`https` and its host must match configured upstream hosts or a route-scoped allowlist.
+- Upstream failover retries network errors, `429`, and `5xx`; `404`/`403` are returned as-is.
+- Known SHA256/digest objects are streamed to clients immediately, but mismatched content is not written to cache.
+- OCI manifests with `Docker-Content-Digest` and OCI blobs requested by digest are verified before cache state/object writes.
+
+---
+
 ## Mode Reference
 
 <details open>
@@ -240,7 +249,7 @@ go:
     name: sum.golang.org
     url: https://sum.golang.org
   sumdb_fresh_for: 30s
-  sumdb_busy_policy: stale
+  sumdb_busy_policy: bypass
   goprivate:
     - "*.corp.example.com"
   disable_module_fetch_header: false
@@ -259,7 +268,7 @@ Client: `go env -w GOPROXY=http://cache.lan:8080/go`
 | `sumdb.name` | string | `sum.golang.org` | SumDB name in URL prefix |
 | `sumdb.url` | URL | `https://sum.golang.org` | Upstream SumDB |
 | `sumdb_fresh_for` | Freshness | `30s` | Freshness for SumDB responses |
-| `sumdb_busy_policy` | Busy | `stale` | Busy policy for SumDB |
+| `sumdb_busy_policy` | Busy | `bypass` | Busy policy for SumDB |
 | `goprivate` | `[]glob` | — | Patterns for private modules (skipped by proxy) |
 | `disable_module_fetch_header` | bool | `false` | Honor `Disable-Module-Fetch` request header |
 
@@ -277,7 +286,7 @@ maven:
   snapshot_fresh_for: 5m
   checksum_policy: revalidate
   checksum_fresh_for: 30s
-  checksum_busy_policy: stale
+  checksum_busy_policy: bypass
   metadata_fresh_for: 2m
   metadata_busy_policy: stale
 ```
@@ -292,7 +301,7 @@ Client: set `<mirror><url>http://cache.lan:8080/maven</url></mirror>` in `~/.m2/
 | `snapshot_fresh_for` | Freshness | — | Freshness for snapshot artifacts |
 | `checksum_policy` | Policy | `revalidate` | Policy for `.sha1` / `.md5` / `.asc` sidecars |
 | `checksum_fresh_for` | Freshness | `30s` | Freshness for checksum sidecars |
-| `checksum_busy_policy` | Busy | `stale` | Busy policy for checksum sidecars |
+| `checksum_busy_policy` | Busy | `bypass` | Busy policy for checksum sidecars |
 | `metadata_fresh_for` | Freshness | — | Freshness for `maven-metadata.xml` |
 | `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
 
@@ -336,7 +345,7 @@ pypi:
   file_policy: immutable
   companion_policy: revalidate
   companion_fresh_for: 30s
-  companion_busy_policy: stale
+  companion_busy_policy: bypass
   proxy_json: true
   proxy_core_metadata: false
   proxy_signatures: false
@@ -353,7 +362,7 @@ Client: `pip install --index-url http://cache.lan:8080/pypi/simple <pkg>`
 | `file_policy` | Policy | `immutable` | Policy for package files |
 | `companion_policy` | Policy | `revalidate` | Policy for sidecar files |
 | `companion_fresh_for` | Freshness | `30s` | Freshness for sidecar files |
-| `companion_busy_policy` | Busy | `stale` | Busy policy for sidecars |
+| `companion_busy_policy` | Busy | `bypass` | Busy policy for sidecars |
 | `proxy_json` | bool | `true` | Enable JSON API (`/simple/<pkg>/json`) |
 | `proxy_core_metadata` | bool | `false` | Proxy core metadata files as sidecars |
 | `proxy_signatures` | bool | `false` | Proxy signature files as sidecars |
@@ -369,30 +378,26 @@ apk:
   upstreams:
     - https://dl-cdn.alpinelinux.org/alpine
   refresh_interval: 1h
-  metadata_policy: revalidate
-  metadata_fresh_for: 1m
   artifact_policy: immutable
   auxiliary_policy: revalidate
 ```
 
 Client: `http://cache.lan:8080/apk/v3.20/main`. Repositories are auto-discovered from `APKINDEX.tar.gz` requests.
 
+Linux repository metadata is refreshed as an upstream-affine generation: all metadata, signatures, and index files for one repository root are fetched from the same upstream and published atomically only after required files and checksums validate. Clients see either the previous complete generation or the next complete generation, never a mixed set of files from different mirrors.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `upstreams` | `[]URL` | required | Upstream mirrors, tried in order |
-| `refresh_interval` | duration | `1h` | Background metadata refresh interval |
+| `upstreams` | `[]URL` | required | Upstream mirrors; each metadata generation uses exactly one upstream, with root-level failover |
+| `refresh_interval` | duration | `1h` | Background generation refresh interval |
 | `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
-| `metadata_policy` | Policy | `revalidate` | Policy for `APKINDEX.tar.gz` and repo metadata |
-| `metadata_fresh_for` | Freshness | `1m` | Freshness for metadata |
-| `metadata_busy_policy` | Busy | `stale` | Busy policy for metadata |
-| `metadata_expire_after` | Expiration | — | Override expiration for metadata |
 | `artifact_policy` | Policy | `immutable` | Policy for `.apk` files |
 | `artifact_fresh_for` | Freshness | — | Freshness for artifacts |
 | `artifact_busy_policy` | Busy | `bypass` | Busy policy for artifacts |
 | `artifact_expire_after` | Expiration | — | Override expiration for artifacts |
 | `auxiliary_policy` | Policy | `revalidate` | Policy for signatures and checksums |
 | `auxiliary_fresh_for` | Freshness | `30s` | Freshness for auxiliary files |
-| `auxiliary_busy_policy` | Busy | `stale` | Busy policy for auxiliary files |
+| `auxiliary_busy_policy` | Busy | `bypass` | Busy policy for auxiliary files |
 | `auxiliary_expire_after` | Expiration | — | Override expiration for auxiliary files |
 
 </details>
@@ -406,15 +411,13 @@ deb:
   upstreams:
     - https://deb.debian.org/debian
   refresh_interval: 1h
-  metadata_policy: revalidate
-  metadata_fresh_for: 2m
   artifact_policy: immutable
   auxiliary_policy: revalidate
 ```
 
 Client: `deb http://cache.lan:8080/deb bookworm main`. Repositories auto-discovered from `InRelease` / `Packages*` / `Sources*`.
 
-Same field table as `apk`, except `metadata_fresh_for` defaults to `2m`.
+Same field table as `apk`.
 
 </details>
 
@@ -427,8 +430,6 @@ rpm:
   upstreams:
     - https://download.rockylinux.org/pub/rocky
   refresh_interval: 1h
-  metadata_policy: revalidate
-  metadata_fresh_for: 1m
   artifact_policy: immutable
   auxiliary_policy: revalidate
 ```
@@ -448,15 +449,13 @@ pacman:
   upstreams:
     - https://geo.mirror.pkgbuild.com
   refresh_interval: 2m
-  metadata_policy: revalidate
-  metadata_fresh_for: 1m
   artifact_policy: immutable
   auxiliary_policy: revalidate
 ```
 
 Client: `Server = http://cache.lan:8080/pacman/$repo/os/$arch`. Repositories auto-discovered from `.db` / `.files` requests.
 
-Same field table as `apk`, except `refresh_interval` defaults to `2m`.
+Same field table as `apk`, except `refresh_interval` defaults to `2m`. Pacman strict metadata requires `.db`, `.db.sig`, `.files`, and `.files.sig` for a published generation.
 
 </details>
 
@@ -499,10 +498,12 @@ Notes:
 
 ### Package repository lifecycle
 
-For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically from client metadata requests and tracked through a lifecycle:
+For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically from client metadata requests and tracked through a generation lifecycle:
 
 - New metadata requests create repositories in `pending`; first successful refresh promotes to `active`.
-- Transient failures keep the last snapshot (serves stale data, marked `suspect`).
+- Each refresh chooses one upstream for the whole root. If that upstream is incomplete or fails validation, the entire staging generation is discarded and the next upstream is tried from the beginning.
+- Required signatures and checksums are part of the generation. Missing or mismatched metadata does not publish.
+- Transient failures keep serving the last published generation (marked `suspect`).
 - Repeated missed updates remove the repository entirely.
 - Re-requesting metadata for a removed repo recreates it automatically.
 

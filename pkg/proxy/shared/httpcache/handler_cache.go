@@ -93,7 +93,7 @@ func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) 
 }
 
 func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL}, h.remoteHeaders(req, route, nil))
+	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts}, h.remoteHeaders(req, route, nil))
 	if response != nil {
 		response.Headers["X-Cache"] = "BYPASS"
 		response = h.rewriteResponse(req, route, response)
@@ -151,7 +151,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 	if lastModified := cached["Last-Modified"]; lastModified != "" {
 		headers["If-Modified-Since"] = lastModified
 	}
-	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true, TargetURL: route.TargetURL}, h.remoteHeaders(nil, route, headers))
+	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts}, h.remoteHeaders(nil, route, headers))
 	if err != nil {
 		return false, err
 	}
@@ -176,7 +176,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 }
 
 func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
-	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL}, h.remoteHeaders(req, route, nil))
+	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts}, h.remoteHeaders(req, route, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +208,12 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		Wait:       &h.wait,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, h.config.Mode, 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, h.config.Mode, -1) },
+		VerifyFn: func(r io.ReadSeeker) error {
+			if h.config.VerifyFunc == nil {
+				return nil
+			}
+			return h.config.VerifyFunc(req, route, r)
+		},
 		StoreFn: func(ctx context.Context, r io.Reader) error {
 			_, err := h.store.Put(ctx, h.name, route.ObjectPath, r, meta)
 			return err
