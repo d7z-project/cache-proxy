@@ -54,10 +54,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
-		if companion, err := session.FetchDerived(ctx, repomd.Path+".asc"); err != nil {
-			return nil, err
-		} else if companion.Path != "" {
-			snapshot.Metadata[companion.Path] = companion
+		for _, companionPath := range append(filerepo.DeduceCompanions(repomd.Path), repomd.Path+".key") {
+			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+				return nil, err
+			} else if companion.Path != "" {
+				snapshot.Metadata[companion.Path] = companion
+			}
 		}
 		var root struct {
 			Data []struct {
@@ -82,7 +84,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			metadataPath := path.Join(repoRoot, itemHref)
-			snapshot.Metadata[metadataPath] = filerepo.MetadataObject{Path: metadataPath, Required: item.Type == "primary"}
 
 			blob, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: metadataPath})
 			if err != nil {
@@ -136,7 +137,7 @@ func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot str
 		}
 		artifactPath := path.Join(repoRoot, pkg.Location.Href)
 		identity := strings.TrimSpace(pkg.Checksum)
-		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: identity}
+		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: identity, ContentHash: identity}
 		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512", ".md5"} {
 			auxPath := artifactPath + suffix
 			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: identity}

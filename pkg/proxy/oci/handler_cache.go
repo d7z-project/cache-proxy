@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
@@ -26,6 +27,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
 	defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
 
+	slog.Debug("oci fetch manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "upstream", h.upstream)
 	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, map[string]string{"Accept": manifestAccept})
 	if err != nil {
 		return 0, 0, err
@@ -63,6 +65,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 }
 
 func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
+	slog.Debug("oci fetch blob", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest, "upstream", h.upstream)
 	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, nil)
 	if err != nil {
 		return 0, "", 0, err

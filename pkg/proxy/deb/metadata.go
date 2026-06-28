@@ -127,10 +127,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
 		if strings.HasSuffix(blob.Path, "/Release") {
-			if companion, err := session.FetchDerived(ctx, blob.Path+".gpg"); err != nil {
-				return nil, err
-			} else if companion.Path != "" {
-				snapshot.Metadata[companion.Path] = companion
+			for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
+				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+					return nil, err
+				} else if companion.Path != "" {
+					snapshot.Metadata[companion.Path] = companion
+				}
 			}
 		}
 		switch target.Kind {
@@ -168,7 +170,7 @@ func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 			return
 		}
 		checksum := strings.TrimSpace(fields["SHA256"])
-		snapshot.Artifacts[filename] = filerepo.RepoObject{Path: filename, Identity: checksum}
+		snapshot.Artifacts[filename] = filerepo.RepoObject{Path: filename, Identity: checksum, ContentHash: checksum}
 		for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
 			auxPath := filename + suffix
 			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: checksum}
@@ -188,7 +190,7 @@ func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 				continue
 			}
 			artifactPath := path.Join(directory, parts[2])
-			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: parts[0]}
+			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: parts[0], ContentHash: parts[0]}
 			for _, suffix := range []string{".sha256", ".sha512", ".md5sum"} {
 				auxPath := artifactPath + suffix
 				snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: parts[0]}
@@ -200,6 +202,7 @@ func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 func parseReleaseSHA256(body []byte) map[string]string {
 	result := map[string]string{}
 	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	scanner.Buffer(nil, 10<<20)
 	inSHA256 := false
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -244,6 +247,7 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, body []byte
 
 func parseDebStanzas(input io.Reader, apply func(map[string]string)) error {
 	scanner := bufio.NewScanner(input)
+	scanner.Buffer(nil, 10<<20)
 	fields := map[string]string{}
 	currentKey := ""
 	flush := func() {

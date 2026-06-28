@@ -2,6 +2,7 @@ package httpcache
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,7 @@ type Route struct {
 	RequestHeaders     map[string]string
 	RewriteKind        string
 	AuthRequired       bool
+	PreferredUpstream  string
 }
 
 type Resolver interface {
@@ -57,6 +59,7 @@ type Handler struct {
 	health    *health.ServiceHealth
 	wait      sync.WaitGroup
 	downloads sync.Map
+	parsedUpstreamHosts []string
 }
 
 type remoteOptions struct {
@@ -64,12 +67,19 @@ type remoteOptions struct {
 	Record             bool
 	TargetURL          string
 	AllowedTargetHosts []string
+	PreferredUpstream  string
 }
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
 	client := utils.DefaultHttpClientWrapper()
 	ConfigureClientTransport(client, name, runtime.Mode, runtime.Transport)
-	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth}
+	hosts := make([]string, 0, len(runtime.Upstreams))
+	for _, u := range runtime.Upstreams {
+		if pu, err := url.Parse(u); err == nil && pu.Host != "" {
+			hosts = append(hosts, pu.Host)
+		}
+	}
+	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth, parsedUpstreamHosts: hosts}
 }
 
 func ConfigureClientTransport(client *utils.HttpClientWrapper, name, mode string, transport *config.TransportConfig) {
@@ -114,8 +124,13 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	result, err := h.handle(req.Context(), req)
 	if err != nil {
 		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
-		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
+		resp.Header().Set("Retry-After", "5")
+		status := http.StatusBadGateway
+		if errors.Is(err, ErrUpstreamUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(resp, http.StatusText(status), status)
+		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
 		return
 	}
 	h.flushResult(req, resp, result, "flush response failed")
@@ -128,9 +143,6 @@ func (h *Handler) flushResult(req *http.Request, resp http.ResponseWriter, resul
 	StripInternal(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
 		slog.Info(logMsg, "instance", h.name, "err", err)
-		if status < 500 {
-			status = http.StatusBadGateway
-		}
 	}
 	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, bytes)
 }
@@ -143,20 +155,29 @@ func (h *Handler) CloseContext(ctx context.Context) error {
 	return utils.WaitGroupContext(ctx, &h.wait)
 }
 
-func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, upstreamPath string) {
+func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) {
 	h.wait.Add(1)
 	defer h.wait.Done()
 
 	route := Route{
-		UpstreamPath: upstreamPath,
-		Policy:       config.PolicyBypass,
+		UpstreamPath:      upstreamPath,
+		Policy:            config.PolicyBypass,
+		PreferredUpstream: preferredUpstream,
 	}
 	result, err := h.bypass(req.Context(), req, route)
 	if err != nil {
 		slog.Info("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
-		http.Error(resp, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusBadGateway, 0)
+		resp.Header().Set("Retry-After", "5")
+		status := http.StatusBadGateway
+		if errors.Is(err, ErrUpstreamUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(resp, http.StatusText(status), status)
+		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
 		return
+	}
+	if result.Headers["X-Cache"] == "BYPASS" {
+		result.Headers["X-Cache"] = "PASSTHROUGH"
 	}
 	h.flushResult(req, resp, result, "flush passthrough response failed")
 }

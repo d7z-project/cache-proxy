@@ -450,6 +450,16 @@ func (h *ServiceHealth) SetResourceTargets(path string, targets []ProbeTarget) {
 	rh.LastTargets = append([]ProbeTarget(nil), targets...)
 }
 
+func (h *ServiceHealth) ScheduleRefresh(path string, refreshInterval time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rh := h.resources[path]
+	if rh == nil || rh.State == RRemoved {
+		return
+	}
+	rh.NextRefreshAt = time.Now().Add(refreshInterval)
+}
+
 func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) error {
 	if h.stats == nil {
 		return nil

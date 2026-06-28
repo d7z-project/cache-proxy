@@ -13,7 +13,7 @@
 2. 实现 `proxyruntime.ModeDriver` 接口：`Mode()` 返回 `config.Mode<Xxx>`，`Plan()` 解码 Block → 创建 handler → `BindPath` 或 `BindAddr`
 3. 在 `pkg/config/config.go` 的 `Instance` 中添加 `*ModeBlock` 字段，常量 `Mode<Xxx>`，并在 `SelectMode()` 候选列表追加
 4. 在 `pkg/app/drivers.go` 的 `builtinDrivers()` 注册 `NewDriver()`
-5. 如需路由规则支持，实现 `httpcache.Resolver`；如需元数据发现刷新，基于 `filerepo.IndexedHandler` 构建
+5. 如需路由规则支持，实现 `httpcache.Resolver`；如需元数据管理，基于 `filerepo.IndexedHandler` 构建（用户请求只负责路径发现，元数据刷新为纯定时器驱动）
 6. 如需健康检查支持，在 `Plan()` 中通过 `httpcache.NewHandler` 的 `svcHealth` 参数注入 `health.ServiceHealth`（参考 `filerepo.health_factory.go`）；handler 内部通过 `openRemote()` 自动调用 `RecordResult`/`RecordFailure`，无需额外代码
 
 ## YAML 配置结构体
@@ -32,6 +32,9 @@
 - 客户端 metadata 请求只允许读取 current generation；禁止走通用 httpcache 单文件 revalidate
 - required companion（如 pacman `.db.sig`、apk `APKINDEX.tar.gz.sig`、deb `Release.gpg`、rpm `repomd.xml.asc`）缺失或校验失败时，本次 generation 必须失败，继续服务旧 generation
 - artifact / auxiliary 下载必须绑定 current generation 的 upstream 和 identity；能得到 SHA256 时必须校验后才写入缓存
+- 伴生文件推导：每个主元数据文件 X 自动推导并尝试缓存 X.sig、X.asc、X.gpg（FetchDerived 处理 404/403 为非致命）；模式可追加额外伴生（如 RPM 加 .key）
+- 元数据刷新为纯定时器驱动，用户请求仅负责路径发现；首次发现的 root 阻塞等待首次刷新完成
+- 伴生文件 `FetchDerived` 同时处理 404 和 403（均为非致命），403 不会导致 generation 失败
 
 ## 测试
 
@@ -46,7 +49,9 @@
 - 5xx 错误响应使用 `httpcache.ErrorResponse`（对外显示 `"internal error"`）
 - 大文件下载（OCI blob / Cargo crate）必须通过 `utils.TempFileFromReader` 流式落盘，禁止 `io.ReadAll` 全量读入内存
 - 直接 `TargetURL` 必须由 `httpcache` 统一校验，host 只能匹配已配置上游或 route-scoped allowlist；不允许各 resolver 自行放行未知 host
-- upstream failover 只对网络错误、`429`、`5xx` 重试；`403`/`404` 直接返回
+- metadata refresh 阶段 upstream failover：只对网络错误、`429`、`5xx` 重试；core metadata `403`/`404` 直接返回
+- 运行时 artifact/auxiliary 请求（TargetURL）：优先使用 generation 绑定 upstream，TargetURL 网络错误时退化为通用 upstream 轮询；HTTP 4xx 直接返回客户端
+- 亲和性：给定 root 的 artifact/auxiliary/unknown 请求优先使用该 root 当前 generation 绑定的 upstream
 - 已知 SHA256/digest 的大文件保持首包流式返回，但校验失败不得写入缓存
 - OCI manifest 的 `Docker-Content-Digest` 和 OCI blob 请求 digest 必须校验后才写入 state/cache
 - 启动时调用 `utils.CleanStaleTempFiles(24h)` 清理残留临时文件

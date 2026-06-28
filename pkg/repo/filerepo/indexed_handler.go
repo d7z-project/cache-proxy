@@ -39,15 +39,15 @@ type IndexedHandler struct {
 	discover   Discoverer
 	policy     RefreshPolicy
 	build      SnapshotBuilder
-	health     *health.ServiceHealth
+	sh         *health.ServiceHealth
 
-	mu             sync.RWMutex
-	refreshing     bool
-	snapshot       *LiveSnapshot
-	targets        map[string][]MetadataTarget
-	rootSnapshots  map[string]*LiveSnapshot
-	refreshTrigger chan struct{}
-	wait           sync.WaitGroup
+	mu            sync.RWMutex
+	snapshot      *LiveSnapshot
+	targets       map[string][]MetadataTarget
+	rootSnapshots map[string]*LiveSnapshot
+	firstRefreshReady map[string]chan struct{}
+	lifecycleCtx  context.Context
+	wait          sync.WaitGroup
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth) *IndexedHandler {
@@ -63,12 +63,10 @@ func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classi
 		discover:      discover,
 		policy:        refreshPolicy,
 		build:         builder,
-		health:        svcHealth,
+		sh:            svcHealth,
 		targets:       map[string][]MetadataTarget{},
 		rootSnapshots: map[string]*LiveSnapshot{},
-	}
-	if builder != nil && refreshPolicy.Interval > 0 {
-		handler.refreshTrigger = make(chan struct{}, 1)
+		firstRefreshReady: map[string]chan struct{}{},
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:         mode,
@@ -92,16 +90,21 @@ func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classi
 func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	cleanPath := cleanRequestPath(req.URL.Path)
 	if cleanPath == "" {
-		h.base.ProxyPassthrough(w, req, "")
+		h.base.ProxyPassthrough(w, req, "", "")
 		return
 	}
 	class := h.classify(cleanPath)
 	if class == ResourceUnknown {
-		h.base.ProxyPassthrough(w, req, cleanPath)
+		snap := h.currentSnapshot()
+		preferred := ""
+		if snap != nil {
+			preferred = snap.Upstream
+		}
+		h.base.ProxyPassthrough(w, req, cleanPath, preferred)
 		return
 	}
 	if class == ResourceMetadata {
-		h.discoverRoot(req.Context(), cleanPath)
+		h.discoverRoot(cleanPath)
 		h.serveMetadata(w, req, cleanPath)
 		return
 	}
@@ -110,15 +113,11 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *IndexedHandler) Start(ctx context.Context) error {
-	if h.health != nil {
-		h.health.Start()
+	h.lifecycleCtx = ctx
+	if h.sh != nil {
+		h.sh.Start()
 	}
 	h.restoreRoots(ctx)
-	h.restoreGenerations(ctx)
-	go h.runRefreshCycle(ctx)
-	if h.policy.Interval <= 0 || h.build == nil {
-		return nil
-	}
 	h.wait.Add(1)
 	go func() {
 		defer func() {
@@ -127,6 +126,10 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 			}
 		}()
 		defer h.wait.Done()
+		h.restoreGenerations(ctx)
+		if h.policy.Interval <= 0 || h.build == nil {
+			return
+		}
 		ticker := time.NewTicker(h.policy.Interval)
 		defer ticker.Stop()
 		for {
@@ -135,8 +138,6 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				h.runRefreshCycle(ctx)
-			case <-h.refreshTrigger:
-				h.runRefreshCycle(ctx)
 			}
 		}
 	}()
@@ -144,8 +145,8 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 }
 
 func (h *IndexedHandler) Stop(ctx context.Context) error {
-	if h.health != nil {
-		if err := h.health.Stop(ctx); err != nil {
+	if h.sh != nil {
+		if err := h.sh.Stop(ctx); err != nil {
 			return err
 		}
 	}
@@ -197,19 +198,36 @@ func (h *IndexedHandler) Cleanup(ctx context.Context) error {
 func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) {
 	snapshot := h.currentSnapshot()
 	if snapshot == nil {
-		if err := h.Refresh(req.Context()); err != nil {
-			httpcache.ErrorResponse(http.StatusBadGateway, err).FlushClose(req, w)
-			h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusBadGateway, 0)
-			return
+		if spec, ok := h.discover.Discover(cleanPath); ok {
+			rootKey := spec.Key()
+			if !h.rootHasSnapshot(rootKey) {
+				ready := h.waitForFirstRefresh(req.Context(), rootKey)
+				if ready {
+					snapshot = h.currentSnapshot()
+				}
+			} else {
+				snapshot = h.currentSnapshot()
+			}
 		}
-		snapshot = h.currentSnapshot()
 	}
 	if snapshot == nil {
-		httpcache.ErrorResponse(http.StatusBadGateway, errors.New("metadata generation is not ready")).FlushClose(req, w)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusBadGateway, 0)
+		w.Header().Set("Retry-After", "5")
+		httpcache.ErrorResponse(http.StatusServiceUnavailable, errors.New("metadata generation is not ready")).FlushClose(req, w)
+		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusServiceUnavailable, 0)
 		return
 	}
 	obj, ok := snapshot.Metadata[cleanPath]
+	if !ok {
+		if spec, disc := h.discover.Discover(cleanPath); disc {
+			rootKey := spec.Key()
+			if !h.rootHasSnapshot(rootKey) {
+				ready := h.waitForFirstRefresh(req.Context(), rootKey)
+				if ready {
+					obj, ok = h.currentSnapshot().Metadata[cleanPath]
+				}
+			}
+		}
+	}
 	if !ok {
 		http.NotFound(w, req)
 		h.stats.RecordRequest(h.name, h.mode, req.Method, "MISS", http.StatusNotFound, 0)
@@ -218,8 +236,8 @@ func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request,
 	objectPath := obj.StorePath
 	reader, err := h.store.OpenObject(req.Context(), h.name, objectPath)
 	if err != nil {
-		httpcache.ErrorResponse(http.StatusBadGateway, err).FlushClose(req, w)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusBadGateway, 0)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusInternalServerError, 0)
 		return
 	}
 	size := reader.Info().Size
@@ -233,32 +251,71 @@ func (h *IndexedHandler) serveMetadata(w http.ResponseWriter, req *http.Request,
 	httpcache.StripInternal(headers)
 	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}
 	result.FlushClose(req, w)
+	slog.Debug("metadata served", "instance", h.name, "mode", h.mode, "path", cleanPath, "size", size)
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
+}
+
+func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
+	h.mu.Lock()
+	if _, exists := h.firstRefreshReady[rootKey]; !exists {
+		h.firstRefreshReady[rootKey] = make(chan struct{})
+	}
+	h.mu.Unlock()
+	h.wait.Add(1)
+	go func() {
+		defer h.wait.Done()
+		_, _ = h.refreshRoot(h.lifecycleCtx, rootKey, time.Now())
+	}()
+}
+
+func (h *IndexedHandler) waitForFirstRefresh(ctx context.Context, rootKey string) bool {
+	if h.rootHasSnapshot(rootKey) {
+		return true
+	}
+	h.mu.Lock()
+	ch, exists := h.firstRefreshReady[rootKey]
+	if !exists {
+		ch = make(chan struct{})
+		h.firstRefreshReady[rootKey] = ch
+	}
+	h.mu.Unlock()
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (h *IndexedHandler) signalFirstRefresh(rootKey string) {
+	h.mu.Lock()
+	if ch, ok := h.firstRefreshReady[rootKey]; ok {
+		close(ch)
+		delete(h.firstRefreshReady, rootKey)
+	}
+	h.mu.Unlock()
+}
+
+func (h *IndexedHandler) rootHasSnapshot(rootKey string) bool {
+	h.mu.RLock()
+	_, ok := h.rootSnapshots[rootKey]
+	h.mu.RUnlock()
+	return ok
 }
 
 func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
 	if h.build == nil || ctx.Err() != nil {
 		return
 	}
+	slog.Debug("metadata refresh cycle starting", "instance", h.name, "mode", h.mode, "interval", h.policy.Interval)
 	h.doRefresh(ctx, false)
 }
 
 func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
-	h.mu.Lock()
-	if h.refreshing {
-		h.mu.Unlock()
-		return nil
-	}
-	h.refreshing = true
-	h.mu.Unlock()
-
 	startedAt := time.Now()
 	refreshed, err := h.refreshRoots(ctx, startedAt, !allRoots)
 
-	h.mu.Lock()
-	h.refreshing = false
-	snapshotReady := h.snapshot != nil
-	h.mu.Unlock()
+	snapshotReady := h.currentSnapshot() != nil
 
 	if refreshed {
 		if cleanupErr := h.Cleanup(ctx); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
@@ -275,10 +332,10 @@ func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 }
 
 func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now time.Time) (bool, error) {
-	if h.health == nil {
+	if h.sh == nil {
 		return false, nil
 	}
-	rhs, unlock, ok := h.health.TryStartRefresh(rootKey)
+	rhs, unlock, ok := h.sh.TryStartRefresh(rootKey)
 	if !ok {
 		return false, nil
 	}
@@ -288,7 +345,8 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 	targets, ok := h.targets[rootKey]
 	h.mu.RUnlock()
 	if !ok || len(targets) == 0 {
-		h.health.FinishRefresh(rootKey, rhs.Generation, nil, nil)
+		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, nil)
+		h.signalFirstRefresh(rootKey)
 		return false, nil
 	}
 
@@ -314,13 +372,18 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 		h.rootSnapshots[rootKey] = snapshot
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
-		h.health.FinishRefresh(rootKey, rhs.Generation, nil, targetsToProbe(targets))
+		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, targetsToProbe(targets))
+		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
+		h.signalFirstRefresh(rootKey)
+		slog.Debug("root refresh succeeded", "instance", h.name, "mode", h.mode, "root", rootKey, "generation", generation, "upstream", upstream)
 		return true, nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataTransient
 	}
-	h.health.FinishRefresh(rootKey, rhs.Generation, refreshHealthError(firstErr), nil)
+	h.sh.FinishRefresh(rootKey, rhs.Generation, refreshHealthError(firstErr), nil)
+	h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
+	h.signalFirstRefresh(rootKey)
 	return false, firstErr
 }
 
@@ -391,15 +454,16 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 	latency := time.Since(start)
 	if err != nil {
 		h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, 0)
-		if h.health != nil {
-			h.health.RecordFailure(upstream, err)
+		if h.sh != nil {
+			h.sh.RecordFailure(upstream, err)
 		}
-		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataTransient}
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("fetch %s: %w", targetURL, err)}
 	}
 	defer response.Body.Close()
+	response.Body = utils.NewContextReadCloser(ctx, response.Body)
 	h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, response.StatusCode)
-	if h.health != nil {
-		h.health.RecordResult(upstream, response.StatusCode, latency)
+	if h.sh != nil {
+		h.sh.RecordResult(upstream, response.StatusCode, latency)
 	}
 	if response.StatusCode != http.StatusOK {
 		switch response.StatusCode {
@@ -408,7 +472,7 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataForbidden}
 		default:
-			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataTransient}
+			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("HTTP %d from upstream: %w", response.StatusCode, errMetadataTransient)}
 		}
 	}
 	body, err := io.ReadAll(io.LimitReader(utils.NewRateLimitReader(response.Body), 50<<20))
@@ -467,19 +531,21 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 }
 
 func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnly bool) (bool, error) {
-	if h.health == nil {
+	if h.sh == nil {
 		return false, nil
 	}
-	resources := h.health.ActiveResources()
+	resources := h.sh.ActiveResources()
 	refreshed := false
 	var firstErr error
 	for _, rh := range resources {
 		if dueOnly {
-			nextRefresh, ok := h.health.ResourceNextRefresh(rh.Path)
+			nextRefresh, ok := h.sh.ResourceNextRefresh(rh.Path)
 			if ok && !nextRefresh.IsZero() && nextRefresh.After(now) {
+				slog.Debug("root refresh skipped (not due)", "instance", h.name, "mode", h.mode, "root", rh.Path, "next_refresh", nextRefresh)
 				continue
 			}
 		}
+		slog.Debug("root refresh due", "instance", h.name, "mode", h.mode, "root", rh.Path)
 		changed, err := h.refreshRoot(ctx, rh.Path, now)
 		if changed {
 			refreshed = true
@@ -492,10 +558,10 @@ func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnl
 }
 
 func (h *IndexedHandler) refreshUpstreams() []string {
-	if h.health == nil {
+	if h.sh == nil {
 		return append([]string(nil), h.upstreams...)
 	}
-	weighted := h.health.WeightedUpstreams(h.upstreams)
+	weighted := h.sh.WeightedUpstreams(h.upstreams)
 	upstreams := make([]string, 0, len(weighted))
 	for _, wu := range weighted {
 		upstreams = append(upstreams, wu.URL)
@@ -517,6 +583,7 @@ func (h *IndexedHandler) prepareRequest(ctx context.Context, cleanPath string, c
 		return
 	}
 	if info.Options["indexed-identity"] != obj.Identity {
+		slog.Debug("object identity changed, evicting", "instance", h.name, "path", cleanPath, "old", info.Options["indexed-identity"], "new", obj.Identity)
 		h.deleteObject(ctx, cleanPath)
 	}
 }
@@ -556,10 +623,10 @@ func (h *IndexedHandler) extraObjectMetadata(_ *http.Request, route httpcache.Ro
 func (h *IndexedHandler) verifyObject(_ *http.Request, route httpcache.Route, reader io.ReadSeeker) error {
 	cleanPath := strings.TrimPrefix(route.ObjectPath, h.objectRoot+"/")
 	obj, ok := h.currentRepoObject(cleanPath, h.classify(cleanPath))
-	if !ok || obj.Identity == "" {
+	if !ok || obj.ContentHash == "" {
 		return nil
 	}
-	expected := strings.TrimPrefix(obj.Identity, "sha256:")
+	expected := strings.TrimPrefix(obj.ContentHash, "sha256:")
 	if len(expected) != 64 {
 		return nil
 	}
@@ -586,12 +653,12 @@ func (h *IndexedHandler) addRoot(rootKey string, targets []MetadataTarget) {
 	h.mu.Lock()
 	h.targets[rootKey] = targets
 	h.mu.Unlock()
-	if h.health != nil {
-		h.health.AddResource(rootKey, targetsToProbe(targets), h.upstreams)
+	if h.sh != nil {
+		h.sh.AddResource(rootKey, targetsToProbe(targets), h.upstreams)
 	}
 }
 
-func (h *IndexedHandler) discoverRoot(ctx context.Context, cleanPath string) {
+func (h *IndexedHandler) discoverRoot(cleanPath string) {
 	if h.discover == nil {
 		return
 	}
@@ -605,25 +672,21 @@ func (h *IndexedHandler) discoverRoot(ctx context.Context, cleanPath string) {
 	existingTargets, existing := h.targets[key]
 	if existing && len(existingTargets) > 0 {
 		h.mu.Unlock()
+		if !h.rootHasSnapshot(key) {
+			slog.Debug("discovered root (needs refresh)", "instance", h.name, "mode", h.mode, "root", key)
+			h.ensureFirstRefresh(key)
+		}
 		return
 	}
 	h.targets[key] = targets
 	h.mu.Unlock()
-	if h.health != nil {
-		h.health.AddResource(key, targetsToProbe(targets), h.upstreams)
+	slog.Debug("discovered new root", "instance", h.name, "mode", h.mode, "root", key)
+	if h.sh != nil {
+		h.sh.AddResource(key, targetsToProbe(targets), h.upstreams)
 	}
-	if h.refreshTrigger != nil {
-		select {
-		case h.refreshTrigger <- struct{}{}:
-		default:
-		}
-		return
+	if !h.rootHasSnapshot(key) {
+		h.ensureFirstRefresh(key)
 	}
-	h.wait.Add(1)
-	go func() {
-		defer h.wait.Done()
-		_, _ = h.refreshRoot(ctx, key, time.Now())
-	}()
 }
 
 func (h *IndexedHandler) rebuildAggregateLocked() {
@@ -656,8 +719,8 @@ func (h *IndexedHandler) reportMetadataState() {
 	ready := h.currentSnapshot() != nil
 	stateStr := "booting"
 	if ready {
-		if h.health != nil {
-			switch h.health.AggregateState() {
+		if h.sh != nil {
+			switch h.sh.AggregateState() {
 			case health.StateHealthy:
 				stateStr = "ready"
 			case health.StateDegraded:

@@ -58,10 +58,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-		if companion, err := session.FetchDerived(ctx, blob.Path+".sig"); err != nil {
-			return nil, err
-		} else if companion.Path != "" {
-			snapshot.Metadata[companion.Path] = companion
+		for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
+			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+				return nil, err
+			} else if companion.Path != "" {
+				snapshot.Metadata[companion.Path] = companion
+			}
 		}
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 		if err != nil {
@@ -105,13 +107,14 @@ func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapsho
 			return
 		}
 		artifactPath := path.Join(basePath, name+"-"+version+".apk")
-		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum}
+		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum, ContentHash: checksum}
 		for _, suffix := range []string{".sig", ".asc", ".sha256", ".sha512"} {
 			auxPath := artifactPath + suffix
 			snapshot.Auxiliary[auxPath] = filerepo.RepoObject{Path: auxPath, Identity: checksum}
 		}
 	}
 	scanner := bufio.NewScanner(input)
+	scanner.Buffer(nil, 10<<20)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {

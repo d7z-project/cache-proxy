@@ -277,14 +277,8 @@ func (a *App) Close(ctx context.Context) error {
 	if a.mainServer != nil {
 		joined = errors.Join(joined, a.mainServer.Shutdown(ctx))
 	}
-	if a.mainListener != nil {
-		joined = errors.Join(joined, a.mainListener.Close())
-	}
-	for addr, server := range a.bindServers {
+	for _, server := range a.bindServers {
 		joined = errors.Join(joined, server.Shutdown(ctx))
-		if ln, ok := a.bindListeners[addr]; ok {
-			joined = errors.Join(joined, ln.Close())
-		}
 	}
 	a.routesMu.RLock()
 	handlers := make([]proxyruntime.Instance, len(a.handlers))

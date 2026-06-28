@@ -3,6 +3,7 @@ package oci
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -24,6 +25,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string
 	if auth := h.staticAuthorization(); auth != "" {
 		request.Header.Set("Authorization", auth)
 	}
+	slog.Debug("oci upstream request", "instance", h.name, "method", method, "url", targetURL)
 	response, err := h.client.Do(request)
 	if err != nil {
 		h.stats.RecordUpstream(h.name, config.ModeOCI, method, 0)
@@ -40,6 +42,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string
 		}
 	}
 	h.stats.RecordUpstream(h.name, config.ModeOCI, method, response.StatusCode)
+	slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
 	response.Body = utils.NewRateLimitReader(response.Body)
 	return response, nil
 }

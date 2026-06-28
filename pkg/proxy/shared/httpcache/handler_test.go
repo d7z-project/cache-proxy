@@ -224,9 +224,9 @@ func TestPassthroughStripsInternalHeaders(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/object", nil)
-	handler.ProxyPassthrough(rec, req, "other")
+	handler.ProxyPassthrough(rec, req, "other", "")
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+	require.Equal(t, "PASSTHROUGH", rec.Header().Get("X-Cache"))
 	require.Empty(t, rec.Header().Get("fetched-at"))
 }
 
@@ -328,7 +328,8 @@ func TestTargetURLRejectsForeignHost(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "allowed", rec.Body.String())
 }
 
 func TestTargetURLAllowsRouteHost(t *testing.T) {
@@ -418,12 +419,79 @@ func TestFailoverDoesNotRetryNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestStaleCacheOnValidationError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", "5")
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	resolver := &staticResolver{route: Route{
+		ObjectPath:   "test/stale-obj",
+		UpstreamPath: "test/stale-obj",
+		Policy:       config.PolicyRevalidate,
+	}}
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:        "test",
+		ExpireAfter: config.Expiration(72 * time.Hour),
+		Upstreams:   []string{upstream.URL},
+	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/stale-obj", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
+	require.Equal(t, "hello", rec.Body.String())
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/stale-obj", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "STALE", rec.Header().Get("X-Cache"))
+	require.Equal(t, "hello", rec.Body.String())
+}
+
 func TestErrorResponseHidesInternalDetails(t *testing.T) {
 	resp := ErrorResponse(http.StatusBadGateway, errors.New("sensitive data"))
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "internal error", string(body))
 	require.Equal(t, "ERROR", resp.Headers["X-Cache"])
+}
+
+func Test503WhenAllUpstreamsUnavailable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{"http://127.0.0.1:1/nonexistent"},
+	}, store, &staticResolver{route: Route{
+		ObjectPath:   "test/downstream",
+		UpstreamPath: "test/downstream",
+		Policy:       config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/downstream", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
 func TestSafePath(t *testing.T) {

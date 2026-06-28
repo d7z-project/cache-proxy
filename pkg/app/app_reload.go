@@ -100,12 +100,6 @@ func (a *App) Reload(ctx context.Context) error {
 					}
 					delete(a.bindServers, entry.Bind)
 				}
-				if ln, ok := a.bindListeners[entry.Bind]; ok {
-					if err := ln.Close(); err != nil {
-						slog.Warn("bind listener close error", "addr", entry.Bind, "err", err)
-					}
-					delete(a.bindListeners, entry.Bind)
-				}
 			}
 		}
 	}

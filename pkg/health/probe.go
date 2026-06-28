@@ -139,7 +139,17 @@ func (h *ServiceHealth) probeTargetsForUpstream(uh *UpstreamHealth) []ProbeTarge
 	for _, rh := range h.resources {
 		switch rh.State {
 		case RActive, RSuspect, RBlocked:
-			if len(rh.UpstreamURLs) > 0 && rh.UpstreamURLs[0] == uh.URL {
+			if len(rh.UpstreamURLs) > 0 {
+				matched := false
+				for _, u := range rh.UpstreamURLs {
+					if u == uh.URL {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					continue
+				}
 				for _, t := range rh.LastTargets {
 					targets = append(targets, t)
 					if len(targets) >= maxDynamicPaths {

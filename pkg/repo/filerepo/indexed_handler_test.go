@@ -163,7 +163,7 @@ func TestArtifactChecksumMismatchIsNotCached(t *testing.T) {
 		require.NoError(t, err)
 		return &LiveSnapshot{
 			Metadata:  map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}},
-			Artifacts: map[string]RepoObject{"pkg.tar": {Path: "pkg.tar", Identity: sha256String("expected")}},
+			Artifacts: map[string]RepoObject{"pkg.tar": {Path: "pkg.tar", Identity: sha256String("expected"), ContentHash: sha256String("expected")}},
 			Auxiliary: map[string]RepoObject{},
 		}, nil
 	})

@@ -31,7 +31,19 @@ func TestParseDescExtractsFilenameAndChecksum(t *testing.T) {
 func TestDiscovererDetectsPacmanRoot(t *testing.T) {
 	spec, ok := (discoverer{}).Discover("core/os/x86_64/core.db.sig")
 	require.True(t, ok)
-	require.Equal(t, "core|x86_64", spec.Key())
+	require.Equal(t, "core", spec.Key())
+}
+
+func TestDiscovererDetectsBareDbFilename(t *testing.T) {
+	spec, ok := (discoverer{}).Discover("d7z-stable.db")
+	require.True(t, ok)
+	require.Equal(t, "d7z-stable", spec.Key())
+}
+
+func TestDiscovererDetectsBareFilesFilename(t *testing.T) {
+	spec, ok := (discoverer{}).Discover("d7z-stable.files")
+	require.True(t, ok)
+	require.Equal(t, "d7z-stable", spec.Key())
 }
 
 func TestDiscovererRejectsPacmanArtifactPath(t *testing.T) {
@@ -69,7 +81,7 @@ func TestRefreshSucceedsWithoutCompanions(t *testing.T) {
 		&filerepo.Policy{},
 		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{Repo: "core", Arch: "x86_64"}},
+		[]filerepo.RootSpec{&rootSpec{Repo: "core", StorePath: "core/os/x86_64/core.db"}},
 		buildSnapshot,
 		store, stats, svcHealth,
 	)
@@ -127,7 +139,7 @@ func TestRefreshPrefetchesCompanions(t *testing.T) {
 		&filerepo.Policy{},
 		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{Repo: "core", Arch: "x86_64"}},
+		[]filerepo.RootSpec{&rootSpec{Repo: "core", StorePath: "core/os/x86_64/core.db"}},
 		buildSnapshot,
 		store,
 		stats,

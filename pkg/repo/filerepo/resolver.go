@@ -57,6 +57,10 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 	if obj, ok := r.handler.currentRepoObject(cleanPath, class); ok {
 		route.TargetURL = strings.TrimRight(obj.Upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
 	}
+	snap := r.handler.currentSnapshot()
+	if snap != nil && snap.Upstream != "" {
+		route.PreferredUpstream = snap.Upstream
+	}
 	return route, nil
 }
 

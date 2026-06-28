@@ -63,7 +63,13 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 	valid, err := h.validateCached(ctx, route, cached.Headers)
 	if err != nil {
 		_ = cached.Close()
-		return ErrorResponse(http.StatusBadGateway, err), nil
+		slog.Debug("cache validation error, serving stale", "instance", h.name, "object", route.ObjectPath, "err", err)
+		staleCached, openErr := h.openCached(ctx, route)
+		if openErr == nil {
+			staleCached.Headers["X-Cache"] = "STALE"
+			return h.rewriteResponse(req, route, staleCached), nil
+		}
+		return ErrorResponse(http.StatusServiceUnavailable, err), nil
 	}
 	if valid {
 		cached.Headers["X-Cache"] = "HIT"
@@ -93,7 +99,7 @@ func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) 
 }
 
 func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts}, h.remoteHeaders(req, route, nil))
+	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(req, route, nil))
 	if response != nil {
 		response.Headers["X-Cache"] = "BYPASS"
 		response = h.rewriteResponse(req, route, response)
@@ -151,7 +157,7 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 	if lastModified := cached["Last-Modified"]; lastModified != "" {
 		headers["If-Modified-Since"] = lastModified
 	}
-	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts}, h.remoteHeaders(nil, route, headers))
+	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(nil, route, headers))
 	if err != nil {
 		return false, err
 	}
@@ -169,14 +175,14 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 		return false, nil
 	default:
 		if resp.StatusCode >= 500 {
-			return false, fmt.Errorf("upstream HEAD failed with %d", resp.StatusCode)
+			return false, fmt.Errorf("%w: upstream HEAD failed with %d", ErrUpstreamUnavailable, resp.StatusCode)
 		}
 		return false, nil
 	}
 }
 
 func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
-	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts}, h.remoteHeaders(req, route, nil))
+	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(req, route, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +190,8 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		resp.Headers["X-Cache"] = "BYPASS"
 		return h.rewriteResponse(req, route, resp), nil
 	}
+
+	slog.Debug("downloading from upstream", "instance", h.name, "mode", h.config.Mode, "object", route.ObjectPath, "status", status)
 
 	if parent := path.Dir(route.ObjectPath); parent != "." {
 		if err = h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {

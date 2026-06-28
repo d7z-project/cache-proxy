@@ -62,9 +62,10 @@ type MetadataObject struct {
 }
 
 type RepoObject struct {
-	Path     string `yaml:"path"`
-	Identity string `yaml:"identity,omitempty"`
-	Upstream string `yaml:"upstream"`
+	Path        string `yaml:"path"`
+	Identity    string `yaml:"identity,omitempty"`
+	ContentHash string `yaml:"content_hash,omitempty"`
+	Upstream    string `yaml:"upstream"`
 }
 
 type LiveSnapshot struct {
@@ -114,6 +115,10 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 	if lastErr == nil {
 		lastErr = errors.New("metadata upstream fetch failed")
 	}
+	var mfe MetadataFetchError
+	if errors.As(lastErr, &mfe) {
+		lastErr = mfe.Err
+	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: lastErr}
 }
 
@@ -127,13 +132,21 @@ func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (
 	blob, err := s.Fetch(ctx, MetadataTarget{URL: derivedPath})
 	if err != nil {
 		var mfe MetadataFetchError
-		if errors.As(err, &mfe) && errors.Is(mfe.Err, errMetadataNotFound) {
+		if errors.As(err, &mfe) && (errors.Is(mfe.Err, errMetadataNotFound) || errors.Is(mfe.Err, errMetadataForbidden)) {
 			slog.Debug("derived metadata not available", "path", derivedPath, "root", s.rootKey, "upstream", s.upstream)
 			return MetadataObject{}, nil
 		}
 		return MetadataObject{}, err
 	}
 	return MetadataObject{Path: blob.Path, Required: false}, nil
+}
+
+func DeduceCompanions(basePath string) []string {
+	var companions []string
+	for _, s := range []string{".sig", ".asc", ".gpg"} {
+		companions = append(companions, basePath+s)
+	}
+	return companions
 }
 
 type RootSpec interface {

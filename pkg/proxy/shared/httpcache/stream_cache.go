@@ -35,6 +35,8 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 	if cfg.StatsStart != nil {
 		cfg.StatsStart()
 	}
+	slog.Debug("download started", "path", cfg.ObjectPath, "temp", tempFile.Name())
+	storeCtx := context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -64,10 +66,14 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 						return
 					}
 				}
-				if err := cfg.StoreFn(context.Background(), tempFile); err != nil {
+				if err := cfg.StoreFn(storeCtx, tempFile); err != nil {
 					slog.Warn("cache store write failed", "path", cfg.ObjectPath, "err", err)
+					return
 				}
+				slog.Debug("download completed", "path", cfg.ObjectPath)
 			}
+		} else {
+			slog.Debug("download aborted", "path", cfg.ObjectPath, "err", copyErr)
 		}
 		tempFile.Close()
 		os.Remove(tempFile.Name())

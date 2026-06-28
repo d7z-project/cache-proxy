@@ -12,19 +12,18 @@ import (
 )
 
 type rootSpec struct {
-	Repo string
-	Arch string
+	Repo      string
+	StorePath string
 }
 
 func (s *rootSpec) Key() string {
-	return strings.Join([]string{s.Repo, s.Arch}, "|")
+	return s.Repo
 }
 
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
 	return []filerepo.MetadataTarget{{
-		URL:  path.Join(s.Repo, "os", s.Arch, s.Repo+".db"),
+		URL:  s.StorePath,
 		Repo: s.Repo,
-		Arch: s.Arch,
 	}}
 }
 
@@ -37,17 +36,28 @@ type discoverer struct{}
 func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
 	parts := strings.Split(trimmed, "/")
-	if len(parts) != 4 || parts[1] != "os" {
+	if len(parts) == 0 || parts[0] == "" {
 		return nil, false
 	}
-	repoName, arch, fileName := parts[0], parts[2], parts[3]
-	if repoName == "" || arch == "" {
+	fileName := parts[len(parts)-1]
+
+	var repoName string
+	switch {
+	case strings.HasSuffix(fileName, ".db"):
+		repoName = strings.TrimSuffix(fileName, ".db")
+	case strings.HasSuffix(fileName, ".db.sig"):
+		repoName = strings.TrimSuffix(fileName, ".db.sig")
+	case strings.HasSuffix(fileName, ".files"):
+		repoName = strings.TrimSuffix(fileName, ".files")
+	case strings.HasSuffix(fileName, ".files.sig"):
+		repoName = strings.TrimSuffix(fileName, ".files.sig")
+	default:
 		return nil, false
 	}
-	if fileName != repoName+".db" && fileName != repoName+".db.sig" && fileName != repoName+".files" && fileName != repoName+".files.sig" {
+	if repoName == "" {
 		return nil, false
 	}
-	return &rootSpec{Repo: repoName, Arch: arch}, true
+	return &rootSpec{Repo: repoName, StorePath: trimmed}, true
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
@@ -62,17 +72,24 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, err
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-		if target.Repo != "" && target.Arch != "" {
-			basePath := path.Join(target.Repo, "os", target.Arch)
-			for _, suffix := range []string{".db.sig", ".files", ".files.sig"} {
-				companionPath := path.Join(basePath, target.Repo+suffix)
-				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-					return nil, err
-				} else if companion.Path != "" {
-					snapshot.Metadata[companion.Path] = companion
-				}
+
+		dbPath := strings.TrimSuffix(blob.Path, ".db")
+		for _, suffix := range []string{".files", ".files.sig"} {
+			companionPath := dbPath + suffix
+			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+				return nil, err
+			} else if companion.Path != "" {
+				snapshot.Metadata[companion.Path] = companion
 			}
 		}
+		for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
+			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+				return nil, err
+			} else if companion.Path != "" {
+				snapshot.Metadata[companion.Path] = companion
+			}
+		}
+
 		reader, err := filerepo.OpenCompressed(blob.Body, blob.Path)
 		if err != nil {
 			return nil, err
@@ -101,7 +118,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			artifactPath := path.Join(path.Dir(blob.Path), filename)
-			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum}
+			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum, ContentHash: checksum}
 			sigPath := artifactPath + ".sig"
 			snapshot.Auxiliary[sigPath] = filerepo.RepoObject{Path: sigPath, Identity: checksum}
 		}

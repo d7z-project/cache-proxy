@@ -30,8 +30,8 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 		return
 	}
 	state := persistedState{Version: 2}
-	if h.health != nil {
-		state.Roots = h.health.SnapshotResources()
+	if h.sh != nil {
+		state.Roots = h.sh.SnapshotResources()
 	}
 	data, err := yaml.Marshal(state)
 	if err != nil {

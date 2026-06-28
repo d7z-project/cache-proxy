@@ -130,6 +130,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	state, err := h.readState(ctx, statePath)
 	if err == nil && !h.stateExpired(state) {
 		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "HIT"); cacheErr == nil {
+			slog.Debug("oci manifest cache hit", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 			return status, "HIT", bytes, nil
 		}
 	}
@@ -137,9 +138,11 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	staleState := state
 	status, bytes, fetchErr := h.fetchManifest(ctx, w, req, resolved)
 	if fetchErr == nil {
+		slog.Debug("oci manifest fetched", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 		return status, "MISS", bytes, nil
 	}
 	if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
+		slog.Debug("oci manifest fetch failed, serving stale", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", fetchErr)
 		if staleStatus, staleBytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "STALE"); cacheErr == nil {
 			return staleStatus, "STALE", staleBytes, nil
 		}
@@ -151,16 +154,20 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	state, err := h.findBlobState(ctx, resolved.repo, resolved.digest)
 	if err == nil {
 		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refBlobPath(state.Repo, state.Ref, resolved.digest), "HIT"); cacheErr == nil {
+			slog.Debug("oci blob cache hit", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 			return status, "HIT", bytes, nil
 		}
 	}
 	if err != nil {
+		slog.Debug("oci blob not found in refs, bypass", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
 	if _, downloading := h.downloads.Load(objectPath); downloading {
+		slog.Debug("oci blob already downloading, bypass", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
+	slog.Debug("oci blob miss, fetching", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 	return h.fetchBlob(ctx, w, req, resolved, state)
 }
 
