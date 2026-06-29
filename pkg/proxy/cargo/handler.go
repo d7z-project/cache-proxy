@@ -6,6 +6,7 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
@@ -28,6 +29,6 @@ func (h *handler) Stop(ctx context.Context) error {
 	return h.base.CloseContext(ctx)
 }
 
-func (h *handler) Cleanup(ctx context.Context) error {
-	return h.base.Cleanup(ctx)
+func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
+	return h.base.Cleanup(ctx, opts)
 }

@@ -85,11 +85,14 @@ func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder,
 	return h
 }
 
-func (h *ServiceHealth) Start() {
+func (h *ServiceHealth) Start(parent context.Context) {
 	if !h.config.Enabled {
 		return
 	}
-	h.ctx, h.cancel = context.WithCancel(context.Background())
+	if parent == nil {
+		parent = context.Background()
+	}
+	h.ctx, h.cancel = context.WithCancel(parent)
 	h.wg.Add(1)
 	go h.probeLoop()
 }

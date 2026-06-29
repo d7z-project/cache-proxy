@@ -60,11 +60,12 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		expireAfter = config.DefaultExpireAfter
 	}
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
-		Mode:        config.ModeMaven,
-		ExpireAfter: expireAfter,
-		Upstreams:   []string{strings.TrimSpace(block.Upstream)},
-		Transport:   block.Transport,
-		BusyPolicy:  config.BusyPolicyBypass,
+		Mode:            config.ModeMaven,
+		ExpireAfter:     expireAfter,
+		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
+		Transport:       block.Transport,
+		BusyPolicy:      config.BusyPolicyBypass,
+		DownloadLimiter: plan.Downloads(),
 	}, plan.Store(), newResolver(&block.Policy), plan.Stats(), nil)
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{

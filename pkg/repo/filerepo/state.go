@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -80,13 +81,8 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		if err != nil || entry.IsDir() || path.Base(objectPath) != "current.yaml" {
 			return nil
 		}
-		reader, err := h.store.OpenObject(ctx, h.name, objectPath)
-		if err != nil {
-			return nil
-		}
-		defer reader.Close()
-		var snapshot LiveSnapshot
-		if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootKey == "" {
+		snapshot, ok := h.loadCurrentSnapshot(ctx, objectPath)
+		if !ok {
 			return nil
 		}
 		for key, obj := range snapshot.Metadata {
@@ -96,7 +92,7 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 			}
 		}
 		h.mu.Lock()
-		h.rootSnapshots[snapshot.RootKey] = &snapshot
+		h.rootSnapshots[snapshot.RootKey] = snapshot
 		h.rebuildAggregateLocked()
 		if entry, ok := h.roots[snapshot.RootKey]; ok && len(entry.targets) == 0 && len(snapshot.Targets) > 0 {
 			entry.targets = snapshot.Targets
@@ -117,4 +113,68 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 	if err != nil && !strings.Contains(err.Error(), "not exist") {
 		slog.Warn("indexed generation restore failed", "instance", h.name, "err", err)
 	}
+}
+
+func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath string) (*LiveSnapshot, bool) {
+	reader, err := h.store.OpenObject(ctx, h.name, currentPath)
+	if err == nil {
+		defer reader.Close()
+		var ref struct {
+			RootKey    string `yaml:"root_key"`
+			Generation string `yaml:"generation"`
+		}
+		if yaml.NewDecoder(reader).Decode(&ref) == nil && ref.RootKey != "" && ref.Generation != "" {
+			if snapshot, ok := h.loadSnapshot(ctx, h.snapshotPath(ref.RootKey, ref.Generation)); ok {
+				return snapshot, true
+			}
+		}
+	}
+	return h.loadLatestSnapshot(ctx, path.Dir(currentPath))
+}
+
+func (h *IndexedHandler) loadLatestSnapshot(ctx context.Context, rootDir string) (*LiveSnapshot, bool) {
+	dir := path.Join(rootDir, "snapshots")
+	var snapshots []struct {
+		path       string
+		generation string
+	}
+	if err := fs.WalkDir(h.store.TenantFS(h.name), dir, func(objectPath string, entry fs.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() && strings.HasSuffix(objectPath, ".yaml") {
+			generation := strings.TrimSuffix(path.Base(objectPath), ".yaml")
+			snapshots = append(snapshots, struct {
+				path       string
+				generation string
+			}{path: objectPath, generation: generation})
+		}
+		return nil
+	}); err != nil {
+		return nil, false
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		left := snapshots[i].generation
+		right := snapshots[j].generation
+		if len(left) == len(right) {
+			return left > right
+		}
+		return len(left) > len(right)
+	})
+	for _, item := range snapshots {
+		if snapshot, ok := h.loadSnapshot(ctx, item.path); ok {
+			return snapshot, true
+		}
+	}
+	return nil, false
+}
+
+func (h *IndexedHandler) loadSnapshot(ctx context.Context, objectPath string) (*LiveSnapshot, bool) {
+	reader, err := h.store.OpenObject(ctx, h.name, objectPath)
+	if err != nil {
+		return nil, false
+	}
+	defer reader.Close()
+	var snapshot LiveSnapshot
+	if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootKey == "" {
+		return nil, false
+	}
+	return &snapshot, true
 }

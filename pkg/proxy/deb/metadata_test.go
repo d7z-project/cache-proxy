@@ -145,6 +145,7 @@ func TestMetadataRequestInReleasePublishesArtifacts(t *testing.T) {
 		discoverer{}, nil, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		nil,
 	)
 	require.NoError(t, handler.Start(ctx))
 	defer func() {
@@ -203,6 +204,7 @@ func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
 		discoverer{}, nil, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		nil,
 	)
 	require.NoError(t, handler.Start(ctx))
 	defer func() {
@@ -263,6 +265,7 @@ func TestMetadataRequestStartsAsyncRefreshAndReturnsUnavailableUntilReady(t *tes
 		discoverer{}, nil, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		nil,
 	)
 	require.NoError(t, handler.Start(ctx))
 	defer func() {
@@ -320,6 +323,7 @@ func TestBuildSnapshotRejectsReleaseWithoutPackageIndexes(t *testing.T) {
 		nil, []filerepo.RootSpec{&rootSpec{Suite: "bookworm"}}, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		nil,
 	)
 	err = handler.Refresh(ctx)
 	require.ErrorContains(t, err, "Release contains no package indexes")

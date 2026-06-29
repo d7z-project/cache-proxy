@@ -12,25 +12,29 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/storage/filesystem"
+
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 )
 
 type gitConfig struct {
-	name           string
-	billyFs        billy.Filesystem
-	upstream       string
-	auth           transport.AuthMethod
-	proxyURL       string
-	syncInterval   time.Duration
-	forceOverwrite bool
+	name             string
+	billyFs          billy.Filesystem
+	upstream         string
+	auth             transport.AuthMethod
+	proxyURL         string
+	syncInterval     time.Duration
+	operationTimeout time.Duration
+	forceOverwrite   bool
 }
 
 type gitHandler struct {
-	name           string
-	upstream       string
-	auth           transport.AuthMethod
-	proxyURL       string
-	syncInterval   time.Duration
-	forceOverwrite bool
+	name             string
+	upstream         string
+	auth             transport.AuthMethod
+	proxyURL         string
+	syncInterval     time.Duration
+	operationTimeout time.Duration
+	forceOverwrite   bool
 
 	storer *filesystem.Storage
 	svr    transport.Transport
@@ -49,16 +53,17 @@ type gitHandler struct {
 func newGitHandler(cfg gitConfig) *gitHandler {
 	st := filesystem.NewStorage(cfg.billyFs, cache.NewObjectLRUDefault())
 	h := &gitHandler{
-		name:           cfg.name,
-		storer:         st,
-		svr:            server.NewServer(&singleLoader{storer: st}),
-		upstream:       cfg.upstream,
-		auth:           cfg.auth,
-		proxyURL:       cfg.proxyURL,
-		syncInterval:   cfg.syncInterval,
-		forceOverwrite: cfg.forceOverwrite,
-		state:          gitStateCloning,
-		stats:          newGitStats(cfg.name),
+		name:             cfg.name,
+		storer:           st,
+		svr:              server.NewServer(&singleLoader{storer: st}),
+		upstream:         cfg.upstream,
+		auth:             cfg.auth,
+		proxyURL:         cfg.proxyURL,
+		syncInterval:     cfg.syncInterval,
+		operationTimeout: cfg.operationTimeout,
+		forceOverwrite:   cfg.forceOverwrite,
+		state:            gitStateCloning,
+		stats:            newGitStats(cfg.name),
 	}
 	return h
 }
@@ -112,7 +117,7 @@ func (h *gitHandler) Stop(ctx context.Context) error {
 	}
 }
 
-func (h *gitHandler) Cleanup(_ context.Context) error {
+func (h *gitHandler) Cleanup(_ context.Context, _ config.CleanupConfig) error {
 	return nil
 }
 

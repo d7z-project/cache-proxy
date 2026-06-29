@@ -68,10 +68,12 @@ func TestDefaultHttpClientWrapper(t *testing.T) {
 	wrapper := DefaultHttpClientWrapper()
 	require.NotNil(t, wrapper.Client)
 	require.NotNil(t, wrapper.Client.Transport)
+	require.Equal(t, DefaultHTTPTimeout, wrapper.Client.Timeout)
 	require.Equal(t, "cache-proxy", wrapper.UserAgent)
+	require.Equal(t, DefaultIdleBodyTimeout, wrapper.IdleBodyTimeout)
 
 	transport, ok := wrapper.Client.Transport.(*http.Transport)
 	require.True(t, ok)
 	require.NotNil(t, transport.DialContext)
-	require.Equal(t, 30*time.Second, transport.ResponseHeaderTimeout)
+	require.Equal(t, DefaultHeaderTimeout, transport.ResponseHeaderTimeout)
 }

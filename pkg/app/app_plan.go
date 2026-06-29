@@ -15,9 +15,11 @@ import (
 )
 
 const DefaultGCInterval = 24 * time.Hour
+const DefaultMaxActiveDownloads = 64
+const DefaultMaxActiveDownloadsPerInstance = 8
 
-func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats) (map[string]*proxyruntime.Entry, error) {
-	plan := proxyruntime.NewPlanContext(store, stats, doc.Server.Bind, doc.Metrics.Path)
+func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) (map[string]*proxyruntime.Entry, error) {
+	plan := proxyruntime.NewPlanContext(store, stats, downloads, doc.Server.Bind, doc.Metrics.Path)
 	drivers := builtinDrivers()
 	for _, decl := range doc.Instances {
 		selected, err := decl.SelectMode()
@@ -70,6 +72,12 @@ func normalizeDocument(doc *config.Document) {
 	if doc.Storage.Cleanup.BatchSize <= 0 {
 		doc.Storage.Cleanup.BatchSize = defaults.BatchSize
 	}
+	if doc.Storage.Download.MaxActive <= 0 {
+		doc.Storage.Download.MaxActive = DefaultMaxActiveDownloads
+	}
+	if doc.Storage.Download.MaxActivePerInstance <= 0 {
+		doc.Storage.Download.MaxActivePerInstance = DefaultMaxActiveDownloadsPerInstance
+	}
 }
 
 func validateServerConfig(doc *config.Document) error {
@@ -81,6 +89,12 @@ func validateServerConfig(doc *config.Document) error {
 	}
 	if doc.Storage.Cleanup.Workers < 0 {
 		return errors.New("cleanup workers must not be negative")
+	}
+	if doc.Storage.Download.MaxActive <= 0 {
+		return errors.New("download max_active must be positive")
+	}
+	if doc.Storage.Download.MaxActivePerInstance <= 0 {
+		return errors.New("download max_active_per_instance must be positive")
 	}
 	return nil
 }

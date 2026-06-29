@@ -61,6 +61,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Transport:       block.Transport,
 		BusyPolicy:      block.IndexBusyPolicy,
 		DefaultFreshFor: block.IndexFreshFor,
+		DownloadLimiter: plan.Downloads(),
 	}
 	h := newHandler(plan.Name(), runtime, plan.Store(), newResolver(&block.Policy, plan.Store(), plan.Name()), plan.Stats())
 	plan.SetHomeSnippet(plan.RenderSnippet())

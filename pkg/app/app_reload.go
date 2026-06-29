@@ -23,8 +23,13 @@ func (a *App) Reload(ctx context.Context) error {
 		return ErrReloadInProgress
 	}
 	defer a.reloading.Store(false)
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
 	if a.closed.Load() {
 		return errors.New("app is closed")
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
 	newDoc, err := config.LoadFile(a.configPath)
@@ -41,15 +46,17 @@ func (a *App) Reload(ctx context.Context) error {
 
 	added, removed, modified := config.DiffInstances(a.config.Instances, newDoc.Instances)
 	if len(added) == 0 && len(removed) == 0 && len(modified) == 0 {
+		a.downloads.Update(newDoc.Storage.Download.MaxActive, newDoc.Storage.Download.MaxActivePerInstance)
 		a.routesMu.Lock()
 		a.config = newDoc
 		a.routesMu.Unlock()
+		a.notifyStorageConfigChanged()
 		return nil
 	}
 	slog.Info("reloading config", "added", len(added), "removed", len(removed), "modified", len(modified))
 
 	// Phase 1: Plan all new instances (dry-run — no Start). If this fails, nothing changed.
-	plan := proxyruntime.NewPlanContext(a.store, a.stats, newDoc.Server.Bind, newDoc.Metrics.Path)
+	plan := proxyruntime.NewPlanContext(a.store, a.stats, a.downloads, newDoc.Server.Bind, newDoc.Metrics.Path)
 	drivers := builtinDrivers()
 	for _, inst := range newDoc.Instances {
 		sel, err := inst.SelectMode()
@@ -226,6 +233,8 @@ func (a *App) Reload(ctx context.Context) error {
 	a.bindListeners = newBindListeners
 	a.config = newDoc
 	a.routesMu.Unlock()
+	a.downloads.Update(newDoc.Storage.Download.MaxActive, newDoc.Storage.Download.MaxActivePerInstance)
+	a.notifyStorageConfigChanged()
 	a.ready.Store(true)
 
 	// Phase 7: Stop bind servers that no remaining instance owns.

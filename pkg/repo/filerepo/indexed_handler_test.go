@@ -1,6 +1,7 @@
 package filerepo
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -50,6 +51,7 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 		store,
 		stats,
 		health.New("repo", "test", health.DefaultConfig(), upstreams, stats, "cache-proxy-test"),
+		nil,
 	)
 }
 
@@ -100,7 +102,9 @@ func TestRefreshUsesSingleUpstreamForGeneration(t *testing.T) {
 	require.NoError(t, handler.Refresh(ctx))
 	snapshot := handler.currentSnapshot()
 	require.NotNil(t, snapshot)
-	require.Equal(t, good.URL, snapshot.Artifacts["pkg.tar"].Upstream)
+	obj, ok := handler.currentRepoObject("pkg.tar", ResourceArtifact)
+	require.True(t, ok)
+	require.Equal(t, good.URL, obj.Upstream)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
@@ -351,6 +355,17 @@ func TestRestoreGenerationsHealthTransition(t *testing.T) {
 
 	psnap := handler.stats.Snapshot()
 	require.Equal(t, "ready", psnap.Instances["repo"].MetadataState)
+
+	_, err = store.Put(ctx, "repo", handler.currentPath("root"), bytes.NewReader([]byte("generation: missing\n")), nil)
+	require.NoError(t, err)
+	restored := newTestHandler(t, store, []string{server.URL}, nil)
+	restored.restoreGenerations(ctx)
+	require.NotNil(t, restored.currentSnapshot())
+	restored.mu.RLock()
+	restoredRoot := restored.rootSnapshots["root"]
+	restored.mu.RUnlock()
+	require.NotNil(t, restoredRoot)
+	require.Equal(t, "1", restoredRoot.Generation)
 }
 
 func TestEnsureFirstRefreshWithNilBuilder(t *testing.T) {
@@ -358,6 +373,32 @@ func TestEnsureFirstRefreshWithNilBuilder(t *testing.T) {
 		build: nil,
 	}
 	handler.ensureFirstRefresh("test-key")
+}
+
+func TestAggregateSnapshotDoesNotCopyArtifacts(t *testing.T) {
+	handler := &IndexedHandler{
+		rootSnapshots: map[string]*LiveSnapshot{
+			"root": {
+				Metadata: map[string]MetadataObject{"meta/index.txt": {Path: "meta/index.txt"}},
+				Artifacts: map[string]RepoObject{
+					"pkg.tar": {Path: "pkg.tar", Upstream: "https://upstream.example"},
+				},
+			},
+		},
+	}
+
+	handler.mu.Lock()
+	handler.rebuildAggregateLocked()
+	handler.mu.Unlock()
+
+	snapshot := handler.currentSnapshot()
+	require.NotNil(t, snapshot)
+	require.Contains(t, snapshot.Metadata, "meta/index.txt")
+	require.Empty(t, snapshot.Artifacts)
+
+	obj, ok := handler.currentRepoObject("pkg.tar", ResourceArtifact)
+	require.True(t, ok)
+	require.Equal(t, "https://upstream.example", obj.Upstream)
 }
 
 func TestMetadataRequestWithoutCurrentGenerationReturnsUnavailable(t *testing.T) {
@@ -382,6 +423,7 @@ func TestMetadataRequestWithoutCurrentGenerationReturnsUnavailable(t *testing.T)
 		nil, nil,
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, stats, "test"),
+		nil,
 	)
 
 	rec := httptest.NewRecorder()
@@ -411,6 +453,7 @@ func TestArtifactWithoutCurrentGenerationUsesUnindexedPlan(t *testing.T) {
 		nil, nil, nil,
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, stats, "test"),
+		nil,
 	)
 
 	route, err := (&generationResolver{handler: handler, policy: &Policy{ArtifactPolicy: config.PolicyImmutable}}).Resolve(httptest.NewRequest(http.MethodGet, "/pool/pkg.deb", nil))
@@ -441,6 +484,7 @@ func TestIndexedArtifactAndAuxiliaryUseGenerationUpstream(t *testing.T) {
 		nil, nil, nil,
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{"https://first.example", "https://second.example"}, stats, "test"),
+		nil,
 	)
 	handler.mu.Lock()
 	handler.snapshot = &LiveSnapshot{
@@ -484,6 +528,7 @@ func TestRootReleasesWithoutHealthDoesNotPanic(t *testing.T) {
 		nil, nil, nil,
 		store, httpcache.NewStats(prometheus.NewRegistry()),
 		nil,
+		nil,
 	)
 	handler.rootSnapshots["root"] = &LiveSnapshot{
 		RootKey:    "root",
@@ -521,7 +566,7 @@ func TestCleanupKeepsUnindexedObjects(t *testing.T) {
 	_, err = store.Put(ctx, "repo", "repo/pkg.tar", strings.NewReader("cached"), map[string]string{"cache": "MISS"})
 	require.NoError(t, err)
 
-	require.NoError(t, handler.Cleanup(ctx))
+	require.NoError(t, handler.Cleanup(ctx, config.CleanupConfig{}))
 	reader, err := store.OpenObject(ctx, "repo", "repo/pkg.tar")
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
@@ -550,7 +595,7 @@ func TestCleanupDeletesStaleIndexedObjects(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, handler.Cleanup(ctx))
+	require.NoError(t, handler.Cleanup(ctx, config.CleanupConfig{}))
 	_, err = store.OpenObject(ctx, "repo", "repo/pkg.tar")
 	require.Error(t, err)
 }
@@ -600,6 +645,7 @@ func TestMetadataRequestStartsFirstRefreshAndReturnsUnavailableUntilReady(t *tes
 		},
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{server.URL}, stats, "test"),
+		nil,
 	)
 	require.NoError(t, handler.Start(ctx))
 	defer func() {

@@ -92,7 +92,7 @@ func TestRefreshSucceedsWithoutCompanions(t *testing.T) {
 		discoverer{},
 		[]filerepo.RootSpec{&rootSpec{Repo: "core", StorePath: "core/os/x86_64/core.db"}},
 		buildSnapshot,
-		store, stats, svcHealth,
+		store, stats, svcHealth, nil,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -153,6 +153,7 @@ func TestRefreshPrefetchesCompanions(t *testing.T) {
 		store,
 		stats,
 		svcHealth,
+		nil,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))

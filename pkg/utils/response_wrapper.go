@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+const DefaultHTTPTimeout = 30 * time.Minute
+const DefaultHeaderTimeout = 30 * time.Second
+const DefaultIdleBodyTimeout = 5 * time.Minute
+
 type ResponseWrapper struct {
 	StatusCode int
 	Headers    map[string]string
@@ -17,7 +21,8 @@ type ResponseWrapper struct {
 
 type HttpClientWrapper struct {
 	*http.Client
-	UserAgent string
+	UserAgent       string
+	IdleBodyTimeout time.Duration
 }
 
 func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -31,8 +36,9 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return &HttpClientWrapper{
-			Client:    &http.Client{},
-			UserAgent: "cache-proxy",
+			Client:          &http.Client{Timeout: DefaultHTTPTimeout},
+			UserAgent:       "cache-proxy",
+			IdleBodyTimeout: DefaultIdleBodyTimeout,
 		}
 	}
 	transport := defaultTransport.Clone()
@@ -41,11 +47,19 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 	transport.MaxConnsPerHost = 200
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.DialContext = DefaultDialContext(3 * time.Second)
-	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.ResponseHeaderTimeout = DefaultHeaderTimeout
 	return &HttpClientWrapper{
-		Client:    &http.Client{Transport: transport},
-		UserAgent: "cache-proxy",
+		Client:          &http.Client{Transport: transport, Timeout: DefaultHTTPTimeout},
+		UserAgent:       "cache-proxy",
+		IdleBodyTimeout: DefaultIdleBodyTimeout,
 	}
+}
+
+func (receiver *HttpClientWrapper) WrapBody(body io.ReadCloser) io.ReadCloser {
+	if receiver == nil {
+		return body
+	}
+	return NewIdleTimeoutReadCloser(body, receiver.IdleBodyTimeout)
 }
 
 func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {

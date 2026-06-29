@@ -43,7 +43,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string
 	}
 	h.stats.RecordUpstream(h.name, config.ModeOCI, method, response.StatusCode)
 	slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
-	response.Body = utils.NewRateLimitReader(response.Body)
+	response.Body = utils.NewRateLimitReader(h.client.WrapBody(response.Body))
 	return response, nil
 }
 

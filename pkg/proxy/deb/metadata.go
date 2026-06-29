@@ -342,7 +342,9 @@ func parseDebStanzas(input io.Reader, apply func(map[string]string)) error {
 			return
 		}
 		apply(fields)
-		fields = map[string]string{}
+		for key := range fields {
+			delete(fields, key)
+		}
 		currentKey = ""
 	}
 	for scanner.Scan() {

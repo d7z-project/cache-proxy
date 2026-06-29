@@ -44,7 +44,7 @@ type moduleRequest struct {
 	cacheKey   string
 }
 
-func NewHandler(name string, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats) (*Handler, error) {
+func NewHandler(name string, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) (*Handler, error) {
 	if policy == nil {
 		policy = &Policy{}
 	}
@@ -57,6 +57,7 @@ func NewHandler(name string, expireAfter config.Expiration, upstreams []string, 
 		BusyPolicy:         policy.ModuleBusyPolicy,
 		DefaultFreshFor:    policy.ModuleFreshFor,
 		AllowedTargetHosts: sumDBTargetHosts(policy),
+		DownloadLimiter:    downloads,
 	}, store, &resolver{policy: policy}, stats, nil)
 	return &Handler{name: name, policy: policy, store: store, base: base}, nil
 }
@@ -104,8 +105,8 @@ func (h *Handler) CloseContext(ctx context.Context) error {
 	return h.base.CloseContext(ctx)
 }
 
-func (h *Handler) Cleanup(ctx context.Context) error {
-	return h.base.Cleanup(ctx)
+func (h *Handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
+	return h.base.Cleanup(ctx, opts)
 }
 
 type resolver struct {

@@ -21,7 +21,7 @@ type Instance interface {
 	http.Handler
 	Start(context.Context) error
 	Stop(context.Context) error
-	Cleanup(context.Context) error
+	Cleanup(context.Context, config.CleanupConfig) error
 }
 
 // StatusSource allows an Instance to provide custom dashboard status
@@ -50,7 +50,7 @@ type HandlerInstance struct {
 	Handler      http.Handler
 	Close        func() error
 	CloseContext func(context.Context) error
-	CleanupFn    func(context.Context) error
+	CleanupFn    func(context.Context, config.CleanupConfig) error
 }
 
 func (h HandlerInstance) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -69,9 +69,9 @@ func (h HandlerInstance) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (h HandlerInstance) Cleanup(ctx context.Context) error {
+func (h HandlerInstance) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
 	if h.CleanupFn != nil {
-		return h.CleanupFn(ctx)
+		return h.CleanupFn(ctx, opts)
 	}
 	return nil
 }
@@ -108,6 +108,7 @@ type Result struct {
 type PlanContext struct {
 	store       *blobfs.Store
 	stats       *httpcache.Stats
+	downloads   *httpcache.DownloadLimiter
 	mainBind    string
 	metricsPath string
 	entries     map[string]*Entry
@@ -123,10 +124,11 @@ type InstancePlan struct {
 	bound    bool
 }
 
-func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, mainBind, metricsPath string) *PlanContext {
+func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, mainBind, metricsPath string) *PlanContext {
 	return &PlanContext{
 		store:       store,
 		stats:       stats,
+		downloads:   downloads,
 		mainBind:    mainBind,
 		metricsPath: metricsPath,
 		entries:     map[string]*Entry{},
@@ -175,14 +177,16 @@ func (p *PlanContext) Finalize() (*Result, error) {
 	return &Result{Entries: entries}, nil
 }
 
-func (p *PlanContext) Store() *blobfs.Store    { return p.store }
-func (p *PlanContext) Stats() *httpcache.Stats { return p.stats }
+func (p *PlanContext) Store() *blobfs.Store                  { return p.store }
+func (p *PlanContext) Stats() *httpcache.Stats               { return p.stats }
+func (p *PlanContext) Downloads() *httpcache.DownloadLimiter { return p.downloads }
 
-func (i *InstancePlan) Name() string            { return i.entry.Name }
-func (i *InstancePlan) Mode() string            { return i.entry.Mode }
-func (i *InstancePlan) Enabled() bool           { return i.entry.Enabled }
-func (i *InstancePlan) Store() *blobfs.Store    { return i.ctx.store }
-func (i *InstancePlan) Stats() *httpcache.Stats { return i.ctx.stats }
+func (i *InstancePlan) Name() string                          { return i.entry.Name }
+func (i *InstancePlan) Mode() string                          { return i.entry.Mode }
+func (i *InstancePlan) Enabled() bool                         { return i.entry.Enabled }
+func (i *InstancePlan) Store() *blobfs.Store                  { return i.ctx.store }
+func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.stats }
+func (i *InstancePlan) Downloads() *httpcache.DownloadLimiter { return i.ctx.downloads }
 
 func (i *InstancePlan) Decode(target any) error {
 	if i.selected.Block == nil {

@@ -18,18 +18,20 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats) *handler {
+func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) *handler {
 	client := utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(client, name, config.ModeOCI, block.Transport)
 	return &handler{
-		name:        name,
-		upstream:    strings.TrimRight(block.Upstream, "/"),
-		expireAfter: expireAfter,
-		policy:      &block.Policy,
-		store:       store,
-		stats:       stats,
-		client:      client,
-		auth:        authHandler{tokens: map[string]ociToken{}},
+		name:             name,
+		upstream:         strings.TrimRight(block.Upstream, "/"),
+		expireAfter:      expireAfter,
+		policy:           &block.Policy,
+		store:            store,
+		stats:            stats,
+		client:           client,
+		downloadsLimiter: downloads,
+		auth:             authHandler{tokens: map[string]ociToken{}},
+		blobIndex:        map[string]blobIndexEntry{},
 	}
 }
 
@@ -67,18 +69,29 @@ func (h *handler) Stop(ctx context.Context) error {
 	return utils.WaitGroupContext(ctx, &h.wait)
 }
 
-func (h *handler) Cleanup(ctx context.Context) error {
+func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
+	deleted := 0
 	return fs.WalkDir(h.store.TenantFS(h.name), "oci/refs", func(current string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+			return fs.SkipAll
 		}
 		if err != nil || entry.IsDir() || path.Base(current) != "state.yaml" {
 			return nil
 		}
 		state, readErr := h.readState(ctx, current)
 		if readErr != nil || h.stateExpired(state) {
+			if opts.DryRun {
+				deleted++
+				slog.Info("oci cleanup dry-run delete", "instance", h.name, "prefix", path.Dir(current))
+				return nil
+			}
 			if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil && !errors.Is(removeErr, context.Canceled) {
 				slog.Info("oci cleanup delete failed", "instance", h.name, "prefix", path.Dir(current), "err", removeErr)
+			} else {
+				deleted++
 			}
 		}
 		return nil

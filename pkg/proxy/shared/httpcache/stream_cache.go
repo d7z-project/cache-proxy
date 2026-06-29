@@ -11,9 +11,11 @@ import (
 
 type StreamConfig struct {
 	Body       io.ReadCloser
+	Instance   string
 	ObjectPath string
 	Downloads  *sync.Map
 	Wait       *sync.WaitGroup
+	Limiter    *DownloadLimiter
 	StatsStart func()
 	StatsDone  func()
 	VerifyFn   func(io.ReadSeeker) error
@@ -21,8 +23,14 @@ type StreamConfig struct {
 }
 
 func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
+	release, err := cfg.Limiter.Acquire(ctx, cfg.Instance)
+	if err != nil {
+		cfg.Body.Close()
+		return nil, err
+	}
 	tempFile, err := os.CreateTemp("", "cache-proxy-*")
 	if err != nil {
+		release()
 		cfg.Body.Close()
 		return nil, err
 	}
@@ -41,6 +49,7 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 			}
 		}()
 		defer cfg.Wait.Done()
+		defer release()
 		defer cfg.Downloads.Delete(cfg.ObjectPath)
 		defer cfg.Body.Close()
 		defer pw.Close()

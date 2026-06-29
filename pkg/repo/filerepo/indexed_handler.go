@@ -59,7 +59,7 @@ type IndexedHandler struct {
 	wait          sync.WaitGroup
 }
 
-func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth) *IndexedHandler {
+func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
 		name:          name,
@@ -77,14 +77,15 @@ func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classi
 		rootSnapshots: map[string]*LiveSnapshot{},
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
-		Mode:         mode,
-		ExpireAfter:  expireAfter,
-		Upstreams:    append([]string(nil), upstreams...),
-		Transport:    transport,
-		PassHeaders:  append([]string(nil), policy.PassHeaders...),
-		BusyPolicy:   policy.AuxiliaryBusyPolicy,
-		MetadataFunc: handler.extraObjectMetadata,
-		VerifyFunc:   handler.verifyObject,
+		Mode:            mode,
+		ExpireAfter:     expireAfter,
+		Upstreams:       append([]string(nil), upstreams...),
+		Transport:       transport,
+		PassHeaders:     append([]string(nil), policy.PassHeaders...),
+		BusyPolicy:      policy.AuxiliaryBusyPolicy,
+		MetadataFunc:    handler.extraObjectMetadata,
+		VerifyFunc:      handler.verifyObject,
+		DownloadLimiter: downloads,
 	}, store, &generationResolver{handler: handler, policy: policy}, stats, svcHealth)
 	handler.client = utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, mode, transport)
@@ -103,12 +104,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	class := h.classify(cleanPath)
 	if class == ResourceUnknown {
-		snap := h.currentSnapshot()
-		preferred := ""
-		if snap != nil {
-			preferred = snap.Upstream
-		}
-		h.base.ProxyPassthrough(w, req, cleanPath, preferred)
+		h.base.ProxyPassthrough(w, req, cleanPath, h.currentPreferredUpstream())
 		return
 	}
 	if class == ResourceMetadata {
@@ -139,7 +135,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (h *IndexedHandler) Start(ctx context.Context) error {
 	h.lifecycleCtx = ctx
 	if h.sh != nil {
-		h.sh.Start()
+		h.sh.Start(ctx)
 	}
 	h.restoreRoots(ctx)
 	h.wait.Add(1)
@@ -202,14 +198,17 @@ func (h *IndexedHandler) Refresh(ctx context.Context) error {
 	return h.doRefresh(ctx, true)
 }
 
-func (h *IndexedHandler) Cleanup(ctx context.Context) error {
-	snapshot := h.currentSnapshot()
-	if snapshot == nil {
+func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
+	if !h.hasAnyRootSnapshot() {
 		return nil
 	}
+	deleted := 0
 	return fs.WalkDir(h.store.TenantFS(h.name), h.objectRoot, func(objectPath string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+			return fs.SkipAll
 		}
 		if err != nil || entry.IsDir() || strings.Contains(objectPath, "/.roots/") {
 			return nil
@@ -221,22 +220,25 @@ func (h *IndexedHandler) Cleanup(ctx context.Context) error {
 		cleanPath := strings.TrimPrefix(objectPath, h.objectRoot+"/")
 		switch h.classify(cleanPath) {
 		case ResourceArtifact:
-			if _, keep := snapshot.Artifacts[cleanPath]; keep {
+			if _, keep := h.currentRepoObject(cleanPath, ResourceArtifact); keep {
 				return nil
 			}
 		case ResourceAuxiliary:
-			for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
-				if base := strings.TrimSuffix(cleanPath, suffix); base != cleanPath {
-					if _, keep := snapshot.Artifacts[base]; keep {
-						return nil
-					}
-				}
+			if _, keep := h.currentRepoObject(cleanPath, ResourceAuxiliary); keep {
+				return nil
 			}
 		default:
 			return nil
 		}
+		if opts.DryRun {
+			deleted++
+			slog.Info("indexed cleanup dry-run delete", "instance", h.name, "path", objectPath)
+			return nil
+		}
 		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Info("indexed cleanup delete failed", "instance", h.name, "path", objectPath, "err", err)
+		} else {
+			deleted++
 		}
 		return nil
 	})
@@ -303,20 +305,24 @@ func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
 			}
 		}()
 		defer h.wait.Done()
-		refreshCtx, refreshCancel := context.WithTimeout(h.lifecycleCtx, defaultFirstRefreshTimeout)
+		refreshCtx, refreshCancel := context.WithTimeout(h.lifecycleCtx, defaultRefreshTimeout)
 		defer refreshCancel()
-		_, _ = h.refreshRoot(refreshCtx, rootKey, time.Now())
+		if _, err := h.refreshRoot(refreshCtx, rootKey, time.Now()); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Info("first metadata refresh failed", "instance", h.name, "mode", h.mode, "root", rootKey, "err", err)
+		}
 	}()
 }
 
-const defaultFirstRefreshTimeout = 30 * time.Minute
+const defaultRefreshTimeout = 30 * time.Minute
 
 func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
 	if h.build == nil || ctx.Err() != nil {
 		return
 	}
 	slog.Debug("metadata refresh cycle starting", "instance", h.name, "mode", h.mode, "interval", h.policy.Interval)
-	h.doRefresh(ctx, false)
+	refreshCtx, cancel := context.WithTimeout(ctx, defaultRefreshTimeout)
+	defer cancel()
+	h.doRefresh(refreshCtx, false)
 }
 
 func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
@@ -341,10 +347,10 @@ func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
 		h.mu.Unlock()
 	}
 
-	snapshotReady := h.currentSnapshot() != nil
+	snapshotReady := h.hasAnyRootSnapshot()
 
 	if refreshed {
-		if cleanupErr := h.Cleanup(ctx); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
+		if cleanupErr := h.Cleanup(ctx, config.CleanupConfig{}); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
 			slog.Info("indexed cleanup failed after refresh", "instance", h.name, "mode", h.mode, "err", cleanupErr)
 		}
 	}
@@ -396,12 +402,10 @@ func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now ti
 			}
 			continue
 		}
-		h.mu.Lock()
-		h.rootSnapshots[rootKey] = snapshot
-		h.mu.Unlock()
 		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, targetsToProbe(targets))
 		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
 		h.mu.Lock()
+		h.rootSnapshots[rootKey] = snapshot
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
 		h.reportMetadataState()
@@ -486,7 +490,7 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("fetch %s: %w", targetURL, err)}
 	}
 	defer response.Body.Close()
-	response.Body = utils.NewContextReadCloser(ctx, response.Body)
+	response.Body = utils.NewContextReadCloser(ctx, h.client.WrapBody(response.Body))
 	h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, response.StatusCode)
 	if h.sh != nil {
 		h.sh.RecordResult(upstream, response.StatusCode, latency)
@@ -562,15 +566,35 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	if err != nil {
 		return err
 	}
-	current := h.currentPath(snapshot.RootKey)
-	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(current)), 0o755); err != nil {
+	snapshotPath := h.snapshotPath(snapshot.RootKey, snapshot.Generation)
+	currentPath := h.currentPath(snapshot.RootKey)
+	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(snapshotPath)), 0o755); err != nil {
 		return err
 	}
-	_, err = h.store.Put(ctx, h.name, current, bytes.NewReader(data), map[string]string{
+	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(currentPath)), 0o755); err != nil {
+		return err
+	}
+	if _, err = h.store.Put(ctx, h.name, snapshotPath, bytes.NewReader(data), map[string]string{
 		"content-type": "application/yaml",
 		"mode":         h.mode,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	refData, err := yaml.Marshal(struct {
+		RootKey    string `yaml:"root_key"`
+		Generation string `yaml:"generation"`
+	}{RootKey: snapshot.RootKey, Generation: snapshot.Generation})
+	if err != nil {
+		return err
+	}
+	tmpPath := currentPath + ".tmp." + snapshot.Generation
+	if _, err = h.store.Put(ctx, h.name, tmpPath, bytes.NewReader(refData), map[string]string{
+		"content-type": "application/yaml",
+		"mode":         h.mode,
+	}); err != nil {
+		return err
+	}
+	return h.store.Rename(path.Join(h.name, tmpPath), path.Join(h.name, currentPath))
 }
 
 func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnly bool) (bool, error) {
@@ -631,25 +655,29 @@ func (h *IndexedHandler) prepareRequest(ctx context.Context, cleanPath string, c
 }
 
 func (h *IndexedHandler) currentRepoObject(cleanPath string, class ResourceClass) (RepoObject, bool) {
-	snapshot := h.currentSnapshot()
-	if snapshot == nil {
-		return RepoObject{}, false
-	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	switch class {
 	case ResourceArtifact:
-		obj, ok := snapshot.Artifacts[cleanPath]
-		return obj, ok
+		for _, snapshot := range h.rootSnapshots {
+			if obj, ok := snapshot.Artifacts[cleanPath]; ok {
+				return obj, true
+			}
+		}
+		return RepoObject{}, false
 	case ResourceAuxiliary:
 		for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
 			if base := strings.TrimSuffix(cleanPath, suffix); base != cleanPath {
-				if artifact, ok := snapshot.Artifacts[base]; ok {
-					return RepoObject{
-						Path:       cleanPath,
-						Identity:   artifact.Identity,
-						Upstream:   artifact.Upstream,
-						RootKey:    artifact.RootKey,
-						Generation: artifact.Generation,
-					}, true
+				for _, snapshot := range h.rootSnapshots {
+					if artifact, ok := snapshot.Artifacts[base]; ok {
+						return RepoObject{
+							Path:       cleanPath,
+							Identity:   artifact.Identity,
+							Upstream:   artifact.Upstream,
+							RootKey:    artifact.RootKey,
+							Generation: artifact.Generation,
+						}, true
+					}
 				}
 			}
 		}
@@ -788,9 +816,6 @@ func (h *IndexedHandler) rebuildAggregateLocked() {
 		for p, obj := range snap.Metadata {
 			aggregate.Metadata[p] = obj
 		}
-		for p, obj := range snap.Artifacts {
-			aggregate.Artifacts[p] = obj
-		}
 	}
 	h.snapshot = aggregate
 }
@@ -808,8 +833,25 @@ func (h *IndexedHandler) hasRootSnapshot(rootKey string) bool {
 	return ok
 }
 
+func (h *IndexedHandler) hasAnyRootSnapshot() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.rootSnapshots) > 0
+}
+
+func (h *IndexedHandler) currentPreferredUpstream() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, snapshot := range h.rootSnapshots {
+		if snapshot.Upstream != "" {
+			return snapshot.Upstream
+		}
+	}
+	return ""
+}
+
 func (h *IndexedHandler) reportMetadataState() {
-	ready := h.currentSnapshot() != nil
+	ready := h.hasAnyRootSnapshot()
 	stateStr := "booting"
 	if ready {
 		if h.sh != nil {
@@ -922,6 +964,10 @@ func (h *IndexedHandler) generationMetadataPath(rootKey, generation, cleanPath s
 
 func (h *IndexedHandler) currentPath(rootKey string) string {
 	return path.Join(h.objectRoot, ".roots", pathEscapeKey(rootKey), "current.yaml")
+}
+
+func (h *IndexedHandler) snapshotPath(rootKey, generation string) string {
+	return path.Join(h.objectRoot, ".roots", pathEscapeKey(rootKey), "snapshots", generation+".yaml")
 }
 
 func headerName(key string) string {

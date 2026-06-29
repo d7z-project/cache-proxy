@@ -107,7 +107,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 
 	for _, d := range blobDigests {
-		h.blobIndex.Store(d, blobRef{repo: state.Repo, ref: state.Ref})
+		h.rememberBlob(d, state)
 	}
 
 	headers := map[string]string{
@@ -140,9 +140,11 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 
 	pr, err := httpcache.StreamToPipe(ctx, httpcache.StreamConfig{
 		Body:       response.Body,
+		Instance:   h.name,
 		ObjectPath: objectPath,
 		Downloads:  &h.downloads,
 		Wait:       &h.wait,
+		Limiter:    h.downloadsLimiter,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
 		VerifyFn: func(r io.ReadSeeker) error {
@@ -203,13 +205,12 @@ func (h *handler) writeState(ctx context.Context, state refState) error {
 }
 
 func (h *handler) findBlobState(ctx context.Context, repo, digest string) (refState, error) {
-	if v, ok := h.blobIndex.Load(digest); ok {
-		ref := v.(blobRef)
+	if ref, ok := h.lookupBlob(digest); ok {
 		state, err := h.readState(ctx, h.refStatePath(ref.repo, ref.ref))
 		if err == nil && !h.stateExpired(state) {
 			return state, nil
 		}
-		h.blobIndex.Delete(digest)
+		h.forgetBlob(digest)
 	}
 	base := path.Join("oci/refs", repo)
 	var matched refState
@@ -224,7 +225,7 @@ func (h *handler) findBlobState(ctx context.Context, repo, digest string) (refSt
 		for _, item := range state.BlobDigests {
 			if item == digest {
 				matched = state
-				h.blobIndex.Store(digest, blobRef{repo: state.Repo, ref: state.Ref})
+				h.rememberBlob(digest, state)
 				return fs.SkipAll
 			}
 		}
@@ -264,14 +265,64 @@ func (h *handler) deleteTree(ctx context.Context, prefix string) error {
 }
 
 func (h *handler) purgeBlobIndex() {
-	h.blobIndex.Range(func(key, value any) bool {
-		ref := value.(blobRef)
-		state, err := h.readState(context.Background(), h.refStatePath(ref.repo, ref.ref))
-		if err != nil || h.stateExpired(state) {
-			h.blobIndex.Delete(key)
+	h.blobIndexMu.Lock()
+	defer h.blobIndexMu.Unlock()
+	now := time.Now()
+	for digest, entry := range h.blobIndex {
+		if !entry.expires.IsZero() && now.After(entry.expires) {
+			delete(h.blobIndex, digest)
 		}
-		return true
-	})
+	}
+	for len(h.blobIndex) > maxBlobIndexEntries {
+		for digest := range h.blobIndex {
+			delete(h.blobIndex, digest)
+			break
+		}
+	}
+}
+
+const maxBlobIndexEntries = 8192
+
+func (h *handler) rememberBlob(digest string, state refState) {
+	if digest == "" {
+		return
+	}
+	expireAfter := effectiveExpire(state.ExpireAfter, h.expireAfter)
+	var expires time.Time
+	if !expireAfter.IsNever() && !expireAfter.IsUnset() {
+		expires = state.FetchedAt.Add(expireAfter.Duration())
+	}
+	h.blobIndexMu.Lock()
+	h.blobIndex[digest] = blobIndexEntry{ref: blobRef{repo: state.Repo, ref: state.Ref}, expires: expires}
+	over := len(h.blobIndex) - maxBlobIndexEntries
+	for digest := range h.blobIndex {
+		if over <= 0 {
+			break
+		}
+		delete(h.blobIndex, digest)
+		over--
+	}
+	h.blobIndexMu.Unlock()
+}
+
+func (h *handler) lookupBlob(digest string) (blobRef, bool) {
+	h.blobIndexMu.Lock()
+	defer h.blobIndexMu.Unlock()
+	entry, ok := h.blobIndex[digest]
+	if !ok {
+		return blobRef{}, false
+	}
+	if !entry.expires.IsZero() && time.Now().After(entry.expires) {
+		delete(h.blobIndex, digest)
+		return blobRef{}, false
+	}
+	return entry.ref, true
+}
+
+func (h *handler) forgetBlob(digest string) {
+	h.blobIndexMu.Lock()
+	delete(h.blobIndex, digest)
+	h.blobIndexMu.Unlock()
 }
 
 func collectBlobDigests(r io.Reader) []string {

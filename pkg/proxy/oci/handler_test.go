@@ -70,6 +70,25 @@ func TestResolveRequestMatchesRepoPolicy(t *testing.T) {
 	require.Equal(t, config.Expiration(2*time.Hour), resolved.match.expireAfter)
 }
 
+func TestBlobIndexIsBounded(t *testing.T) {
+	h := &handler{
+		expireAfter: config.Expiration(time.Hour),
+		blobIndex:   map[string]blobIndexEntry{},
+	}
+	state := refState{
+		Repo:        "library/alpine",
+		Ref:         "latest",
+		FetchedAt:   time.Now(),
+		ExpireAfter: config.Expiration(time.Hour),
+	}
+	for i := 0; i < maxBlobIndexEntries+100; i++ {
+		h.rememberBlob("sha256:"+strconv.FormatInt(int64(i), 16), state)
+	}
+	h.blobIndexMu.Lock()
+	require.LessOrEqual(t, len(h.blobIndex), maxBlobIndexEntries)
+	h.blobIndexMu.Unlock()
+}
+
 func TestOCIBearerTokenSingleflight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -90,7 +109,7 @@ func TestOCIBearerTokenSingleflight(t *testing.T) {
 		Policy: Policy{
 			Auth: &AuthConfig{Type: "basic", Username: "user", Password: "pass"},
 		},
-	}, config.DefaultExpireAfter, nil, httpcache.NewStats(prometheus.NewRegistry()))
+	}, config.DefaultExpireAfter, nil, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	challenge := ociChallenge{
 		scheme: "Bearer",
 		realm:  tokenServer.URL + "/token",
@@ -152,7 +171,7 @@ func TestOCIManifestKeepsBlobUntilRefExpires(t *testing.T) {
 			DefaultPolicy: config.PolicyImmutable,
 			BusyPolicy:    config.BusyPolicyStale,
 		},
-	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()))
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
 	rec := httptest.NewRecorder()
@@ -181,7 +200,7 @@ func TestOCIManifestKeepsBlobUntilRefExpires(t *testing.T) {
 	state.FetchedAt = time.Now().Add(-2 * time.Hour)
 	require.NoError(t, handler.writeState(ctx, state))
 
-	require.NoError(t, handler.Cleanup(ctx))
+	require.NoError(t, handler.Cleanup(ctx, config.CleanupConfig{}))
 
 	_, err = store.OpenObject(ctx, handler.name, handler.refBlobPath("library/alpine", "latest", "sha256:layer"))
 	require.Error(t, err)
@@ -207,7 +226,7 @@ func TestOCIBypassesBlobWithoutActiveRef(t *testing.T) {
 		Policy: Policy{
 			DefaultPolicy: config.PolicyImmutable,
 		},
-	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()))
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/sha256:layer", nil)
 	rec := httptest.NewRecorder()
@@ -238,7 +257,7 @@ func TestOCIManifestDigestMismatchFails(t *testing.T) {
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
 		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
-	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()))
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
@@ -272,7 +291,7 @@ func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
 		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
-	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()))
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))

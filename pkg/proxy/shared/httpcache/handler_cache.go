@@ -219,9 +219,11 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 
 	pr, err := StreamToPipe(ctx, StreamConfig{
 		Body:       resp.Body,
+		Instance:   h.name,
 		ObjectPath: route.ObjectPath,
 		Downloads:  &h.downloads,
 		Wait:       &h.wait,
+		Limiter:    h.downloadLimiter,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, h.config.Mode, 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, h.config.Mode, -1) },
 		VerifyFn: func(r io.ReadSeeker) error {

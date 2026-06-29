@@ -26,7 +26,9 @@ const (
 func (h *gitHandler) cloneAndSync(ctx context.Context) {
 	backoff := 10 * time.Second
 	for {
-		err := h.doClone(ctx)
+		opCtx, cancel := h.operationContext(ctx)
+		err := h.doClone(opCtx)
+		cancel()
 		if err == nil {
 			break
 		}
@@ -39,13 +41,15 @@ func (h *gitHandler) cloneAndSync(ctx context.Context) {
 			return
 		}
 		slog.Warn("git clone failed, retrying", "instance", h.name, "upstream", h.redactedUpstream(), "backoff", backoff, "err", err)
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			h.mu.Lock()
 			h.state = gitStateFailed
 			h.mu.Unlock()
 			return
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 		if backoff < 10*time.Minute {
 			backoff *= 2
@@ -71,6 +75,13 @@ func (h *gitHandler) cloneAndSync(ctx context.Context) {
 			h.doSync(ctx)
 		}
 	}
+}
+
+func (h *gitHandler) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if h.operationTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, h.operationTimeout)
 }
 
 func (h *gitHandler) doClone(ctx context.Context) error {
@@ -144,7 +155,9 @@ func (h *gitHandler) doSync(ctx context.Context) {
 		opts.ProxyOptions = proxyOptions(h.proxyURL)
 	}
 	slog.Debug("syncing git mirror", "instance", h.name)
-	err := h.repo.FetchContext(ctx, opts)
+	opCtx, cancel := h.operationContext(ctx)
+	err := h.repo.FetchContext(opCtx, opts)
+	cancel()
 
 	h.mu.Lock()
 	h.state = gitStateReady

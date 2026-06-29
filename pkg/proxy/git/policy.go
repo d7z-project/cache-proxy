@@ -23,12 +23,13 @@ type AuthConfig struct {
 }
 
 type Block struct {
-	Upstream     string          `yaml:"upstream"`
-	Auth         *AuthConfig     `yaml:"auth,omitempty"`
-	Proxy        string          `yaml:"proxy,omitempty"`
-	SyncInterval config.Duration `yaml:"sync_interval"`
-	Overwrite    *bool           `yaml:"force_overwrite"`
-	Route        struct {
+	Upstream         string          `yaml:"upstream"`
+	Auth             *AuthConfig     `yaml:"auth,omitempty"`
+	Proxy            string          `yaml:"proxy,omitempty"`
+	SyncInterval     config.Duration `yaml:"sync_interval"`
+	OperationTimeout config.Duration `yaml:"operation_timeout"`
+	Overwrite        *bool           `yaml:"force_overwrite"`
+	Route            struct {
 		Path string `yaml:"path"`
 	} `yaml:"route"`
 }
@@ -73,13 +74,14 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	billyFs := newBillyAdapter(baseFs, "")
 
 	handler := newGitHandler(gitConfig{
-		name:           plan.Name(),
-		billyFs:        billyFs,
-		upstream:       block.Upstream,
-		auth:           auth,
-		proxyURL:       proxyURLStr,
-		syncInterval:   time.Duration(block.SyncInterval),
-		forceOverwrite: forceOverwrite,
+		name:             plan.Name(),
+		billyFs:          billyFs,
+		upstream:         block.Upstream,
+		auth:             auth,
+		proxyURL:         proxyURLStr,
+		syncInterval:     time.Duration(block.SyncInterval),
+		operationTimeout: block.OperationTimeout.Duration(),
+		forceOverwrite:   forceOverwrite,
 	})
 
 	plan.SetHomeSnippet(plan.RenderSnippet())

@@ -120,8 +120,9 @@ func ErrorResponse(status int, err error) *utils.ResponseWrapper {
 	return &utils.ResponseWrapper{StatusCode: status, Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8", "X-Cache": "ERROR"}, Body: io.NopCloser(strings.NewReader(body))}
 }
 
-func responseFromHTTP(response *http.Response) *utils.ResponseWrapper {
-	return &utils.ResponseWrapper{StatusCode: response.StatusCode, Headers: copyHeaders(response.Header), Body: utils.NewRateLimitReader(response.Body)}
+func responseFromHTTP(client *utils.HttpClientWrapper, response *http.Response) *utils.ResponseWrapper {
+	body := client.WrapBody(response.Body)
+	return &utils.ResponseWrapper{StatusCode: response.StatusCode, Headers: copyHeaders(response.Header), Body: utils.NewRateLimitReader(body)}
 }
 
 func copyHeaders(headers http.Header) map[string]string {

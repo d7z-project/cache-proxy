@@ -46,6 +46,7 @@ type RuntimeConfig struct {
 	AllowedTargetHosts []string
 	MetadataFunc       func(*http.Request, Route, map[string]string, string) map[string]string
 	VerifyFunc         func(*http.Request, Route, io.ReadSeeker) error
+	DownloadLimiter    *DownloadLimiter
 }
 
 type Handler struct {
@@ -59,6 +60,7 @@ type Handler struct {
 	health              *health.ServiceHealth
 	wait                sync.WaitGroup
 	downloads           sync.Map
+	downloadLimiter     *DownloadLimiter
 	parsedUpstreamHosts []string
 }
 
@@ -79,7 +81,7 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 			hosts = append(hosts, pu.Host)
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth, parsedUpstreamHosts: hosts}
+	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth, downloadLimiter: runtime.DownloadLimiter, parsedUpstreamHosts: hosts}
 }
 
 func ConfigureClientTransport(client *utils.HttpClientWrapper, name, mode string, transport *config.TransportConfig) {
@@ -102,8 +104,17 @@ func ConfigureClientTransport(client *utils.HttpClientWrapper, name, mode string
 			slog.Warn("invalid transport proxy URL", "instance", name, "proxy", transport.Proxy, "err", err)
 		}
 	}
-	if transport.Timeout > 0 {
-		baseTransport.DialContext = utils.DefaultDialContext(transport.Timeout.Duration())
+	if transport.DialTimeout > 0 {
+		baseTransport.DialContext = utils.DefaultDialContext(transport.DialTimeout.Duration())
+	}
+	if transport.HeaderTimeout > 0 {
+		baseTransport.ResponseHeaderTimeout = transport.HeaderTimeout.Duration()
+	}
+	if transport.IdleBodyTimeout > 0 {
+		client.IdleBodyTimeout = transport.IdleBodyTimeout.Duration()
+	}
+	if transport.MaxRequestDuration > 0 {
+		client.Timeout = transport.MaxRequestDuration.Duration()
 	}
 	if transport.MaxIdleConns > 0 {
 		baseTransport.MaxIdleConns = transport.MaxIdleConns

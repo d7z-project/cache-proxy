@@ -53,6 +53,8 @@ instances:
 | `storage.cleanup.dry_run` | bool | `false` | Log deletions without removing |
 | `storage.cleanup.batch_size` | int | `500` | Max objects per batch |
 | `storage.cleanup.workers` | int | `0` | Concurrency (`0` = auto) |
+| `storage.download.max_active` | int | `64` | Global concurrent cache-fill downloads |
+| `storage.download.max_active_per_instance` | int | `8` | Concurrent cache-fill downloads per instance |
 
 ### Value types
 
@@ -78,7 +80,10 @@ instances:
       transport:
         proxy: http://127.0.0.1:7890
         ua: custom-agent/1.0
-        timeout: 10s
+        dial_timeout: 3s
+        header_timeout: 30s
+        idle_body_timeout: 5m
+        max_request_duration: 30m
         health:
           enabled: true
           degrade_rate: 0.1
@@ -106,7 +111,10 @@ instances:
 | `bind` | `host:port` | required* | Dedicated listener (* `oci` only) |
 | `transport.proxy` | URL | — | Outbound HTTP proxy |
 | `transport.ua` | string | per mode | Override User-Agent |
-| `transport.timeout` | duration | `3s` | Upstream TCP dial timeout |
+| `transport.dial_timeout` | duration | `3s` | TCP/TLS connection timeout |
+| `transport.header_timeout` | duration | `30s` | Time allowed to receive upstream response headers |
+| `transport.idle_body_timeout` | duration | `5m` | Maximum idle gap between upstream response body reads |
+| `transport.max_request_duration` | duration | `30m` | Optional total upstream request duration cap |
 | `transport.health.enabled` | bool | `true` | Enable active health monitoring and failover |
 | `transport.health.degrade_rate` | float | `0.1` | Error rate threshold to reduce upstream traffic |
 | `transport.health.trip_rate` | float | `0.3` | Error rate threshold to stop all traffic to upstream |
@@ -122,6 +130,8 @@ instances:
 | `transport.health.resource_remove_count` | int | `5` | Consecutive missed updates to remove a repo |
 
 `transport.health` is a patch over the built-in defaults: unspecified fields keep their default values.
+
+Storage writes are bounded internally to protect memory during concurrent large downloads.
 
 ---
 
@@ -495,7 +505,6 @@ Notes:
 - One remote repository per instance. Read-only mirror (no push support).
 - Configurable `sync_interval` keeps the local mirror in sync with the remote; set to `0` for manual-only.
 - With `force_overwrite: true` and `sync_interval > 0`, the mirror stays byte-identical to the remote including force-pushed history and deleted branches (prune).
-- Repository storage is backed by the configured `server.backend` via the internal afero filesystem layer.
 - Clone status and sync results are exposed as Prometheus metrics (`cache_proxy_git_clone_success_total`, `cache_proxy_git_sync_success_total`, `cache_proxy_git_last_sync_timestamp_seconds`).
 
 </details>

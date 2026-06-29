@@ -137,7 +137,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 		}
 	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
-	return responseFromHTTP(response), nil
+	return responseFromHTTP(h.client, response), nil
 }
 
 func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error {
@@ -252,7 +252,7 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 		}
 		return nil, err
 	}
-	return responseFromHTTP(response), nil
+	return responseFromHTTP(h.client, response), nil
 }
 
 func shouldFailoverStatus(status int) bool {

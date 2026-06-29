@@ -45,20 +45,27 @@ type descriptor struct {
 }
 
 type handler struct {
-	name        string
-	upstream    string
-	expireAfter config.Expiration
-	policy      *Policy
-	store       *blobfs.Store
-	stats       *httpcache.Stats
-	client      *utils.HttpClientWrapper
-	wait        sync.WaitGroup
-	auth        authHandler
-	downloads   sync.Map
-	blobIndex   sync.Map // digest(string) -> blobRef
+	name             string
+	upstream         string
+	expireAfter      config.Expiration
+	policy           *Policy
+	store            *blobfs.Store
+	stats            *httpcache.Stats
+	client           *utils.HttpClientWrapper
+	downloadsLimiter *httpcache.DownloadLimiter
+	wait             sync.WaitGroup
+	auth             authHandler
+	downloads        sync.Map
+	blobIndexMu      sync.Mutex
+	blobIndex        map[string]blobIndexEntry
 }
 
 type blobRef struct {
 	repo string
 	ref  string
+}
+
+type blobIndexEntry struct {
+	ref     blobRef
+	expires time.Time
 }

@@ -152,7 +152,7 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 
 func newTestHandler(t *testing.T, store *blobfs.Store, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy) *Handler {
 	t.Helper()
-	handler, err := NewHandler("gomod", expireAfter, upstreams, transport, policy, store, httpcache.NewStats(prometheus.NewRegistry()))
+	handler, err := NewHandler("gomod", expireAfter, upstreams, transport, policy, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	require.NoError(t, err)
 	t.Cleanup(handler.Close)
 	return handler

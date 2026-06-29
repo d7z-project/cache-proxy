@@ -84,6 +84,7 @@ func TestRefreshPrefetchesCompanion(t *testing.T) {
 		store,
 		stats,
 		svcHealth,
+		nil,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))
@@ -125,7 +126,7 @@ func TestRefreshSucceedsWithoutSig(t *testing.T) {
 		discoverer{},
 		[]filerepo.RootSpec{&rootSpec{Branch: "v3.20", Repo: "main", Arch: "x86_64"}},
 		buildSnapshot,
-		store, stats, svcHealth,
+		store, stats, svcHealth, nil,
 	)
 
 	require.NoError(t, handler.Refresh(ctx))

@@ -17,6 +17,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func TestHeaderName(t *testing.T) {
@@ -67,6 +68,27 @@ func TestStripInternal(t *testing.T) {
 	require.NotContains(t, headers, "indexed-digest-algorithm")
 	require.NotContains(t, headers, "indexed-digest")
 	require.NotContains(t, headers, "indexed-digest-verifiable")
+}
+
+func TestConfigureClientTransportTimeouts(t *testing.T) {
+	client := utils.DefaultHttpClientWrapper()
+	ConfigureClientTransport(client, "test", "test", &config.TransportConfig{
+		DialTimeout:        config.Duration(2 * time.Second),
+		HeaderTimeout:      config.Duration(3 * time.Second),
+		IdleBodyTimeout:    config.Duration(4 * time.Second),
+		MaxRequestDuration: config.Duration(5 * time.Second),
+		MaxIdleConns:       7,
+		MaxConnsPerHost:    8,
+	})
+
+	require.Equal(t, 5*time.Second, client.Timeout)
+	require.Equal(t, 4*time.Second, client.IdleBodyTimeout)
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.Equal(t, 3*time.Second, transport.ResponseHeaderTimeout)
+	require.Equal(t, 7, transport.MaxIdleConns)
+	require.Equal(t, 8, transport.MaxConnsPerHost)
+	require.NotNil(t, transport.DialContext)
 }
 
 func TestCacheDebugHeadersOnCacheHit(t *testing.T) {

@@ -38,6 +38,7 @@ type App struct {
 	configPath    string
 	store         *blobfs.Store
 	stats         *httpcache.Stats
+	downloads     *httpcache.DownloadLimiter
 	metricsReg    *prometheus.Registry
 	entries       map[string]*proxyruntime.Entry
 	handlers      []proxyruntime.Instance
@@ -49,6 +50,7 @@ type App struct {
 	bindListeners map[string]net.Listener
 	mainServer    *http.Server
 	mainListener  net.Listener
+	lifecycleMu   sync.Mutex
 	lifecycleCtx  context.Context
 	stopRuntime   context.CancelFunc
 	started       bool
@@ -57,28 +59,70 @@ type App struct {
 	closed        atomic.Bool
 	gcDone        chan struct{}
 	cleanupDone   chan struct{}
+	gcWake        chan struct{}
+	cleanupWake   chan struct{}
 
-	tuMu       sync.Mutex
-	tuCachedAt time.Time
-	tuCache    map[string]int64
+	tuMu         sync.Mutex
+	tuCachedAt   time.Time
+	tuCache      map[string]int64
+	tuRefreshing atomic.Bool
 }
 
 func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
 	a.tuMu.Lock()
 	prev := a.tuCachedAt
+	result := cloneUsage(a.tuCache)
 	a.tuMu.Unlock()
 	if time.Since(prev) >= 5*time.Minute {
-		usage := collectTenantUsage(ctx, tenants, a.store)
+		a.refreshTenantUsage(tenants)
+	}
+	return result
+}
+
+func (a *App) refreshTenantUsage(tenants []string) {
+	if a.store == nil || !a.tuRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	names := append([]string(nil), tenants...)
+	go func() {
+		defer a.tuRefreshing.Store(false)
+		ctx, cancel := context.WithTimeout(a.lifecycleCtx, 30*time.Second)
+		defer cancel()
+		usage := collectTenantUsage(ctx, names, a.store)
 		a.tuMu.Lock()
 		a.tuCache = usage
 		a.tuCachedAt = time.Now()
 		a.tuMu.Unlock()
-		return usage
+	}()
+}
+
+func cloneUsage(src map[string]int64) map[string]int64 {
+	if len(src) == 0 {
+		return map[string]int64{}
 	}
-	a.tuMu.Lock()
-	result := a.tuCache
-	a.tuMu.Unlock()
-	return result
+	dst := make(map[string]int64, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func (a *App) currentConfig() *config.Document {
+	a.routesMu.RLock()
+	doc := a.config
+	a.routesMu.RUnlock()
+	return doc
+}
+
+func (a *App) notifyStorageConfigChanged() {
+	select {
+	case a.gcWake <- struct{}{}:
+	default:
+	}
+	select {
+	case a.cleanupWake <- struct{}{}:
+	default:
+	}
 }
 
 func Load(path string) (*config.Document, error) {
@@ -94,7 +138,8 @@ func Validate(doc *config.Document) error {
 
 	copy := *doc
 	copy.Server.Backend = dir
-	store, err := blobfs.Open(dir, blobfs.DefaultConfig())
+	normalizeDocument(&copy)
+	store, err := blobfs.Open(dir, appBlobFSConfig())
 	if err != nil {
 		return err
 	}
@@ -102,7 +147,8 @@ func Validate(doc *config.Document) error {
 
 	registry := prometheus.NewRegistry()
 	stats := httpcache.NewStats(registry)
-	_, err = planEntries(context.Background(), &copy, store, stats)
+	downloads := httpcache.NewDownloadLimiter(copy.Storage.Download.MaxActive, copy.Storage.Download.MaxActivePerInstance)
+	_, err = planEntries(context.Background(), &copy, store, stats, downloads)
 	return err
 }
 
@@ -119,14 +165,15 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		return nil, err
 	}
 
-	store, err := blobfs.Open(doc.Server.Backend, blobfs.DefaultConfig())
+	store, err := blobfs.Open(doc.Server.Backend, appBlobFSConfig())
 	if err != nil {
 		return nil, err
 	}
 	metricsReg := prometheus.NewRegistry()
 	metricsReg.MustRegister(metrics.NewBlobFSCollector(store))
 	stats := httpcache.NewStats(metricsReg)
-	entries, err := planEntries(ctx, doc, store, stats)
+	downloads := httpcache.NewDownloadLimiter(doc.Storage.Download.MaxActive, doc.Storage.Download.MaxActivePerInstance)
+	entries, err := planEntries(ctx, doc, store, stats, downloads)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
@@ -138,6 +185,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		configPath:    configPath,
 		store:         store,
 		stats:         stats,
+		downloads:     downloads,
 		metricsReg:    metricsReg,
 		entries:       entries,
 		pathHandlers:  map[string]http.Handler{},
@@ -148,24 +196,27 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		stopRuntime:   stopRuntime,
 		gcDone:        make(chan struct{}),
 		cleanupDone:   make(chan struct{}),
+		gcWake:        make(chan struct{}, 1),
+		cleanupWake:   make(chan struct{}, 1),
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
 	app.mainServer = &http.Server{Addr: doc.Server.Bind, Handler: app}
-	gcInterval := doc.Storage.GC.Blob.Duration()
-	cleanupInterval := doc.Storage.Cleanup.Interval.Duration()
-	cleanupEnabled := doc.Storage.Cleanup.Enabled
 	go func() {
 		defer close(app.gcDone)
-		ticker := time.NewTicker(gcInterval)
-		defer ticker.Stop()
 		for {
+			interval := app.currentConfig().Storage.GC.Blob.Duration()
+			timer := time.NewTimer(interval)
 			select {
 			case <-app.lifecycleCtx.Done():
+				timer.Stop()
 				return
-			case <-ticker.C:
+			case <-app.gcWake:
+				timer.Stop()
+				continue
+			case <-timer.C:
 				if _, err := app.store.RunGC(app.lifecycleCtx, blobfs.GCOptions{Compact: true}); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Info("blob gc failed", "err", err)
 				}
@@ -174,16 +225,18 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	}()
 	go func() {
 		defer close(app.cleanupDone)
-		ticker := time.NewTicker(cleanupInterval)
-		defer ticker.Stop()
 		for {
+			interval := app.currentConfig().Storage.Cleanup.Interval.Duration()
+			timer := time.NewTimer(interval)
 			select {
 			case <-app.lifecycleCtx.Done():
+				timer.Stop()
 				return
-			case <-ticker.C:
-				if cleanupEnabled {
-					app.runCleanup(app.lifecycleCtx)
-				}
+			case <-app.cleanupWake:
+				timer.Stop()
+				continue
+			case <-timer.C:
+				app.runCleanup(app.lifecycleCtx)
 			}
 		}
 	}()
@@ -224,6 +277,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (a *App) Start() error {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if a.closed.Load() {
+		return errors.New("app is closed")
+	}
 	if a.started {
 		return nil
 	}
@@ -266,6 +324,8 @@ func (a *App) Start() error {
 }
 
 func (a *App) Close(ctx context.Context) error {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
 	if a.closed.Swap(true) {
 		return nil
 	}

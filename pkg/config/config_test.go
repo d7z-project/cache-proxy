@@ -83,6 +83,9 @@ storage:
     dry_run: true
     batch_size: 100
     workers: 4
+  download:
+    max_active: 32
+    max_active_per_instance: 6
 instances:
   - name: files
     enabled: true
@@ -99,6 +102,8 @@ instances:
 	require.Equal(t, "/tmp/cache", doc.Server.Backend)
 	require.Equal(t, "/metrics", doc.Metrics.Path)
 	require.Equal(t, "secret", doc.Metrics.Token)
+	require.Equal(t, 32, doc.Storage.Download.MaxActive)
+	require.Equal(t, 6, doc.Storage.Download.MaxActivePerInstance)
 	require.Len(t, doc.Instances, 1)
 	spec, err := doc.Instances[0].SelectMode()
 	require.NoError(t, err)

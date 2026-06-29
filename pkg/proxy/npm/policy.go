@@ -68,6 +68,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Transport:       block.Transport,
 		BusyPolicy:      block.MetadataBusyPolicy,
 		DefaultFreshFor: block.MetadataFreshFor,
+		DownloadLimiter: plan.Downloads(),
 	}, plan.Store(), New(&block.Policy), plan.Stats(), nil)
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{

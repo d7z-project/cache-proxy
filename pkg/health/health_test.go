@@ -436,7 +436,9 @@ func TestCircuitEventEmitted(t *testing.T) {
 
 func TestStopCleanShutdown(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
-	h.Start()
+	parent, parentCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer parentCancel()
+	h.Start(parent)
 	require.NotNil(t, h.ctx)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -449,13 +451,29 @@ func TestStopWithDisabledProbing(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Enabled = false
 	h := New("test", "apk", cfg, []string{"https://a.example.com"}, &testStats{}, "ua")
-	h.Start()
+	parent, parentCancel := context.WithTimeout(context.Background(), time.Second)
+	defer parentCancel()
+	h.Start(parent)
 	require.Nil(t, h.ctx)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err := h.Stop(ctx)
 	require.NoError(t, err)
+}
+
+func TestParentContextStopsProbeLoop(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeInterval = 10 * time.Millisecond
+	h := New("test", "apk", cfg, []string{"https://a.example.com"}, &testStats{}, "ua")
+	parent, parentCancel := context.WithCancel(context.Background())
+	h.Start(parent)
+	require.NotNil(t, h.ctx)
+	parentCancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, h.Stop(ctx))
 }
 
 func TestProbeHeadSuccess(t *testing.T) {

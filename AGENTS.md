@@ -73,7 +73,7 @@
 
 核心 API：
 - `health.New(name, mode, config, upstreams, stats, ua)` — 创建，config 从 `health.DefaultConfig()` 开始覆盖
-- `health.Start()` / `health.Stop(ctx)` — 启动/停止探测定时器
+- `health.Start(ctx)` / `health.Stop(ctx)` — 启动/停止探测定时器；Start 必须传入实例 lifecycle context
 - `health.WeightedUpstreams(upstreams)` — 取权重排序的上游列表
 - `health.RecordResult(url, status, latency)` / `health.RecordFailure(url, err)` — 被动记录请求结果（驱动错误率窗口 + 状态机）
 - `health.TryStartRefresh(path)` / `health.FinishRefresh(path, gen, err, targets)` — CAS 防重入的刷新生命周期 (filerepo)

@@ -70,7 +70,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if !block.ExpireAfter.IsUnset() {
 		expireAfter = block.ExpireAfter
 	}
-	handler := newHandler(plan.Name(), block, expireAfter, plan.Store(), plan.Stats())
+	handler := newHandler(plan.Name(), block, expireAfter, plan.Store(), plan.Stats(), plan.Downloads())
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	if block.DisplayURL != "" {
 		plan.SetHomeDisplayURL(block.DisplayURL)

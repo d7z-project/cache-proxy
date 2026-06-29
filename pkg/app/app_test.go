@@ -841,9 +841,9 @@ func closeApp(t *testing.T, app *App) {
 
 type blockingInstance struct{}
 
-func (blockingInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
-func (blockingInstance) Start(context.Context) error                  { return nil }
-func (blockingInstance) Cleanup(context.Context) error                { return nil }
+func (blockingInstance) ServeHTTP(http.ResponseWriter, *http.Request)        {}
+func (blockingInstance) Start(context.Context) error                         { return nil }
+func (blockingInstance) Cleanup(context.Context, config.CleanupConfig) error { return nil }
 func (blockingInstance) Stop(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()
@@ -853,9 +853,9 @@ type startContextInstance struct {
 	onStart func(context.Context) error
 }
 
-func (s startContextInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
-func (s startContextInstance) Cleanup(context.Context) error                { return nil }
-func (s startContextInstance) Stop(context.Context) error                   { return nil }
+func (s startContextInstance) ServeHTTP(http.ResponseWriter, *http.Request)        {}
+func (s startContextInstance) Cleanup(context.Context, config.CleanupConfig) error { return nil }
+func (s startContextInstance) Stop(context.Context) error                          { return nil }
 func (s startContextInstance) Start(ctx context.Context) error {
 	if s.onStart != nil {
 		return s.onStart(ctx)
@@ -868,8 +868,8 @@ type cleanupContextInstance struct {
 	stopped atomic.Bool
 }
 
-func (s *cleanupContextInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
-func (s *cleanupContextInstance) Cleanup(context.Context) error                { return nil }
+func (s *cleanupContextInstance) ServeHTTP(http.ResponseWriter, *http.Request)        {}
+func (s *cleanupContextInstance) Cleanup(context.Context, config.CleanupConfig) error { return nil }
 func (s *cleanupContextInstance) Start(ctx context.Context) error {
 	s.ctx = ctx
 	return nil

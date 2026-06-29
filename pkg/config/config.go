@@ -69,8 +69,9 @@ type MetricsConfig struct {
 }
 
 type StorageConfig struct {
-	GC      GCConfig      `yaml:"gc"`
-	Cleanup CleanupConfig `yaml:"cleanup"`
+	GC       GCConfig       `yaml:"gc"`
+	Cleanup  CleanupConfig  `yaml:"cleanup"`
+	Download DownloadConfig `yaml:"download"`
 }
 
 type GCConfig struct {
@@ -84,6 +85,11 @@ type CleanupConfig struct {
 	BatchSize    int      `yaml:"batch_size"`
 	Workers      int      `yaml:"workers"`
 	OrphanPolicy string   `yaml:"orphan_policy"`
+}
+
+type DownloadConfig struct {
+	MaxActive            int `yaml:"max_active"`
+	MaxActivePerInstance int `yaml:"max_active_per_instance"`
 }
 
 func DefaultCleanupConfig() CleanupConfig {
@@ -114,12 +120,15 @@ type Instance struct {
 }
 
 type TransportConfig struct {
-	Proxy           string              `yaml:"proxy,omitempty"`
-	UserAgent       string              `yaml:"ua,omitempty"`
-	Timeout         Duration            `yaml:"timeout,omitempty"`
-	MaxIdleConns    int                 `yaml:"max_idle_conns,omitempty"`
-	MaxConnsPerHost int                 `yaml:"max_conns_per_host,omitempty"`
-	Health          *health.ConfigPatch `yaml:"health,omitempty"`
+	Proxy              string              `yaml:"proxy,omitempty"`
+	UserAgent          string              `yaml:"ua,omitempty"`
+	DialTimeout        Duration            `yaml:"dial_timeout,omitempty"`
+	HeaderTimeout      Duration            `yaml:"header_timeout,omitempty"`
+	IdleBodyTimeout    Duration            `yaml:"idle_body_timeout,omitempty"`
+	MaxRequestDuration Duration            `yaml:"max_request_duration,omitempty"`
+	MaxIdleConns       int                 `yaml:"max_idle_conns,omitempty"`
+	MaxConnsPerHost    int                 `yaml:"max_conns_per_host,omitempty"`
+	Health             *health.ConfigPatch `yaml:"health,omitempty"`
 }
 
 type SelectedMode struct {
