@@ -28,7 +28,6 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 	}
 
 	pr, pw := io.Pipe()
-	done := make(chan struct{})
 	cfg.Wait.Add(1)
 	if cfg.StatsStart != nil {
 		cfg.StatsStart()
@@ -42,7 +41,6 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 			}
 		}()
 		defer cfg.Wait.Done()
-		defer close(done)
 		defer cfg.Downloads.Delete(cfg.ObjectPath)
 		defer cfg.Body.Close()
 		defer pw.Close()

@@ -250,7 +250,11 @@ func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 			return
 		}
 		checksum := strings.TrimSpace(fields["SHA256"])
-		snapshot.Artifacts[filename] = filerepo.RepoObject{Path: filename, Identity: checksum, ContentHash: checksum}
+		snapshot.Artifacts[filename] = filerepo.RepoObject{
+			Path:     filename,
+			Identity: checksum,
+			Digest:   filerepo.SHA256Digest(checksum),
+		}
 	})
 }
 
@@ -266,7 +270,11 @@ func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
 				continue
 			}
 			artifactPath := path.Join(directory, parts[2])
-			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: parts[0], ContentHash: parts[0]}
+			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
+				Path:     artifactPath,
+				Identity: parts[0],
+				Digest:   filerepo.SHA256Digest(parts[0]),
+			}
 		}
 	})
 }

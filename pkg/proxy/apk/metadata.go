@@ -111,7 +111,11 @@ func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapsho
 			return
 		}
 		artifactPath := path.Join(basePath, name+"-"+version+".apk")
-		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum, ContentHash: checksum}
+		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
+			Path:     artifactPath,
+			Identity: checksum,
+			Digest:   filerepo.IdentityDigest("apk-control", checksum),
+		}
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(nil, 10<<20)

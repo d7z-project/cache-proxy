@@ -24,7 +24,9 @@ func TestParsePackagesRecordsArtifactChecksum(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]filerepo.RepoObject{}}
 	input := "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\nSHA256: abc123\n\n"
 	require.NoError(t, parsePackages(strings.NewReader(input), snapshot))
-	require.Equal(t, "abc123", snapshot.Artifacts["pool/main/h/hello/hello_1.0_amd64.deb"].Identity)
+	artifact := snapshot.Artifacts["pool/main/h/hello/hello_1.0_amd64.deb"]
+	require.Equal(t, "abc123", artifact.Identity)
+	require.False(t, artifact.Digest.Verifiable, "short SHA256 test fixture should not be treated as a verifiable digest")
 }
 
 func TestParseSourcesRecordsArtifacts(t *testing.T) {
@@ -33,6 +35,17 @@ func TestParseSourcesRecordsArtifacts(t *testing.T) {
 	require.NoError(t, parseSources(strings.NewReader(input), snapshot))
 	require.Equal(t, "abc111", snapshot.Artifacts["pool/main/h/hello/hello_1.0.dsc"].Identity)
 	require.Equal(t, "def222", snapshot.Artifacts["pool/main/h/hello/hello_1.0.orig.tar.xz"].Identity)
+}
+
+func TestParsePackagesRecordsVerifiableSHA256Digest(t *testing.T) {
+	sum := strings.Repeat("a", 64)
+	snapshot := &filerepo.LiveSnapshot{Artifacts: map[string]filerepo.RepoObject{}}
+	input := "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\nSHA256: " + sum + "\n\n"
+	require.NoError(t, parsePackages(strings.NewReader(input), snapshot))
+	artifact := snapshot.Artifacts["pool/main/h/hello/hello_1.0_amd64.deb"]
+	require.Equal(t, "sha256", artifact.Digest.Algorithm)
+	require.Equal(t, sum, artifact.Digest.Value)
+	require.True(t, artifact.Digest.Verifiable)
 }
 
 func TestDiscovererDetectsDebianSuiteRoot(t *testing.T) {
@@ -143,12 +156,17 @@ func TestMetadataRequestInReleasePublishesArtifacts(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
 	require.Eventually(t, func() bool {
 		releases := handler.RootReleases()
 		return len(releases) == 1 && releases[0].ArtifactCount == 1
 	}, 2*time.Second, 10*time.Millisecond)
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, string(release), rec.Body.String())
 }
 
 func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
@@ -196,7 +214,7 @@ func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
 	require.Eventually(t, func() bool {
 		releases := handler.RootReleases()
@@ -209,7 +227,7 @@ func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
 	require.Equal(t, "/dists/bookworm/Release", rec.Header().Get("Location"))
 }
 
-func TestMetadataRequestStartsAsyncRefresh(t *testing.T) {
+func TestMetadataRequestStartsAsyncRefreshAndReturnsUnavailableUntilReady(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -257,8 +275,7 @@ func TestMetadataRequestStartsAsyncRefresh(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, string(release), rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
 	require.Eventually(t, func() bool {
 		select {

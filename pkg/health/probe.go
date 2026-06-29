@@ -70,7 +70,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 		uh.lastProbeErr = err.Error()
 		_ = h.emitUpstreamMetrics(uh)
 		if event != "" {
-			h.stats.RecordCircuitEvent(h.name, h.mode, uh.URL, event)
+			h.recordCircuitEvent(uh.URL, event)
 		}
 		h.recomputeAggregateLocked()
 		h.mu.Unlock()
@@ -105,7 +105,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 
 	_ = h.emitUpstreamMetrics(uh)
 	if event != "" {
-		h.stats.RecordCircuitEvent(h.name, h.mode, uh.URL, event)
+		h.recordCircuitEvent(uh.URL, event)
 	}
 	h.recomputeAggregateLocked()
 }

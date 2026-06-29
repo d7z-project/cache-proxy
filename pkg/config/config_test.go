@@ -171,7 +171,6 @@ instances:
       upstreams:
         - https://deb.example.com/debian
       refresh_interval: 1h
-      metadata_policy: revalidate
       artifact_policy: immutable
 `))
 	require.NoError(t, err)
@@ -184,7 +183,6 @@ instances:
 		} `yaml:"route"`
 		Upstreams       []string `yaml:"upstreams"`
 		RefreshInterval Duration `yaml:"refresh_interval"`
-		MetadataPolicy  string   `yaml:"metadata_policy"`
 		ArtifactPolicy  string   `yaml:"artifact_policy"`
 	}
 	require.NoError(t, selected.Block.DecodeStrict(&block))
@@ -192,7 +190,7 @@ instances:
 	require.Equal(t, []string{"https://deb.example.com/debian"}, block.Upstreams)
 }
 
-func TestDecodePackageRepositoryConfigRejectsRules(t *testing.T) {
+func TestDecodePackageRepositoryConfigRejectsLegacyMetadataPolicy(t *testing.T) {
 	doc, err := Decode(strings.NewReader(`
 instances:
   - name: linux
@@ -203,7 +201,7 @@ instances:
         path: /deb
       upstreams:
         - https://deb.example.com/debian
-      rules: []
+      metadata_policy: revalidate
 `))
 	require.NoError(t, err)
 	selected, err := doc.Instances[0].SelectMode()
@@ -217,7 +215,7 @@ instances:
 	}
 	err = selected.Block.DecodeStrict(&block)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "field rules not found")
+	require.ErrorContains(t, err, "field metadata_policy not found")
 }
 
 func TestDecodeGoProxyConfig(t *testing.T) {

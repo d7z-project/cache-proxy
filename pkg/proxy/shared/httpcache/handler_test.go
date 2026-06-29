@@ -35,14 +35,21 @@ func TestHeaderName(t *testing.T) {
 
 func TestStripInternal(t *testing.T) {
 	headers := map[string]string{
-		"Content-Type":     "application/json",
-		"Content-Length":   "123",
-		"ETag":             "\"abc\"",
-		"fetched-at":       "2024-01-01T00:00:00Z",
-		"mode":             "test",
-		"cache":            "HIT",
-		"indexed-identity": "sha256:xyz",
-		"X-Cache":          "HIT",
+		"Content-Type":              "application/json",
+		"Content-Length":            "123",
+		"ETag":                      "\"abc\"",
+		"fetched-at":                "2024-01-01T00:00:00Z",
+		"mode":                      "test",
+		"cache":                     "HIT",
+		"indexed":                   "true",
+		"indexed-identity":          "sha256:xyz",
+		"indexed-root":              "root",
+		"indexed-generation":        "7",
+		"indexed-upstream":          "https://upstream.example",
+		"indexed-digest-algorithm":  "sha256",
+		"indexed-digest":            "abc",
+		"indexed-digest-verifiable": "true",
+		"X-Cache":                   "HIT",
 	}
 	StripInternal(headers)
 	require.Equal(t, "application/json", headers["Content-Type"])
@@ -52,7 +59,14 @@ func TestStripInternal(t *testing.T) {
 	require.NotContains(t, headers, "fetched-at")
 	require.NotContains(t, headers, "mode")
 	require.NotContains(t, headers, "cache")
+	require.NotContains(t, headers, "indexed")
 	require.NotContains(t, headers, "indexed-identity")
+	require.NotContains(t, headers, "indexed-root")
+	require.NotContains(t, headers, "indexed-generation")
+	require.NotContains(t, headers, "indexed-upstream")
+	require.NotContains(t, headers, "indexed-digest-algorithm")
+	require.NotContains(t, headers, "indexed-digest")
+	require.NotContains(t, headers, "indexed-digest-verifiable")
 }
 
 func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
@@ -474,6 +488,54 @@ func TestErrorResponseHidesInternalDetails(t *testing.T) {
 	require.Equal(t, "ERROR", resp.Headers["X-Cache"])
 }
 
+func TestStreamDownloadClearsInFlightMarkerOnRemoteError(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{"https://upstream.example"},
+	}, store, &staticResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})
+	route := Route{ObjectPath: "test/object", UpstreamPath: "test/object"}
+	handler.downloads.Store(route.ObjectPath, struct{}{})
+
+	_, err = handler.streamDownload(context.Background(), httptest.NewRequest(http.MethodGet, "/test/object", nil), route, "MISS")
+	require.Error(t, err)
+	_, found := handler.downloads.Load(route.ObjectPath)
+	require.False(t, found)
+}
+
+func TestStreamDownloadClearsInFlightMarkerOnNonOK(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{"https://upstream.example"},
+	}, store, &staticResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{"Content-Type": []string{"text/plain"}},
+			Body:       io.NopCloser(strings.NewReader("missing")),
+			Request:    req,
+		}, nil
+	})
+	route := Route{ObjectPath: "test/object", UpstreamPath: "test/object"}
+	handler.downloads.Store(route.ObjectPath, struct{}{})
+
+	resp, err := handler.streamDownload(context.Background(), httptest.NewRequest(http.MethodGet, "/test/object", nil), route, "MISS")
+	require.NoError(t, err)
+	require.NoError(t, resp.Close())
+	_, found := handler.downloads.Load(route.ObjectPath)
+	require.False(t, found)
+}
+
 func TestStreamToPipeRemovesTempFileOnVerifyFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("TMPDIR", tmpDir)
@@ -534,4 +596,10 @@ func TestSafePath(t *testing.T) {
 	require.False(t, SafePath("/absolute/path"))
 	require.False(t, SafePath("."))
 	require.False(t, SafePath(".."))
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }

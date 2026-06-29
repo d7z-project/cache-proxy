@@ -129,7 +129,8 @@ func (h *gitHandler) doSync(ctx context.Context) {
 	h.state = gitStateSyncing
 	h.mu.Unlock()
 
-	h.requestWait.Wait()
+	h.requestMu.Lock()
+	h.requestMu.Unlock()
 
 	opts := &git.FetchOptions{
 		Auth:  h.auth,

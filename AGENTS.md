@@ -30,8 +30,8 @@
 - 同一个 root generation 内的所有 metadata、签名、校验文件必须从同一个 upstream 获取；多 upstream 只能在 root generation 级别 failover，禁止单文件混用 upstream
 - metadata refresh 必须先写 staging generation，所有 required metadata 和校验通过后才能发布 current generation
 - 客户端 metadata 请求只允许读取 current generation；禁止走通用 httpcache 单文件 revalidate
-- required companion（如 pacman `.db.sig`、apk `APKINDEX.tar.gz.sig`、deb `Release.gpg`、rpm `repomd.xml.asc`）缺失或校验失败时，本次 generation 必须失败，继续服务旧 generation
-- artifact / auxiliary 下载必须绑定 current generation 的 upstream 和 identity；能得到 SHA256 时必须校验后才写入缓存
+- required metadata 缺失或校验失败时，本次 generation 必须失败，继续服务旧 generation；签名、文件列表等 companion 默认为 optional，FetchDerived 处理 404/403 为非致命
+- artifact / auxiliary 下载不能因包索引缺失、refresh 失败或无 current generation 而被阻断；索引命中时绑定 current generation 的 upstream 和 identity，能得到 SHA256 时必须校验后才写入缓存
 - 伴生文件推导：每个主元数据文件 X 自动推导并尝试缓存 X.sig、X.asc、X.gpg（FetchDerived 处理 404/403 为非致命）；模式可追加额外伴生（如 RPM 加 .key）
 - 元数据刷新为后台驱动，用户请求仅负责路径发现；无 current generation 时返回 `503 Retry-After`，禁止 passthrough 或在请求路径同步解析大型 metadata
 - metadata 下载与解压解析必须使用临时文件/reader 流式处理，禁止对 Packages/primary 等大型 metadata 使用 `io.ReadAll` 全量读入内存
@@ -51,8 +51,9 @@
 - 大文件下载（OCI blob / Cargo crate）必须通过 `utils.TempFileFromReader` 流式落盘，禁止 `io.ReadAll` 全量读入内存
 - 直接 `TargetURL` 必须由 `httpcache` 统一校验，host 只能匹配已配置上游或 route-scoped allowlist；不允许各 resolver 自行放行未知 host
 - metadata refresh 阶段 upstream failover：只对网络错误、`429`、`5xx` 重试；core metadata `403`/`404` 直接返回
-- 运行时 artifact/auxiliary 请求（TargetURL）：优先使用 generation 绑定 upstream，TargetURL 网络错误时退化为通用 upstream 轮询；HTTP 4xx 直接返回客户端
+- 运行时 artifact/auxiliary 请求（TargetURL）：索引命中时优先使用 generation 绑定 upstream，TargetURL 网络错误时退化为通用 upstream 轮询；HTTP 4xx 直接返回客户端；索引未命中按普通反代缓存处理
 - 亲和性：给定 root 的 artifact/auxiliary/unknown 请求优先使用该 root 当前 generation 绑定的 upstream
+- 包索引只用于下载增强（upstream 亲和、identity、SHA256 校验）和清理旧 indexed 缓存；不得作为 artifact/auxiliary 下载准入条件
 - 已知 SHA256/digest 的大文件保持首包流式返回，但校验失败不得写入缓存
 - OCI manifest 的 `Docker-Content-Digest` 和 OCI blob 请求 digest 必须校验后才写入 state/cache
 - 启动时调用 `utils.CleanStaleTempFiles(24h)` 清理残留临时文件

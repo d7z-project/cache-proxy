@@ -266,7 +266,7 @@ func (h *handler) deleteTree(ctx context.Context, prefix string) error {
 func (h *handler) purgeBlobIndex() {
 	h.blobIndex.Range(func(key, value any) bool {
 		ref := value.(blobRef)
-		state, err := h.readState(context.TODO(), h.refStatePath(ref.repo, ref.ref))
+		state, err := h.readState(context.Background(), h.refStatePath(ref.repo, ref.ref))
 		if err != nil || h.stateExpired(state) {
 			h.blobIndex.Delete(key)
 		}

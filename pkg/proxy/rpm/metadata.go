@@ -154,7 +154,11 @@ func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot str
 		}
 		artifactPath := path.Join(repoRoot, href)
 		identity := strings.TrimSpace(checksum)
-		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: identity, ContentHash: identity}
+		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
+			Path:     artifactPath,
+			Identity: identity,
+			Digest:   filerepo.SHA256Digest(identity),
+		}
 	}
 }
 

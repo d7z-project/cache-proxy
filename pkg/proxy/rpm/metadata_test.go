@@ -20,10 +20,31 @@ func TestParsePrimaryRecordsArtifacts(t *testing.T) {
   <package>
     <checksum>abc123</checksum>
     <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
+ </package>
+</metadata>`
+	require.NoError(t, parsePrimary(strings.NewReader(input), snapshot, "repo/os"))
+	artifact := snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"]
+	require.Equal(t, "abc123", artifact.Identity)
+	require.False(t, artifact.Digest.Verifiable)
+}
+
+func TestParsePrimaryRecordsVerifiableSHA256Digest(t *testing.T) {
+	sum := strings.Repeat("c", 64)
+	snapshot := &filerepo.LiveSnapshot{
+		Artifacts: map[string]filerepo.RepoObject{},
+	}
+	input := `
+<metadata>
+  <package>
+    <checksum>` + sum + `</checksum>
+    <location href="Packages/h/hello-1.0-1.x86_64.rpm"/>
   </package>
 </metadata>`
 	require.NoError(t, parsePrimary(strings.NewReader(input), snapshot, "repo/os"))
-	require.Equal(t, "abc123", snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"].Identity)
+	artifact := snapshot.Artifacts["repo/os/Packages/h/hello-1.0-1.x86_64.rpm"]
+	require.Equal(t, "sha256", artifact.Digest.Algorithm)
+	require.Equal(t, sum, artifact.Digest.Value)
+	require.True(t, artifact.Digest.Verifiable)
 }
 
 func TestDiscovererDetectsRPMRoot(t *testing.T) {

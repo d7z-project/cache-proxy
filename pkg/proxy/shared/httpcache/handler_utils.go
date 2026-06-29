@@ -16,10 +16,17 @@ import (
 )
 
 var internalHeaders = map[string]struct{}{
-	"fetched-at":       {},
-	"mode":             {},
-	"cache":            {},
-	"indexed-identity": {},
+	"fetched-at":                {},
+	"mode":                      {},
+	"cache":                     {},
+	"indexed":                   {},
+	"indexed-identity":          {},
+	"indexed-root":              {},
+	"indexed-generation":        {},
+	"indexed-upstream":          {},
+	"indexed-digest-algorithm":  {},
+	"indexed-digest":            {},
+	"indexed-digest-verifiable": {},
 }
 
 func StripInternal(headers map[string]string) {

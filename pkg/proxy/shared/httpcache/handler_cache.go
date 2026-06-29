@@ -72,6 +72,7 @@ func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.Respons
 			staleCached.Headers["X-Cache"] = "STALE"
 			return h.rewriteResponse(req, route, staleCached), nil
 		}
+		h.downloads.Delete(route.ObjectPath)
 		return ErrorResponse(http.StatusServiceUnavailable, err), nil
 	}
 	if valid {
@@ -188,9 +189,11 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
 	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(req, route, nil))
 	if err != nil {
+		h.downloads.Delete(route.ObjectPath)
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		h.downloads.Delete(route.ObjectPath)
 		resp.Headers["X-Cache"] = "BYPASS"
 		return h.rewriteResponse(req, route, resp), nil
 	}
@@ -199,6 +202,7 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 
 	if parent := path.Dir(route.ObjectPath); parent != "." {
 		if err = h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
+			h.downloads.Delete(route.ObjectPath)
 			resp.Close()
 			return nil, err
 		}
@@ -232,6 +236,7 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 		},
 	})
 	if err != nil {
+		h.downloads.Delete(route.ObjectPath)
 		return nil, err
 	}
 

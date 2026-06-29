@@ -28,6 +28,15 @@ func TestParseDescExtractsFilenameAndChecksum(t *testing.T) {
 	require.Equal(t, "abc123", checksum)
 }
 
+func TestPacmanSHA256DigestRequiresFullHash(t *testing.T) {
+	short := filerepo.SHA256Digest("abc123")
+	require.False(t, short.Verifiable)
+
+	full := filerepo.SHA256Digest(strings.Repeat("b", 64))
+	require.Equal(t, "sha256", full.Algorithm)
+	require.True(t, full.Verifiable)
+}
+
 func TestDiscovererDetectsPacmanRoot(t *testing.T) {
 	spec, ok := (discoverer{}).Discover("core/os/x86_64/core.db.sig")
 	require.True(t, ok)

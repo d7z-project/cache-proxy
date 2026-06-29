@@ -363,6 +363,40 @@ func TestPrepareHandlersUsesPerInstanceContext(t *testing.T) {
 	}
 }
 
+func TestPrepareHandlersCancelsStartedInstancesOnLaterStartFailure(t *testing.T) {
+	started := &cleanupContextInstance{}
+	failed := startContextInstance{
+		onStart: func(context.Context) error {
+			return fmt.Errorf("boom")
+		},
+	}
+	app := &App{
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		entries: map[string]*proxyruntime.Entry{
+			"a-started": {
+				Name:    "a-started",
+				Mode:    config.ModeFile,
+				Enabled: true,
+				Path:    "/started",
+				Runtime: started,
+			},
+			"z-failed": {
+				Name:    "z-failed",
+				Mode:    config.ModeFile,
+				Enabled: true,
+				Path:    "/failed",
+				Runtime: failed,
+			},
+		},
+	}
+
+	err := app.prepareHandlers(context.Background())
+	require.ErrorContains(t, err, "boom")
+	require.True(t, started.stopped.Load())
+	require.ErrorIs(t, started.ctx.Err(), context.Canceled)
+}
+
 func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
 	entry := &proxyruntime.Entry{
 		Name:    "registry",
@@ -827,6 +861,22 @@ func (s startContextInstance) Start(ctx context.Context) error {
 		return s.onStart(ctx)
 	}
 	return nil
+}
+
+type cleanupContextInstance struct {
+	ctx     context.Context
+	stopped atomic.Bool
+}
+
+func (s *cleanupContextInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (s *cleanupContextInstance) Cleanup(context.Context) error                { return nil }
+func (s *cleanupContextInstance) Start(ctx context.Context) error {
+	s.ctx = ctx
+	return nil
+}
+func (s *cleanupContextInstance) Stop(context.Context) error {
+	s.stopped.Store(true)
+	return s.ctx.Err()
 }
 
 func makeClosedChan() chan struct{} {

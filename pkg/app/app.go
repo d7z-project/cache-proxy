@@ -347,6 +347,7 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 		entry.Ctx = entryCtx
 		entry.Cancel = entryCancel
 		if err := entry.Runtime.Start(entryCtx); err != nil {
+			entryCancel()
 			a.stopHandlers()
 			return fmt.Errorf("instance %s: %w", entry.Name, err)
 		}
@@ -372,8 +373,15 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 }
 
 func (a *App) stopHandlers() {
+	for _, entry := range a.entries {
+		if entry.Cancel != nil {
+			entry.Cancel()
+		}
+	}
 	for _, handler := range a.handlers {
-		_ = handler.Stop(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		_ = handler.Stop(ctx)
+		cancel()
 	}
 	a.handlers = nil
 }

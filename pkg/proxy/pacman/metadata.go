@@ -121,7 +121,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			artifactPath := path.Join(path.Dir(blob.Path), filename)
-			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{Path: artifactPath, Identity: checksum, ContentHash: checksum}
+			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
+				Path:     artifactPath,
+				Identity: checksum,
+				Digest:   filerepo.SHA256Digest(checksum),
+			}
 		}
 		_ = reader.Close()
 		session.Release(target)

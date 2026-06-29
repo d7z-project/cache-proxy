@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -607,6 +608,14 @@ func TestMetricsEmission(t *testing.T) {
 	require.Equal(t, 0.0, ts.health["error_rate"])
 	require.Greater(t, ts.health["state"], -1.0)
 	ts.mu.Unlock()
+}
+
+func TestNilStatsRecorderDoesNotPanic(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, nil, "ua")
+	require.NotPanics(t, func() {
+		h.RecordResult("https://a.example.com", 200, time.Millisecond)
+		h.RecordFailure("https://a.example.com", errors.New("boom"))
+	})
 }
 
 func TestAggregateStateString(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -411,6 +412,33 @@ func TestServeConcurrentRequests(t *testing.T) {
 	}
 	for i := 0; i < 10; i++ {
 		<-done
+	}
+}
+
+func TestSyncAndServeConcurrentRequests(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	h.Start(context.Background())
+	defer h.Stop(context.Background())
+	waitForClone(t, h)
+
+	var wg sync.WaitGroup
+	statuses := make(chan int, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			statuses <- rec.Code
+		}()
+	}
+	h.doSync(context.Background())
+	wg.Wait()
+	close(statuses)
+	for status := range statuses {
+		require.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, status)
 	}
 }
 

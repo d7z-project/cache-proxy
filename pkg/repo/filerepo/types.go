@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -82,11 +83,31 @@ type MetadataObject struct {
 	StorePath string `yaml:"store_path,omitempty"`
 }
 
+type Digest struct {
+	Algorithm  string `yaml:"algorithm,omitempty"`
+	Value      string `yaml:"value,omitempty"`
+	Verifiable bool   `yaml:"verifiable,omitempty"`
+}
+
+func SHA256Digest(value string) Digest {
+	value = strings.TrimPrefix(value, "sha256:")
+	if len(value) != 64 {
+		return Digest{}
+	}
+	return Digest{Algorithm: "sha256", Value: value, Verifiable: true}
+}
+
+func IdentityDigest(algorithm, value string) Digest {
+	return Digest{Algorithm: algorithm, Value: value, Verifiable: false}
+}
+
 type RepoObject struct {
-	Path        string `yaml:"path"`
-	Identity    string `yaml:"identity,omitempty"`
-	ContentHash string `yaml:"content_hash,omitempty"`
-	Upstream    string `yaml:"upstream"`
+	Path       string `yaml:"path"`
+	Identity   string `yaml:"identity,omitempty"`
+	Digest     Digest `yaml:"digest,omitempty"`
+	Upstream   string `yaml:"upstream"`
+	RootKey    string `yaml:"root_key,omitempty"`
+	Generation string `yaml:"generation,omitempty"`
 }
 
 type LiveSnapshot struct {

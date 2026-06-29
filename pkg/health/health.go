@@ -153,7 +153,7 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 	}
 	_ = h.emitUpstreamMetrics(uh)
 	if event != "" {
-		h.stats.RecordCircuitEvent(h.name, h.mode, url, event)
+		h.recordCircuitEvent(url, event)
 		h.recomputeAggregateLocked()
 	}
 }
@@ -171,7 +171,7 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 	event := uh.recordFailure(err, h.config)
 	_ = h.emitUpstreamMetrics(uh)
 	if event != "" {
-		h.stats.RecordCircuitEvent(h.name, h.mode, url, event)
+		h.recordCircuitEvent(url, event)
 		h.recomputeAggregateLocked()
 	}
 }
@@ -471,6 +471,12 @@ func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) error {
 		int(uh.State), uh.weight, uh.window.errorRate(),
 		uh.ewmaLatency.Seconds())
 	return nil
+}
+
+func (h *ServiceHealth) recordCircuitEvent(upstream, event string) {
+	if h.stats != nil {
+		h.stats.RecordCircuitEvent(h.name, h.mode, upstream, event)
+	}
 }
 
 func fmtDegradedLabel(upstreams map[string]*UpstreamHealth, resources map[string]*ResourceHealth) string {

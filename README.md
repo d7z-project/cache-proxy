@@ -459,7 +459,7 @@ pacman:
 
 Client: `Server = http://cache.lan:8080/pacman/$repo/os/$arch`. Repositories auto-discovered from `.db` / `.files` requests.
 
-Same field table as `apk`, except `refresh_interval` defaults to `2m`. Pacman strict metadata requires `.db`, `.db.sig`, `.files`, and `.files.sig` for a published generation.
+Same field table as `apk`, except `refresh_interval` defaults to `2m`. `.db` is required for a published generation; `.db.sig`, `.files`, and `.files.sig` are cached when available.
 
 </details>
 
@@ -507,6 +507,8 @@ For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically fro
 - Metadata is refreshed in the background and served only after validation.
 - If no validated snapshot is available yet, clients receive `503 Retry-After`.
 - Refresh failures keep serving the last valid snapshot when one exists.
+- Package and auxiliary downloads remain best-effort reverse proxy/cache requests. A package index hit adds upstream affinity, identity metadata, and digest verification when a SHA256 is available; an index miss does not block the download.
+- Cleanup only removes cached objects that were written with package-index metadata and are no longer referenced by the current validated snapshot.
 - Re-requesting metadata for a removed repository recreates it automatically.
 
 ## Development
