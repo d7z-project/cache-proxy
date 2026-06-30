@@ -104,10 +104,6 @@ func TestRefreshPublishesSnapshotAndCleanupUsesRebuiltPaths(t *testing.T) {
 	_, err = store.Put(ctx, "repo", "repo/pool/old.deb", strings.NewReader("drop"), map[string]string{"indexed": "true"})
 	require.NoError(t, err)
 
-	handler.mu.Lock()
-	handler.cleanupIndex = map[string]cleanupIndex{}
-	handler.mu.Unlock()
-
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 
 	_, err = store.OpenObject(ctx, "repo", "repo/pool/pkg.deb")

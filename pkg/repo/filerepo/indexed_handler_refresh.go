@@ -106,7 +106,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
 	var firstErr error
 	for _, upstream := range upstreams {
-		snapshot, cleanupPaths, err := h.buildSnapshot(ctx, subPath, generation, upstream, entry.targets)
+		snapshot, err := h.buildSnapshot(ctx, subPath, generation, upstream, entry.targets)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -125,7 +125,6 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 		}
 		h.mu.Lock()
 		h.rootSnapshots[subPath] = snapshot
-		h.cleanupIndex[subPath] = cleanupIndex{generation: generation, paths: cleanupPaths}
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
 		h.reportMetadataState()
@@ -168,7 +167,7 @@ func (h *IndexedHandler) CleanupSubPath(ctx context.Context, subPath string) err
 	return nil
 }
 
-func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation, upstream string, targets []MetadataTarget) (*LiveSnapshot, []string, error) {
+func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation, upstream string, targets []MetadataTarget) (*LiveSnapshot, error) {
 	session := &RefreshSession{
 		handler:    h,
 		rootKey:    rootKey,
@@ -181,10 +180,10 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation,
 	indexBuilder := &PathIndexBuilder{}
 	snapshot, err := h.build(ctx, session, indexBuilder)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if snapshot == nil {
-		return nil, nil, errors.New("metadata refresh produced no snapshot")
+		return nil, errors.New("metadata refresh produced no snapshot")
 	}
 	if snapshot.Metadata == nil {
 		snapshot.Metadata = map[string]MetadataObject{}
@@ -202,11 +201,11 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation,
 		snapshot.Metadata[pathKey] = obj
 		if obj.Required {
 			if _, err := h.store.StatObject(ctx, h.name, obj.StorePath); err != nil {
-				return nil, nil, fmt.Errorf("%s: required metadata missing", obj.Path)
+				return nil, fmt.Errorf("%s: required metadata missing", obj.Path)
 			}
 		}
 	}
-	return snapshot, indexBuilder.Finalize(), nil
+	return snapshot, nil
 }
 
 func (h *IndexedHandler) currentCleanupPaths(ctx context.Context) ([]string, error) {
@@ -244,12 +243,6 @@ func (h *IndexedHandler) cleanupPathsForSnapshot(ctx context.Context, snapshot *
 	if snapshot == nil {
 		return nil, nil
 	}
-	h.mu.RLock()
-	current, ok := h.cleanupIndex[snapshot.RootKey]
-	h.mu.RUnlock()
-	if ok && current.generation == snapshot.Generation {
-		return current.paths, nil
-	}
 	if h.rebuild == nil {
 		return nil, nil
 	}
@@ -257,13 +250,7 @@ func (h *IndexedHandler) cleanupPathsForSnapshot(ctx context.Context, snapshot *
 	if err := h.rebuild(ctx, &LocalSession{handler: h, snapshot: snapshot, ctx: ctx}, builder); err != nil {
 		return nil, err
 	}
-	paths := builder.Finalize()
-	h.mu.Lock()
-	if live := h.rootSnapshots[snapshot.RootKey]; live != nil && live.Generation == snapshot.Generation {
-		h.cleanupIndex[snapshot.RootKey] = cleanupIndex{generation: snapshot.Generation, paths: paths}
-	}
-	h.mu.Unlock()
-	return paths, nil
+	return builder.Finalize(), nil
 }
 
 func containsSortedPath(paths []string, cleanPath string) bool {

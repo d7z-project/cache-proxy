@@ -41,14 +41,8 @@ type IndexedHandler struct {
 	snapshot      *LiveSnapshot
 	roots         map[string]*rootEntry
 	rootSnapshots map[string]*LiveSnapshot
-	cleanupIndex  map[string]cleanupIndex
 	lifecycleCtx  context.Context
 	wait          sync.WaitGroup
-}
-
-type cleanupIndex struct {
-	generation string
-	paths      []string
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, discover Discoverer, builder SnapshotBuilder, rebuild CleanupIndexBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
@@ -67,7 +61,6 @@ func NewIndexedHandler(name, mode, objectRoot string, classifier func(string) Re
 		sh:            svcHealth,
 		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
-		cleanupIndex:  map[string]cleanupIndex{},
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:            mode,
