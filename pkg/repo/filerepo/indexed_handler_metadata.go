@@ -44,7 +44,7 @@ func (h *IndexedHandler) tryServeMetadata(w http.ResponseWriter, req *http.Reque
 		"X-Cache":        "GENERATION",
 	}
 	for key, value := range reader.Info().Options {
-		headers[headerName(key)] = value
+		headers[httpcache.HeaderName(key)] = value
 	}
 	httpcache.StripInternal(headers)
 	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}
@@ -120,7 +120,7 @@ func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootKey, generat
 		"content-type":   headers["Content-Type"],
 		"content-length": headers["Content-Length"],
 		"last-modified":  headers["Last-Modified"],
-		"etag":           headers["ETag"],
+		"etag":           headers["Etag"],
 		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
 		"mode":           h.mode,
 		"cache":          "GENERATION",
@@ -177,19 +177,4 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 		return err
 	}
 	return h.store.Rename(path.Join(h.name, tmpPath), path.Join(h.name, currentPath))
-}
-
-func headerName(key string) string {
-	switch key {
-	case "content-type":
-		return "Content-Type"
-	case "content-length":
-		return "Content-Length"
-	case "last-modified":
-		return "Last-Modified"
-	case "etag":
-		return "ETag"
-	default:
-		return key
-	}
 }

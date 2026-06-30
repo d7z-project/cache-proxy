@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"path"
 	"strings"
@@ -119,7 +118,8 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 		_ = reader.Close()
 		session.Release(target)
 		if !found {
-			return nil, fmt.Errorf("%s: desc entries not found", blob.Path)
+			snapshot.ArtifactCount = artifactCount
+			return snapshot, nil
 		}
 	}
 	snapshot.ArtifactCount = artifactCount

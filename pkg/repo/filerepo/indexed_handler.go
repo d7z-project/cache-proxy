@@ -2,7 +2,10 @@ package filerepo
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"gopkg.d7z.net/blobfs"
@@ -137,4 +140,91 @@ func (h *IndexedHandler) classify(cleanPath string) ResourceClass {
 		return ResourceAuxiliary
 	}
 	return h.classifier(cleanPath)
+}
+
+func (h *IndexedHandler) rootSnapshot(rootKey string) *LiveSnapshot {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rootSnapshots[rootKey]
+}
+
+func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnapshot, upstream string, targets []MetadataTarget) (bool, error) {
+	if snapshot == nil || len(targets) == 0 {
+		return false, nil
+	}
+	for _, target := range targets {
+		resolved, ok := resolveSnapshotMetadata(snapshot, target)
+		if !ok || resolved.StorePath == "" {
+			return false, nil
+		}
+		info, err := h.store.StatObject(ctx, h.name, resolved.StorePath)
+		if err != nil {
+			return false, nil
+		}
+		etag := info.Options["etag"]
+		lastModified := info.Options["last-modified"]
+		if etag == "" && lastModified == "" {
+			return false, nil
+		}
+
+		request, err := http.NewRequestWithContext(ctx, http.MethodHead, strings.TrimRight(upstream, "/")+"/"+httpcache.EscapePath(resolved.Path), nil)
+		if err != nil {
+			return false, err
+		}
+		request.Header.Set("User-Agent", h.client.UserAgent)
+		if etag != "" {
+			request.Header.Set("If-None-Match", etag)
+		}
+		if lastModified != "" {
+			request.Header.Set("If-Modified-Since", lastModified)
+		}
+
+		response, err := h.client.Do(request)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return false, err
+			}
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				return false, err
+			}
+			return false, nil
+		}
+		response.Body.Close()
+		switch response.StatusCode {
+		case http.StatusNotModified:
+			continue
+		case http.StatusOK:
+			return false, nil
+		case http.StatusMethodNotAllowed, http.StatusNotImplemented:
+			return false, nil
+		default:
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func resolveSnapshotMetadata(snapshot *LiveSnapshot, target MetadataTarget) (MetadataObject, bool) {
+	if snapshot == nil {
+		return MetadataObject{}, false
+	}
+	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+		obj, ok := snapshot.Metadata[candidate]
+		if !ok {
+			continue
+		}
+		if obj.Path == "" || obj.Path == candidate {
+			return obj, obj.StorePath != ""
+		}
+		resolved, ok := snapshot.Metadata[obj.Path]
+		if !ok {
+			return MetadataObject{}, false
+		}
+		if resolved.Path == "" {
+			resolved.Path = obj.Path
+		}
+		return resolved, resolved.StorePath != ""
+	}
+	return MetadataObject{}, false
 }

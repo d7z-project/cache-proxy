@@ -34,12 +34,6 @@ func (s *Scheduler) saveState() {
 	s.saveStateLocked()
 }
 
-func (s *Scheduler) saveAllState() {
-	s.storeMu.Lock()
-	defer s.storeMu.Unlock()
-	s.saveStateLocked()
-}
-
 func (s *Scheduler) saveStateLocked() {
 	if s.store == nil {
 		if s.m != nil {

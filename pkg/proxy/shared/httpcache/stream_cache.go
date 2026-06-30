@@ -53,8 +53,10 @@ func StreamToPipe(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) 
 		defer cfg.Downloads.Delete(cfg.ObjectPath)
 		defer cfg.Body.Close()
 		defer pw.Close()
-		defer tempFile.Close()
-		defer os.Remove(tempFile.Name())
+		defer func() {
+			tempFile.Close()
+			os.Remove(tempFile.Name())
+		}()
 		if cfg.StatsDone != nil {
 			defer cfg.StatsDone()
 		}

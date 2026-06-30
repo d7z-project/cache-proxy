@@ -64,17 +64,17 @@ type App struct {
 	ready         atomic.Bool
 	closed        atomic.Bool
 
-	tuMu         sync.Mutex
-	tuCachedAt   time.Time
-	tuCache      map[string]int64
-	tuRefreshing atomic.Bool
+	tenantUsageMu         sync.Mutex
+	tenantUsageCachedAt   time.Time
+	tenantUsageCache      map[string]int64
+	tenantUsageRefreshing atomic.Bool
 }
 
 func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
-	a.tuMu.Lock()
-	prev := a.tuCachedAt
-	result := cloneUsage(a.tuCache)
-	a.tuMu.Unlock()
+	a.tenantUsageMu.Lock()
+	prev := a.tenantUsageCachedAt
+	result := cloneUsage(a.tenantUsageCache)
+	a.tenantUsageMu.Unlock()
 	if time.Since(prev) >= 5*time.Minute {
 		a.refreshTenantUsage(tenants)
 	}
@@ -82,19 +82,19 @@ func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int6
 }
 
 func (a *App) refreshTenantUsage(tenants []string) {
-	if a.store == nil || !a.tuRefreshing.CompareAndSwap(false, true) {
+	if a.store == nil || !a.tenantUsageRefreshing.CompareAndSwap(false, true) {
 		return
 	}
 	names := append([]string(nil), tenants...)
 	go func() {
-		defer a.tuRefreshing.Store(false)
+		defer a.tenantUsageRefreshing.Store(false)
 		ctx, cancel := context.WithTimeout(a.lifecycleCtx, 30*time.Second)
 		defer cancel()
 		usage := collectTenantUsage(ctx, names, a.store)
-		a.tuMu.Lock()
-		a.tuCache = usage
-		a.tuCachedAt = time.Now()
-		a.tuMu.Unlock()
+		a.tenantUsageMu.Lock()
+		a.tenantUsageCache = usage
+		a.tenantUsageCachedAt = time.Now()
+		a.tenantUsageMu.Unlock()
 	}()
 }
 
@@ -107,13 +107,6 @@ func cloneUsage(src map[string]int64) map[string]int64 {
 		dst[key] = value
 	}
 	return dst
-}
-
-func (a *App) currentConfig() *config.Document {
-	a.routesMu.RLock()
-	doc := a.config
-	a.routesMu.RUnlock()
-	return doc
 }
 
 func Load(path string) (*config.Document, error) {

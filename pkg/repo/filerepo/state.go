@@ -103,7 +103,8 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		h.mu.Unlock()
 
 		if h.sh != nil {
-			h.sh.AddResource(snapshot.RootKey, nil, h.upstreams)
+			h.sh.AddResource(snapshot.RootKey, targetsToProbe(snapshot.Targets), h.upstreams)
+			h.sh.MarkResourceActive(snapshot.RootKey, targetsToProbe(snapshot.Targets))
 		}
 		h.reportMetadataState()
 		return nil

@@ -18,22 +18,6 @@ type registryManifest struct {
 	UpdatedAt string   `json:"updated_at"`
 }
 
-func loadRegistry(ctx context.Context, store *blobfs.Store) (*registryManifest, error) {
-	rd, err := store.OpenObject(ctx, registryTenant, "manifest.json")
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = rd.Close() }() // read-only reader, close error is harmless
-	var manifest registryManifest
-	if err := json.NewDecoder(rd).Decode(&manifest); err != nil {
-		return nil, err
-	}
-	return &manifest, nil
-}
-
 func saveRegistry(ctx context.Context, store *blobfs.Store, doc *config.Document) {
 	var names []string
 	for _, inst := range doc.Instances {

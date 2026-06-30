@@ -68,7 +68,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 		h.mu.Lock()
 		event := uh.recordProbe(false, 0, h.config)
 		uh.lastProbeErr = err.Error()
-		_ = h.emitUpstreamMetrics(uh)
+		h.emitUpstreamMetrics(uh)
 		if event != "" {
 			h.recordCircuitEvent(uh.URL, event)
 		}
@@ -90,7 +90,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 	case resp.StatusCode == 404 || resp.StatusCode == 403 || resp.StatusCode == 410:
 		event = uh.recordProbe(true, latency, h.config)
 		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil {
-			h.recordResourceResultLocked(rh, statusToResourceError(resp.StatusCode))
+			h.applyResourceErrorLocked(rh, statusToResourceError(resp.StatusCode))
 		}
 	default:
 		event = uh.recordProbe(true, latency, h.config)
@@ -103,7 +103,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 		}
 	}
 
-	_ = h.emitUpstreamMetrics(uh)
+	h.emitUpstreamMetrics(uh)
 	if event != "" {
 		h.recordCircuitEvent(uh.URL, event)
 	}

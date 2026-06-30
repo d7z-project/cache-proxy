@@ -165,7 +165,7 @@ func metadata(headers map[string]string, mode, status string) map[string]string 
 	return result
 }
 
-func headerName(key string) string {
+func HeaderName(key string) string {
 	switch key {
 	case "content-type":
 		return "Content-Type"

@@ -30,7 +30,7 @@ func TestHeaderName(t *testing.T) {
 		"unknown-key":           "unknown-key",
 	}
 	for input, expected := range tests {
-		require.Equal(t, expected, headerName(input), "headerName(%q)", input)
+		require.Equal(t, expected, HeaderName(input), "HeaderName(%q)", input)
 	}
 }
 

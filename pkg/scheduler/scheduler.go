@@ -187,7 +187,7 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	s.saveAllState()
+	s.saveState()
 	return nil
 }
 
@@ -336,9 +336,6 @@ func (s *Scheduler) execute(ts *taskState) {
 	}
 	if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone {
 		refreshResult := result
-		if refreshResult == "success" {
-			refreshResult = "success"
-		}
 		if !ts.discoveredAt.IsZero() && s.m != nil {
 			s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), refreshResult).Observe(time.Since(ts.discoveredAt).Seconds())
 		}
@@ -351,7 +348,11 @@ func (s *Scheduler) execute(ts *taskState) {
 	}
 
 	if ts.Interval > 0 {
-		s.heapPush(ts)
+		if ts.index >= 0 {
+			heap.Fix(&s.heap, ts.index)
+		} else {
+			heap.Push(&s.heap, ts)
+		}
 	}
 	s.refreshMetrics()
 	s.saveState()
@@ -422,14 +423,6 @@ func (s *Scheduler) heapPeek() *taskState {
 		return nil
 	}
 	return s.heap[0]
-}
-
-func (s *Scheduler) heapPush(ts *taskState) {
-	if ts.index >= 0 {
-		heap.Fix(&s.heap, ts.index)
-	} else {
-		heap.Push(&s.heap, ts)
-	}
 }
 
 func (s *Scheduler) refreshMetrics() {

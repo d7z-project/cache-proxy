@@ -16,7 +16,6 @@ type ResponseWrapper struct {
 	StatusCode int
 	Headers    map[string]string
 	Body       io.ReadCloser
-	Closes     func()
 }
 
 type HttpClientWrapper struct {
@@ -86,15 +85,10 @@ func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.Respons
 }
 
 func (receiver *ResponseWrapper) Close() error {
-	var err error
 	if receiver.Body != nil {
-		err = receiver.Body.Close()
+		return receiver.Body.Close()
 	}
-	if receiver.Closes != nil {
-		receiver.Closes()
-		receiver.Closes = nil
-	}
-	return err
+	return nil
 }
 
 func ParseFetchedAt(value string) (time.Time, error) {

@@ -155,11 +155,11 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 	}
 	var event string
 	if status >= 500 || status == 0 {
-		event = uh.recordFailure(fmtStatusError(status), h.config)
+		event = uh.recordFailure(formatStatusError(status), h.config)
 	} else {
 		event = uh.recordSuccess(latency, h.config)
 	}
-	_ = h.emitUpstreamMetrics(uh)
+	h.emitUpstreamMetrics(uh)
 	if event != "" {
 		h.recordCircuitEvent(url, event)
 		h.recomputeAggregateLocked()
@@ -177,7 +177,7 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 		return
 	}
 	event := uh.recordFailure(err, h.config)
-	_ = h.emitUpstreamMetrics(uh)
+	h.emitUpstreamMetrics(uh)
 	if event != "" {
 		h.recordCircuitEvent(url, event)
 		h.recomputeAggregateLocked()
@@ -297,20 +297,6 @@ func (h *ServiceHealth) RefreshBlockedUntil(path string) (time.Time, bool) {
 	return rh.NextRefreshAt, true
 }
 
-func (h *ServiceHealth) ActiveResources() []*ResourceHealth {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	result := make([]*ResourceHealth, 0)
-	for _, rh := range h.resources {
-		if rh.State == RRemoved {
-			continue
-		}
-		cp := *rh
-		result = append(result, &cp)
-	}
-	return result
-}
-
 func (h *ServiceHealth) SnapshotResources() []ResourceSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -319,12 +305,6 @@ func (h *ServiceHealth) SnapshotResources() []ResourceSnapshot {
 		result = append(result, rh.Snapshot())
 	}
 	return result
-}
-
-func (h *ServiceHealth) HasResources() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.resources) > 0
 }
 
 func (h *ServiceHealth) AggregateState() AggregateState {
@@ -340,39 +320,12 @@ func (h *ServiceHealth) DashboardStatus() (color, label, extra string) {
 	case StateHealthy:
 		return "green", "healthy", ""
 	case StateDegraded:
-		return "yellow", fmtDegradedLabel(h.upstreams, h.resources), ""
+		return "yellow", degradedLabel(h.upstreams, h.resources), ""
 	case StateUnhealthy:
 		return "red", "unhealthy", ""
 	default:
 		return "gray", "unknown", ""
 	}
-}
-
-func (h *ServiceHealth) DegradedCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	n := 0
-	for _, uh := range h.upstreams {
-		if uh.State == SDegraded || uh.State == SOpen || uh.State == SHalfOpen {
-			n++
-		}
-	}
-	for _, rh := range h.resources {
-		if rh.State == RSuspect || rh.State == RBlocked || rh.State == RRemoved {
-			n++
-		}
-	}
-	return n
-}
-
-func (h *ServiceHealth) UpstreamStates() map[string]string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	result := make(map[string]string, len(h.upstreams))
-	for url, uh := range h.upstreams {
-		result[url] = uh.State.String()
-	}
-	return result
 }
 
 func (h *ServiceHealth) recomputeAggregateLocked() {
@@ -407,17 +360,10 @@ func (h *ServiceHealth) recomputeAggregateLocked() {
 	}
 }
 
-func (h *ServiceHealth) recordResourceResultLocked(rh *ResourceHealth, err error) {
-	if rh == nil || err == nil {
-		return
-	}
-	h.applyResourceErrorLocked(rh, err)
-}
-
 func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) {
 	rh.LastError = err.Error()
 	switch {
-	case IsResourceNotFound(err):
+	case isResourceNotFound(err):
 		rh.ConsecutiveNotFound++
 		if rh.FirstNotFoundAt.IsZero() {
 			rh.FirstNotFoundAt = time.Now()
@@ -434,11 +380,11 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 		} else {
 			rh.State = RSuspect
 		}
-	case IsResourceForbidden(err):
+	case isResourceForbidden(err):
 		rh.ConsecutiveInvalid++
 		rh.State = RBlocked
 		rh.NextRefreshAt = time.Now().Add(h.config.ResourceBlockInterval)
-	case IsResourceTransient(err):
+	case isResourceTransient(err):
 		rh.ConsecutiveTransient++
 		if rh.ConsecutiveTransient >= resourceFailCount {
 			rh.State = RBlocked
@@ -458,13 +404,6 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 	h.recomputeAggregateLocked()
 }
 
-func (h *ServiceHealth) RecordResourceResult(path string, err error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	rh := h.resources[path]
-	h.recordResourceResultLocked(rh, err)
-}
-
 func (h *ServiceHealth) ResourceHealth(path string) (*ResourceHealth, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -472,14 +411,36 @@ func (h *ServiceHealth) ResourceHealth(path string) (*ResourceHealth, bool) {
 	return rh, ok
 }
 
-func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) error {
+func (h *ServiceHealth) MarkResourceActive(path string, targets []ProbeTarget) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rh := h.resources[path]
+	if rh == nil || rh.State == RRemoved {
+		return
+	}
+	rh.State = RActive
+	rh.Refreshing = false
+	rh.ConsecutiveNotFound = 0
+	rh.ConsecutiveInvalid = 0
+	rh.ConsecutiveTransient = 0
+	rh.LastError = ""
+	if rh.LastSuccessAt.IsZero() {
+		rh.LastSuccessAt = time.Now()
+	}
+	rh.NextRefreshAt = time.Time{}
+	if len(targets) > 0 {
+		rh.LastTargets = append([]ProbeTarget(nil), targets...)
+	}
+	h.recomputeAggregateLocked()
+}
+
+func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) {
 	if h.stats == nil {
-		return nil
+		return
 	}
 	h.stats.SetUpstreamHealth(h.name, h.mode, uh.URL,
 		int(uh.State), uh.weight, uh.window.errorRate(),
 		uh.ewmaLatency.Seconds())
-	return nil
 }
 
 func (h *ServiceHealth) recordCircuitEvent(upstream, event string) {
@@ -488,7 +449,7 @@ func (h *ServiceHealth) recordCircuitEvent(upstream, event string) {
 	}
 }
 
-func fmtDegradedLabel(upstreams map[string]*UpstreamHealth, resources map[string]*ResourceHealth) string {
+func degradedLabel(upstreams map[string]*UpstreamHealth, resources map[string]*ResourceHealth) string {
 	n := 0
 	for _, uh := range upstreams {
 		if uh.State != SClosed {
@@ -506,13 +467,13 @@ func fmtDegradedLabel(upstreams map[string]*UpstreamHealth, resources map[string
 	return fmt.Sprintf("%d degraded", n)
 }
 
-func fmtStatusError(status int) error {
+func formatStatusError(status int) error {
 	if status == 0 {
 		return fmt.Errorf("network error")
 	}
 	return fmt.Errorf("HTTP %d", status)
 }
 
-func IsResourceNotFound(err error) bool  { return err == ErrResourceNotFound }
-func IsResourceForbidden(err error) bool { return err == ErrResourceForbidden }
-func IsResourceTransient(err error) bool { return err == ErrResourceTransient }
+func isResourceNotFound(err error) bool  { return err == ErrResourceNotFound }
+func isResourceForbidden(err error) bool { return err == ErrResourceForbidden }
+func isResourceTransient(err error) bool { return err == ErrResourceTransient }

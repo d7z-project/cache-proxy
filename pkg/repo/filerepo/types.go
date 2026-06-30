@@ -17,8 +17,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-const DefaultBlockedRetryInterval = time.Hour
-
 var (
 	errMetadataNotFound  = errors.New("metadata upstream not found")
 	errMetadataTransient = errors.New("metadata upstream transient failure")
@@ -30,10 +28,6 @@ func ResolveMetadataRefreshInterval(value config.Duration, fallback time.Duratio
 		return value.Duration()
 	}
 	return fallback
-}
-
-type RefreshPolicy struct {
-	Interval time.Duration
 }
 
 type MetadataFetchError struct {
@@ -67,14 +61,6 @@ func (b MetadataBlob) Open() (io.ReadSeeker, error) {
 		return nil, err
 	}
 	return b.file, nil
-}
-
-func (b MetadataBlob) ReadAll() ([]byte, error) {
-	reader, err := b.Open()
-	if err != nil {
-		return nil, err
-	}
-	return io.ReadAll(reader)
 }
 
 func (b MetadataBlob) Close() {
@@ -265,23 +251,14 @@ func (s *LocalSession) Fetch(target MetadataTarget) (MetadataBlob, error) {
 		if err != nil {
 			return MetadataBlob{}, err
 		}
-		tempFile, size, err := tempFileFromObjectReader(reader)
+		tempFile, _, err := utils.TempFileFromReader(reader)
 		reader.Close()
 		if err != nil {
 			return MetadataBlob{}, err
 		}
-		_ = size
 		return MetadataBlob{Path: obj.Path, file: tempFile, temp: tempFile.Name()}, nil
 	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: errMetadataNotFound}
-}
-
-func tempFileFromObjectReader(reader io.Reader) (*os.File, int64, error) {
-	file, size, err := utils.TempFileFromReader(reader)
-	if err != nil {
-		return nil, 0, err
-	}
-	return file, size, nil
 }
 
 func DeduceCompanions(basePath string) []string {
@@ -302,18 +279,6 @@ type RootSpec interface {
 type Discoverer interface {
 	Discover(cleanPath string) (RootSpec, bool)
 }
-
-type staticRootSpec struct {
-	key     string
-	targets []MetadataTarget
-}
-
-func (s staticRootSpec) Key() string     { return s.key }
-func (s staticRootSpec) SubPath() string { return s.key }
-func (s staticRootSpec) Targets() []MetadataTarget {
-	return append([]MetadataTarget(nil), s.targets...)
-}
-func (s staticRootSpec) Merge(_ RootSpec) bool { return false }
 
 func metadataStorePath(root, rootKey, generation, cleanPath string) string {
 	return path.Join(root, ".roots", pathEscapeKey(rootKey), "generations", generation, "metadata", cleanPath)

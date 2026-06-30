@@ -120,7 +120,7 @@ func (h *Handler) openCached(ctx context.Context, route Route) (*utils.ResponseW
 	info := reader.Info()
 	headers := map[string]string{"Content-Length": strconv.FormatInt(info.Size, 10)}
 	for key, value := range info.Options {
-		headers[headerName(key)] = value
+		headers[HeaderName(key)] = value
 	}
 	if h.expired(route, info.Options) {
 		_ = reader.Close()
@@ -244,7 +244,7 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 
 	headers := map[string]string{"X-Cache": status}
 	for key, value := range meta {
-		headers[headerName(key)] = value
+		headers[HeaderName(key)] = value
 	}
 	setContentType(headers, route.ObjectPath)
 	h.addCacheDebugHeaders(headers, route, meta["fetched-at"])

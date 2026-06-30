@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -470,49 +469,11 @@ func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 }
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
-	return openAppWithConfig(t, ctx, doc, "")
-}
-
-func openAppWithConfig(t *testing.T, ctx context.Context, doc *config.Document, configPath string) *App {
 	t.Helper()
-	app, err := Open(ctx, doc, configPath)
+	app, err := Open(ctx, doc, "")
 	require.NoError(t, err)
 	app.ready.Store(true)
 	return app
-}
-
-func writeYAML(t *testing.T, path string, doc *config.Document) {
-	t.Helper()
-	var b strings.Builder
-	b.WriteString("server:\n")
-	b.WriteString("  bind: " + doc.Server.Bind + "\n")
-	b.WriteString("  backend: " + doc.Server.Backend + "\n")
-	if doc.Server.PublicURL != "" {
-		b.WriteString("  public_url: " + doc.Server.PublicURL + "\n")
-	}
-	b.WriteString("metrics:\n")
-	b.WriteString("  path: " + doc.Metrics.Path + "\n")
-	b.WriteString("storage:\n")
-	b.WriteString("  gc:\n")
-	b.WriteString("    blob: 1h\n")
-	b.WriteString("instances:\n")
-	for _, inst := range doc.Instances {
-		sel, err := inst.SelectMode()
-		require.NoError(t, err)
-		b.WriteString("  - name: " + inst.Name + "\n")
-		b.WriteString("    enabled: " + fmt.Sprintf("%v", inst.Enabled) + "\n")
-		b.WriteString("    " + sel.Mode + ":\n")
-		if sel.Block != nil {
-			data, err := yaml.Marshal(sel.Block.Node)
-			require.NoError(t, err)
-			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-				if line != "" {
-					b.WriteString("      " + line + "\n")
-				}
-			}
-		}
-	}
-	require.NoError(t, os.WriteFile(path, []byte(b.String()), 0o644))
 }
 
 func testDocument(backend string, instances []config.Instance) *config.Document {
@@ -560,18 +521,6 @@ func fileInstance(t *testing.T, name, path, upstream string, policy file.Policy)
 		Name:    name,
 		Enabled: true,
 		File:    &config.ModeBlock{Node: yamlNode(t, mode)},
-	}
-}
-
-func ociInstance(t *testing.T, name, bind, upstream string) config.Instance {
-	t.Helper()
-	return config.Instance{
-		Name:    name,
-		Enabled: true,
-		OCI: &config.ModeBlock{Node: yamlNode(t, map[string]any{
-			"bind":     bind,
-			"upstream": upstream,
-		})},
 	}
 }
 

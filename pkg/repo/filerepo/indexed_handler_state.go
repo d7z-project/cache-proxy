@@ -97,13 +97,6 @@ func (h *IndexedHandler) currentSnapshot() *LiveSnapshot {
 	return h.snapshot
 }
 
-func (h *IndexedHandler) hasRootSnapshot(rootKey string) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	_, ok := h.rootSnapshots[rootKey]
-	return ok
-}
-
 func (h *IndexedHandler) hasAnyRootSnapshot() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

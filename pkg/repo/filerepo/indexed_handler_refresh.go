@@ -106,6 +106,24 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
 	var firstErr error
 	for _, upstream := range upstreams {
+		if current := h.rootSnapshot(subPath); current != nil && current.Upstream == upstream {
+			unchanged, err := h.canSkipRefresh(ctx, current, upstream, entry.targets)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				slog.Debug("subpath refresh head check failed", "instance", h.name, "subPath", subPath, "upstream", upstream, "err", err)
+				continue
+			}
+			if unchanged {
+				if h.sh != nil {
+					h.sh.FinishRefresh(subPath, refreshGen, nil, targetsToProbe(current.Targets))
+				}
+				h.reportMetadataState()
+				slog.Debug("subpath refresh skipped unchanged metadata", "instance", h.name, "mode", h.mode, "subPath", subPath, "upstream", upstream)
+				return nil
+			}
+		}
 		snapshot, err := h.buildSnapshot(ctx, subPath, generation, upstream, entry.targets)
 		if err != nil {
 			if firstErr == nil {

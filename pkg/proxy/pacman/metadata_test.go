@@ -18,3 +18,9 @@ func TestDiscovererDetectsPacmanRoot(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "core", spec.Key())
 }
+
+func TestParseDescWithoutFilenameReturnsEmpty(t *testing.T) {
+	filename, err := parseDesc(strings.NewReader("%NAME%\nmultilib-staging\n"))
+	require.NoError(t, err)
+	require.Empty(t, filename)
+}

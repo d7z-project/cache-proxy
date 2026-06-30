@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
@@ -41,7 +43,13 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	refreshInterval := ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval)
 	gcInterval := max(refreshInterval*3, 6*time.Hour)
 
-	handler := NewIndexedHandler(plan.Name(), mode, mode, classify, upstreams, block.Transport, config.ExpirationNever, policy, discover, build, rebuild, plan.Store(), plan.Stats(), NewServiceHealth(block.Transport, upstreams, plan, mode), plan.Downloads())
+	healthCfg := health.DefaultConfig()
+	if block.Transport != nil {
+		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
+	}
+	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats(), httpcache.ModeUserAgent(mode))
+	sh.SetBus(plan.Bus())
+	handler := NewIndexedHandler(plan.Name(), mode, mode, classify, upstreams, block.Transport, config.ExpirationNever, policy, discover, build, rebuild, plan.Store(), plan.Stats(), sh, plan.Downloads())
 	handler.SetBus(plan.Bus())
 
 	sched := plan.Scheduler()
