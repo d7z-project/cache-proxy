@@ -2,6 +2,7 @@ package pacman
 
 import (
 	"archive/tar"
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -59,11 +60,11 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	return &rootSpec{Repo: repoName, StorePath: trimmed}, true
 }
 
-func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
+func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]filerepo.MetadataObject{},
-		Artifacts: map[string]filerepo.RepoObject{},
+		Metadata: map[string]filerepo.MetadataObject{},
 	}
+	artifactCount := 0
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
 		if err != nil {
@@ -111,7 +112,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			found = true
-			filename, checksum, err := parseDesc(tarReader)
+			filename, err := parseDesc(tarReader)
 			if err != nil {
 				_ = reader.Close()
 				return nil, err
@@ -120,11 +121,9 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			artifactPath := path.Join(path.Dir(blob.Path), filename)
-			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
-				Path:     artifactPath,
-				Identity: checksum,
-				Digest:   filerepo.SHA256Digest(checksum),
-			}
+			paths.Add(artifactPath)
+			paths.AddAuxiliary(artifactPath)
+			artifactCount++
 		}
 		_ = reader.Close()
 		session.Release(target)
@@ -132,28 +131,68 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, fmt.Errorf("%s: desc entries not found", blob.Path)
 		}
 	}
+	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
 }
 
-func parseDesc(input io.Reader) (string, string, error) {
-	data, err := io.ReadAll(input)
-	if err != nil {
-		return "", "", err
-	}
-	var filename string
-	var checksum string
-	parts := strings.Split(string(data), "\n")
-	for i := 0; i < len(parts); i++ {
-		switch strings.TrimSpace(parts[i]) {
-		case "%FILENAME%":
-			if i+1 < len(parts) {
-				filename = strings.TrimSpace(parts[i+1])
+func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
+	for _, target := range session.Targets() {
+		blob, err := session.Fetch(target)
+		if err != nil {
+			return err
+		}
+		defer blob.Close()
+		blobReader, err := blob.Open()
+		if err != nil {
+			return err
+		}
+		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
+		if err != nil {
+			return err
+		}
+		tarReader := tar.NewReader(reader)
+		for {
+			header, err := tarReader.Next()
+			if err == io.EOF {
+				break
 			}
-		case "%SHA256SUM%":
-			if i+1 < len(parts) {
-				checksum = strings.TrimSpace(parts[i+1])
+			if err != nil {
+				_ = reader.Close()
+				return err
+			}
+			if path.Base(header.Name) != "desc" {
+				continue
+			}
+			filename, err := parseDesc(tarReader)
+			if err != nil {
+				_ = reader.Close()
+				return err
+			}
+			if filename != "" {
+				artifactPath := path.Join(path.Dir(blob.Path), filename)
+				paths.Add(artifactPath)
+				paths.AddAuxiliary(artifactPath)
 			}
 		}
+		_ = reader.Close()
 	}
-	return filename, checksum, nil
+	return nil
+}
+
+func parseDesc(input io.Reader) (string, error) {
+	var filename string
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(nil, 1<<20)
+	nextFilename := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case nextFilename:
+			filename = line
+			nextFilename = false
+		case line == "%FILENAME%":
+			nextFilename = true
+		}
+	}
+	return filename, scanner.Err()
 }

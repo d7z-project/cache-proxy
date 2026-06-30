@@ -51,18 +51,10 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 		BusyPolicy:   profile.BusyPolicy,
 		ExpireAfter:  profile.ExpireAfter,
 	}
-	if class != ResourceArtifact && class != ResourceAuxiliary {
-		return route, nil
-	}
-	if obj, ok := r.handler.currentRepoObject(cleanPath, class); ok {
-		if obj.Upstream != "" {
-			route.TargetURL = strings.TrimRight(obj.Upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
-			route.PreferredUpstream = obj.Upstream
+	if class == ResourceArtifact || class == ResourceAuxiliary {
+		if snap := r.handler.currentSnapshot(); snap != nil && snap.Upstream != "" {
+			route.PreferredUpstream = snap.Upstream
 		}
-	}
-	snap := r.handler.currentSnapshot()
-	if route.PreferredUpstream == "" && snap != nil && snap.Upstream != "" {
-		route.PreferredUpstream = snap.Upstream
 	}
 	return route, nil
 }

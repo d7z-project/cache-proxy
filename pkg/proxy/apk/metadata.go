@@ -50,11 +50,11 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	return &rootSpec{Branch: parts[0], Repo: parts[1], Arch: parts[2]}, true
 }
 
-func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
+func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]filerepo.MetadataObject{},
-		Artifacts: map[string]filerepo.RepoObject{},
+		Metadata: map[string]filerepo.MetadataObject{},
 	}
+	artifacts := 0
 	for _, target := range session.Targets() {
 		blob, err := session.Fetch(ctx, target)
 		if err != nil {
@@ -91,10 +91,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				continue
 			}
 			found = true
-			if err := parseIndex(path.Dir(blob.Path), tarReader, snapshot); err != nil {
+			n, err := parseIndex(path.Dir(blob.Path), tarReader, paths)
+			if err != nil {
 				_ = reader.Close()
 				return nil, err
 			}
+			artifacts += n
 			break
 		}
 		_ = reader.Close()
@@ -103,23 +105,61 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, fmt.Errorf("%s: APKINDEX entry not found", blob.Path)
 		}
 	}
+	snapshot.ArtifactCount = artifacts
 	return snapshot, nil
 }
 
-func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapshot) error {
+func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
+	for _, target := range session.Targets() {
+		blob, err := session.Fetch(target)
+		if err != nil {
+			return err
+		}
+		defer blob.Close()
+		blobReader, err := blob.Open()
+		if err != nil {
+			return err
+		}
+		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
+		if err != nil {
+			return err
+		}
+		tarReader := tar.NewReader(reader)
+		for {
+			header, err := tarReader.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				_ = reader.Close()
+				return err
+			}
+			if path.Base(header.Name) != "APKINDEX" {
+				continue
+			}
+			_, err = parseIndex(path.Dir(blob.Path), tarReader, paths)
+			_ = reader.Close()
+			if err != nil {
+				return err
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func parseIndex(basePath string, input io.Reader, paths *filerepo.PathIndexBuilder) (int, error) {
 	var name string
 	var version string
-	var checksum string
+	count := 0
 	flush := func() {
 		if name == "" || version == "" {
 			return
 		}
 		artifactPath := path.Join(basePath, name+"-"+version+".apk")
-		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
-			Path:     artifactPath,
-			Identity: checksum,
-			Digest:   filerepo.IdentityDigest("apk-control", checksum),
-		}
+		paths.Add(artifactPath)
+		paths.AddAuxiliary(artifactPath)
+		count++
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(nil, 10<<20)
@@ -127,7 +167,7 @@ func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapsho
 		line := scanner.Text()
 		if line == "" {
 			flush()
-			name, version, checksum = "", "", ""
+			name, version = "", ""
 			continue
 		}
 		key, value, ok := strings.Cut(line, ":")
@@ -139,10 +179,8 @@ func parseIndex(basePath string, input io.Reader, snapshot *filerepo.LiveSnapsho
 			name = value
 		case "V":
 			version = value
-		case "C":
-			checksum = value
 		}
 	}
 	flush()
-	return scanner.Err()
+	return count, scanner.Err()
 }

@@ -43,11 +43,11 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	return &rootSpec{RepoPath: repoPath}, true
 }
 
-func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
+func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]filerepo.MetadataObject{},
-		Artifacts: map[string]filerepo.RepoObject{},
+		Metadata: map[string]filerepo.MetadataObject{},
 	}
+	artifactCount := 0
 	for _, target := range session.Targets() {
 		repomd, err := session.Fetch(ctx, target)
 		if err != nil {
@@ -61,34 +61,18 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				snapshot.Metadata[companion.Path] = companion
 			}
 		}
-		var root struct {
-			Data []struct {
-				Type     string `xml:"type,attr"`
-				Checksum struct {
-					Type  string `xml:"type,attr"`
-					Value string `xml:",chardata"`
-				} `xml:"checksum"`
-				Location struct {
-					Href string `xml:"href,attr"`
-				} `xml:"location"`
-			} `xml:"data"`
-		}
-		repomdBody, err := repomd.ReadAll()
+		items, err := parseRepomd(repomd)
 		if err != nil {
-			return nil, err
-		}
-		if err := xml.Unmarshal(repomdBody, &root); err != nil {
 			return nil, err
 		}
 		session.Release(target)
 		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
 		foundPrimary := false
-		for _, item := range root.Data {
-			itemHref := item.Location.Href
-			if itemHref == "" {
+		for _, item := range items {
+			if item.Location == "" {
 				continue
 			}
-			metadataPath := path.Join(repoRoot, itemHref)
+			metadataPath := path.Join(repoRoot, item.Location)
 			metaTarget := filerepo.MetadataTarget{URL: metadataPath}
 
 			blob, err := session.Fetch(ctx, metaTarget)
@@ -98,7 +82,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				}
 				continue
 			}
-			if err := verifyRepomdChecksum(metadataPath, item.Checksum.Type, strings.TrimSpace(item.Checksum.Value), blob); err != nil {
+			if err := verifyRepomdChecksum(metadataPath, item.SumType, item.Checksum, blob); err != nil {
 				return nil, err
 			}
 			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
@@ -117,7 +101,8 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			if err != nil {
 				return nil, err
 			}
-			err = parsePrimary(reader, snapshot, repoRoot)
+			added, err := parsePrimary(reader, paths, repoRoot)
+			artifactCount += added
 			_ = reader.Close()
 			session.Release(metaTarget)
 			if err != nil {
@@ -128,18 +113,105 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			return nil, fmt.Errorf("%s: primary metadata not found", repomd.Path)
 		}
 	}
+	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
 }
 
-func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot string) error {
-	decoder := xml.NewDecoder(input)
+func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
+	for _, target := range session.Targets() {
+		repomd, err := session.Fetch(target)
+		if err != nil {
+			return err
+		}
+		defer repomd.Close()
+		root, err := parseRepomd(repomd)
+		if err != nil {
+			return err
+		}
+		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
+		for _, item := range root {
+			if item.Type != "primary" || item.Location == "" {
+				continue
+			}
+			blob, err := session.Fetch(filerepo.MetadataTarget{URL: path.Join(repoRoot, item.Location)})
+			if err != nil {
+				return err
+			}
+			defer blob.Close()
+			blobReader, err := blob.Open()
+			if err != nil {
+				return err
+			}
+			reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
+			if err != nil {
+				return err
+			}
+			_, err = parsePrimary(reader, paths, repoRoot)
+			_ = reader.Close()
+			return err
+		}
+	}
+	return nil
+}
+
+type repomdItem struct {
+	Type     string
+	Location string
+	Checksum string
+	SumType  string
+}
+
+func parseRepomd(blob filerepo.MetadataBlob) ([]repomdItem, error) {
+	reader, err := blob.Open()
+	if err != nil {
+		return nil, err
+	}
+	decoder := xml.NewDecoder(reader)
+	var items []repomdItem
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			return nil
+			return items, nil
 		}
 		if err != nil {
-			return err
+			return nil, err
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "data" {
+			continue
+		}
+		var node struct {
+			Type     string `xml:"type,attr"`
+			Checksum struct {
+				Type  string `xml:"type,attr"`
+				Value string `xml:",chardata"`
+			} `xml:"checksum"`
+			Location struct {
+				Href string `xml:"href,attr"`
+			} `xml:"location"`
+		}
+		if err := decoder.DecodeElement(&node, &start); err != nil {
+			return nil, err
+		}
+		items = append(items, repomdItem{
+			Type:     node.Type,
+			Location: node.Location.Href,
+			Checksum: strings.TrimSpace(node.Checksum.Value),
+			SumType:  node.Checksum.Type,
+		})
+	}
+}
+
+func parsePrimary(input io.Reader, paths *filerepo.PathIndexBuilder, repoRoot string) (int, error) {
+	decoder := xml.NewDecoder(input)
+	count := 0
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return count, nil
+		}
+		if err != nil {
+			return count, err
 		}
 		start, ok := token.(xml.StartElement)
 		if !ok || start.Name.Local != "package" {
@@ -148,18 +220,16 @@ func parsePrimary(input io.Reader, snapshot *filerepo.LiveSnapshot, repoRoot str
 
 		href, checksum, err := parsePrimaryPackage(decoder)
 		if err != nil {
-			return err
+			return count, err
 		}
 		if href == "" {
 			continue
 		}
 		artifactPath := path.Join(repoRoot, href)
-		identity := strings.TrimSpace(checksum)
-		snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
-			Path:     artifactPath,
-			Identity: identity,
-			Digest:   filerepo.SHA256Digest(identity),
-		}
+		_ = checksum
+		paths.Add(artifactPath)
+		paths.AddAuxiliary(artifactPath)
+		count++
 	}
 }
 

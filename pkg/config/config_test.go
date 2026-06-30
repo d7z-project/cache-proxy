@@ -78,11 +78,8 @@ storage:
   gc:
     blob: 24h
   cleanup:
-    enabled: true
-    interval: 6h
     dry_run: true
     batch_size: 100
-    workers: 4
   download:
     max_active: 32
     max_active_per_instance: 6
@@ -162,6 +159,18 @@ instances:
 	require.NotNil(t, cfg.Transport.Health.ProbeTimeout)
 	require.Equal(t, 7*time.Second, *cfg.Transport.Health.ProbeTimeout)
 	require.Nil(t, cfg.Transport.Health.DegradeRate)
+}
+
+func TestDecodeRejectsRemovedCleanupFields(t *testing.T) {
+	_, err := Decode(strings.NewReader(`
+storage:
+  gc:
+    blob: 24h
+  cleanup:
+    interval: 6h
+instances: []
+`))
+	require.ErrorContains(t, err, "field interval not found")
 }
 
 func TestDecodePackageRepositoryConfig(t *testing.T) {

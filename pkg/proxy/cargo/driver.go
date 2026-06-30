@@ -71,7 +71,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: defaultCleanupInterval,
 		Handler: func(ctx context.Context) error {
-			return h.Cleanup(ctx, config.DefaultCleanupConfig())
+			return h.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 	plan.SetHomeSnippet(plan.RenderSnippet())

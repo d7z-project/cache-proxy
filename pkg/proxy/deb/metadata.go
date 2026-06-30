@@ -104,11 +104,11 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	}
 }
 
-func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*filerepo.LiveSnapshot, error) {
+func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
-		Metadata:  map[string]filerepo.MetadataObject{},
-		Artifacts: map[string]filerepo.RepoObject{},
+		Metadata: map[string]filerepo.MetadataObject{},
 	}
+	artifactCount := 0
 	for _, target := range session.Targets() {
 		if target.Kind != "release" {
 			return nil, fmt.Errorf("%s: unsupported seed metadata target kind %q", target.URL, target.Kind)
@@ -132,11 +132,10 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				}
 			}
 		}
-		releaseBody, err := blob.ReadAll()
+		releaseSums, err := parseReleaseSHA256(blob)
 		if err != nil {
 			return nil, err
 		}
-		releaseSums := parseReleaseSHA256(releaseBody)
 		session.Release(target)
 
 		targets := releaseIndexTargets(blob.Path, releaseSums)
@@ -166,9 +165,9 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 				return nil, err
 			}
 			if indexTarget.Kind == "packages" {
-				err = parsePackages(reader, snapshot)
+				artifactCount, err = parsePackages(reader, paths, artifactCount)
 			} else {
-				err = parseSources(reader, snapshot)
+				artifactCount, err = parseSources(reader, paths, artifactCount)
 			}
 			_ = reader.Close()
 			session.Release(indexTarget)
@@ -177,7 +176,52 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession) (*file
 			}
 		}
 	}
+	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
+}
+
+func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
+	artifactCount := 0
+	for _, target := range session.Targets() {
+		if target.Kind != "release" {
+			continue
+		}
+		blob, err := session.Fetch(target)
+		if err != nil {
+			return err
+		}
+		defer blob.Close()
+		releaseSums, err := parseReleaseSHA256(blob)
+		if err != nil {
+			return err
+		}
+		targets := releaseIndexTargets(blob.Path, releaseSums)
+		for _, indexTarget := range targets {
+			indexBlob, err := session.Fetch(indexTarget)
+			if err != nil {
+				return err
+			}
+			defer indexBlob.Close()
+			blobReader, err := indexBlob.Open()
+			if err != nil {
+				return err
+			}
+			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
+			if err != nil {
+				return err
+			}
+			if indexTarget.Kind == "packages" {
+				artifactCount, err = parsePackages(reader, paths, artifactCount)
+			} else {
+				artifactCount, err = parseSources(reader, paths, artifactCount)
+			}
+			_ = reader.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func releaseIndexTargets(releasePath string, sums map[string]string) []filerepo.MetadataTarget {
@@ -253,45 +297,46 @@ func sortedKeys[T any](items map[string]T) []string {
 	return keys
 }
 
-func parsePackages(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
-	return parseDebStanzas(input, func(fields map[string]string) {
+func parsePackages(input io.Reader, paths *filerepo.PathIndexBuilder, count int) (int, error) {
+	return parseDebStanzas(input, count, func(fields map[string]string) int {
 		filename := strings.TrimSpace(fields["Filename"])
 		if filename == "" {
-			return
+			return 0
 		}
-		checksum := strings.TrimSpace(fields["SHA256"])
-		snapshot.Artifacts[filename] = filerepo.RepoObject{
-			Path:     filename,
-			Identity: checksum,
-			Digest:   filerepo.SHA256Digest(checksum),
-		}
+		paths.Add(filename)
+		paths.AddAuxiliary(filename)
+		return 1
 	})
 }
 
-func parseSources(input io.Reader, snapshot *filerepo.LiveSnapshot) error {
-	return parseDebStanzas(input, func(fields map[string]string) {
+func parseSources(input io.Reader, paths *filerepo.PathIndexBuilder, count int) (int, error) {
+	return parseDebStanzas(input, count, func(fields map[string]string) int {
 		directory := strings.TrimSpace(fields["Directory"])
 		if directory == "" {
-			return
+			return 0
 		}
+		added := 0
 		for _, line := range strings.Split(fields["Checksums-Sha256"], "\n") {
 			parts := strings.Fields(line)
 			if len(parts) < 3 {
 				continue
 			}
 			artifactPath := path.Join(directory, parts[2])
-			snapshot.Artifacts[artifactPath] = filerepo.RepoObject{
-				Path:     artifactPath,
-				Identity: parts[0],
-				Digest:   filerepo.SHA256Digest(parts[0]),
-			}
+			paths.Add(artifactPath)
+			paths.AddAuxiliary(artifactPath)
+			added++
 		}
+		return added
 	})
 }
 
-func parseReleaseSHA256(body []byte) map[string]string {
+func parseReleaseSHA256(blob filerepo.MetadataBlob) (map[string]string, error) {
 	result := map[string]string{}
-	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	reader, err := blob.Open()
+	if err != nil {
+		return nil, err
+	}
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 10<<20)
 	inSHA256 := false
 	for scanner.Scan() {
@@ -311,7 +356,7 @@ func parseReleaseSHA256(body []byte) map[string]string {
 			result[parts[2]] = parts[0]
 		}
 	}
-	return result
+	return result, scanner.Err()
 }
 
 func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filerepo.MetadataBlob) error {
@@ -342,7 +387,7 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filere
 	return nil
 }
 
-func parseDebStanzas(input io.Reader, apply func(map[string]string)) error {
+func parseDebStanzas(input io.Reader, count int, apply func(map[string]string) int) (int, error) {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(nil, 10<<20)
 	fields := map[string]string{}
@@ -351,7 +396,7 @@ func parseDebStanzas(input io.Reader, apply func(map[string]string)) error {
 		if len(fields) == 0 {
 			return
 		}
-		apply(fields)
+		count += apply(fields)
 		for key := range fields {
 			delete(fields, key)
 		}
@@ -377,5 +422,5 @@ func parseDebStanzas(input io.Reader, apply func(map[string]string)) error {
 		fields[key] = strings.TrimSpace(value)
 	}
 	flush()
-	return scanner.Err()
+	return count, scanner.Err()
 }

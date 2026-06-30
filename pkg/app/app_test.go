@@ -442,6 +442,33 @@ func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
 	require.Equal(t, first, runs.Load())
 }
 
+func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
+	})
+	doc.Storage.Cleanup = config.CleanupConfig{
+		DryRun:    true,
+		BatchSize: 17,
+	}
+
+	var got config.CleanupConfig
+	prev := driverSet
+	driverSet = func() map[string]proxyruntime.ModeDriver {
+		drivers := prev()
+		drivers[config.ModeFile] = cleanupConfigDriver{seen: &got}
+		return drivers
+	}
+	defer func() { driverSet = prev }()
+
+	app := openApp(t, ctx, doc)
+	defer closeApp(t, app)
+
+	require.Equal(t, doc.Storage.Cleanup, got)
+}
+
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
 	return openAppWithConfig(t, ctx, doc, "")
 }
@@ -468,9 +495,6 @@ func writeYAML(t *testing.T, path string, doc *config.Document) {
 	b.WriteString("storage:\n")
 	b.WriteString("  gc:\n")
 	b.WriteString("    blob: 1h\n")
-	b.WriteString("  cleanup:\n")
-	b.WriteString("    enabled: " + fmt.Sprintf("%v", doc.Storage.Cleanup.Enabled) + "\n")
-	b.WriteString("    interval: 6h\n")
 	b.WriteString("instances:\n")
 	for _, inst := range doc.Instances {
 		sel, err := inst.SelectMode()
@@ -637,4 +661,15 @@ func (d startFailingDriver) Plan(_ context.Context, plan *proxyruntime.InstanceP
 			return fmt.Errorf("boom")
 		},
 	})
+}
+
+type cleanupConfigDriver struct{ seen *config.CleanupConfig }
+
+func (cleanupConfigDriver) Mode() string { return config.ModeFile }
+
+func (d cleanupConfigDriver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	if d.seen != nil {
+		*d.seen = plan.CleanupConfig()
+	}
+	return plan.BindPath("/files", config.Expiration(time.Hour), startContextInstance{})
 }

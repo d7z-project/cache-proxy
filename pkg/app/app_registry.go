@@ -79,7 +79,7 @@ func (a *App) checkOrphans(ctx context.Context) {
 		usage := collectTenantUsage(ctx, []string{name}, a.store)
 		slog.Warn("orphan tenant found", "tenant", name, "size_bytes", usage[name])
 
-		if a.config.Storage.Cleanup.OrphanPolicy == "auto" {
+		if a.config.Storage.OrphanPolicy == "auto" {
 			if err := a.store.DeleteTenant(ctx, name); err != nil {
 				slog.Warn("failed to clean orphan tenant", "tenant", name, "err", err)
 			} else {

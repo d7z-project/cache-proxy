@@ -68,9 +68,10 @@ type MetricsConfig struct {
 }
 
 type StorageConfig struct {
-	GC       GCConfig       `yaml:"gc"`
-	Cleanup  CleanupConfig  `yaml:"cleanup"`
-	Download DownloadConfig `yaml:"download"`
+	GC           GCConfig       `yaml:"gc"`
+	Cleanup      CleanupConfig  `yaml:"cleanup"`
+	OrphanPolicy string         `yaml:"orphan_policy,omitempty"`
+	Download     DownloadConfig `yaml:"download"`
 }
 
 type GCConfig struct {
@@ -78,12 +79,8 @@ type GCConfig struct {
 }
 
 type CleanupConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	Interval     Duration `yaml:"interval"`
-	DryRun       bool     `yaml:"dry_run"`
-	BatchSize    int      `yaml:"batch_size"`
-	Workers      int      `yaml:"workers"`
-	OrphanPolicy string   `yaml:"orphan_policy"`
+	DryRun    bool `yaml:"dry_run"`
+	BatchSize int  `yaml:"batch_size"`
 }
 
 type DownloadConfig struct {
@@ -93,11 +90,8 @@ type DownloadConfig struct {
 
 func DefaultCleanupConfig() CleanupConfig {
 	return CleanupConfig{
-		Enabled:   false,
-		Interval:  Duration(6 * time.Hour),
 		DryRun:    false,
 		BatchSize: 500,
-		Workers:   0,
 	}
 }
 

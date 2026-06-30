@@ -25,6 +25,8 @@ type homeRelease struct {
 	StateLabel string
 	StateColor string
 	LastOK     string
+	LastTry    string
+	LastError  string
 }
 
 type homeInstance struct {
@@ -169,18 +171,37 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 				upstream = u.Host
 			}
 			stateStr := r.State
-			if stateStr == "" {
+			switch {
+			case r.Refreshing && r.HasCurrent:
+				stateStr = "refreshing"
+			case r.Refreshing:
+				stateStr = "bootstrapping"
+			case !r.HasCurrent && r.State == "blocked":
+				stateStr = "failed"
+			case !r.HasCurrent && (r.State == "" || r.State == "pending"):
+				stateStr = "booting"
+			case stateStr == "":
 				stateStr = "pending"
+			}
+			lastTry := ""
+			if !r.LastRefreshAt.IsZero() {
+				lastTry = relativeTime(time.Since(r.LastRefreshAt), i18n)
+			}
+			gen := fmt.Sprintf("%s:%s", i18nStr(i18n, "gen"), r.Generation)
+			if !r.HasCurrent || r.Generation == "" {
+				gen = fmt.Sprintf("%s:%s", i18nStr(i18n, "gen"), i18nStr(i18n, "none"))
 			}
 			hi.Releases[i] = homeRelease{
 				Key:        r.Key,
-				Gen:        fmt.Sprintf("%s:%s", i18nStr(i18n, "gen"), r.Generation),
+				Gen:        gen,
 				Published:  pub,
 				Packages:   fmt.Sprintf("%d %s", r.ArtifactCount, i18nStr(i18n, "packages")),
 				Upstream:   upstream,
 				StateLabel: i18nStr(i18n, "release_state_"+stateStr),
 				StateColor: formatRootStateColor(stateStr),
 				LastOK:     lok,
+				LastTry:    lastTry,
+				LastError:  r.LastError,
 			}
 		}
 	}

@@ -48,12 +48,9 @@ instances:
 | `metrics.path` | path | `/metrics` | Prometheus endpoint |
 | `metrics.token` | string | — | Bearer token for `/metrics` |
 | `storage.gc.blob` | duration | `24h` | Storage GC interval |
-| `storage.cleanup.enabled` | bool | `false` | Deprecated placeholder; currently not consumed by runtime cleanup scheduling |
-| `storage.cleanup.interval` | duration | `6h` | Deprecated placeholder; runtime cleanup intervals are registered per mode in code |
-| `storage.cleanup.dry_run` | bool | `false` | Deprecated placeholder; scheduled cleanup currently runs with built-in defaults |
-| `storage.cleanup.batch_size` | int | `500` | Deprecated placeholder; scheduled cleanup currently runs with built-in defaults |
-| `storage.cleanup.workers` | int | `0` | Deprecated; cleanup tasks run sequentially via scheduler |
-| `storage.cleanup.orphan_policy` | string | — | Home page orphan index cleanup policy (`auto` enables automatic orphan removal on startup) |
+| `storage.cleanup.dry_run` | bool | `false` | Run scheduled cache cleanup in dry-run mode without deleting files |
+| `storage.cleanup.batch_size` | int | `500` | Maximum objects deleted per cleanup batch |
+| `storage.orphan_policy` | string | — | Home page orphan index cleanup policy (`auto` enables automatic orphan removal on startup) |
 | `storage.download.max_active` | int | `64` | Global concurrent cache-fill downloads |
 | `storage.download.max_active_per_instance` | int | `8` | Concurrent cache-fill downloads per instance |
 
@@ -152,13 +149,11 @@ All periodic maintenance runs through a unified single-threaded scheduler:
 
 - **Blob GC**: system-level storage garbage collection
 - **Expire cleanup**: per-instance cache expiration (all proxy modes)
-- **Metadata refresh**: background download + index rebuild for Linux repo modes
+- **Metadata refresh**: background download + generation publish for Linux repo modes
 - **Metadata GC**: old generation cleanup for Linux repo modes
 
 Tasks are registered during startup (Plan phase). Metadata refresh tasks are dynamically registered when a new repository is discovered via client metadata requests. The scheduler persists task state to `_scheduler/tasks.yaml` and restores it on restart.
 - Linux repository metadata is served only from a validated snapshot. If a repository has not finished its first refresh, metadata requests bypass directly to upstream while triggering a background refresh task via the event bus.
-
-`storage.cleanup.enabled`, `storage.cleanup.interval`, `storage.cleanup.dry_run`, and `storage.cleanup.batch_size` are currently configuration placeholders. Runtime cleanup tasks are still registered per mode with built-in intervals and default cleanup options.
 
 ---
 
@@ -414,6 +409,11 @@ apk:
 
 Client: `http://cache.lan:8080/apk/v3.20/main`. Repositories are auto-discovered from `APKINDEX.tar.gz` requests.
 
+Behavior:
+- Metadata is served only from the current validated generation.
+- Artifact and auxiliary downloads stay ordinary proxy/cache requests.
+- Cleanup uses a short-lived sorted path set rebuilt from the current generation when needed; no long-lived package index is persisted.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `upstreams` | `[]URL` | required | Upstream mirrors; each metadata generation uses exactly one upstream, with root-level failover |
@@ -534,8 +534,8 @@ For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically fro
 - Metadata is refreshed in the background by the unified scheduler and served only after validation.
 - If no validated snapshot is available yet, metadata requests bypass directly to upstream while a background refresh is triggered.
 - Refresh failures keep serving the last valid snapshot when one exists.
-- Package and auxiliary downloads remain best-effort reverse proxy/cache requests. A package index hit adds upstream affinity, identity metadata, and digest verification when a SHA256 is available; an index miss does not block the download.
-- Cleanup only removes cached objects that were written with package-index metadata and are no longer referenced by the current validated snapshot.
+- Package and auxiliary downloads remain best-effort reverse proxy/cache requests and do not depend on a package index hit.
+- Cleanup removes cached indexed objects by rebuilding a sorted current-generation path set from local metadata when needed.
 - Re-requesting metadata for a removed repository recreates it automatically.
 
 ## Development

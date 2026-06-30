@@ -35,11 +35,14 @@ type StatusSource interface {
 type RootRelease struct {
 	Key           string
 	Generation    string
+	HasCurrent    bool
 	Published     time.Time
 	Upstream      string
 	ArtifactCount int
 	MetadataCount int
 	State         string
+	Refreshing    bool
+	LastError     string
 	LastSuccessAt time.Time
 	LastRefreshAt time.Time
 }
@@ -111,6 +114,7 @@ type PlanContext struct {
 	store       *blobfs.Store
 	stats       *httpcache.Stats
 	downloads   *httpcache.DownloadLimiter
+	cleanup     config.CleanupConfig
 	mainBind    string
 	metricsPath string
 	entries     map[string]*Entry
@@ -128,11 +132,12 @@ type InstancePlan struct {
 	bound    bool
 }
 
-func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, mainBind, metricsPath string, sched *scheduler.Scheduler, b *bus.Bus) *PlanContext {
+func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, cleanup config.CleanupConfig, mainBind, metricsPath string, sched *scheduler.Scheduler, b *bus.Bus) *PlanContext {
 	return &PlanContext{
 		store:       store,
 		stats:       stats,
 		downloads:   downloads,
+		cleanup:     cleanup,
 		mainBind:    mainBind,
 		metricsPath: metricsPath,
 		entries:     map[string]*Entry{},
@@ -186,6 +191,7 @@ func (p *PlanContext) Finalize() (*Result, error) {
 func (p *PlanContext) Store() *blobfs.Store                  { return p.store }
 func (p *PlanContext) Stats() *httpcache.Stats               { return p.stats }
 func (p *PlanContext) Downloads() *httpcache.DownloadLimiter { return p.downloads }
+func (p *PlanContext) CleanupConfig() config.CleanupConfig   { return p.cleanup }
 func (p *PlanContext) Scheduler() *scheduler.Scheduler       { return p.scheduler }
 func (p *PlanContext) Bus() *bus.Bus                         { return p.bus }
 
@@ -195,6 +201,7 @@ func (i *InstancePlan) Enabled() bool                         { return i.entry.E
 func (i *InstancePlan) Store() *blobfs.Store                  { return i.ctx.store }
 func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.stats }
 func (i *InstancePlan) Downloads() *httpcache.DownloadLimiter { return i.ctx.downloads }
+func (i *InstancePlan) CleanupConfig() config.CleanupConfig   { return i.ctx.cleanup }
 func (i *InstancePlan) Scheduler() *scheduler.Scheduler       { return i.ctx.scheduler }
 func (i *InstancePlan) Bus() *bus.Bus                         { return i.ctx.bus }
 

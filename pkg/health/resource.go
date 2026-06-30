@@ -69,6 +69,7 @@ type ResourceHealth struct {
 type ResourceSnapshot struct {
 	Path                 string    `yaml:"path"`
 	State                string    `yaml:"state"`
+	Refreshing           bool      `yaml:"refreshing,omitempty"`
 	LastRefreshAt        time.Time `yaml:"last_refresh_at"`
 	LastSuccessAt        time.Time `yaml:"last_success_at"`
 	ConsecutiveNotFound  int       `yaml:"consecutive_not_found"`
@@ -82,6 +83,7 @@ func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
 	return ResourceSnapshot{
 		Path:                 rh.Path,
 		State:                rh.State.String(),
+		Refreshing:           rh.Refreshing,
 		LastRefreshAt:        rh.LastRefreshAt,
 		LastSuccessAt:        rh.LastSuccessAt,
 		ConsecutiveNotFound:  rh.ConsecutiveNotFound,
@@ -95,6 +97,7 @@ func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
 func ResourceFromSnapshot(snapshot ResourceSnapshot) *ResourceHealth {
 	rh := &ResourceHealth{
 		Path:                 snapshot.Path,
+		Refreshing:           snapshot.Refreshing,
 		LastRefreshAt:        snapshot.LastRefreshAt,
 		LastSuccessAt:        snapshot.LastSuccessAt,
 		ConsecutiveNotFound:  snapshot.ConsecutiveNotFound,

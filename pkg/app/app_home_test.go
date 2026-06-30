@@ -226,7 +226,7 @@ func TestFormatCompact(t *testing.T) {
 	require.Equal(t, "1.5M", formatCompact(1500000))
 }
 
-func TestStatsLastRefreshAtIsSet(t *testing.T) {
+func TestStatsMetadataStateDoesNotOverwriteLastRefreshAt(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	stats := httpcache.NewStats(reg)
 
@@ -234,7 +234,8 @@ func TestStatsLastRefreshAtIsSet(t *testing.T) {
 	snap := stats.Snapshot()
 	inst := snap.Instances["test"]
 	require.Equal(t, "booting", inst.MetadataState)
-	require.False(t, inst.LastRefreshAt.IsZero())
+	require.False(t, inst.LastStateChangeAt.IsZero())
+	require.True(t, inst.LastRefreshAt.IsZero())
 
 	stats.RecordMetadataRefresh("test", "apk", "success", time.Second, true)
 	snap = stats.Snapshot()
@@ -242,4 +243,5 @@ func TestStatsLastRefreshAtIsSet(t *testing.T) {
 	require.Equal(t, "success", inst.LastRefresh)
 	require.True(t, inst.SnapshotReady)
 	require.False(t, inst.LastRefreshAt.IsZero())
+	require.False(t, inst.LastRefreshOKAt.IsZero())
 }

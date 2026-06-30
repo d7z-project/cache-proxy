@@ -113,21 +113,23 @@ type StatsSnapshot struct {
 }
 
 type InstanceStats struct {
-	Mode             string            `json:"mode,omitempty"`
-	Requests         uint64            `json:"requests"`
-	Errors           uint64            `json:"errors"`
-	ResponseBytes    uint64            `json:"responseBytes"`
-	Cache            map[string]uint64 `json:"cache"`
-	UpstreamRequests uint64            `json:"upstreamRequests"`
-	UpstreamErrors   uint64            `json:"upstreamErrors"`
-	UpstreamStatus   map[string]uint64 `json:"upstreamStatus"`
-	ActiveDownloads  int64             `json:"activeDownloads"`
-	MetadataState    string            `json:"metadataState,omitempty"`
-	SnapshotReady    bool              `json:"snapshotReady"`
-	Refreshes        uint64            `json:"refreshes"`
-	RefreshFailures  uint64            `json:"refreshFailures"`
-	LastRefresh      string            `json:"lastRefresh,omitempty"`
-	LastRefreshAt    time.Time         `json:"lastRefreshAt,omitempty"`
+	Mode              string            `json:"mode,omitempty"`
+	Requests          uint64            `json:"requests"`
+	Errors            uint64            `json:"errors"`
+	ResponseBytes     uint64            `json:"responseBytes"`
+	Cache             map[string]uint64 `json:"cache"`
+	UpstreamRequests  uint64            `json:"upstreamRequests"`
+	UpstreamErrors    uint64            `json:"upstreamErrors"`
+	UpstreamStatus    map[string]uint64 `json:"upstreamStatus"`
+	ActiveDownloads   int64             `json:"activeDownloads"`
+	MetadataState     string            `json:"metadataState,omitempty"`
+	SnapshotReady     bool              `json:"snapshotReady"`
+	Refreshes         uint64            `json:"refreshes"`
+	RefreshFailures   uint64            `json:"refreshFailures"`
+	LastRefresh       string            `json:"lastRefresh,omitempty"`
+	LastRefreshAt     time.Time         `json:"lastRefreshAt,omitempty"`
+	LastRefreshOKAt   time.Time         `json:"lastRefreshOkAt,omitempty"`
+	LastStateChangeAt time.Time         `json:"lastStateChangeAt,omitempty"`
 }
 
 func NewStats(reg prometheus.Registerer) *Stats {
@@ -229,6 +231,9 @@ func (s *Stats) RecordMetadataRefresh(instance, mode, result string, duration ti
 	entry.data.Refreshes++
 	entry.data.LastRefresh = result
 	entry.data.LastRefreshAt = time.Now()
+	if result == "success" {
+		entry.data.LastRefreshOKAt = entry.data.LastRefreshAt
+	}
 	entry.data.SnapshotReady = ready
 	if result != "success" {
 		entry.data.RefreshFailures++
@@ -261,7 +266,7 @@ func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
 	entry.data.MetadataState = state
-	entry.data.LastRefreshAt = time.Now()
+	entry.data.LastStateChangeAt = time.Now()
 	entry.data.SnapshotReady = ready
 	entry.mu.Unlock()
 

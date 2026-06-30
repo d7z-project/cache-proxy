@@ -1,7 +1,6 @@
 package filerepo
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,10 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const DefaultBlockedRetryInterval = time.Hour
@@ -76,51 +77,71 @@ func (b MetadataBlob) ReadAll() ([]byte, error) {
 	return io.ReadAll(reader)
 }
 
+func (b MetadataBlob) Close() {
+	if b.file != nil {
+		_ = b.file.Close()
+	}
+	if b.temp != "" {
+		_ = os.Remove(b.temp)
+	}
+}
+
 type MetadataObject struct {
 	Path      string `yaml:"path"`
-	Identity  string `yaml:"identity,omitempty"`
 	Required  bool   `yaml:"required"`
 	StorePath string `yaml:"store_path,omitempty"`
 }
 
-type Digest struct {
-	Algorithm  string `yaml:"algorithm,omitempty"`
-	Value      string `yaml:"value,omitempty"`
-	Verifiable bool   `yaml:"verifiable,omitempty"`
-}
-
-func SHA256Digest(value string) Digest {
-	value = strings.TrimPrefix(value, "sha256:")
-	if len(value) != 64 {
-		return Digest{}
-	}
-	return Digest{Algorithm: "sha256", Value: value, Verifiable: true}
-}
-
-func IdentityDigest(algorithm, value string) Digest {
-	return Digest{Algorithm: algorithm, Value: value, Verifiable: false}
-}
-
-type RepoObject struct {
-	Path       string `yaml:"path"`
-	Identity   string `yaml:"identity,omitempty"`
-	Digest     Digest `yaml:"digest,omitempty"`
-	Upstream   string `yaml:"upstream"`
-	RootKey    string `yaml:"root_key,omitempty"`
-	Generation string `yaml:"generation,omitempty"`
-}
-
 type LiveSnapshot struct {
-	RootKey    string                    `yaml:"root_key"`
-	Generation string                    `yaml:"generation"`
-	Upstream   string                    `yaml:"upstream"`
-	Published  time.Time                 `yaml:"published"`
-	Metadata   map[string]MetadataObject `yaml:"metadata"`
-	Artifacts  map[string]RepoObject     `yaml:"artifacts"`
-	Targets    []MetadataTarget          `yaml:"targets,omitempty"`
+	RootKey       string                    `yaml:"root_key"`
+	Generation    string                    `yaml:"generation"`
+	Upstream      string                    `yaml:"upstream"`
+	Published     time.Time                 `yaml:"published"`
+	Metadata      map[string]MetadataObject `yaml:"metadata"`
+	ArtifactCount int                       `yaml:"artifact_count"`
+	Targets       []MetadataTarget          `yaml:"targets,omitempty"`
 }
 
-type SnapshotBuilder func(context.Context, *RefreshSession) (*LiveSnapshot, error)
+type SnapshotBuilder func(context.Context, *RefreshSession, *PathIndexBuilder) (*LiveSnapshot, error)
+type CleanupIndexBuilder func(context.Context, *LocalSession, *PathIndexBuilder) error
+
+type PathIndexBuilder struct {
+	paths []string
+}
+
+func (b *PathIndexBuilder) Add(path string) {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	if path == "" {
+		return
+	}
+	b.paths = append(b.paths, path)
+}
+
+func (b *PathIndexBuilder) AddAuxiliary(basePath string) {
+	basePath = strings.Trim(strings.TrimSpace(basePath), "/")
+	if basePath == "" {
+		return
+	}
+	for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
+		b.paths = append(b.paths, basePath+suffix)
+	}
+}
+
+func (b *PathIndexBuilder) Finalize() []string {
+	if len(b.paths) == 0 {
+		return nil
+	}
+	sort.Strings(b.paths)
+	n := 1
+	for i := 1; i < len(b.paths); i++ {
+		if b.paths[i] == b.paths[n-1] {
+			continue
+		}
+		b.paths[n] = b.paths[i]
+		n++
+	}
+	return b.paths[:n]
+}
 
 type RefreshSession struct {
 	handler    *IndexedHandler
@@ -162,12 +183,6 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 		lastErr = mfe.Err
 	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: lastErr}
-}
-
-func (s *RefreshSession) Store(ctx context.Context, cleanPath string, body []byte, meta map[string]string) error {
-	storePath := s.handler.generationMetadataPath(s.rootKey, s.generation, cleanPath)
-	_, err := s.handler.store.Put(ctx, s.handler.name, storePath, bytes.NewReader(body), meta)
-	return err
 }
 
 func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (MetadataObject, error) {
@@ -217,6 +232,56 @@ func (s *RefreshSession) Close() {
 			_ = os.Remove(blob.temp)
 		}
 	}
+}
+
+type LocalSession struct {
+	handler  *IndexedHandler
+	snapshot *LiveSnapshot
+	ctx      context.Context
+}
+
+func (s *LocalSession) Targets() []MetadataTarget {
+	if s.snapshot == nil {
+		return nil
+	}
+	return append([]MetadataTarget(nil), s.snapshot.Targets...)
+}
+
+func (s *LocalSession) Fetch(target MetadataTarget) (MetadataBlob, error) {
+	if s.snapshot == nil {
+		return MetadataBlob{}, errors.New("snapshot is nil")
+	}
+	candidates := append([]string{target.URL}, target.Candidates...)
+	for _, candidate := range candidates {
+		obj, ok := s.snapshot.Metadata[candidate]
+		if !ok {
+			continue
+		}
+		ctx := s.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		reader, err := s.handler.store.OpenObject(ctx, s.handler.name, obj.StorePath)
+		if err != nil {
+			return MetadataBlob{}, err
+		}
+		tempFile, size, err := tempFileFromObjectReader(reader)
+		reader.Close()
+		if err != nil {
+			return MetadataBlob{}, err
+		}
+		_ = size
+		return MetadataBlob{Path: obj.Path, file: tempFile, temp: tempFile.Name()}, nil
+	}
+	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: errMetadataNotFound}
+}
+
+func tempFileFromObjectReader(reader io.Reader) (*os.File, int64, error) {
+	file, size, err := utils.TempFileFromReader(reader)
+	if err != nil {
+		return nil, 0, err
+	}
+	return file, size, nil
 }
 
 func DeduceCompanions(basePath string) []string {

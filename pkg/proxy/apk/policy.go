@@ -20,7 +20,7 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModeAPK }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	return filerepo.PlanRepoMode(plan, config.ModeAPK, config.Freshness(time.Minute), time.Hour, classify, discoverer{}, buildSnapshot)
+	return filerepo.PlanRepoMode(plan, config.ModeAPK, config.Freshness(time.Minute), time.Hour, classify, discoverer{}, buildSnapshot, rebuildCleanupIndex)
 }
 
 func classify(cleanPath string) filerepo.ResourceClass {

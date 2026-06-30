@@ -20,7 +20,7 @@ type RepoBlock struct {
 	Policy          BasicPolicy             `yaml:",inline"`
 }
 
-func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor config.Freshness, defaultRefreshInterval time.Duration, classify func(string) ResourceClass, discover Discoverer, build SnapshotBuilder) error {
+func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor config.Freshness, defaultRefreshInterval time.Duration, classify func(string) ResourceClass, discover Discoverer, build SnapshotBuilder, rebuild CleanupIndexBuilder) error {
 	var block RepoBlock
 	if err := plan.Decode(&block); err != nil {
 		return err
@@ -41,7 +41,7 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	refreshInterval := ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval)
 	gcInterval := max(refreshInterval*3, 6*time.Hour)
 
-	handler := NewIndexedHandler(plan.Name(), mode, mode, classify, upstreams, block.Transport, config.ExpirationNever, policy, discover, build, plan.Store(), plan.Stats(), NewServiceHealth(block.Transport, upstreams, plan, mode), plan.Downloads())
+	handler := NewIndexedHandler(plan.Name(), mode, mode, classify, upstreams, block.Transport, config.ExpirationNever, policy, discover, build, rebuild, plan.Store(), plan.Stats(), NewServiceHealth(block.Transport, upstreams, plan, mode), plan.Downloads())
 	handler.SetBus(plan.Bus())
 
 	sched := plan.Scheduler()
@@ -51,7 +51,7 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: cleanupInterval,
 		Handler: func(ctx context.Context) error {
-			return handler.Cleanup(ctx, config.DefaultCleanupConfig())
+			return handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 

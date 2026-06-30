@@ -133,6 +133,8 @@
               <span>{{.Packages}}</span>
               <span>{{t "upstream"}}: {{.Upstream}}</span>
               {{if .LastOK}}<span>{{t "last_ok"}}: {{.LastOK}}</span>{{end}}
+              {{if .LastTry}}<span>{{t "last_try"}}: {{.LastTry}}</span>{{end}}
+              {{if .LastError}}<span>{{t "last_error"}}: {{.LastError}}</span>{{end}}
             </div>
           </div>
           {{end}}

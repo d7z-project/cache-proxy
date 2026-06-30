@@ -208,6 +208,18 @@ func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstream
 	return rh
 }
 
+func (h *ServiceHealth) RestoreResources(snapshots []ResourceSnapshot) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, snapshot := range snapshots {
+		if snapshot.Path == "" {
+			continue
+		}
+		h.resources[snapshot.Path] = ResourceFromSnapshot(snapshot)
+	}
+	h.recomputeAggregateLocked()
+}
+
 func (h *ServiceHealth) TryStartRefresh(path string, now time.Time) (ResourceHealth, func(), error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

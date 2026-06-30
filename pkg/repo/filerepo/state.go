@@ -68,6 +68,9 @@ func (h *IndexedHandler) loadState(ctx context.Context) persistedState {
 
 func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 	persisted := h.loadState(ctx)
+	if h.sh != nil {
+		h.sh.RestoreResources(persisted.Roots)
+	}
 	for _, snap := range persisted.Roots {
 		if snap.Path != "" {
 			h.AddRoot(snap.Path, nil)

@@ -26,7 +26,7 @@ func instanceStatus(s httpcache.InstanceStats, i18n map[string]string) (color, l
 		switch s.MetadataState {
 		case "ready":
 			color = "green"
-		case "refreshing":
+		case "refreshing", "bootstrapping":
 			color = "blue"
 		case "degraded":
 			color = "yellow"
@@ -38,7 +38,10 @@ func instanceStatus(s httpcache.InstanceStats, i18n map[string]string) (color, l
 			key = "loading"
 		}
 		label = i18nStr(i18n, key)
-		if !s.LastRefreshAt.IsZero() {
+		switch {
+		case !s.LastStateChangeAt.IsZero():
+			extra = relativeTime(time.Since(s.LastStateChangeAt), i18n)
+		case !s.LastRefreshAt.IsZero():
 			extra = relativeTime(time.Since(s.LastRefreshAt), i18n)
 		}
 		return
@@ -113,9 +116,15 @@ func formatRootStateColor(state string) string {
 	switch state {
 	case "active":
 		return "green"
+	case "refreshing":
+		return "blue"
+	case "bootstrapping":
+		return "blue"
 	case "suspect":
 		return "yellow"
 	case "blocked":
+		return "red"
+	case "failed":
 		return "red"
 	default:
 		return "gray"
