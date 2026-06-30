@@ -130,6 +130,23 @@ func TestServeDuringSync(t *testing.T) {
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
+
+	color, label, extra := h.DashboardStatus()
+	require.Equal(t, "green", color)
+	require.Equal(t, "ready", label)
+	require.Empty(t, extra)
+}
+
+func TestDashboardStatusDuringSync(t *testing.T) {
+	h := newTestHandler(t, "file:///tmp/unused")
+	h.mu.Lock()
+	h.state = gitStateSyncing
+	h.mu.Unlock()
+
+	color, label, extra := h.DashboardStatus()
+	require.Equal(t, "blue", color)
+	require.Equal(t, "syncing...", label)
+	require.Empty(t, extra)
 }
 
 func TestServeFailedStateResponse(t *testing.T) {

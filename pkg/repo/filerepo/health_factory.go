@@ -12,5 +12,7 @@ func NewServiceHealth(transport *config.TransportConfig, upstreams []string, pla
 	if transport != nil {
 		cfg = health.ApplyConfigPatch(cfg, transport.Health)
 	}
-	return health.New(plan.Name(), mode, cfg, upstreams, plan.Stats(), httpcache.ModeUserAgent(mode))
+	sh := health.New(plan.Name(), mode, cfg, upstreams, plan.Stats(), httpcache.ModeUserAgent(mode))
+	sh.SetBus(plan.Bus())
+	return sh
 }

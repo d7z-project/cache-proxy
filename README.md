@@ -48,11 +48,12 @@ instances:
 | `metrics.path` | path | `/metrics` | Prometheus endpoint |
 | `metrics.token` | string | — | Bearer token for `/metrics` |
 | `storage.gc.blob` | duration | `24h` | Storage GC interval |
-| `storage.cleanup.enabled` | bool | `false` | Enable stale-object cleanup |
-| `storage.cleanup.interval` | duration | `6h` | Cleanup scan interval |
-| `storage.cleanup.dry_run` | bool | `false` | Log deletions without removing |
-| `storage.cleanup.batch_size` | int | `500` | Max objects per batch |
-| `storage.cleanup.workers` | int | `0` | Deprecated: cleanup tasks run sequentially via scheduler |
+| `storage.cleanup.enabled` | bool | `false` | Deprecated placeholder; currently not consumed by runtime cleanup scheduling |
+| `storage.cleanup.interval` | duration | `6h` | Deprecated placeholder; runtime cleanup intervals are registered per mode in code |
+| `storage.cleanup.dry_run` | bool | `false` | Deprecated placeholder; scheduled cleanup currently runs with built-in defaults |
+| `storage.cleanup.batch_size` | int | `500` | Deprecated placeholder; scheduled cleanup currently runs with built-in defaults |
+| `storage.cleanup.workers` | int | `0` | Deprecated; cleanup tasks run sequentially via scheduler |
+| `storage.cleanup.orphan_policy` | string | — | Home page orphan index cleanup policy (`auto` enables automatic orphan removal on startup) |
 | `storage.download.max_active` | int | `64` | Global concurrent cache-fill downloads |
 | `storage.download.max_active_per_instance` | int | `8` | Concurrent cache-fill downloads per instance |
 
@@ -66,15 +67,15 @@ instances:
 | Policy | Enum | — | `bypass` / `immutable` / `revalidate` |
 | Busy policy | Enum | — | `bypass` / `stale` |
 
-### Instance-level
+### Shared mode fields
 
-Every instance block supports these fields regardless of mode:
+Most HTTP-backed mode blocks (`file`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`) support these common fields. `git` has its own block shape and does not support `expire_after` or `transport`.
 
 ```yaml
 instances:
   - name: my-instance
     enabled: true
-    <mode>:           # exactly one mode block (oci / npm / go / ...)
+    <mode>:           # exactly one mode block (file / oci / npm / go / ...)
       expire_after: 720h
       route: { path: /mount }
       transport:
@@ -106,15 +107,17 @@ instances:
 | `name` | string | required | Instance name (metrics label, home page) |
 | `enabled` | bool | required | `false` = skip at runtime |
 | `<mode>` | block | required | One of `file`, `git`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman` |
-| `expire_after` | expiration | `720h` | Upper bound on cached object lifetime |
+| `expire_after` | expiration | `720h` | Upper bound on cached object lifetime (not supported by `git`) |
 | `route.path` | path | required* | Mount under `server.bind` (* `oci` uses `bind` instead) |
 | `bind` | `host:port` | required* | Dedicated listener (* `oci` only) |
-| `transport.proxy` | URL | — | Outbound HTTP proxy |
+| `transport.proxy` | URL | — | Outbound HTTP proxy (not supported by `git`; use `git.proxy`) |
 | `transport.ua` | string | per mode | Override User-Agent |
 | `transport.dial_timeout` | duration | `3s` | TCP/TLS connection timeout |
 | `transport.header_timeout` | duration | `30s` | Time allowed to receive upstream response headers |
 | `transport.idle_body_timeout` | duration | `5m` | Maximum idle gap between upstream response body reads |
 | `transport.max_request_duration` | duration | `30m` | Optional total upstream request duration cap |
+| `transport.max_idle_conns` | int | transport default | Maximum idle upstream connections across all hosts |
+| `transport.max_conns_per_host` | int | transport default | Maximum total upstream connections per host |
 | `transport.health.enabled` | bool | `true` | Enable active health monitoring and failover |
 | `transport.health.degrade_rate` | float | `0.1` | Error rate threshold to reduce upstream traffic |
 | `transport.health.trip_rate` | float | `0.3` | Error rate threshold to stop all traffic to upstream |
@@ -154,6 +157,8 @@ All periodic maintenance runs through a unified single-threaded scheduler:
 
 Tasks are registered during startup (Plan phase). Metadata refresh tasks are dynamically registered when a new repository is discovered via client metadata requests. The scheduler persists task state to `_scheduler/tasks.yaml` and restores it on restart.
 - Linux repository metadata is served only from a validated snapshot. If a repository has not finished its first refresh, metadata requests bypass directly to upstream while triggering a background refresh task via the event bus.
+
+`storage.cleanup.enabled`, `storage.cleanup.interval`, `storage.cleanup.dry_run`, and `storage.cleanup.batch_size` are currently configuration placeholders. Runtime cleanup tasks are still registered per mode with built-in intervals and default cleanup options.
 
 ---
 
@@ -413,6 +418,7 @@ Client: `http://cache.lan:8080/apk/v3.20/main`. Repositories are auto-discovered
 | --- | --- | --- | --- |
 | `upstreams` | `[]URL` | required | Upstream mirrors; each metadata generation uses exactly one upstream, with root-level failover |
 | `refresh_interval` | duration | `1h` | Background generation refresh interval |
+| `cleanup_interval` | duration | `6h` | Interval for indexed cache cleanup task |
 | `pass_headers` | `[]string` | — | Request headers forwarded to upstream |
 | `artifact_policy` | Policy | `immutable` | Policy for `.apk` files |
 | `artifact_fresh_for` | Freshness | — | Freshness for artifacts |
@@ -509,6 +515,7 @@ Client: `git clone http://cache.lan:8080/git/`.
 | `auth.password` | string | — | Password/token (supports `$ENV` expansion) |
 | `proxy` | URL | — | HTTP/SOCKS5 proxy for upstream connection |
 | `sync_interval` | Duration | `0` | Periodic sync interval (`0` = only initial clone) |
+| `operation_timeout` | Duration | `0` | Per clone/fetch operation timeout (`0` = no extra timeout) |
 | `force_overwrite` | bool | `true` | Force overwrite local refs on incompatible remote changes |
 | `route.path` | path | required | URL prefix for git clone |
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 type testStats struct {
@@ -252,8 +253,8 @@ func TestResourceStateTransitions(t *testing.T) {
 	require.NotNil(t, rh)
 	require.Equal(t, RPending, rh.State)
 
-	copy, cancel, ok := h.TryStartRefresh(rh.Path)
-	require.True(t, ok)
+	copy, cancel, err := h.TryStartRefresh(rh.Path, time.Now())
+	require.NoError(t, err)
 	require.NotNil(t, cancel)
 	require.Equal(t, copy.Path, rh.Path)
 
@@ -313,16 +314,54 @@ func TestTryStartRefreshRejectsConcurrent(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
 	h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})
 
-	_, cancel1, ok1 := h.TryStartRefresh("dists/bookworm")
-	require.True(t, ok1)
+	_, cancel1, err := h.TryStartRefresh("dists/bookworm", time.Now())
+	require.NoError(t, err)
 
-	_, _, ok2 := h.TryStartRefresh("dists/bookworm")
-	require.False(t, ok2)
+	_, _, err = h.TryStartRefresh("dists/bookworm", time.Now())
+	require.ErrorIs(t, err, ErrRefreshAlreadyRunning)
 
 	cancel1()
-	_, cancel3, ok3 := h.TryStartRefresh("dists/bookworm")
-	require.True(t, ok3)
+	_, cancel3, err := h.TryStartRefresh("dists/bookworm", time.Now())
+	require.NoError(t, err)
 	cancel3()
+}
+
+func TestTryStartRefreshRejectsBlockedResourceUntilWindow(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	rh := h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})
+	h.FinishRefresh(rh.Path, rh.Generation, ErrResourceForbidden, nil)
+
+	_, _, err := h.TryStartRefresh(rh.Path, time.Now())
+	require.ErrorIs(t, err, ErrRefreshBlockedUntil)
+
+	blockedUntil, ok := h.RefreshBlockedUntil(rh.Path)
+	require.True(t, ok)
+	_, cancel, err := h.TryStartRefresh(rh.Path, blockedUntil)
+	require.NoError(t, err)
+	cancel()
+}
+
+func TestRemovedResourcePublishesRemovedEvent(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ResourceRemoveCount = 1
+	cfg.ResourceRemoveAge = 0
+	b := bus.New()
+	ch := b.Subscribe(bus.EventMetadataRemoved)
+	h := New("test", "apk", cfg, []string{"https://a.example.com"}, &testStats{}, "ua")
+	h.SetBus(b)
+	rh := h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})
+
+	h.FinishRefresh(rh.Path, rh.Generation, ErrResourceNotFound, nil)
+
+	select {
+	case evt := <-ch:
+		payload, ok := evt.Payload.(bus.MetadataRemovedPayload)
+		require.True(t, ok)
+		require.Equal(t, "test", payload.Instance)
+		require.Equal(t, rh.Path, payload.SubPath)
+	case <-time.After(time.Second):
+		t.Fatal("expected metadata removed event")
+	}
 }
 
 func TestFinishRefreshRejectsStaleGeneration(t *testing.T) {

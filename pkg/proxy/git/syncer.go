@@ -23,6 +23,21 @@ const (
 	gitStateFailed
 )
 
+func (s gitState) String() string {
+	switch s {
+	case gitStateCloning:
+		return "cloning"
+	case gitStateSyncing:
+		return "syncing"
+	case gitStateReady:
+		return "ready"
+	case gitStateFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
 func (h *gitHandler) cloneAndSync(ctx context.Context) {
 	backoff := 10 * time.Second
 	for {

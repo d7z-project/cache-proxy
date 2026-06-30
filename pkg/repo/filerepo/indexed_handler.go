@@ -208,9 +208,18 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 		release    func()
 	)
 	if h.sh != nil {
-		rh, done, ok := h.sh.TryStartRefresh(subPath)
-		if !ok {
-			slog.Debug("subpath refresh skipped", "instance", h.name, "mode", h.mode, "subPath", subPath, "reason", "already_refreshing")
+		rh, done, err := h.sh.TryStartRefresh(subPath, time.Now())
+		if err != nil {
+			reason := "rejected"
+			switch {
+			case errors.Is(err, health.ErrRefreshAlreadyRunning):
+				reason = "already_refreshing"
+			case errors.Is(err, health.ErrRefreshBlockedUntil):
+				reason = "blocked"
+			case errors.Is(err, health.ErrRefreshResourceRemoved):
+				reason = "removed"
+			}
+			slog.Debug("subpath refresh skipped", "instance", h.name, "mode", h.mode, "subPath", subPath, "reason", reason)
 			return scheduler.ErrTaskSkipped
 		}
 		refreshGen = rh.Generation

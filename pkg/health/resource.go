@@ -33,9 +33,12 @@ func (s ResourceState) String() string {
 }
 
 var (
-	ErrResourceNotFound  = errors.New("resource upstream not found")
-	ErrResourceForbidden = errors.New("resource upstream forbidden")
-	ErrResourceTransient = errors.New("resource upstream transient failure")
+	ErrResourceNotFound       = errors.New("resource upstream not found")
+	ErrResourceForbidden      = errors.New("resource upstream forbidden")
+	ErrResourceTransient      = errors.New("resource upstream transient failure")
+	ErrRefreshAlreadyRunning  = errors.New("resource refresh already running")
+	ErrRefreshBlockedUntil    = errors.New("resource refresh blocked until next retry window")
+	ErrRefreshResourceRemoved = errors.New("resource refresh rejected because resource was removed")
 )
 
 type ProbeTarget struct {

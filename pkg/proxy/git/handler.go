@@ -130,14 +130,14 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.RUnlock()
 
 	if state != gitStateReady {
-		h.serveCloneStatus(w, state)
+		h.serveRepositoryState(w, state)
 		return
 	}
 
 	serveGitHTTP(w, r, h.svr, h.name)
 }
 
-func (h *gitHandler) serveCloneStatus(w http.ResponseWriter, state gitState) {
+func (h *gitHandler) serveRepositoryState(w http.ResponseWriter, state gitState) {
 	switch state {
 	case gitStateCloning:
 		w.Header().Set("Retry-After", "10")
@@ -162,6 +162,8 @@ func (h *gitHandler) DashboardStatus() (color, label, extra string) {
 	switch h.state {
 	case gitStateCloning:
 		return "blue", "cloning...", ""
+	case gitStateSyncing:
+		return "blue", "syncing...", ""
 	case gitStateReady:
 		return "green", "ready", ""
 	case gitStateFailed:

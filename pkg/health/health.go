@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 type StatsRecorder interface {
@@ -50,6 +52,7 @@ type ServiceHealth struct {
 	mode      string
 	config    Config
 	stats     StatsRecorder
+	bus       *bus.Bus
 	userAgent string
 
 	upstreams map[string]*UpstreamHealth
@@ -84,6 +87,8 @@ func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder,
 	h.recomputeAggregateLocked()
 	return h
 }
+
+func (h *ServiceHealth) SetBus(b *bus.Bus) { h.bus = b }
 
 func (h *ServiceHealth) Start(parent context.Context) {
 	if !h.config.Enabled {
@@ -203,16 +208,23 @@ func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstream
 	return rh
 }
 
-func (h *ServiceHealth) TryStartRefresh(path string) (ResourceHealth, func(), bool) {
+func (h *ServiceHealth) TryStartRefresh(path string, now time.Time) (ResourceHealth, func(), error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	rh := h.resources[path]
-	if rh == nil || rh.State == RRemoved || rh.Refreshing {
-		return ResourceHealth{}, nil, false
+	if rh == nil || rh.State == RRemoved {
+		return ResourceHealth{}, nil, ErrRefreshResourceRemoved
+	}
+	if rh.Refreshing {
+		return ResourceHealth{}, nil, ErrRefreshAlreadyRunning
+	}
+	if rh.State == RBlocked && !rh.NextRefreshAt.IsZero() && now.Before(rh.NextRefreshAt) {
+		return ResourceHealth{}, nil, ErrRefreshBlockedUntil
 	}
 	rh.Refreshing = true
-	rh.LastRefreshAt = time.Now()
+	rh.LastRefreshAt = now
+	rh.Generation++
 	copy := *rh
 	return copy, func() {
 		h.mu.Lock()
@@ -220,7 +232,7 @@ func (h *ServiceHealth) TryStartRefresh(path string) (ResourceHealth, func(), bo
 			cur.Refreshing = false
 		}
 		h.mu.Unlock()
-	}, true
+	}, nil
 }
 
 func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, targets []ProbeTarget) {
@@ -242,6 +254,7 @@ func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, target
 		if len(targets) > 0 {
 			rh.LastTargets = append([]ProbeTarget(nil), targets...)
 		}
+		rh.NextRefreshAt = time.Time{}
 		h.recomputeAggregateLocked()
 		return
 	}
@@ -262,7 +275,7 @@ func (h *ServiceHealth) ResourceState(path string) (ResourceState, bool) {
 	return rh.State, true
 }
 
-func (h *ServiceHealth) ResourceNextRefresh(path string) (time.Time, bool) {
+func (h *ServiceHealth) RefreshBlockedUntil(path string) (time.Time, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	rh, ok := h.resources[path]
@@ -399,9 +412,13 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 		}
 		now := time.Now()
 		if rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount && now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge {
+			path := rh.Path
 			rh.State = RRemoved
 			rh.Generation++
 			delete(h.resources, rh.Path)
+			if h.bus != nil {
+				h.bus.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: h.name, SubPath: path}})
+			}
 		} else {
 			rh.State = RSuspect
 		}
@@ -441,29 +458,6 @@ func (h *ServiceHealth) ResourceHealth(path string) (*ResourceHealth, bool) {
 	defer h.mu.RUnlock()
 	rh, ok := h.resources[path]
 	return rh, ok
-}
-
-func (h *ServiceHealth) SetResourceTargets(path string, targets []ProbeTarget) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	rh := h.resources[path]
-	if rh == nil {
-		return
-	}
-	rh.LastTargets = append([]ProbeTarget(nil), targets...)
-}
-
-func (h *ServiceHealth) ScheduleRefresh(path string, refreshInterval time.Duration) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	rh := h.resources[path]
-	if rh == nil || rh.State == RRemoved {
-		return
-	}
-	if rh.State == RBlocked {
-		refreshInterval = h.config.ResourceBlockInterval
-	}
-	rh.NextRefreshAt = time.Now().Add(refreshInterval)
 }
 
 func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) error {
