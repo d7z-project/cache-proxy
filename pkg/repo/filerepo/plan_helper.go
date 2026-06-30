@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 type RepoBlock struct {

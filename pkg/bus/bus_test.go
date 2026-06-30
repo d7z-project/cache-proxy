@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -164,4 +166,31 @@ func TestBusSameTypeMultipleSubscribe(t *testing.T) {
 	b.Subscribe(EventMetadataDiscovered)
 	b.Subscribe(EventMetadataDiscovered)
 	b.Publish(Event{Type: EventMetadataDiscovered, Payload: MetadataDiscoveredPayload{Instance: "x"}})
+}
+
+func TestBusMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	b := NewWithRegisterer(reg)
+	b.Subscribe(EventMetadataDiscovered)
+	b.Publish(Event{Type: EventMetadataDiscovered, Payload: MetadataDiscoveredPayload{Instance: "x"}})
+	b.Publish(Event{Type: EventMetadataRemoved, Payload: MetadataRemovedPayload{Instance: "x"}})
+
+	require.Equal(t, float64(1), metricValue(t, b.m.published.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.m.delivered.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.m.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.m.dropped.WithLabelValues(string(EventMetadataRemoved), "no_subscriber")))
+}
+
+func metricValue(t *testing.T, metric prometheus.Metric) float64 {
+	t.Helper()
+	var pb dto.Metric
+	require.NoError(t, metric.Write(&pb))
+	if pb.Counter != nil {
+		return pb.Counter.GetValue()
+	}
+	if pb.Gauge != nil {
+		return pb.Gauge.GetValue()
+	}
+	t.Fatal("unsupported metric type")
+	return 0
 }

@@ -338,15 +338,17 @@ func (r *staticResolver) Resolve(req *http.Request) (Route, error) {
 	}, nil
 }
 
-func TestTargetURLRejectsForeignHost(t *testing.T) {
+func TestTargetURLRejectsForeignHostWithoutFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	var allowedRequests int
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "foreign")
 	}))
 	defer foreign.Close()
 	allowed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allowedRequests++
 		_, _ = io.WriteString(w, "allowed")
 	}))
 	defer allowed.Close()
@@ -366,8 +368,8 @@ func TestTargetURLRejectsForeignHost(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "allowed", rec.Body.String())
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Zero(t, allowedRequests)
 }
 
 func TestTargetURLAllowsRouteHost(t *testing.T) {
@@ -394,6 +396,68 @@ func TestTargetURLAllowsRouteHost(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "target", rec.Body.String())
+}
+
+func TestTargetURLReturnsClientErrorWithoutFallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var upstreamRequests int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests++
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, &staticResolver{route: Route{
+		ObjectPath:         "test/object",
+		TargetURL:          target.URL + "/object",
+		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
+		Policy:             config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, upstreamRequests)
+}
+
+func TestTargetURLFallsBackOnRetryableStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, &staticResolver{route: Route{
+		ObjectPath:         "test/object",
+		TargetURL:          target.URL + "/object",
+		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
+		Policy:             config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "upstream", rec.Body.String())
 }
 
 func TestFailoverRetriesRetryableStatus(t *testing.T) {

@@ -81,9 +81,12 @@ func publicBaseURL(req *http.Request) string {
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	if options.TargetURL != "" {
-		result, err := h.doTargetURL(ctx, method, options, headers)
+		result, err, fallback := h.doTargetURL(ctx, method, options, headers)
 		if err == nil {
 			return result, nil
+		}
+		if !fallback {
+			return nil, err
 		}
 		slog.Debug("target url error, fallback to upstream list", "instance", h.name, "url", redactedURL(options.TargetURL), "err", err)
 	}
@@ -106,13 +109,13 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 	return nil, lastErr
 }
 
-func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
+func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error, bool) {
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
-		return nil, err
+		return nil, err, false
 	}
 	request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, err, false
 	}
 	request.Header.Set("User-Agent", h.client.UserAgent)
 	for key, value := range headers {
@@ -128,7 +131,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 				h.health.RecordFailure(options.TargetURL, err)
 			}
 		}
-		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err), true
 	}
 	if options.Record {
 		h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
@@ -136,8 +139,12 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 			h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 		}
 	}
+	if shouldFailoverStatus(response.StatusCode) {
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("%w: target url returned retryable status %d", ErrUpstreamUnavailable, response.StatusCode), true
+	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
-	return responseFromHTTP(h.client, response), nil
+	return responseFromHTTP(h.client, response), nil, false
 }
 
 func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error {

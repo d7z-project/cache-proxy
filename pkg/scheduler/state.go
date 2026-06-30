@@ -42,6 +42,9 @@ func (s *Scheduler) saveAllState() {
 
 func (s *Scheduler) saveStateLocked() {
 	if s.store == nil {
+		if s.m != nil {
+			s.m.stateSaves.WithLabelValues("success").Inc()
+		}
 		return
 	}
 	state := persistedState{Version: 1}
@@ -65,22 +68,48 @@ func (s *Scheduler) saveStateLocked() {
 	var buf bytes.Buffer
 	if err := yaml.NewEncoder(&buf).Encode(state); err != nil {
 		slog.Warn("scheduler state marshal failed", "err", err)
+		if s.m != nil {
+			s.m.stateSaves.WithLabelValues("failed").Inc()
+		}
 		return
 	}
 	if err := s.store.MkdirAll(s.tenant+"/", 0o755); err != nil {
 		slog.Warn("scheduler state mkdir failed", "err", err)
+		if s.m != nil {
+			s.m.stateSaves.WithLabelValues("failed").Inc()
+		}
 		return
 	}
 	if _, err := s.store.Put(context.Background(), s.tenant, "tasks.yaml", bytes.NewReader(buf.Bytes()), nil); err != nil {
 		slog.Warn("scheduler state write failed", "err", err)
+		if s.m != nil {
+			s.m.stateSaves.WithLabelValues("failed").Inc()
+		}
+		return
+	}
+	if s.m != nil {
+		s.m.stateSaves.WithLabelValues("success").Inc()
 	}
 }
 
 func (s *Scheduler) restoreFromStore() {
-	data := loadTaskState(s.store, s.tenant)
+	data, err := loadTaskState(s.store, s.tenant)
+	if s.m != nil {
+		switch {
+		case err != nil:
+			s.m.stateRestore.WithLabelValues("failed").Inc()
+		case len(data) == 0:
+			s.m.stateRestore.WithLabelValues("empty").Inc()
+		default:
+			s.m.stateRestore.WithLabelValues("success").Inc()
+		}
+	}
 	for _, pt := range data {
 		factory := s.factories[pt.Instance]
 		if factory == nil {
+			if s.m != nil {
+				s.m.restoreSkipped.WithLabelValues(pt.Type, "factory_missing").Inc()
+			}
 			continue
 		}
 		var handler TaskHandler
@@ -90,6 +119,9 @@ func (s *Scheduler) restoreFromStore() {
 		case TypeMetadataGC:
 			handler = factory.NewGC(pt.SubPath)
 		default:
+			if s.m != nil {
+				s.m.restoreSkipped.WithLabelValues(pt.Type, "unknown_type").Inc()
+			}
 			continue
 		}
 
@@ -108,26 +140,31 @@ func (s *Scheduler) restoreFromStore() {
 			handler: handler,
 		}
 		s.tasks[key] = ts
+		s.metricInstances[key.Instance()] = struct{}{}
+		if s.m != nil {
+			s.m.restoredTasks.WithLabelValues(pt.Type).Inc()
+		}
 		heap.Push(&s.heap, ts)
 	}
+	s.refreshMetrics()
 	if len(data) > 0 {
 		slog.Debug("scheduler restored tasks", "count", len(data))
 	}
 }
 
-func loadTaskState(store *blobfs.Store, tenant string) []persistedTask {
+func loadTaskState(store *blobfs.Store, tenant string) ([]persistedTask, error) {
 	if store == nil {
-		return nil
+		return nil, nil
 	}
 	reader, err := store.OpenObject(context.Background(), tenant, "tasks.yaml")
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer reader.Close()
 
 	var state persistedState
 	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
-		return nil
+		return nil, err
 	}
-	return state.Tasks
+	return state.Tasks, nil
 }

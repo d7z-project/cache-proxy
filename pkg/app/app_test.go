@@ -18,6 +18,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 func TestValidateRejectsConflictingPaths(t *testing.T) {
@@ -70,7 +71,6 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/a.txt"))
 	require.Equal(t, int64(1), upstreamRequests.Load())
 }
-
 
 func TestMetricsRequireBearerToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -247,7 +247,6 @@ instances:
 	require.ErrorContains(t, err, "field default_polciy not found")
 }
 
-
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	app := &App{
 		stopRuntime: func() {},
@@ -419,6 +418,29 @@ func TestBindHomePageHeadReturnsOK(t *testing.T) {
 	require.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
 }
 
+func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var runs atomic.Int32
+	prev := driverSet
+	driverSet = func() map[string]proxyruntime.ModeDriver {
+		drivers := prev()
+		drivers[config.ModeFile] = startFailingDriver{runs: &runs}
+		return drivers
+	}
+	defer func() { driverSet = prev }()
+
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
+	})
+
+	_, err := Open(ctx, doc, "")
+	require.ErrorContains(t, err, "boom")
+	first := runs.Load()
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, first, runs.Load())
+}
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
 	return openAppWithConfig(t, ctx, doc, "")
@@ -593,4 +615,26 @@ func (s *cleanupContextInstance) Start(ctx context.Context) error {
 func (s *cleanupContextInstance) Stop(context.Context) error {
 	s.stopped.Store(true)
 	return s.ctx.Err()
+}
+
+type startFailingDriver struct{ runs *atomic.Int32 }
+
+func (startFailingDriver) Mode() string { return config.ModeFile }
+
+func (d startFailingDriver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	plan.Scheduler().Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: 10 * time.Millisecond,
+		Handler: func(context.Context) error {
+			if d.runs != nil {
+				d.runs.Add(1)
+			}
+			return nil
+		},
+	})
+	return plan.BindPath("/files", config.Expiration(time.Hour), startContextInstance{
+		onStart: func(context.Context) error {
+			return fmt.Errorf("boom")
+		},
+	})
 }

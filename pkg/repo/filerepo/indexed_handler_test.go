@@ -18,10 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, builder SnapshotBuilder) *IndexedHandler {
@@ -257,9 +258,99 @@ func TestMetadataStateAfterFailedRefresh(t *testing.T) {
 	require.Nil(t, handler.currentSnapshot())
 	require.Error(t, handler.RefreshSubPath(ctx, "root"))
 	require.Nil(t, handler.currentSnapshot())
+	state, ok := handler.sh.ResourceState("root")
+	require.True(t, ok)
+	require.Equal(t, health.RSuspect, state)
 
 	snap := handler.stats.Snapshot()
 	require.Equal(t, "booting", snap.Instances["repo"].MetadataState)
+}
+
+func TestRefreshPromotesResourceToActive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/meta/index.txt":
+			_, _ = io.WriteString(w, "index")
+		case "/meta/index.txt.sig":
+			_, _ = io.WriteString(w, "sig")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+		blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+		require.NoError(t, err)
+		_, err = session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt.sig"})
+		require.NoError(t, err)
+		return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}, "meta/index.txt.sig": {Path: "meta/index.txt.sig", Required: true}}}, nil
+	})
+
+	state, ok := handler.sh.ResourceState("root")
+	require.True(t, ok)
+	require.Equal(t, health.RPending, state)
+
+	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
+
+	state, ok = handler.sh.ResourceState("root")
+	require.True(t, ok)
+	require.Equal(t, health.RActive, state)
+}
+
+func TestRefreshSkipsWhenSameSubPathAlreadyRefreshing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/meta/index.txt":
+			_, _ = io.WriteString(w, "index")
+		case "/meta/index.txt.sig":
+			_, _ = io.WriteString(w, "sig")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	started := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	builderCalls := make(chan struct{}, 2)
+	handler := newTestHandler(t, store, []string{server.URL}, func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+		builderCalls <- struct{}{}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-unblock
+		blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+		require.NoError(t, err)
+		_, err = session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt.sig"})
+		require.NoError(t, err)
+		return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}, "meta/index.txt.sig": {Path: "meta/index.txt.sig", Required: true}}}, nil
+	})
+
+	refreshErr := make(chan error, 1)
+	go func() {
+		refreshErr <- handler.RefreshSubPath(ctx, "root")
+	}()
+	<-started
+	require.ErrorIs(t, handler.RefreshSubPath(ctx, "root"), scheduler.ErrTaskSkipped)
+	close(unblock)
+	require.NoError(t, <-refreshErr)
+	require.Len(t, builderCalls, 1)
 }
 
 func TestFailedRefreshCleansMetadataTempFiles(t *testing.T) {

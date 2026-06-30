@@ -13,9 +13,9 @@ import (
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 

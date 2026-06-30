@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
 
@@ -24,8 +26,9 @@ func newTestStore(t *testing.T) *blobfs.Store {
 
 func newTestScheduler(t *testing.T, store *blobfs.Store) (*Scheduler, *bus.Bus) {
 	t.Helper()
-	b := bus.New()
-	return New(b, store), b
+	reg := prometheus.NewRegistry()
+	b := bus.NewWithRegisterer(reg)
+	return New(b, store, reg), b
 }
 
 func TestTaskKeyFormat(t *testing.T) {
@@ -151,7 +154,7 @@ func TestBusEventDiscovered(t *testing.T) {
 	})
 
 	b.Publish(bus.Event{
-		Type: bus.EventMetadataDiscovered,
+		Type:    bus.EventMetadataDiscovered,
 		Payload: bus.MetadataDiscoveredPayload{Instance: "test", SubPath: "sub1"},
 	})
 
@@ -161,6 +164,11 @@ func TestBusEventDiscovered(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("refresh not executed after discovery")
 	}
+	require.Equal(t, float64(1), metricValue(t, sched.m.registered.WithLabelValues("test", string(TypeMetadataRefresh), "discovery")))
+	require.Equal(t, float64(1), metricValue(t, sched.m.registered.WithLabelValues("test", string(TypeMetadataGC), "discovery")))
+	require.Eventually(t, func() bool {
+		return metricValue(t, sched.m.discoveriesPending.WithLabelValues("test")) == 0
+	}, time.Second, 10*time.Millisecond)
 
 	sched.Stop(context.Background())
 }
@@ -181,7 +189,7 @@ func TestBusEventRemoved(t *testing.T) {
 	})
 
 	b.Publish(bus.Event{
-		Type: bus.EventMetadataDiscovered,
+		Type:    bus.EventMetadataDiscovered,
 		Payload: bus.MetadataDiscoveredPayload{Instance: "test", SubPath: "sub1"},
 	})
 
@@ -261,12 +269,77 @@ func TestTaskFailureAndRetry(t *testing.T) {
 		Payload: bus.MetadataDiscoveredPayload{Instance: "test", SubPath: "fail1"},
 	})
 
-	time.Sleep(500 * time.Millisecond)
-	info, _ := sched.Info(NewTaskKey("test", TypeMetadataRefresh, "fail1"))
-	require.Equal(t, StatusFailed, info.Status)
+	require.Eventually(t, func() bool {
+		info, _ := sched.Info(NewTaskKey("test", TypeMetadataRefresh, "fail1"))
+		return info.Status == StatusFailed
+	}, 5*time.Second, 20*time.Millisecond)
 	require.Greater(t, calls.Load(), int32(0), "handler should have been called at least once")
+	require.Greater(t, metricValue(t, sched.m.runs.WithLabelValues("test", string(TypeMetadataRefresh), "timeout")), float64(0))
+	require.Greater(t, metricValue(t, sched.m.backoff.WithLabelValues("test", string(TypeMetadataRefresh))), float64(0))
 
 	sched.Stop(context.Background())
+}
+
+func TestRestoreMetrics(t *testing.T) {
+	dir := t.TempDir()
+	store, err := blobfs.Open(dir, blobfs.DefaultConfig())
+	require.NoError(t, err)
+
+	{
+		reg := prometheus.NewRegistry()
+		b := bus.NewWithRegisterer(reg)
+		sched := New(b, store, reg)
+		ctx, cancel := context.WithCancel(context.Background())
+		sched.RegisterFactory(TaskFactory{
+			Instance:        "test",
+			RefreshInterval: time.Hour,
+			GCInterval:      time.Hour,
+			NewRefresh:      func(subPath string) TaskHandler { return func(ctx context.Context) error { return nil } },
+			NewGC:           func(subPath string) TaskHandler { return func(ctx context.Context) error { return nil } },
+		})
+		sched.Start(ctx)
+		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "test", SubPath: "sub1"}})
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		require.NoError(t, sched.Stop(context.Background()))
+		require.NoError(t, store.Close())
+	}
+
+	store, err = blobfs.Open(dir, blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	reg := prometheus.NewRegistry()
+	b := bus.NewWithRegisterer(reg)
+	sched := New(b, store, reg)
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "test",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh:      func(subPath string) TaskHandler { return func(ctx context.Context) error { return nil } },
+		NewGC:           func(subPath string) TaskHandler { return func(ctx context.Context) error { return nil } },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, float64(1), metricValue(t, sched.m.stateRestore.WithLabelValues("success")))
+	require.Equal(t, float64(1), metricValue(t, sched.m.restoredTasks.WithLabelValues(string(TypeMetadataRefresh))))
+	require.Equal(t, float64(1), metricValue(t, sched.m.restoredTasks.WithLabelValues(string(TypeMetadataGC))))
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func metricValue(t *testing.T, metric prometheus.Metric) float64 {
+	t.Helper()
+	var pb dto.Metric
+	require.NoError(t, metric.Write(&pb))
+	if pb.Counter != nil {
+		return pb.Counter.GetValue()
+	}
+	if pb.Gauge != nil {
+		return pb.Gauge.GetValue()
+	}
+	t.Fatal("unsupported metric type")
+	return 0
 }
 
 func TestStopCompletesCleanly(t *testing.T) {
@@ -294,8 +367,9 @@ func TestPersistenceRestore(t *testing.T) {
 
 	// First session: discover metadata and persist
 	{
-		b := bus.New()
-		sched := New(b, store)
+		reg := prometheus.NewRegistry()
+		b := bus.NewWithRegisterer(reg)
+		sched := New(b, store, reg)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		sched.RegisterFactory(TaskFactory{
@@ -325,8 +399,9 @@ func TestPersistenceRestore(t *testing.T) {
 		require.NoError(t, err)
 		defer store2.Close()
 
-		b := bus.New()
-		sched := New(b, store2)
+		reg := prometheus.NewRegistry()
+		b := bus.NewWithRegisterer(reg)
+		sched := New(b, store2, reg)
 
 		sched.RegisterFactory(TaskFactory{
 			Instance:        "test",
@@ -357,8 +432,9 @@ func TestMissingFactoryOnRestore(t *testing.T) {
 
 	// Persist a task
 	{
-		b := bus.New()
-		sched := New(b, store)
+		reg := prometheus.NewRegistry()
+		b := bus.NewWithRegisterer(reg)
+		sched := New(b, store, reg)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		sched.RegisterFactory(TaskFactory{
@@ -385,8 +461,9 @@ func TestMissingFactoryOnRestore(t *testing.T) {
 	require.NoError(t, err)
 	defer store2.Close()
 
-	b := bus.New()
-	sched := New(b, store2)
+	reg := prometheus.NewRegistry()
+	b := bus.NewWithRegisterer(reg)
+	sched := New(b, store2, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -402,8 +479,9 @@ func TestMissingFactoryOnRestore(t *testing.T) {
 
 func TestSchedulerEmptyStore(t *testing.T) {
 	// Test that scheduler works without a store
-	b := bus.New()
-	sched := New(b, nil)
+	reg := prometheus.NewRegistry()
+	b := bus.NewWithRegisterer(reg)
+	sched := New(b, nil, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -463,8 +541,9 @@ func TestRegisterFactoryOverwrite(t *testing.T) {
 }
 
 func TestSchedulerInfoQuery(t *testing.T) {
-	b := bus.New()
-	sched := New(b, nil)
+	reg := prometheus.NewRegistry()
+	b := bus.NewWithRegisterer(reg)
+	sched := New(b, nil, reg)
 
 	sched.Start(context.Background())
 
@@ -523,7 +602,7 @@ func TestRegisterZeroInterval(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      NewTaskKey("zero", TypeBlobGC, ""),
 		Interval: 0,
-		Handler: func(ctx context.Context) error { count.Add(1); return nil },
+		Handler:  func(ctx context.Context) error { count.Add(1); return nil },
 	})
 
 	time.Sleep(200 * time.Millisecond)
@@ -661,12 +740,12 @@ func TestDuplicateRegisterOverwrites(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      key,
 		Interval: time.Hour,
-		Handler: func(ctx context.Context) error { first.Store(true); return nil },
+		Handler:  func(ctx context.Context) error { first.Store(true); return nil },
 	})
 	sched.Register(TaskDef{
 		Key:      key,
 		Interval: time.Minute,
-		Handler: func(ctx context.Context) error { second.Store(true); return nil },
+		Handler:  func(ctx context.Context) error { second.Store(true); return nil },
 	})
 
 	info, ok := sched.Info(key)
@@ -725,4 +804,3 @@ func TestStopBeforeStartIsSafe(t *testing.T) {
 	err := sched.Stop(stopCtx)
 	require.NoError(t, err)
 }
-

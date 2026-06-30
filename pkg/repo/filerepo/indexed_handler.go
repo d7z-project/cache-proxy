@@ -27,6 +27,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -202,6 +203,20 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 	if !ok || entry == nil || len(entry.targets) == 0 {
 		return fmt.Errorf("root %s not found or has no targets", subPath)
 	}
+	var (
+		refreshGen uint64
+		release    func()
+	)
+	if h.sh != nil {
+		rh, done, ok := h.sh.TryStartRefresh(subPath)
+		if !ok {
+			slog.Debug("subpath refresh skipped", "instance", h.name, "mode", h.mode, "subPath", subPath, "reason", "already_refreshing")
+			return scheduler.ErrTaskSkipped
+		}
+		refreshGen = rh.Generation
+		release = done
+		defer release()
+	}
 	upstreams := h.weightedUpstreams()
 	if len(upstreams) == 0 {
 		return errors.New("no upstreams available")
@@ -224,7 +239,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 			continue
 		}
 		if h.sh != nil {
-			h.sh.FinishRefresh(subPath, 0, nil, targetsToProbe(entry.targets))
+			h.sh.FinishRefresh(subPath, refreshGen, nil, targetsToProbe(snapshot.Targets))
 		}
 		h.mu.Lock()
 		h.rootSnapshots[subPath] = snapshot
@@ -238,7 +253,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 		firstErr = errMetadataTransient
 	}
 	if h.sh != nil {
-		h.sh.FinishRefresh(subPath, 0, refreshHealthError(firstErr), nil)
+		h.sh.FinishRefresh(subPath, refreshGen, refreshHealthError(firstErr), nil)
 	}
 	return firstErr
 }

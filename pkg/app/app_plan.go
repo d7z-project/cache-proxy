@@ -20,9 +20,11 @@ const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 64
 const DefaultMaxActiveDownloadsPerInstance = 8
 
+var driverSet = builtinDrivers
+
 func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, sched *scheduler.Scheduler, b *bus.Bus) (map[string]*proxyruntime.Entry, error) {
 	plan := proxyruntime.NewPlanContext(store, stats, downloads, doc.Server.Bind, doc.Metrics.Path, sched, b)
-	drivers := builtinDrivers()
+	drivers := driverSet()
 	for _, decl := range doc.Instances {
 		selected, err := decl.SelectMode()
 		if err != nil {

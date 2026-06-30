@@ -155,9 +155,9 @@ func TestMetadataRequestInReleasePublishesArtifacts(t *testing.T) {
 	}()
 
 	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
-		URL: "dists/bookworm/InRelease",
+		URL:        "dists/bookworm/InRelease",
 		Candidates: []string{"dists/bookworm/Release"},
-		Kind: "release",
+		Kind:       "release",
 	}})
 	require.NoError(t, handler.RefreshSubPath(ctx, "dists/bookworm"))
 
@@ -214,9 +214,9 @@ func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
 	}()
 
 	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
-		URL: "dists/bookworm/InRelease",
+		URL:        "dists/bookworm/InRelease",
 		Candidates: []string{"dists/bookworm/Release"},
-		Kind: "release",
+		Kind:       "release",
 	}})
 	require.NoError(t, handler.RefreshSubPath(ctx, "dists/bookworm"))
 
@@ -273,9 +273,9 @@ func TestMetadataRequestStartsAsyncRefreshAndReturnsUnavailableUntilReady(t *tes
 	}()
 
 	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
-		URL: "dists/bookworm/InRelease",
+		URL:        "dists/bookworm/InRelease",
 		Candidates: []string{"dists/bookworm/Release"},
-		Kind: "release",
+		Kind:       "release",
 	}})
 	refreshDone := make(chan struct{})
 	go func() {
@@ -328,9 +328,9 @@ func TestBuildSnapshotRejectsReleaseWithoutPackageIndexes(t *testing.T) {
 		nil,
 	)
 	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
-		URL: "dists/bookworm/InRelease",
+		URL:        "dists/bookworm/InRelease",
 		Candidates: []string{"dists/bookworm/Release"},
-		Kind: "release",
+		Kind:       "release",
 	}})
 	err = handler.RefreshSubPath(ctx, "dists/bookworm")
 	require.ErrorContains(t, err, "Release contains no package indexes")

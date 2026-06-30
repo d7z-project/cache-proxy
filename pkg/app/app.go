@@ -140,8 +140,8 @@ func Validate(doc *config.Document) error {
 	stats := httpcache.NewStats(registry)
 	downloads := httpcache.NewDownloadLimiter(copy.Storage.Download.MaxActive, copy.Storage.Download.MaxActivePerInstance)
 
-	b := bus.New()
-	sched := scheduler.New(b, store)
+	b := bus.NewWithRegisterer(registry)
+	sched := scheduler.New(b, store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
 	sched.Start(validateCtx)
 	defer validateCancel()
@@ -172,17 +172,22 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	stats := httpcache.NewStats(metricsReg)
 	downloads := httpcache.NewDownloadLimiter(doc.Storage.Download.MaxActive, doc.Storage.Download.MaxActivePerInstance)
 
-	b := bus.New()
-	sched := scheduler.New(b, store)
+	b := bus.NewWithRegisterer(metricsReg)
+	sched := scheduler.New(b, store, metricsReg)
 
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
 	sched.Start(lifecycleCtx)
+	cleanupOpenFailure := func() {
+		stopRuntime()
+		stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer cancel()
+		_ = sched.Stop(stopCtx)
+		_ = store.Close()
+	}
 
 	entries, err := planEntries(ctx, doc, store, stats, downloads, sched, b)
 	if err != nil {
-		sched.Stop(ctx)
-		stopRuntime()
-		_ = store.Close()
+		cleanupOpenFailure()
 		return nil, err
 	}
 
@@ -204,7 +209,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		stopRuntime:   stopRuntime,
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
-		_ = store.Close()
+		cleanupOpenFailure()
 		return nil, err
 	}
 
