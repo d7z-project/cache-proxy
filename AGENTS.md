@@ -25,6 +25,7 @@
 - 同一个 generation 内的 metadata、签名、校验文件必须来自同一个 upstream
 - refresh 先写 staging，全部必需文件校验通过后才能发布 current generation
 - 客户端 metadata 请求只读取 current generation；没有 current 时才允许直连上游并触发后台刷新
+- 自动发现只允许由主元数据请求触发；伴生文件请求不能创建或识别新仓库
 - artifact / auxiliary 下载不能依赖包索引命中，也不能因为 refresh 失败被阻断
 - 包索引只用于清理旧缓存：只保留相对路径集合，用排序后的路径集做快查
 - 不落盘长期 artifact index，不把索引作为运行时下载校验或准入条件

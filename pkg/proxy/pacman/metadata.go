@@ -41,19 +41,10 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 	}
 	fileName := parts[len(parts)-1]
 
-	var repoName string
-	switch {
-	case strings.HasSuffix(fileName, ".db"):
-		repoName = strings.TrimSuffix(fileName, ".db")
-	case strings.HasSuffix(fileName, ".db.sig"):
-		repoName = strings.TrimSuffix(fileName, ".db.sig")
-	case strings.HasSuffix(fileName, ".files"):
-		repoName = strings.TrimSuffix(fileName, ".files")
-	case strings.HasSuffix(fileName, ".files.sig"):
-		repoName = strings.TrimSuffix(fileName, ".files.sig")
-	default:
+	if !strings.HasSuffix(fileName, ".db") {
 		return nil, false
 	}
+	repoName := strings.TrimSuffix(fileName, ".db")
 	if repoName == "" {
 		return nil, false
 	}
