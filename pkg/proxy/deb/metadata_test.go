@@ -138,11 +138,10 @@ func TestMetadataRequestInReleasePublishesArtifacts(t *testing.T) {
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := filerepo.NewIndexedHandler(
 		"repo", "deb", "deb",
-		0, classify,
+		classify,
 		[]string{server.URL}, nil,
 		0, &filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
-		discoverer{}, nil, buildSnapshot,
+		discoverer{}, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
 		nil,
@@ -155,19 +154,20 @@ func TestMetadataRequestInReleasePublishesArtifacts(t *testing.T) {
 		require.NoError(t, handler.Stop(stopCtx))
 	}()
 
+	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
+		URL: "dists/bookworm/InRelease",
+		Candidates: []string{"dists/bookworm/Release"},
+		Kind: "release",
+	}})
+	require.NoError(t, handler.RefreshSubPath(ctx, "dists/bookworm"))
+
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-
-	require.Eventually(t, func() bool {
-		releases := handler.RootReleases()
-		return len(releases) == 1 && releases[0].ArtifactCount == 1
-	}, 2*time.Second, 10*time.Millisecond)
-
-	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, string(release), rec.Body.String())
+
+	require.Len(t, handler.RootReleases(), 1)
+	require.Equal(t, 1, handler.RootReleases()[0].ArtifactCount)
 }
 
 func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
@@ -197,11 +197,10 @@ func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := filerepo.NewIndexedHandler(
 		"repo", "deb", "deb",
-		0, classify,
+		classify,
 		[]string{server.URL}, nil,
 		0, &filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
-		discoverer{}, nil, buildSnapshot,
+		discoverer{}, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
 		nil,
@@ -214,16 +213,14 @@ func TestMetadataRequestInReleaseRedirectsToReleaseFallback(t *testing.T) {
 		require.NoError(t, handler.Stop(stopCtx))
 	}()
 
+	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
+		URL: "dists/bookworm/InRelease",
+		Candidates: []string{"dists/bookworm/Release"},
+		Kind: "release",
+	}})
+	require.NoError(t, handler.RefreshSubPath(ctx, "dists/bookworm"))
+
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-
-	require.Eventually(t, func() bool {
-		releases := handler.RootReleases()
-		return len(releases) == 1 && releases[0].ArtifactCount == 1
-	}, 2*time.Second, 10*time.Millisecond)
-
-	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
 	require.Equal(t, http.StatusFound, rec.Code)
 	require.Equal(t, "/dists/bookworm/Release", rec.Header().Get("Location"))
@@ -258,11 +255,10 @@ func TestMetadataRequestStartsAsyncRefreshAndReturnsUnavailableUntilReady(t *tes
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := filerepo.NewIndexedHandler(
 		"repo", "deb", "deb",
-		0, classify,
+		classify,
 		[]string{server.URL}, nil,
 		0, &filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
-		discoverer{}, nil, buildSnapshot,
+		discoverer{}, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
 		nil,
@@ -276,9 +272,16 @@ func TestMetadataRequestStartsAsyncRefreshAndReturnsUnavailableUntilReady(t *tes
 		require.NoError(t, handler.Stop(stopCtx))
 	}()
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dists/bookworm/InRelease", nil))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
+		URL: "dists/bookworm/InRelease",
+		Candidates: []string{"dists/bookworm/Release"},
+		Kind: "release",
+	}})
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		_ = handler.RefreshSubPath(ctx, "dists/bookworm")
+	}()
 
 	require.Eventually(t, func() bool {
 		select {
@@ -316,16 +319,20 @@ func TestBuildSnapshotRejectsReleaseWithoutPackageIndexes(t *testing.T) {
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := filerepo.NewIndexedHandler(
 		"repo", "deb", "deb",
-		0, classify,
+		classify,
 		[]string{server.URL}, nil,
 		0, &filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
-		nil, []filerepo.RootSpec{&rootSpec{Suite: "bookworm"}}, buildSnapshot,
+		nil, buildSnapshot,
 		store, stats,
 		health.New("repo", "deb", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
 		nil,
 	)
-	err = handler.Refresh(ctx)
+	handler.AddRoot("dists/bookworm", []filerepo.MetadataTarget{{
+		URL: "dists/bookworm/InRelease",
+		Candidates: []string{"dists/bookworm/Release"},
+		Kind: "release",
+	}})
+	err = handler.RefreshSubPath(ctx, "dists/bookworm")
 	require.ErrorContains(t, err, "Release contains no package indexes")
 	require.Empty(t, handler.RootReleases())
 }

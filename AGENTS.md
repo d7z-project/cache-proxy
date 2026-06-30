@@ -33,7 +33,7 @@
 - required metadata 缺失或校验失败时，本次 generation 必须失败，继续服务旧 generation；签名、文件列表等 companion 默认为 optional，FetchDerived 处理 404/403 为非致命
 - artifact / auxiliary 下载不能因包索引缺失、refresh 失败或无 current generation 而被阻断；索引命中时绑定 current generation 的 upstream 和 identity，能得到 SHA256 时必须校验后才写入缓存
 - 伴生文件推导：每个主元数据文件 X 自动推导并尝试缓存 X.sig、X.asc、X.gpg（FetchDerived 处理 404/403 为非致命）；模式可追加额外伴生（如 RPM 加 .key）
-- 元数据刷新为后台驱动，用户请求仅负责路径发现；无 current generation 时返回 `503 Retry-After`，禁止 passthrough 或在请求路径同步解析大型 metadata
+- 元数据刷新为后台驱动，用户请求仅负责路径发现；无本地缓存时直接 bypass 到上游并发布 `EventMetadataDiscovered` 事件到总线，由调度器注册刷新任务
 - metadata 下载与解压解析必须使用临时文件/reader 流式处理，禁止对 Packages/primary 等大型 metadata 使用 `io.ReadAll` 全量读入内存
 - 伴生文件 `FetchDerived` 同时处理 404 和 403（均为非致命），403 不会导致 generation 失败
 
@@ -101,3 +101,74 @@
 - 状态切换统一输出 debug 日志，格式：`"upstream state change" from=xxx to=yyy weight=N error_rate=N reason=reason`
 - 故障转移透明：`openRemote()` 循环依次尝试，返回首个成功响应；failover 通过 debug 日志记录
 - 5 个 Prometheus 指标通过 `StatsRecorder.SetUpstreamHealth` 和 `RecordCircuitEvent` 写入
+
+## 事件总线 (pkg/bus)
+
+纯数据 pub/sub，用于解耦跨组件通信。总线只传输数据，不携带函数引用。
+
+事件类型：
+- `EventMetadataDiscovered` — 新的元数据子路径被 proxy handler 发现，payload 包含 Instance 和 SubPath
+- `EventMetadataRemoved` — 元数据根被移除
+
+接口：
+- `bus.New() *Bus` — 创建总线
+- `Subscribe(types ...EventType) <-chan Event` — 订阅多种类型，缓冲 128
+- `Publish(Event)` — 非阻塞发布，满则丢弃并记录 debug 日志
+
+## 调度器 (pkg/scheduler)
+
+程序级统一任务调度器，单 goroutine 串行执行所有定时任务，最大化避免并发内存峰值。
+
+任务类型：
+- `TypeBlobGC` — blob 存储 GC（系统级，App 注册）
+- `TypeExpireCleanup` — 缓存过期清理（所有 proxy 注册）
+- `TypeMetadataRefresh` — 元数据刷新（包 proxy 通过 Factory 动态注册）
+- `TypeMetadataGC` — 元数据世代 GC（包 proxy 通过 Factory 动态注册）
+
+核心 API：
+- `New(bus, store) *Scheduler` — 创建，绑定总线和持久化存储
+- `Register(TaskDef)` — 注册静态任务（Plan 阶段调用）
+- `RegisterFactory(TaskFactory)` — 注册动态任务工厂（同步，必须在 Start 前）
+- `Unregister(key)` / `Info(key)` / `Snapshot()` — 查询和管理
+- `Start(ctx)` / `Stop(ctx)` — 生命周期
+
+工厂模式：
+- `TaskFactory` 在 Plan 时注册到调度器
+- 发现事件到达时，调度器查找 factory，调用 `NewRefresh(subPath)` / `NewGC(subPath)` 创建 handler
+- 重启时，`restoreFromStore()` 从持久化状态恢复任务，用已注册的 factory 重绑 handler
+- `RegisterFactory` 是同步方法（不通过 cmdCh），确保在 `Start()` 前注册以供恢复使用
+
+任务执行：
+- 单 goroutine 命令循环：cmdCh + busSub + ticker(500ms) select
+- 到期任务从最小堆取出，同步执行，完成后再入堆
+- 每次执行有 context 超时保护：`min(interval/2, 30min, min=1min)`
+- handler panic 被 `safeCall()` 捕获，记录日志，标记任务失败
+- 失败退避：`failures * interval / 8`，上限 `interval/2`，下限 1min
+
+持久化：
+- 仅 `metadata_refresh` + `metadata_gc` 任务持久化到 `_scheduler/tasks.yaml`
+- 静态任务（blob_gc, expire_cleanup）每次 Plan 重新注册，不持久化
+
+### Plan 阶段任务注册
+
+所有 proxy 的 `Plan()` 必须注册调度任务：
+
+普通 proxy（file/npm/git/gomod/maven/pypi/oci/cargo）：
+```go
+plan.Scheduler().Register(scheduler.TaskDef{
+    Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+    Interval: 6 * time.Hour,
+    Handler:  func(ctx context.Context) error { return handler.Cleanup(ctx, config.DefaultCleanupConfig()) },
+})
+```
+
+包 proxy（deb/rpm/apk/pacman）：
+```go
+// 1. 注册过期清理
+plan.Scheduler().Register(scheduler.TaskDef{...})
+// 2. 注册动态工厂
+plan.Scheduler().RegisterFactory(scheduler.TaskFactory{
+    NewRefresh: func(subPath) TaskHandler { return handler.RefreshSubPath(ctx, subPath) },
+    NewGC:      func(subPath) TaskHandler { return handler.CleanupSubPath(ctx, subPath) },
+})
+```

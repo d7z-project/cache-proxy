@@ -14,6 +14,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 type AuthConfig struct {
@@ -86,6 +87,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	plan.SetHomeDisplayURL(block.Upstream)
+	plan.Scheduler().Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: 6 * time.Hour,
+		Handler: func(ctx context.Context) error {
+			return handler.Cleanup(ctx, config.DefaultCleanupConfig())
+		},
+	})
 	return plan.BindPath(block.Route.Path, config.DefaultExpireAfter, handler)
 }
 

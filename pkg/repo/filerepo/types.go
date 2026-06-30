@@ -229,6 +229,7 @@ func DeduceCompanions(basePath string) []string {
 
 type RootSpec interface {
 	Key() string
+	SubPath() string
 	Targets() []MetadataTarget
 	Merge(RootSpec) bool
 }
@@ -242,7 +243,8 @@ type staticRootSpec struct {
 	targets []MetadataTarget
 }
 
-func (s staticRootSpec) Key() string { return s.key }
+func (s staticRootSpec) Key() string     { return s.key }
+func (s staticRootSpec) SubPath() string { return s.key }
 func (s staticRootSpec) Targets() []MetadataTarget {
 	return append([]MetadataTarget(nil), s.targets...)
 }

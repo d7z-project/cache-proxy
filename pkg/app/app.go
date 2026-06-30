@@ -20,10 +20,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -31,15 +33,20 @@ const (
 	DefaultBackend     = "/tmp/cache-proxy"
 	DefaultBind        = "127.0.0.1:18080"
 	DefaultMetricsPath = "/metrics"
+	drainTimeout       = 10 * time.Second
 )
 
 type App struct {
-	config        *config.Document
-	configPath    string
-	store         *blobfs.Store
-	stats         *httpcache.Stats
-	downloads     *httpcache.DownloadLimiter
-	metricsReg    *prometheus.Registry
+	config     *config.Document
+	configPath string
+	store      *blobfs.Store
+	stats      *httpcache.Stats
+	downloads  *httpcache.DownloadLimiter
+	metricsReg *prometheus.Registry
+
+	scheduler *scheduler.Scheduler
+	bus       *bus.Bus
+
 	entries       map[string]*proxyruntime.Entry
 	handlers      []proxyruntime.Instance
 	routesMu      sync.RWMutex
@@ -55,12 +62,7 @@ type App struct {
 	stopRuntime   context.CancelFunc
 	started       bool
 	ready         atomic.Bool
-	reloading     atomic.Bool
 	closed        atomic.Bool
-	gcDone        chan struct{}
-	cleanupDone   chan struct{}
-	gcWake        chan struct{}
-	cleanupWake   chan struct{}
 
 	tuMu         sync.Mutex
 	tuCachedAt   time.Time
@@ -114,17 +116,6 @@ func (a *App) currentConfig() *config.Document {
 	return doc
 }
 
-func (a *App) notifyStorageConfigChanged() {
-	select {
-	case a.gcWake <- struct{}{}:
-	default:
-	}
-	select {
-	case a.cleanupWake <- struct{}{}:
-	default:
-	}
-}
-
 func Load(path string) (*config.Document, error) {
 	return config.LoadFile(path)
 }
@@ -134,7 +125,7 @@ func Validate(doc *config.Document) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(dir) }() // ephemeral temp dir, best-effort cleanup
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	copy := *doc
 	copy.Server.Backend = dir
@@ -143,12 +134,19 @@ func Validate(doc *config.Document) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = store.Close() }() // ephemeral validation store
+	defer func() { _ = store.Close() }()
 
 	registry := prometheus.NewRegistry()
 	stats := httpcache.NewStats(registry)
 	downloads := httpcache.NewDownloadLimiter(copy.Storage.Download.MaxActive, copy.Storage.Download.MaxActivePerInstance)
-	_, err = planEntries(context.Background(), &copy, store, stats, downloads)
+
+	b := bus.New()
+	sched := scheduler.New(b, store)
+	validateCtx, validateCancel := context.WithCancel(context.Background())
+	sched.Start(validateCtx)
+	defer validateCancel()
+	defer func() { sched.Stop(validateCtx) }()
+	_, err = planEntries(context.Background(), &copy, store, stats, downloads, sched, b)
 	return err
 }
 
@@ -173,13 +171,21 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	metricsReg.MustRegister(metrics.NewBlobFSCollector(store))
 	stats := httpcache.NewStats(metricsReg)
 	downloads := httpcache.NewDownloadLimiter(doc.Storage.Download.MaxActive, doc.Storage.Download.MaxActivePerInstance)
-	entries, err := planEntries(ctx, doc, store, stats, downloads)
+
+	b := bus.New()
+	sched := scheduler.New(b, store)
+
+	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
+	sched.Start(lifecycleCtx)
+
+	entries, err := planEntries(ctx, doc, store, stats, downloads, sched, b)
 	if err != nil {
+		sched.Stop(ctx)
+		stopRuntime()
 		_ = store.Close()
 		return nil, err
 	}
 
-	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
 	app := &App{
 		config:        doc,
 		configPath:    configPath,
@@ -187,6 +193,8 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		stats:         stats,
 		downloads:     downloads,
 		metricsReg:    metricsReg,
+		scheduler:     sched,
+		bus:           b,
 		entries:       entries,
 		pathHandlers:  map[string]http.Handler{},
 		bindHandlers:  map[string]http.Handler{},
@@ -194,52 +202,22 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		bindListeners: map[string]net.Listener{},
 		lifecycleCtx:  lifecycleCtx,
 		stopRuntime:   stopRuntime,
-		gcDone:        make(chan struct{}),
-		cleanupDone:   make(chan struct{}),
-		gcWake:        make(chan struct{}, 1),
-		cleanupWake:   make(chan struct{}, 1),
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
+
+	sched.Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),
+		Interval: doc.Storage.GC.Blob.Duration(),
+		Handler: func(ctx context.Context) error {
+			_, err := app.store.RunGC(ctx, blobfs.GCOptions{Compact: true})
+			return err
+		},
+	})
+
 	app.mainServer = &http.Server{Addr: doc.Server.Bind, Handler: app}
-	go func() {
-		defer close(app.gcDone)
-		for {
-			interval := app.currentConfig().Storage.GC.Blob.Duration()
-			timer := time.NewTimer(interval)
-			select {
-			case <-app.lifecycleCtx.Done():
-				timer.Stop()
-				return
-			case <-app.gcWake:
-				timer.Stop()
-				continue
-			case <-timer.C:
-				if _, err := app.store.RunGC(app.lifecycleCtx, blobfs.GCOptions{Compact: true}); err != nil && !errors.Is(err, context.Canceled) {
-					slog.Info("blob gc failed", "err", err)
-				}
-			}
-		}
-	}()
-	go func() {
-		defer close(app.cleanupDone)
-		for {
-			interval := app.currentConfig().Storage.Cleanup.Interval.Duration()
-			timer := time.NewTimer(interval)
-			select {
-			case <-app.lifecycleCtx.Done():
-				timer.Stop()
-				return
-			case <-app.cleanupWake:
-				timer.Stop()
-				continue
-			case <-timer.C:
-				app.runCleanup(app.lifecycleCtx)
-			}
-		}
-	}()
 	app.checkOrphans(lifecycleCtx)
 	return app, nil
 }
@@ -333,6 +311,9 @@ func (a *App) Close(ctx context.Context) error {
 	a.stopRuntime()
 
 	var joined error
+	if a.scheduler != nil {
+		joined = errors.Join(joined, a.scheduler.Stop(ctx))
+	}
 	if a.mainServer != nil {
 		joined = errors.Join(joined, a.mainServer.Shutdown(ctx))
 	}
@@ -345,16 +326,6 @@ func (a *App) Close(ctx context.Context) error {
 	a.routesMu.RUnlock()
 	for _, handler := range handlers {
 		joined = errors.Join(joined, handler.Stop(ctx))
-	}
-	select {
-	case <-a.gcDone:
-	case <-ctx.Done():
-		joined = errors.Join(joined, ctx.Err())
-	}
-	select {
-	case <-a.cleanupDone:
-	case <-ctx.Done():
-		joined = errors.Join(joined, ctx.Err())
 	}
 	if a.store != nil {
 		joined = errors.Join(joined, a.store.Close())

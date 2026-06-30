@@ -71,23 +71,21 @@ func TestRefreshPrefetchesCompanion(t *testing.T) {
 		"repo",
 		"apk",
 		"repo",
-		config.Freshness(time.Minute),
 		classify,
 		[]string{server.URL},
 		nil,
 		config.Expiration(time.Hour),
 		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{Branch: "v3.20", Repo: "main", Arch: "x86_64"}},
 		buildSnapshot,
 		store,
 		stats,
 		svcHealth,
 		nil,
 	)
+	handler.AddRoot("v3.20/main/x86_64", []filerepo.MetadataTarget{{URL: "v3.20/main/x86_64/APKINDEX.tar.gz"}})
 
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "v3.20/main/x86_64"))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v3.20/main/x86_64/APKINDEX.tar.gz.sig", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -116,20 +114,18 @@ func TestRefreshSucceedsWithoutSig(t *testing.T) {
 	svcHealth := health.New("repo", "apk", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo", "apk", "repo",
-		config.Freshness(time.Minute),
 		classify,
 		[]string{server.URL},
 		nil,
 		config.Expiration(time.Hour),
 		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{Branch: "v3.20", Repo: "main", Arch: "x86_64"}},
 		buildSnapshot,
 		store, stats, svcHealth, nil,
 	)
+	handler.AddRoot("v3.20/main/x86_64", []filerepo.MetadataTarget{{URL: "v3.20/main/x86_64/APKINDEX.tar.gz"}})
 
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "v3.20/main/x86_64"))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v3.20/main/x86_64/APKINDEX.tar.gz", nil))

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 
@@ -14,7 +15,10 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
+
+const defaultCleanupInterval = 6 * time.Hour
 
 type Policy struct {
 	PassHeaders   []string         `json:"passHeaders,omitempty" yaml:"pass_headers,omitempty"`
@@ -76,6 +80,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		DefaultFreshFor: block.FreshFor,
 		DownloadLimiter: plan.Downloads(),
 	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), nil)
+	plan.Scheduler().Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: defaultCleanupInterval,
+		Handler: func(ctx context.Context) error {
+			return handler.Cleanup(ctx, config.DefaultCleanupConfig())
+		},
+	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      handler,

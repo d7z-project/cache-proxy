@@ -2,7 +2,6 @@ package config
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -206,47 +205,6 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 		return SelectedMode{}, fmt.Errorf("instance %q must define one mode block", i.Name)
 	}
 	return selected, nil
-}
-
-func (i Instance) Fingerprint() string {
-	sel, err := i.SelectMode()
-	if err != nil {
-		return "invalid:" + err.Error()
-	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%t", sel.Enabled)
-	fmt.Fprintf(h, "%s", sel.Mode)
-	if sel.Block != nil {
-		data, err := yaml.Marshal(sel.Block.Node)
-		if err != nil {
-			return "marshal-error:" + err.Error()
-		}
-		h.Write(data)
-	}
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-func DiffInstances(old, new []Instance) (added, removed, modified []string) {
-	oldMap := make(map[string]Instance, len(old))
-	for _, inst := range old {
-		oldMap[inst.Name] = inst
-	}
-	newMap := make(map[string]Instance, len(new))
-	for _, inst := range new {
-		newMap[inst.Name] = inst
-		if _, exists := oldMap[inst.Name]; !exists {
-			added = append(added, inst.Name)
-		}
-	}
-	for _, inst := range old {
-		newInst, exists := newMap[inst.Name]
-		if !exists {
-			removed = append(removed, inst.Name)
-		} else if newInst.Fingerprint() != inst.Fingerprint() {
-			modified = append(modified, inst.Name)
-		}
-	}
-	return
 }
 
 func LoadFile(path string) (*Document, error) {

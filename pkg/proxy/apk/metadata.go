@@ -22,6 +22,10 @@ func (s *rootSpec) Key() string {
 	return strings.Join([]string{s.Branch, s.Repo, s.Arch}, "|")
 }
 
+func (s *rootSpec) SubPath() string {
+	return s.Branch + "/" + s.Repo + "/" + s.Arch
+}
+
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
 	return []filerepo.MetadataTarget{{URL: path.Join(s.Branch, s.Repo, s.Arch, "APKINDEX.tar.gz")}}
 }

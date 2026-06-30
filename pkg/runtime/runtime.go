@@ -15,6 +15,8 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 type Instance interface {
@@ -114,6 +116,8 @@ type PlanContext struct {
 	entries     map[string]*Entry
 	pathOwners  map[string]string
 	bindOwners  map[string]string
+	scheduler   *scheduler.Scheduler
+	bus         *bus.Bus
 }
 
 type InstancePlan struct {
@@ -124,7 +128,7 @@ type InstancePlan struct {
 	bound    bool
 }
 
-func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, mainBind, metricsPath string) *PlanContext {
+func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, mainBind, metricsPath string, sched *scheduler.Scheduler, b *bus.Bus) *PlanContext {
 	return &PlanContext{
 		store:       store,
 		stats:       stats,
@@ -134,6 +138,8 @@ func NewPlanContext(store *blobfs.Store, stats *httpcache.Stats, downloads *http
 		entries:     map[string]*Entry{},
 		pathOwners:  map[string]string{},
 		bindOwners:  map[string]string{mainBind: "main"},
+		scheduler:   sched,
+		bus:         b,
 	}
 }
 
@@ -180,6 +186,8 @@ func (p *PlanContext) Finalize() (*Result, error) {
 func (p *PlanContext) Store() *blobfs.Store                  { return p.store }
 func (p *PlanContext) Stats() *httpcache.Stats               { return p.stats }
 func (p *PlanContext) Downloads() *httpcache.DownloadLimiter { return p.downloads }
+func (p *PlanContext) Scheduler() *scheduler.Scheduler       { return p.scheduler }
+func (p *PlanContext) Bus() *bus.Bus                         { return p.bus }
 
 func (i *InstancePlan) Name() string                          { return i.entry.Name }
 func (i *InstancePlan) Mode() string                          { return i.entry.Mode }
@@ -187,6 +195,8 @@ func (i *InstancePlan) Enabled() bool                         { return i.entry.E
 func (i *InstancePlan) Store() *blobfs.Store                  { return i.ctx.store }
 func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.stats }
 func (i *InstancePlan) Downloads() *httpcache.DownloadLimiter { return i.ctx.downloads }
+func (i *InstancePlan) Scheduler() *scheduler.Scheduler       { return i.ctx.scheduler }
+func (i *InstancePlan) Bus() *bus.Bus                         { return i.ctx.bus }
 
 func (i *InstancePlan) Decode(target any) error {
 	if i.selected.Block == nil {

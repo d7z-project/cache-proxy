@@ -17,7 +17,8 @@ type rootSpec struct {
 	RepoPath string
 }
 
-func (s *rootSpec) Key() string { return s.RepoPath }
+func (s *rootSpec) Key() string     { return s.RepoPath }
+func (s *rootSpec) SubPath() string { return s.RepoPath }
 
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
 	return []filerepo.MetadataTarget{{URL: path.Join(s.RepoPath, "repodata", "repomd.xml")}}

@@ -21,16 +21,16 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, builder SnapshotBuilder) *IndexedHandler {
 	t.Helper()
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	return NewIndexedHandler(
+	handler := NewIndexedHandler(
 		"repo",
 		"test",
 		"repo",
-		config.Freshness(time.Minute),
 		func(cleanPath string) ResourceClass {
 			if strings.HasPrefix(cleanPath, "meta/") {
 				return ResourceMetadata
@@ -44,15 +44,15 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		RefreshPolicy{Interval: time.Hour},
 		nil,
-		[]RootSpec{staticRootSpec{key: "root", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
 		builder,
 		store,
 		stats,
 		health.New("repo", "test", health.DefaultConfig(), upstreams, stats, "cache-proxy-test"),
 		nil,
 	)
+	handler.AddRoot("root", []MetadataTarget{{URL: "meta/index.txt"}})
+	return handler
 }
 
 func TestRefreshUsesSingleUpstreamForGeneration(t *testing.T) {
@@ -99,7 +99,7 @@ func TestRefreshUsesSingleUpstreamForGeneration(t *testing.T) {
 		}, nil
 	})
 
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
 	snapshot := handler.currentSnapshot()
 	require.NotNil(t, snapshot)
 	obj, ok := handler.currentRepoObject("pkg.tar", ResourceArtifact)
@@ -139,7 +139,7 @@ func TestRefreshDoesNotPublishWhenRequiredMetadataMissing(t *testing.T) {
 		return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
 	})
 
-	require.Error(t, handler.Refresh(ctx))
+	require.Error(t, handler.RefreshSubPath(ctx, "root"))
 	require.Nil(t, handler.currentSnapshot())
 }
 
@@ -171,7 +171,7 @@ func TestArtifactChecksumMismatchIsNotCached(t *testing.T) {
 			Artifacts: map[string]RepoObject{"pkg.tar": {Path: "pkg.tar", Identity: sha256String("expected"), Digest: SHA256Digest(sha256String("expected"))}},
 		}, nil
 	})
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pkg.tar", nil))
@@ -226,7 +226,7 @@ func TestMetadataStateAfterSuccessfulRefresh(t *testing.T) {
 	snap := handler.stats.Snapshot()
 	require.Equal(t, "booting", snap.Instances["repo"].MetadataState)
 
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
 	require.NotNil(t, handler.currentSnapshot())
 
 	snap = handler.stats.Snapshot()
@@ -255,7 +255,7 @@ func TestMetadataStateAfterFailedRefresh(t *testing.T) {
 	})
 
 	require.Nil(t, handler.currentSnapshot())
-	require.Error(t, handler.Refresh(ctx))
+	require.Error(t, handler.RefreshSubPath(ctx, "root"))
 	require.Nil(t, handler.currentSnapshot())
 
 	snap := handler.stats.Snapshot()
@@ -288,7 +288,7 @@ func TestFailedRefreshCleansMetadataTempFiles(t *testing.T) {
 		return nil, errors.New("builder failed")
 	})
 
-	require.Error(t, handler.Refresh(ctx))
+	require.Error(t, handler.RefreshSubPath(ctx, "root"))
 	entries, err := os.ReadDir(tmp)
 	require.NoError(t, err)
 	require.Empty(t, entries)
@@ -351,10 +351,10 @@ func TestRestoreGenerationsHealthTransition(t *testing.T) {
 
 	state, ok := handler.sh.ResourceState("root")
 	require.True(t, ok)
-	require.Equal(t, health.RActive, state)
+	require.Equal(t, health.RPending, state)
 
 	psnap := handler.stats.Snapshot()
-	require.Equal(t, "ready", psnap.Instances["repo"].MetadataState)
+	require.Equal(t, "degraded", psnap.Instances["repo"].MetadataState)
 
 	_, err = store.Put(ctx, "repo", handler.currentPath("root"), bytes.NewReader([]byte("generation: missing\n")), nil)
 	require.NoError(t, err)
@@ -366,13 +366,6 @@ func TestRestoreGenerationsHealthTransition(t *testing.T) {
 	restored.mu.RUnlock()
 	require.NotNil(t, restoredRoot)
 	require.Equal(t, "1", restoredRoot.Generation)
-}
-
-func TestEnsureFirstRefreshWithNilBuilder(t *testing.T) {
-	handler := &IndexedHandler{
-		build: nil,
-	}
-	handler.ensureFirstRefresh("test-key")
 }
 
 func TestAggregateSnapshotDoesNotCopyArtifacts(t *testing.T) {
@@ -409,7 +402,6 @@ func TestMetadataRequestWithoutCurrentGenerationReturnsUnavailable(t *testing.T)
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
-		config.Freshness(time.Minute),
 		func(cleanPath string) ResourceClass {
 			if strings.HasPrefix(cleanPath, "meta/") {
 				return ResourceMetadata
@@ -418,9 +410,8 @@ func TestMetadataRequestWithoutCurrentGenerationReturnsUnavailable(t *testing.T)
 		},
 		[]string{"https://upstream.example"}, nil,
 		config.Expiration(time.Hour), &Policy{},
-		RefreshPolicy{Interval: time.Hour},
 		testDiscoverer{spec: staticRootSpec{key: "root", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
-		nil, nil,
+		nil,
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, stats, "test"),
 		nil,
@@ -440,7 +431,6 @@ func TestArtifactWithoutCurrentGenerationUsesUnindexedPlan(t *testing.T) {
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
-		config.Freshness(time.Minute),
 		func(cleanPath string) ResourceClass {
 			if strings.HasPrefix(cleanPath, "meta/") {
 				return ResourceMetadata
@@ -449,8 +439,7 @@ func TestArtifactWithoutCurrentGenerationUsesUnindexedPlan(t *testing.T) {
 		},
 		[]string{"https://upstream.example"}, nil,
 		config.Expiration(time.Hour), &Policy{},
-		RefreshPolicy{Interval: time.Hour},
-		nil, nil, nil,
+		nil, nil,
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, stats, "test"),
 		nil,
@@ -471,7 +460,6 @@ func TestIndexedArtifactAndAuxiliaryUseGenerationUpstream(t *testing.T) {
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
-		config.Freshness(time.Minute),
 		func(cleanPath string) ResourceClass {
 			if strings.HasSuffix(cleanPath, ".sig") {
 				return ResourceAuxiliary
@@ -480,14 +468,13 @@ func TestIndexedArtifactAndAuxiliaryUseGenerationUpstream(t *testing.T) {
 		},
 		[]string{"https://first.example", "https://second.example"}, nil,
 		config.Expiration(time.Hour), &Policy{},
-		RefreshPolicy{Interval: time.Hour},
-		nil, nil, nil,
+		nil, nil,
 		store, stats,
 		health.New("repo", "test", health.DefaultConfig(), []string{"https://first.example", "https://second.example"}, stats, "test"),
 		nil,
 	)
 	handler.mu.Lock()
-	handler.snapshot = &LiveSnapshot{
+	handler.rootSnapshots["root"] = &LiveSnapshot{
 		Metadata: map[string]MetadataObject{},
 		Artifacts: map[string]RepoObject{
 			"pkg.tar": {
@@ -520,12 +507,10 @@ func TestRootReleasesWithoutHealthDoesNotPanic(t *testing.T) {
 
 	handler := NewIndexedHandler(
 		"repo", "test", "repo",
-		config.Freshness(time.Minute),
 		func(string) ResourceClass { return ResourceArtifact },
 		[]string{"https://upstream.example"}, nil,
 		config.Expiration(time.Hour), &Policy{},
-		RefreshPolicy{Interval: time.Hour},
-		nil, nil, nil,
+		nil, nil,
 		store, httpcache.NewStats(prometheus.NewRegistry()),
 		nil,
 		nil,
@@ -559,7 +544,7 @@ func TestCleanupKeepsUnindexedObjects(t *testing.T) {
 		}, nil
 	})
 	handler.mu.Lock()
-	handler.snapshot = &LiveSnapshot{Metadata: map[string]MetadataObject{}, Artifacts: map[string]RepoObject{}}
+	handler.rootSnapshots["root"] = &LiveSnapshot{Metadata: map[string]MetadataObject{}, Artifacts: map[string]RepoObject{}}
 	handler.mu.Unlock()
 
 	require.NoError(t, store.MkdirAll("repo/repo", 0o755))
@@ -585,7 +570,7 @@ func TestCleanupDeletesStaleIndexedObjects(t *testing.T) {
 		}, nil
 	})
 	handler.mu.Lock()
-	handler.snapshot = &LiveSnapshot{Metadata: map[string]MetadataObject{}, Artifacts: map[string]RepoObject{}}
+	handler.rootSnapshots["root"] = &LiveSnapshot{Metadata: map[string]MetadataObject{}, Artifacts: map[string]RepoObject{}}
 	handler.mu.Unlock()
 
 	require.NoError(t, store.MkdirAll("repo/repo", 0o755))
@@ -600,7 +585,7 @@ func TestCleanupDeletesStaleIndexedObjects(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestMetadataRequestStartsFirstRefreshAndReturnsUnavailableUntilReady(t *testing.T) {
+func TestMetadataRequestServesAfterRefresh(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -617,36 +602,17 @@ func TestMetadataRequestStartsFirstRefreshAndReturnsUnavailableUntilReady(t *tes
 	require.NoError(t, err)
 	defer store.Close()
 
-	stats := httpcache.NewStats(prometheus.NewRegistry())
-	handler := NewIndexedHandler(
-		"repo", "test", "repo",
-		config.Freshness(time.Minute),
-		func(cleanPath string) ResourceClass {
-			if strings.HasPrefix(cleanPath, "meta/") {
-				return ResourceMetadata
-			}
-			return ResourceArtifact
-		},
-		[]string{server.URL}, nil,
-		config.Expiration(time.Hour), &Policy{},
-		RefreshPolicy{Interval: time.Hour},
-		testDiscoverer{spec: staticRootSpec{key: "root", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
-		nil,
-		func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
-			if err != nil {
-				return nil, err
-			}
-			return &LiveSnapshot{
-				Metadata: map[string]MetadataObject{
-					blob.Path: {Path: blob.Path, Required: true},
-				},
-			}, nil
-		},
-		store, stats,
-		health.New("repo", "test", health.DefaultConfig(), []string{server.URL}, stats, "test"),
-		nil,
-	)
+	handler := newTestHandler(t, store, []string{server.URL}, func(ctx context.Context, session *RefreshSession) (*LiveSnapshot, error) {
+		blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+		if err != nil {
+			return nil, err
+		}
+		return &LiveSnapshot{
+			Metadata: map[string]MetadataObject{
+				blob.Path: {Path: blob.Path, Required: true},
+			},
+		}, nil
+	})
 	require.NoError(t, handler.Start(ctx))
 	defer func() {
 		cancel()
@@ -655,15 +621,12 @@ func TestMetadataRequestStartsFirstRefreshAndReturnsUnavailableUntilReady(t *tes
 		require.NoError(t, handler.Stop(stopCtx))
 	}()
 
+	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
+
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-
-	require.Eventually(t, func() bool {
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
-		return rec.Code == http.StatusOK && rec.Body.String() == "generated"
-	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "generated", rec.Body.String())
 }
 
 type testDiscoverer struct {
@@ -672,4 +635,184 @@ type testDiscoverer struct {
 
 func (d testDiscoverer) Discover(string) (RootSpec, bool) {
 	return d.spec, true
+}
+
+func TestRefreshSubPathNoTargets(t *testing.T) {
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"http://noop"}, nil)
+	handler.SetBus(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.Start(ctx)
+	defer handler.Stop(ctx)
+
+	handler.AddRoot("empty", nil)
+
+	err := handler.RefreshSubPath(ctx, "empty")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no targets")
+}
+
+func TestRefreshSubPathNonExistent(t *testing.T) {
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"http://noop"}, nil)
+	handler.SetBus(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.Start(ctx)
+	defer handler.Stop(ctx)
+
+	err := handler.RefreshSubPath(ctx, "nonexistent")
+	require.Error(t, err)
+}
+
+func TestCleanupSubPathNoGenerations(t *testing.T) {
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"http://noop"}, nil)
+	handler.SetBus(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.Start(ctx)
+	defer handler.Stop(ctx)
+
+	err := handler.CleanupSubPath(ctx, "nonexistent")
+	require.NoError(t, err)
+}
+
+func TestServeHTTPEmptyPathPassthrough(t *testing.T) {
+	store := newTestStore(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("passthrough-ok"))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(t, store, []string{upstream.URL}, nil)
+	handler.SetBus(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.Start(ctx)
+	defer handler.Stop(ctx)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "passthrough-ok", rec.Body.String())
+}
+
+func TestMetadataBypassWhenNotCached(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("bypass-meta"))
+	}))
+	defer upstream.Close()
+
+	store := newTestStore(t)
+	handler := newTestHandlerWithDiscoverer(t, store, []string{upstream.URL}, nil)
+	b := bus.New()
+	handler.SetBus(b)
+	ch := b.Subscribe(bus.EventMetadataDiscovered)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.Start(ctx)
+	defer handler.Stop(ctx)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "bypass-meta", rec.Body.String())
+
+	select {
+	case evt := <-ch:
+		require.Equal(t, bus.EventMetadataDiscovered, evt.Type)
+	case <-time.After(2 * time.Second):
+		t.Fatal("discovery event not published on metadata miss")
+	}
+}
+
+func newTestHandlerWithDiscoverer(t *testing.T, store *blobfs.Store, upstreams []string, builder SnapshotBuilder) *IndexedHandler {
+	t.Helper()
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		func(cleanPath string) ResourceClass {
+			if strings.HasPrefix(cleanPath, "meta/") {
+				return ResourceMetadata
+			}
+			if strings.HasSuffix(cleanPath, ".sig") {
+				return ResourceAuxiliary
+			}
+			return ResourceArtifact
+		},
+		upstreams, nil, config.Expiration(time.Hour), &Policy{},
+		testDiscoverer{spec: staticRootSpec{key: "root", targets: []MetadataTarget{{URL: "meta/index.txt"}}}},
+		builder, store, stats,
+		health.New("repo", "test", health.DefaultConfig(), upstreams, stats, "cache-proxy-test"),
+		nil,
+	)
+	handler.AddRoot("root", []MetadataTarget{{URL: "meta/index.txt"}})
+	return handler
+}
+
+func TestDiscoverSubPathNilDiscoverer(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	handler := NewIndexedHandler("test", "test", "test",
+		nil, []string{"http://x"}, nil, config.Expiration(time.Hour), &Policy{},
+		nil, nil, store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+		health.New("test", "test", health.DefaultConfig(), []string{"http://x"}, nil, "ua"),
+		nil,
+	)
+
+	subPath, discovered := handler.discoverSubPath("anything")
+	require.False(t, discovered)
+	require.Equal(t, "", subPath)
+}
+
+func TestDiscoverSubPathReturnsBusEventData(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	handler := buildHandler(t, store, func(cleanPath string) ResourceClass {
+		if strings.HasPrefix(cleanPath, "meta/") {
+			return ResourceMetadata
+		}
+		return ResourceArtifact
+	}, nil)
+	handler.SetBus(nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handler.Start(ctx)
+	defer handler.Stop(ctx)
+
+	spec := staticRootSpec{key: "rootkey", targets: []MetadataTarget{{URL: "meta/data.json"}}}
+	handler.discover = testDiscoverer{spec: spec}
+
+	subPath, discovered := handler.discoverSubPath("meta/data.json")
+	require.True(t, discovered)
+	require.Equal(t, "rootkey", subPath)
+}
+
+func buildHandler(t *testing.T, store *blobfs.Store, classifier func(string) ResourceClass, builder SnapshotBuilder) *IndexedHandler {
+	t.Helper()
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	return NewIndexedHandler("test", "test", "test", classifier,
+		[]string{"http://noop"}, nil, config.Expiration(time.Hour), &Policy{},
+		nil, builder, store, stats,
+		health.New("test", "test", health.DefaultConfig(), []string{"http://noop"}, stats, "ua"),
+		nil,
+	)
+}
+
+func newTestStore(t *testing.T) *blobfs.Store {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := blobfs.Open(dir, blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	return store
 }

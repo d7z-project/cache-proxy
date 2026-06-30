@@ -10,7 +10,10 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
+
+const defaultCleanupInterval = 6 * time.Hour
 
 type Policy struct {
 	MetadataPolicy     string           `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
@@ -70,6 +73,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		DefaultFreshFor: block.MetadataFreshFor,
 		DownloadLimiter: plan.Downloads(),
 	}, plan.Store(), New(&block.Policy), plan.Stats(), nil)
+	plan.Scheduler().Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: defaultCleanupInterval,
+		Handler: func(ctx context.Context) error {
+			return handler.Cleanup(ctx, config.DefaultCleanupConfig())
+		},
+	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      handler,

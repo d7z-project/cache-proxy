@@ -12,6 +12,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 type Policy struct {
@@ -75,6 +76,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.DisplayURL != "" {
 		plan.SetHomeDisplayURL(block.DisplayURL)
 	}
+	plan.Scheduler().Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: 6 * time.Hour,
+		Handler: func(ctx context.Context) error {
+			return handler.Cleanup(ctx, config.DefaultCleanupConfig())
+		},
+	})
 	return plan.BindAddr(block.Bind, expireAfter, handler)
 }
 

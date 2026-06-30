@@ -10,7 +10,10 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
+
+const defaultCleanupInterval = 6 * time.Hour
 
 type Policy struct {
 	IndexFreshFor   config.Freshness `json:"indexFreshFor,omitempty" yaml:"index_fresh_for,omitempty"`
@@ -64,6 +67,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		DownloadLimiter: plan.Downloads(),
 	}
 	h := newHandler(plan.Name(), runtime, plan.Store(), newResolver(&block.Policy, plan.Store(), plan.Name()), plan.Stats())
+	plan.Scheduler().Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: defaultCleanupInterval,
+		Handler: func(ctx context.Context) error {
+			return h.Cleanup(ctx, config.DefaultCleanupConfig())
+		},
+	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      h,

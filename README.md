@@ -7,8 +7,8 @@ A caching reverse proxy for package registries and artifact repositories. Single
 - 12 proxy modes in one process: `file`, `git`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`
 - Path-mounted and dedicated-listener instances
 - Per-resource cache policies (`bypass` / `immutable` / `revalidate`) with freshness and concurrency controls
-- Prometheus metrics, background GC, expired-object cleanup
-- Discovery-driven metadata refresh for Linux package repositories (`apk`, `deb`, `rpm`, `pacman`)
+- Prometheus metrics, background GC, expired-object cleanup via unified scheduler
+- Discovery-driven metadata refresh for Linux package repositories (`apk`, `deb`, `rpm`, `pacman`), with background-only refresh via event bus + scheduler
 
 ## Quick Start
 
@@ -52,7 +52,7 @@ instances:
 | `storage.cleanup.interval` | duration | `6h` | Cleanup scan interval |
 | `storage.cleanup.dry_run` | bool | `false` | Log deletions without removing |
 | `storage.cleanup.batch_size` | int | `500` | Max objects per batch |
-| `storage.cleanup.workers` | int | `0` | Concurrency (`0` = auto) |
+| `storage.cleanup.workers` | int | `0` | Deprecated: cleanup tasks run sequentially via scheduler |
 | `storage.download.max_active` | int | `64` | Global concurrent cache-fill downloads |
 | `storage.download.max_active_per_instance` | int | `8` | Concurrent cache-fill downloads per instance |
 
@@ -141,8 +141,19 @@ Storage writes are bounded internally to protect memory during concurrent large 
 - Upstream failover retries network errors, `429`, and `5xx`; `404`/`403` are returned as-is.
 - Known SHA256/digest objects are streamed to clients immediately, but mismatched content is not written to cache.
 - OCI manifests with `Docker-Content-Digest` and OCI blobs requested by digest are verified before cache state/object writes.
-- Reload is prepared before commit: new runtimes and new listeners must all start successfully before routing changes. If preparation fails, the old routing table remains active.
-- Linux repository metadata is served only from a validated snapshot. If a repository has not finished its first refresh, metadata requests return `503 Retry-After` instead of passthrough.
+- Reload was removed; restart the process to pick up configuration changes.
+
+### Background tasks
+
+All periodic maintenance runs through a unified single-threaded scheduler:
+
+- **Blob GC**: system-level storage garbage collection
+- **Expire cleanup**: per-instance cache expiration (all proxy modes)
+- **Metadata refresh**: background download + index rebuild for Linux repo modes
+- **Metadata GC**: old generation cleanup for Linux repo modes
+
+Tasks are registered during startup (Plan phase). Metadata refresh tasks are dynamically registered when a new repository is discovered via client metadata requests. The scheduler persists task state to `_scheduler/tasks.yaml` and restores it on restart.
+- Linux repository metadata is served only from a validated snapshot. If a repository has not finished its first refresh, metadata requests bypass directly to upstream while triggering a background refresh task via the event bus.
 
 ---
 
@@ -429,7 +440,7 @@ deb:
 
 Client: `deb http://cache.lan:8080/deb bookworm main`. Repositories are discovered from `Release` / `InRelease`; package and source indexes are derived from the Release checksum section and refreshed in the background.
 
-A Debian snapshot is published only after at least one `Packages*` or `Sources*` index is fetched and validated. Before the first snapshot is ready, clients receive `503 Retry-After` and should retry.
+A Debian snapshot is published only after at least one `Packages*` or `Sources*` index is fetched and validated. Before the first snapshot, metadata requests bypass directly to upstream and trigger background refresh.
 
 Same field table as `apk`.
 
@@ -513,8 +524,8 @@ Notes:
 
 For `apk`, `deb`, `rpm`, `pacman`: repositories are discovered automatically from client metadata requests.
 
-- Metadata is refreshed in the background and served only after validation.
-- If no validated snapshot is available yet, clients receive `503 Retry-After`.
+- Metadata is refreshed in the background by the unified scheduler and served only after validation.
+- If no validated snapshot is available yet, metadata requests bypass directly to upstream while a background refresh is triggered.
 - Refresh failures keep serving the last valid snapshot when one exists.
 - Package and auxiliary downloads remain best-effort reverse proxy/cache requests. A package index hit adds upstream affinity, identity metadata, and digest verification when a SHA256 is available; an index miss does not block the download.
 - Cleanup only removes cached objects that were written with package-index metadata and are no longer referenced by the current validated snapshot.

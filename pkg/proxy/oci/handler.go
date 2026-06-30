@@ -36,20 +36,6 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 }
 
 func (h *handler) Start(ctx context.Context) error {
-	h.wait.Add(1)
-	go func() {
-		defer h.wait.Done()
-		ticker := time.NewTicker(10 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				h.purgeExpiredTokens()
-			}
-		}
-	}()
 	return nil
 }
 

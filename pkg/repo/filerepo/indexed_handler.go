@@ -22,6 +22,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -47,9 +48,9 @@ type IndexedHandler struct {
 	client     *utils.HttpClientWrapper
 	upstreams  []string
 	discover   Discoverer
-	policy     RefreshPolicy
 	build      SnapshotBuilder
 	sh         *health.ServiceHealth
+	bus        *bus.Bus
 
 	mu            sync.RWMutex
 	snapshot      *LiveSnapshot
@@ -59,7 +60,7 @@ type IndexedHandler struct {
 	wait          sync.WaitGroup
 }
 
-func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, refreshPolicy RefreshPolicy, discover Discoverer, seeds []RootSpec, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
+func NewIndexedHandler(name, mode, objectRoot string, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, discover Discoverer, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
 		name:          name,
@@ -70,7 +71,6 @@ func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classi
 		classifier:    classifier,
 		upstreams:     append([]string(nil), upstreams...),
 		discover:      discover,
-		policy:        refreshPolicy,
 		build:         builder,
 		sh:            svcHealth,
 		roots:         map[string]*rootEntry{},
@@ -89,12 +89,11 @@ func NewIndexedHandler(name, mode, objectRoot string, _ config.Freshness, classi
 	}, store, &generationResolver{handler: handler, policy: policy}, stats, svcHealth)
 	handler.client = utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, mode, transport)
-	for _, seed := range seeds {
-		handler.addRoot(seed.Key(), seed.Targets())
-	}
 	handler.reportMetadataState()
 	return handler
 }
+
+func (h *IndexedHandler) SetBus(b *bus.Bus) { h.bus = b }
 
 func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	cleanPath := cleanRequestPath(req.URL.Path)
@@ -108,24 +107,20 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if class == ResourceMetadata {
-		rootKey, discovered := h.discoverRoot(cleanPath)
-		if discovered {
-			h.ensureFirstRefresh(rootKey)
-		}
+		subPath, discovered := h.discoverSubPath(cleanPath)
 		if h.tryServeMetadata(w, req, cleanPath) {
 			return
 		}
-		if (discovered && h.hasRootSnapshot(rootKey)) || (!discovered && h.currentSnapshot() != nil) {
-			http.NotFound(w, req)
-			h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusNotFound, 0)
-			return
+		if discovered && h.bus != nil {
+			h.bus.Publish(bus.Event{
+				Type: bus.EventMetadataDiscovered,
+				Payload: bus.MetadataDiscoveredPayload{
+					Instance: h.name,
+					SubPath:  subPath,
+				},
+			})
 		}
-		if discovered {
-			h.metadataUnavailable(w, req)
-			return
-		}
-		http.NotFound(w, req)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusNotFound, 0)
+		h.base.ProxyPassthrough(w, req, cleanPath, h.currentPreferredUpstream())
 		return
 	}
 	h.prepareRequest(req.Context(), cleanPath, class)
@@ -138,44 +133,7 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 		h.sh.Start(ctx)
 	}
 	h.restoreRoots(ctx)
-	h.wait.Add(1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("refresh cycle panic", "instance", h.name, "panic", r)
-			}
-		}()
-		defer h.wait.Done()
-		h.restoreGenerations(ctx)
-
-		if h.build != nil {
-			var needRefresh []string
-			h.mu.RLock()
-			for key := range h.roots {
-				if _, ok := h.rootSnapshots[key]; !ok {
-					needRefresh = append(needRefresh, key)
-				}
-			}
-			h.mu.RUnlock()
-			for _, key := range needRefresh {
-				h.ensureFirstRefresh(key)
-			}
-		}
-
-		if h.policy.Interval <= 0 || h.build == nil {
-			return
-		}
-		ticker := time.NewTicker(h.policy.Interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				h.runRefreshCycle(ctx)
-			}
-		}
-	}()
+	h.restoreGenerations(ctx)
 	return nil
 }
 
@@ -189,13 +147,6 @@ func (h *IndexedHandler) Stop(ctx context.Context) error {
 		return err
 	}
 	return h.base.CloseContext(ctx)
-}
-
-func (h *IndexedHandler) Refresh(ctx context.Context) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return h.doRefresh(ctx, true)
 }
 
 func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
@@ -244,6 +195,81 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 	})
 }
 
+func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) error {
+	h.mu.RLock()
+	entry, ok := h.roots[subPath]
+	h.mu.RUnlock()
+	if !ok || entry == nil || len(entry.targets) == 0 {
+		return fmt.Errorf("root %s not found or has no targets", subPath)
+	}
+	upstreams := h.weightedUpstreams()
+	if len(upstreams) == 0 {
+		return errors.New("no upstreams available")
+	}
+	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
+	var firstErr error
+	for _, upstream := range upstreams {
+		snapshot, err := h.buildSnapshot(ctx, subPath, generation, upstream, entry.targets)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			slog.Debug("subpath refresh failed on upstream", "instance", h.name, "subPath", subPath, "upstream", upstream, "err", err)
+			continue
+		}
+		if err := h.publishSnapshot(ctx, snapshot); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if h.sh != nil {
+			h.sh.FinishRefresh(subPath, 0, nil, targetsToProbe(entry.targets))
+		}
+		h.mu.Lock()
+		h.rootSnapshots[subPath] = snapshot
+		h.rebuildAggregateLocked()
+		h.mu.Unlock()
+		h.reportMetadataState()
+		slog.Debug("subpath refresh succeeded", "instance", h.name, "mode", h.mode, "subPath", subPath, "upstream", upstream)
+		return nil
+	}
+	if firstErr == nil {
+		firstErr = errMetadataTransient
+	}
+	if h.sh != nil {
+		h.sh.FinishRefresh(subPath, 0, refreshHealthError(firstErr), nil)
+	}
+	return firstErr
+}
+
+func (h *IndexedHandler) CleanupSubPath(ctx context.Context, subPath string) error {
+	rootDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(subPath), "generations")
+	currentGen := h.currentGeneration(subPath)
+	if currentGen == "" {
+		return nil
+	}
+	var toDelete []string
+	if err := fs.WalkDir(h.store.TenantFS(h.name), rootDir, func(objectPath string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		parts := strings.Split(strings.TrimPrefix(objectPath, rootDir+"/"), "/")
+		if len(parts) > 0 && parts[0] != currentGen {
+			toDelete = append(toDelete, objectPath)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, p := range toDelete {
+		if err := h.store.DeleteObject(ctx, h.name, p); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Debug("metadata gc failed", "path", p, "err", err)
+		}
+	}
+	return nil
+}
+
 func (h *IndexedHandler) tryServeMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) bool {
 	snapshot := h.currentSnapshot()
 	if snapshot == nil {
@@ -276,149 +302,8 @@ func (h *IndexedHandler) tryServeMetadata(w http.ResponseWriter, req *http.Reque
 	httpcache.StripInternal(headers)
 	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}
 	result.FlushClose(req, w)
-	slog.Debug("metadata served", "instance", h.name, "mode", h.mode, "path", cleanPath, "size", size)
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
 	return true
-}
-
-func (h *IndexedHandler) metadataUnavailable(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Retry-After", "5")
-	http.Error(w, "metadata generation is not ready", http.StatusServiceUnavailable)
-	h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusServiceUnavailable, 0)
-}
-
-func (h *IndexedHandler) ensureFirstRefresh(rootKey string) {
-	if h.build == nil {
-		return
-	}
-	h.mu.RLock()
-	_, hasSnap := h.rootSnapshots[rootKey]
-	h.mu.RUnlock()
-	if hasSnap {
-		return
-	}
-	h.wait.Add(1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("first refresh panic", "instance", h.name, "root", rootKey, "panic", r)
-			}
-		}()
-		defer h.wait.Done()
-		refreshCtx, refreshCancel := context.WithTimeout(h.lifecycleCtx, defaultRefreshTimeout)
-		defer refreshCancel()
-		if _, err := h.refreshRoot(refreshCtx, rootKey, time.Now()); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Info("first metadata refresh failed", "instance", h.name, "mode", h.mode, "root", rootKey, "err", err)
-		}
-	}()
-}
-
-const defaultRefreshTimeout = 30 * time.Minute
-
-func (h *IndexedHandler) runRefreshCycle(ctx context.Context) {
-	if h.build == nil || ctx.Err() != nil {
-		return
-	}
-	slog.Debug("metadata refresh cycle starting", "instance", h.name, "mode", h.mode, "interval", h.policy.Interval)
-	refreshCtx, cancel := context.WithTimeout(ctx, defaultRefreshTimeout)
-	defer cancel()
-	h.doRefresh(refreshCtx, false)
-}
-
-func (h *IndexedHandler) doRefresh(ctx context.Context, allRoots bool) error {
-	startedAt := time.Now()
-	refreshed, err := h.refreshRoots(ctx, startedAt, !allRoots)
-
-	var remove []string
-	if h.sh != nil {
-		for key := range h.roots {
-			if state, ok := h.sh.ResourceState(key); !ok || state == health.RRemoved {
-				remove = append(remove, key)
-			}
-		}
-	}
-	if h.sh != nil {
-		h.mu.Lock()
-		for _, key := range remove {
-			delete(h.roots, key)
-			delete(h.rootSnapshots, key)
-		}
-		h.rebuildAggregateLocked()
-		h.mu.Unlock()
-	}
-
-	snapshotReady := h.hasAnyRootSnapshot()
-
-	if refreshed {
-		if cleanupErr := h.Cleanup(ctx, config.CleanupConfig{}); cleanupErr != nil && !errors.Is(cleanupErr, context.Canceled) {
-			slog.Info("indexed cleanup failed after refresh", "instance", h.name, "mode", h.mode, "err", cleanupErr)
-		}
-	}
-	h.reportMetadataState()
-	h.stats.RecordMetadataRefresh(h.name, h.mode, refreshResult(err), time.Since(startedAt), snapshotReady)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		slog.Info("metadata refresh failed", "instance", h.name, "mode", h.mode, "err", err)
-	}
-	h.saveState(ctx)
-	return err
-}
-
-func (h *IndexedHandler) refreshRoot(ctx context.Context, rootKey string, now time.Time) (bool, error) {
-	if h.sh == nil {
-		return false, nil
-	}
-	rhs, unlock, ok := h.sh.TryStartRefresh(rootKey)
-	if !ok {
-		return false, nil
-	}
-	defer unlock()
-
-	h.mu.RLock()
-	entry, ok := h.roots[rootKey]
-	h.mu.RUnlock()
-	if !ok || entry == nil || len(entry.targets) == 0 {
-		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, nil)
-		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
-		slog.Debug("root refresh skipped (no targets)", "instance", h.name, "mode", h.mode, "root", rootKey)
-		return false, nil
-	}
-	targets := entry.targets
-
-	upstreams := h.refreshUpstreams()
-	generation := strconv.FormatUint(rhs.Generation, 10)
-	var firstErr error
-	for _, upstream := range upstreams {
-		snapshot, err := h.buildSnapshot(ctx, rootKey, generation, upstream, targets)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			slog.Debug("root refresh failed on upstream", "instance", h.name, "mode", h.mode, "root", rootKey, "upstream", upstream, "err", err)
-			continue
-		}
-		if err := h.publishSnapshot(ctx, snapshot); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		h.sh.FinishRefresh(rootKey, rhs.Generation, nil, targetsToProbe(targets))
-		h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
-		h.mu.Lock()
-		h.rootSnapshots[rootKey] = snapshot
-		h.rebuildAggregateLocked()
-		h.mu.Unlock()
-		h.reportMetadataState()
-		slog.Debug("root refresh succeeded", "instance", h.name, "mode", h.mode, "root", rootKey, "generation", generation, "upstream", upstream)
-		return true, nil
-	}
-	if firstErr == nil {
-		firstErr = errMetadataTransient
-	}
-	h.sh.FinishRefresh(rootKey, rhs.Generation, refreshHealthError(firstErr), nil)
-	h.sh.ScheduleRefresh(rootKey, h.policy.Interval)
-	h.reportMetadataState()
-	return false, firstErr
 }
 
 func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation, upstream string, targets []MetadataTarget) (*LiveSnapshot, error) {
@@ -597,45 +482,6 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	return h.store.Rename(path.Join(h.name, tmpPath), path.Join(h.name, currentPath))
 }
 
-func (h *IndexedHandler) refreshRoots(ctx context.Context, now time.Time, dueOnly bool) (bool, error) {
-	if h.sh == nil {
-		return false, nil
-	}
-	resources := h.sh.ActiveResources()
-	refreshed := false
-	var firstErr error
-	for _, rh := range resources {
-		if dueOnly {
-			nextRefresh, ok := h.sh.ResourceNextRefresh(rh.Path)
-			if ok && !nextRefresh.IsZero() && nextRefresh.After(now) {
-				slog.Debug("root refresh skipped (not due)", "instance", h.name, "mode", h.mode, "root", rh.Path, "next_refresh", nextRefresh)
-				continue
-			}
-		}
-		slog.Debug("root refresh due", "instance", h.name, "mode", h.mode, "root", rh.Path)
-		changed, err := h.refreshRoot(ctx, rh.Path, now)
-		if changed {
-			refreshed = true
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return refreshed, firstErr
-}
-
-func (h *IndexedHandler) refreshUpstreams() []string {
-	if h.sh == nil {
-		return append([]string(nil), h.upstreams...)
-	}
-	weighted := h.sh.WeightedUpstreams(h.upstreams)
-	upstreams := make([]string, 0, len(weighted))
-	for _, wu := range weighted {
-		upstreams = append(upstreams, wu.URL)
-	}
-	return upstreams
-}
-
 func (h *IndexedHandler) prepareRequest(ctx context.Context, cleanPath string, class ResourceClass) {
 	obj, ok := h.currentRepoObject(cleanPath, class)
 	if !ok {
@@ -649,7 +495,6 @@ func (h *IndexedHandler) prepareRequest(ctx context.Context, cleanPath string, c
 		return
 	}
 	if info.Options["indexed"] == "true" && info.Options["indexed-identity"] != obj.Identity {
-		slog.Debug("object identity changed, evicting", "instance", h.name, "path", cleanPath, "old", info.Options["indexed-identity"], "new", obj.Identity)
 		h.deleteObject(ctx, cleanPath)
 	}
 }
@@ -737,15 +582,57 @@ func (h *IndexedHandler) verifyObject(_ *http.Request, route httpcache.Route, re
 	return nil
 }
 
-func targetsToProbe(targets []MetadataTarget) []health.ProbeTarget {
-	pt := make([]health.ProbeTarget, 0, len(targets))
-	for _, t := range targets {
-		pt = append(pt, health.ProbeTarget{Path: t.URL})
+func (h *IndexedHandler) weightedUpstreams() []string {
+	if h.sh == nil {
+		return append([]string(nil), h.upstreams...)
 	}
-	return pt
+	weighted := h.sh.WeightedUpstreams(h.upstreams)
+	upstreams := make([]string, 0, len(weighted))
+	for _, wu := range weighted {
+		upstreams = append(upstreams, wu.URL)
+	}
+	return upstreams
 }
 
-func (h *IndexedHandler) addRoot(rootKey string, targets []MetadataTarget) {
+func (h *IndexedHandler) discoverSubPath(cleanPath string) (subPath string, discovered bool) {
+	if h.discover == nil {
+		return "", false
+	}
+	spec, ok := h.discover.Discover(cleanPath)
+	if !ok {
+		return "", false
+	}
+	key := spec.Key()
+	subPath = spec.SubPath()
+	newTargets := spec.Targets()
+
+	h.mu.Lock()
+	entry, exists := h.roots[subPath]
+	if exists {
+		changed := false
+		if entry.spec != nil {
+			changed = entry.spec.Merge(spec)
+		} else {
+			entry.spec = spec
+			changed = true
+		}
+		if changed {
+			entry.targets = entry.spec.Targets()
+		}
+		h.mu.Unlock()
+		return subPath, true
+	}
+
+	h.roots[subPath] = &rootEntry{spec: spec, targets: newTargets}
+	h.mu.Unlock()
+	slog.Debug("discovered new root", "instance", h.name, "mode", h.mode, "root", key, "subPath", subPath)
+	if h.sh != nil {
+		h.sh.AddResource(subPath, targetsToProbe(newTargets), h.upstreams)
+	}
+	return subPath, true
+}
+
+func (h *IndexedHandler) AddRoot(rootKey string, targets []MetadataTarget) {
 	h.mu.Lock()
 	if entry, ok := h.roots[rootKey]; ok {
 		if len(targets) > 0 {
@@ -759,48 +646,6 @@ func (h *IndexedHandler) addRoot(rootKey string, targets []MetadataTarget) {
 	if h.sh != nil {
 		h.sh.AddResource(rootKey, targetsToProbe(targets), h.upstreams)
 	}
-}
-
-func (h *IndexedHandler) discoverRoot(cleanPath string) (string, bool) {
-	if h.discover == nil {
-		return "", false
-	}
-	spec, ok := h.discover.Discover(cleanPath)
-	if !ok {
-		return "", false
-	}
-	key := spec.Key()
-	newTargets := spec.Targets()
-
-	h.mu.Lock()
-	entry, exists := h.roots[key]
-	if exists {
-		changed := false
-		if entry.spec != nil {
-			changed = entry.spec.Merge(spec)
-		} else {
-			entry.spec = spec
-			changed = true
-		}
-		if changed {
-			entry.targets = entry.spec.Targets()
-		}
-		h.mu.Unlock()
-		if changed {
-			slog.Debug("discovered root (merged)", "instance", h.name, "mode", h.mode, "root", key, "targets", len(entry.targets))
-			h.ensureFirstRefresh(key)
-		}
-		return key, true
-	}
-
-	h.roots[key] = &rootEntry{spec: spec, targets: newTargets}
-	h.mu.Unlock()
-	slog.Debug("discovered new root", "instance", h.name, "mode", h.mode, "root", key)
-	if h.sh != nil {
-		h.sh.AddResource(key, targetsToProbe(newTargets), h.upstreams)
-	}
-	h.ensureFirstRefresh(key)
-	return key, true
 }
 
 func (h *IndexedHandler) rebuildAggregateLocked() {
@@ -846,6 +691,15 @@ func (h *IndexedHandler) currentPreferredUpstream() string {
 		if snapshot.Upstream != "" {
 			return snapshot.Upstream
 		}
+	}
+	return ""
+}
+
+func (h *IndexedHandler) currentGeneration(subPath string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if snap, ok := h.rootSnapshots[subPath]; ok {
+		return snap.Generation
 	}
 	return ""
 }
@@ -911,6 +765,14 @@ func (h *IndexedHandler) RootReleases() []runtime.RootRelease {
 	return releases
 }
 
+func targetsToProbe(targets []MetadataTarget) []health.ProbeTarget {
+	pt := make([]health.ProbeTarget, 0, len(targets))
+	for _, t := range targets {
+		pt = append(pt, health.ProbeTarget{Path: t.URL})
+	}
+	return pt
+}
+
 func refreshHealthError(err error) error {
 	var fetchErr MetadataFetchError
 	switch {
@@ -920,23 +782,6 @@ func refreshHealthError(err error) error {
 		return fetchErr.Err
 	default:
 		return err
-	}
-}
-
-func refreshResult(err error) string {
-	if err == nil {
-		return "success"
-	}
-	var fetchErr MetadataFetchError
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
-	case errors.Is(err, errMetadataNotFound):
-		return "not_found"
-	case errors.As(err, &fetchErr):
-		return "fetch_error"
-	default:
-		return "parse_error"
 	}
 }
 

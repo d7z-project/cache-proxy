@@ -16,9 +16,8 @@ type rootSpec struct {
 	StorePath string
 }
 
-func (s *rootSpec) Key() string {
-	return s.Repo
-}
+func (s *rootSpec) Key() string     { return s.Repo }
+func (s *rootSpec) SubPath() string { return s.StorePath }
 
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
 	return []filerepo.MetadataTarget{{

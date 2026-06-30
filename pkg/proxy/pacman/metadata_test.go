@@ -82,20 +82,18 @@ func TestRefreshSucceedsWithoutCompanions(t *testing.T) {
 	svcHealth := health.New("repo", "pacman", health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test")
 	handler := filerepo.NewIndexedHandler(
 		"repo", "pacman", "repo",
-		config.Freshness(time.Minute),
 		classify,
 		[]string{server.URL},
 		nil,
 		config.Expiration(time.Hour),
 		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{Repo: "core", StorePath: "core/os/x86_64/core.db"}},
 		buildSnapshot,
 		store, stats, svcHealth, nil,
 	)
+	handler.AddRoot("core/os/x86_64/core.db", []filerepo.MetadataTarget{{URL: "core/os/x86_64/core.db", Repo: "core"}})
 
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "core/os/x86_64/core.db"))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/core/os/x86_64/core.db", nil))
@@ -140,23 +138,21 @@ func TestRefreshPrefetchesCompanions(t *testing.T) {
 		"repo",
 		"pacman",
 		"repo",
-		config.Freshness(time.Minute),
 		classify,
 		[]string{server.URL},
 		nil,
 		config.Expiration(time.Hour),
 		&filerepo.Policy{},
-		filerepo.RefreshPolicy{Interval: time.Hour},
 		discoverer{},
-		[]filerepo.RootSpec{&rootSpec{Repo: "core", StorePath: "core/os/x86_64/core.db"}},
 		buildSnapshot,
 		store,
 		stats,
 		svcHealth,
 		nil,
 	)
+	handler.AddRoot("core/os/x86_64/core.db", []filerepo.MetadataTarget{{URL: "core/os/x86_64/core.db", Repo: "core"}})
 
-	require.NoError(t, handler.Refresh(ctx))
+	require.NoError(t, handler.RefreshSubPath(ctx, "core/os/x86_64/core.db"))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/core/os/x86_64/core.db.sig", nil))

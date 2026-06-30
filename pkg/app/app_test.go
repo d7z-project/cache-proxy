@@ -4,12 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/fs"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,39 +71,6 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	require.Equal(t, int64(1), upstreamRequests.Load())
 }
 
-func TestAppCleanupRemovesExpiredObjects(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
-	})
-	doc.Storage.Cleanup.Enabled = true
-
-	app := openApp(t, ctx, doc)
-	defer closeApp(t, app)
-
-	now := time.Now()
-	_, err := app.store.Put(ctx, "files", "expired.txt", strings.NewReader("expired"), map[string]string{
-		"fetched-at": now.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
-	})
-	require.NoError(t, err)
-	_, err = app.store.Put(ctx, "files", "fresh.txt", strings.NewReader("fresh"), map[string]string{
-		"fetched-at": now.Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano),
-	})
-	require.NoError(t, err)
-	_, err = app.store.Put(ctx, "files", "missing.txt", strings.NewReader("missing"), map[string]string{})
-	require.NoError(t, err)
-
-	app.runCleanup(context.Background())
-
-	_, err = app.store.OpenObject(ctx, "files", "expired.txt")
-	require.ErrorIs(t, err, fs.ErrNotExist)
-	_, err = app.store.OpenObject(ctx, "files", "missing.txt")
-	require.ErrorIs(t, err, fs.ErrNotExist)
-	_, err = app.store.OpenObject(ctx, "files", "fresh.txt")
-	require.NoError(t, err)
-}
 
 func TestMetricsRequireBearerToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -283,31 +247,6 @@ instances:
 	require.ErrorContains(t, err, "field default_polciy not found")
 }
 
-func TestAppCleanupHonorsCanceledContext(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
-	})
-	doc.Storage.Cleanup.Enabled = true
-
-	app := openApp(t, ctx, doc)
-	defer closeApp(t, app)
-
-	now := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
-	_, err := app.store.Put(ctx, "files", "expired.txt", strings.NewReader("expired"), map[string]string{
-		"fetched-at": now,
-	})
-	require.NoError(t, err)
-
-	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
-	stopCleanup()
-	app.runCleanup(cleanupCtx)
-
-	_, err = app.store.OpenObject(ctx, "files", "expired.txt")
-	require.NoError(t, err)
-}
 
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	app := &App{
@@ -315,8 +254,6 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 		handlers: []proxyruntime.Instance{
 			blockingInstance{},
 		},
-		gcDone:      makeClosedChan(),
-		cleanupDone: makeClosedChan(),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -482,227 +419,6 @@ func TestBindHomePageHeadReturnsOK(t *testing.T) {
 	require.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
 }
 
-func TestDiffInstances(t *testing.T) {
-	old := []config.Instance{
-		{Name: "keep", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/keep"}, "upstreams": []string{"https://a.com"}})}},
-		{Name: "remove", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/remove"}, "upstreams": []string{"https://b.com"}})}},
-		{Name: "change", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/old"}, "upstreams": []string{"https://c.com"}})}},
-	}
-	new_ := []config.Instance{
-		{Name: "keep", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/keep"}, "upstreams": []string{"https://a.com"}})}},
-		{Name: "change", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/new"}, "upstreams": []string{"https://c.com"}})}},
-		{Name: "added", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/added"}, "upstreams": []string{"https://d.com"}})}},
-	}
-	added, removed, modified := config.DiffInstances(old, new_)
-	require.ElementsMatch(t, []string{"remove"}, removed)
-	require.ElementsMatch(t, []string{"added"}, added)
-	require.ElementsMatch(t, []string{"change"}, modified)
-}
-
-func TestDiffInstancesModeSwitch(t *testing.T) {
-	old := []config.Instance{
-		{Name: "proxy", Enabled: true, File: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/files"}, "upstreams": []string{"https://a.com"}})}},
-	}
-	new_ := []config.Instance{
-		{Name: "proxy", Enabled: true, NPM: &config.ModeBlock{Node: yamlNode(t, map[string]any{"route": map[string]any{"path": "/npm"}, "upstreams": []string{"https://b.com"}})}},
-	}
-	added, removed, modified := config.DiffInstances(old, new_)
-	require.Empty(t, added)
-	require.Empty(t, removed)
-	require.ElementsMatch(t, []string{"proxy"}, modified)
-}
-
-func TestReloadInvalidConfigPreservesRunningInstances(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	dir := t.TempDir()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "hello")
-	}))
-	defer upstream.Close()
-
-	doc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-	})
-	doc.Storage.Cleanup.Enabled = true
-
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeYAML(t, cfgPath, doc)
-	app := openAppWithConfig(t, ctx, doc, cfgPath)
-	defer closeApp(t, app)
-
-	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
-
-	badDoc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-		fileInstance(t, "dup", "/files", "https://other.com", file.Policy{}),
-	})
-	writeYAML(t, cfgPath, badDoc)
-	err := app.Reload(ctx)
-	require.Error(t, err)
-
-	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
-}
-
-func TestReloadPrepareFailurePreservesRunningInstances(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	dir := t.TempDir()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "hello")
-	}))
-	defer upstream.Close()
-
-	doc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-	})
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeYAML(t, cfgPath, doc)
-	app := openAppWithConfig(t, ctx, doc, cfgPath)
-	defer closeApp(t, app)
-
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer occupied.Close()
-
-	newDoc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-		ociInstance(t, "registry", occupied.Addr().String(), "https://registry-1.docker.io"),
-	})
-	writeYAML(t, cfgPath, newDoc)
-	err = app.Reload(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "listen "+occupied.Addr().String())
-
-	require.True(t, app.ready.Load())
-	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/test.txt"))
-}
-
-func TestReloadClosedReturnsError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	dir := t.TempDir()
-	doc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
-	})
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeYAML(t, cfgPath, doc)
-	app := openAppWithConfig(t, ctx, doc, cfgPath)
-
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	err := app.Close(closeCtx)
-	closeCancel()
-	require.NoError(t, err)
-
-	err = app.Reload(ctx)
-	require.ErrorContains(t, err, "app is closed")
-}
-
-func TestReloadConcurrentServeHTTPNoRace(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	}))
-	defer upstream.Close()
-
-	dir := t.TempDir()
-	doc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-	})
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeYAML(t, cfgPath, doc)
-	app := openAppWithConfig(t, ctx, doc, cfgPath)
-	defer closeApp(t, app)
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 50; i++ {
-			req := httptest.NewRequest(http.MethodGet, "/files/test.txt", nil)
-			rec := httptest.NewRecorder()
-			app.ServeHTTP(rec, req)
-		}
-	}()
-
-	newDoc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-		fileInstance(t, "newf", "/newf", upstream.URL, file.Policy{}),
-	})
-	writeYAML(t, cfgPath, newDoc)
-	err := app.Reload(ctx)
-	require.NoError(t, err)
-	<-done
-}
-
-func TestMultipleReloads(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	}))
-	defer upstream.Close()
-
-	dir := t.TempDir()
-	doc := testDocument(dir, []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-	})
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeYAML(t, cfgPath, doc)
-	app := openAppWithConfig(t, ctx, doc, cfgPath)
-	defer closeApp(t, app)
-
-	for i := 0; i < 3; i++ {
-		newDoc := testDocument(dir, []config.Instance{
-			fileInstance(t, "files", "/files", upstream.URL, file.Policy{}),
-		})
-		writeYAML(t, cfgPath, newDoc)
-		err := app.Reload(ctx)
-		require.NoError(t, err)
-	}
-
-	require.Equal(t, "ok", requestBody(t, app, http.MethodGet, "/files/test.txt"))
-}
-
-func TestReloadAddsAndRemovesInstances(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	}))
-	defer upstream.Close()
-
-	dir := t.TempDir()
-	doc := testDocument(dir, []config.Instance{
-		fileInstance(t, "one", "/one", upstream.URL, file.Policy{}),
-	})
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeYAML(t, cfgPath, doc)
-	app := openAppWithConfig(t, ctx, doc, cfgPath)
-	defer closeApp(t, app)
-
-	require.Equal(t, "ok", requestBody(t, app, http.MethodGet, "/one/test.txt"))
-
-	newDoc := testDocument(dir, []config.Instance{
-		fileInstance(t, "two", "/two", upstream.URL, file.Policy{}),
-	})
-	writeYAML(t, cfgPath, newDoc)
-	err := app.Reload(ctx)
-	require.NoError(t, err)
-
-	require.Equal(t, "ok", requestBody(t, app, http.MethodGet, "/two/test.txt"))
-
-	req := httptest.NewRequest(http.MethodGet, "/one/test.txt", nil)
-	rec := httptest.NewRecorder()
-	app.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusNotFound, rec.Code)
-}
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
 	return openAppWithConfig(t, ctx, doc, "")
@@ -877,10 +593,4 @@ func (s *cleanupContextInstance) Start(ctx context.Context) error {
 func (s *cleanupContextInstance) Stop(context.Context) error {
 	s.stopped.Store(true)
 	return s.ctx.Err()
-}
-
-func makeClosedChan() chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
 }

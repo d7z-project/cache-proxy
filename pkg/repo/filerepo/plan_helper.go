@@ -1,10 +1,12 @@
 package filerepo
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -14,6 +16,7 @@ type RepoBlock struct {
 	Transport       *config.TransportConfig `yaml:"transport,omitempty"`
 	Upstreams       []string                `yaml:"upstreams"`
 	RefreshInterval config.Duration         `yaml:"refresh_interval,omitempty"`
+	CleanupInterval config.Duration         `yaml:"cleanup_interval,omitempty"`
 	Policy          BasicPolicy             `yaml:",inline"`
 }
 
@@ -35,9 +38,46 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler := NewIndexedHandler(plan.Name(), mode, mode, defaultFreshFor, classify, upstreams, block.Transport, config.ExpirationNever, policy, RefreshPolicy{
-		Interval: ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval),
-	}, discover, nil, build, plan.Store(), plan.Stats(), NewServiceHealth(block.Transport, upstreams, plan, mode), plan.Downloads())
+	refreshInterval := ResolveMetadataRefreshInterval(block.RefreshInterval, defaultRefreshInterval)
+	gcInterval := max(refreshInterval*3, 6*time.Hour)
+
+	handler := NewIndexedHandler(plan.Name(), mode, mode, classify, upstreams, block.Transport, config.ExpirationNever, policy, discover, build, plan.Store(), plan.Stats(), NewServiceHealth(block.Transport, upstreams, plan, mode), plan.Downloads())
+	handler.SetBus(plan.Bus())
+
+	sched := plan.Scheduler()
+
+	cleanupInterval := defaultCleanupInterval(block.CleanupInterval)
+	sched.Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+		Interval: cleanupInterval,
+		Handler: func(ctx context.Context) error {
+			return handler.Cleanup(ctx, config.DefaultCleanupConfig())
+		},
+	})
+
+	sched.RegisterFactory(scheduler.TaskFactory{
+		Instance:        plan.Name(),
+		RefreshInterval: refreshInterval,
+		GCInterval:      gcInterval,
+		NewRefresh: func(subPath string) scheduler.TaskHandler {
+			return func(ctx context.Context) error {
+				return handler.RefreshSubPath(ctx, subPath)
+			}
+		},
+		NewGC: func(subPath string) scheduler.TaskHandler {
+			return func(ctx context.Context) error {
+				return handler.CleanupSubPath(ctx, subPath)
+			}
+		},
+	})
+
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, handler)
+}
+
+func defaultCleanupInterval(cfg config.Duration) time.Duration {
+	if cfg > 0 {
+		return cfg.Duration()
+	}
+	return 6 * time.Hour
 }

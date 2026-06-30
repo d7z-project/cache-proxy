@@ -70,7 +70,7 @@ func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 	persisted := h.loadState(ctx)
 	for _, snap := range persisted.Roots {
 		if snap.Path != "" {
-			h.addRoot(snap.Path, nil)
+			h.AddRoot(snap.Path, nil)
 		}
 	}
 }
@@ -100,12 +100,7 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		h.mu.Unlock()
 
 		if h.sh != nil {
-			rhs, unlock, ok := h.sh.TryStartRefresh(snapshot.RootKey)
-			if ok {
-				h.sh.FinishRefresh(snapshot.RootKey, rhs.Generation, nil, nil)
-				h.sh.ScheduleRefresh(snapshot.RootKey, h.policy.Interval)
-				unlock()
-			}
+			h.sh.AddResource(snapshot.RootKey, nil, h.upstreams)
 		}
 		h.reportMetadataState()
 		return nil

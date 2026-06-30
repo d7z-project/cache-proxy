@@ -23,6 +23,16 @@ type rootSpec struct {
 
 func (s *rootSpec) Key() string { return s.Suite }
 
+func (s *rootSpec) SubPath() string {
+	if len(s.Components) > 0 && len(s.Architectures) > 0 {
+		return "dists/" + s.Suite + "/" + s.Components[0] + "/binary-" + s.Architectures[0]
+	}
+	if s.Source {
+		return "dists/" + s.Suite + "/" + s.Components[0] + "/source"
+	}
+	return "dists/" + s.Suite
+}
+
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
 	return []filerepo.MetadataTarget{{
 		URL:        path.Join("dists", s.Suite, "InRelease"),

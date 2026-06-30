@@ -9,17 +9,19 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 64
 const DefaultMaxActiveDownloadsPerInstance = 8
 
-func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) (map[string]*proxyruntime.Entry, error) {
-	plan := proxyruntime.NewPlanContext(store, stats, downloads, doc.Server.Bind, doc.Metrics.Path)
+func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, sched *scheduler.Scheduler, b *bus.Bus) (map[string]*proxyruntime.Entry, error) {
+	plan := proxyruntime.NewPlanContext(store, stats, downloads, doc.Server.Bind, doc.Metrics.Path, sched, b)
 	drivers := builtinDrivers()
 	for _, decl := range doc.Instances {
 		selected, err := decl.SelectMode()
