@@ -102,9 +102,9 @@ func TestRefreshPublishesSnapshotAndCleanupUsesRebuiltPaths(t *testing.T) {
 	require.Equal(t, 1, releases[0].ArtifactCount)
 
 	require.NoError(t, store.MkdirAll("repo/repo/pool", 0o755))
-	_, err := store.Put(ctx, "repo", "repo/pool/pkg.deb", strings.NewReader("keep"), map[string]string{"indexed": "true"})
+	_, err := store.Put(ctx, "repo", "repo/pool/pkg.deb", strings.NewReader("keep"), nil)
 	require.NoError(t, err)
-	_, err = store.Put(ctx, "repo", "repo/pool/old.deb", strings.NewReader("drop"), map[string]string{"indexed": "true"})
+	_, err = store.Put(ctx, "repo", "repo/pool/old.deb", strings.NewReader("drop"), nil)
 	require.NoError(t, err)
 
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
@@ -113,6 +113,38 @@ func TestRefreshPublishesSnapshotAndCleanupUsesRebuiltPaths(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.OpenObject(ctx, "repo", "repo/pool/old.deb")
 	require.Error(t, err)
+}
+
+func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
+	handler.AddRoot("root", []MetadataTarget{{URL: "meta/index.txt"}})
+	handler.sh.AddResource("root", targetsToProbe([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
+	handler.saveState(ctx)
+
+	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
+	restored.restoreRoots(ctx)
+
+	releases := restored.RootReleases()
+	require.Len(t, releases, 1)
+	require.Equal(t, "root", releases[0].Key)
+	require.False(t, releases[0].HasCurrent)
+
+	info, ok := restored.sh.ResourceHealth("root")
+	require.True(t, ok)
+	require.Equal(t, "root", info.Path)
+	require.Len(t, info.LastTargets, 0)
+	require.Equal(t, health.RPending, info.State)
+
+	restored.mu.RLock()
+	entry := restored.roots["root"]
+	restored.mu.RUnlock()
+	require.NotNil(t, entry)
+	require.Len(t, entry.targets, 1)
+	require.Equal(t, "meta/index.txt", entry.targets[0].URL)
 }
 
 func TestRootReleasesIncludesPendingAndRefreshingRoots(t *testing.T) {
@@ -367,8 +399,8 @@ func TestResolveSnapshotMetadataDirectMatch(t *testing.T) {
 func TestResolveSnapshotMetadataResolvedPath(t *testing.T) {
 	snapshot := &LiveSnapshot{
 		Metadata: map[string]MetadataObject{
-			"meta/index.txt":    {Path: "meta/real.txt", Required: true},
-			"meta/real.txt":     {Path: "meta/real.txt", StorePath: "/store/path", Required: true},
+			"meta/index.txt": {Path: "meta/real.txt", Required: true},
+			"meta/real.txt":  {Path: "meta/real.txt", StorePath: "/store/path", Required: true},
 		},
 	}
 	obj, ok := resolveSnapshotMetadata(snapshot, MetadataTarget{URL: "meta/index.txt"})

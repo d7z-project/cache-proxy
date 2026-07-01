@@ -63,6 +63,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 		}
 		items, err := parseRepomd(repomd)
 		if err != nil {
+			session.Release(target)
 			return nil, err
 		}
 		session.Release(target)
@@ -95,10 +96,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 
 			blobReader, err := blob.Open()
 			if err != nil {
+				session.Release(metaTarget)
 				return nil, err
 			}
 			reader, err := filerepo.OpenCompressed(blobReader, metadataPath)
 			if err != nil {
+				session.Release(metaTarget)
 				return nil, err
 			}
 			added, err := parsePrimary(reader, paths, repoRoot)
@@ -123,9 +126,9 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 		if err != nil {
 			return err
 		}
-		defer repomd.Close()
 		root, err := parseRepomd(repomd)
 		if err != nil {
+			repomd.Close()
 			return err
 		}
 		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
@@ -135,21 +138,28 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			}
 			blob, err := session.Fetch(filerepo.MetadataTarget{URL: path.Join(repoRoot, item.Location)})
 			if err != nil {
+				repomd.Close()
 				return err
 			}
-			defer blob.Close()
 			blobReader, err := blob.Open()
 			if err != nil {
+				blob.Close()
+				repomd.Close()
 				return err
 			}
 			reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 			if err != nil {
+				blob.Close()
+				repomd.Close()
 				return err
 			}
 			_, err = parsePrimary(reader, paths, repoRoot)
 			_ = reader.Close()
+			blob.Close()
+			repomd.Close()
 			return err
 		}
+		repomd.Close()
 	}
 	return nil
 }
@@ -166,6 +176,7 @@ func parseRepomd(blob filerepo.MetadataBlob) ([]repomdItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	decoder := xml.NewDecoder(reader)
 	var items []repomdItem
 	for {
@@ -281,6 +292,7 @@ func verifyRepomdChecksum(path, sumType, expected string, blob filerepo.Metadata
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	sum := sha256.New()
 	if _, err := io.Copy(sum, reader); err != nil {
 		return err

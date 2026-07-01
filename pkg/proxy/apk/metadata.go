@@ -70,10 +70,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 		}
 		blobReader, err := blob.Open()
 		if err != nil {
+			session.Release(target)
 			return nil, err
 		}
 		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 		if err != nil {
+			session.Release(target)
 			return nil, err
 		}
 		tarReader := tar.NewReader(reader)
@@ -85,6 +87,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 			}
 			if err != nil {
 				_ = reader.Close()
+				session.Release(target)
 				return nil, err
 			}
 			if path.Base(header.Name) != "APKINDEX" {
@@ -94,6 +97,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 			n, err := parseIndex(path.Dir(blob.Path), tarReader, paths)
 			if err != nil {
 				_ = reader.Close()
+				session.Release(target)
 				return nil, err
 			}
 			artifacts += n
@@ -115,13 +119,14 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 		if err != nil {
 			return err
 		}
-		defer blob.Close()
 		blobReader, err := blob.Open()
 		if err != nil {
+			blob.Close()
 			return err
 		}
 		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 		if err != nil {
+			blob.Close()
 			return err
 		}
 		tarReader := tar.NewReader(reader)
@@ -132,6 +137,7 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			}
 			if err != nil {
 				_ = reader.Close()
+				blob.Close()
 				return err
 			}
 			if path.Base(header.Name) != "APKINDEX" {
@@ -139,11 +145,14 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			}
 			_, err = parseIndex(path.Dir(blob.Path), tarReader, paths)
 			_ = reader.Close()
+			blob.Close()
 			if err != nil {
 				return err
 			}
 			break
 		}
+		_ = reader.Close()
+		blob.Close()
 	}
 	return nil
 }

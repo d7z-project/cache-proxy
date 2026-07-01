@@ -134,6 +134,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 		}
 		releaseSums, err := parseReleaseSHA256(blob)
 		if err != nil {
+			session.Release(target)
 			return nil, err
 		}
 		session.Release(target)
@@ -158,10 +159,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 			}
 			blobReader, err := indexBlob.Open()
 			if err != nil {
+				session.Release(indexTarget)
 				return nil, err
 			}
 			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
 			if err != nil {
+				session.Release(indexTarget)
 				return nil, err
 			}
 			if indexTarget.Kind == "packages" {
@@ -190,24 +193,28 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 		if err != nil {
 			return err
 		}
-		defer blob.Close()
 		releaseSums, err := parseReleaseSHA256(blob)
 		if err != nil {
+			blob.Close()
 			return err
 		}
 		targets := releaseIndexTargets(blob.Path, releaseSums)
 		for _, indexTarget := range targets {
 			indexBlob, err := session.Fetch(indexTarget)
 			if err != nil {
+				blob.Close()
 				return err
 			}
-			defer indexBlob.Close()
 			blobReader, err := indexBlob.Open()
 			if err != nil {
+				indexBlob.Close()
+				blob.Close()
 				return err
 			}
 			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
 			if err != nil {
+				indexBlob.Close()
+				blob.Close()
 				return err
 			}
 			if indexTarget.Kind == "packages" {
@@ -216,10 +223,13 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 				artifactCount, err = parseSources(reader, paths, artifactCount)
 			}
 			_ = reader.Close()
+			indexBlob.Close()
 			if err != nil {
+				blob.Close()
 				return err
 			}
 		}
+		blob.Close()
 	}
 	return nil
 }
@@ -336,6 +346,7 @@ func parseReleaseSHA256(blob filerepo.MetadataBlob) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 10<<20)
 	inSHA256 := false
@@ -376,6 +387,7 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filere
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	sum := sha256.New()
 	if _, err := io.Copy(sum, reader); err != nil {
 		return err

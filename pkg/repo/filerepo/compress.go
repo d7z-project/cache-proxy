@@ -10,30 +10,69 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-func OpenCompressed(reader io.ReadSeeker, name string) (io.ReadCloser, error) {
+type readSeekCloser struct {
+	io.Reader
+	close func() error
+}
+
+func (r *readSeekCloser) Close() error {
+	if r.close == nil {
+		return nil
+	}
+	return r.close()
+}
+
+func OpenCompressed(reader io.ReadSeekCloser, name string) (io.ReadCloser, error) {
 	header := make([]byte, 6)
 	n, _ := reader.Read(header)
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		_ = reader.Close()
 		return nil, err
 	}
 	header = header[:n]
 	switch {
 	case strings.HasSuffix(name, ".gz"), looksLikeGzip(header):
-		return gzip.NewReader(reader)
+		decoded, err := gzip.NewReader(reader)
+		if err != nil {
+			_ = reader.Close()
+			return nil, err
+		}
+		return &readSeekCloser{
+			Reader: decoded,
+			close: func() error {
+				err := decoded.Close()
+				if closeErr := reader.Close(); err == nil {
+					err = closeErr
+				}
+				return err
+			},
+		}, nil
 	case strings.HasSuffix(name, ".xz"), looksLikeXZ(header):
 		decoded, err := xz.NewReader(reader)
 		if err != nil {
+			_ = reader.Close()
 			return nil, err
 		}
-		return io.NopCloser(decoded), nil
+		return &readSeekCloser{Reader: decoded, close: reader.Close}, nil
 	case strings.HasSuffix(name, ".zst"), strings.HasSuffix(name, ".zstd"), looksLikeZstd(header):
 		decoded, err := zstd.NewReader(reader)
 		if err != nil {
+			_ = reader.Close()
 			return nil, err
 		}
-		return decoded.IOReadCloser(), nil
+		body := decoded.IOReadCloser()
+		return &readSeekCloser{
+			Reader: body,
+			close: func() error {
+				err := body.Close()
+				if closeErr := reader.Close(); err == nil {
+					err = closeErr
+				}
+				return err
+			},
+		}, nil
 	default:
-		return io.NopCloser(reader), nil
+		return reader, nil
 	}
 }
 

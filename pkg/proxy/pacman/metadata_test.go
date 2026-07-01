@@ -16,7 +16,7 @@ func TestParseDescExtractsFilename(t *testing.T) {
 func TestDiscovererDetectsPacmanRoot(t *testing.T) {
 	spec, ok := (discoverer{}).Discover("core/os/x86_64/core.db")
 	require.True(t, ok)
-	require.Equal(t, "core", spec.Key())
+	require.Equal(t, "core/os/x86_64", spec.Key())
 }
 
 func TestParseDescWithoutFilenameReturnsEmpty(t *testing.T) {

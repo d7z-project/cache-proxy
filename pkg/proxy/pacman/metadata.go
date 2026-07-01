@@ -12,17 +12,19 @@ import (
 )
 
 type rootSpec struct {
-	Repo      string
-	StorePath string
+	Repo     string
+	Arch     string
+	RootPath string
 }
 
-func (s *rootSpec) Key() string     { return s.Repo }
-func (s *rootSpec) SubPath() string { return s.StorePath }
+func (s *rootSpec) Key() string     { return s.RootPath }
+func (s *rootSpec) SubPath() string { return s.RootPath }
 
 func (s *rootSpec) Targets() []filerepo.MetadataTarget {
 	return []filerepo.MetadataTarget{{
-		URL:  s.StorePath,
+		URL:  path.Join(s.RootPath, s.Repo+".db"),
 		Repo: s.Repo,
+		Arch: s.Arch,
 	}}
 }
 
@@ -39,15 +41,22 @@ func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
 		return nil, false
 	}
 	fileName := parts[len(parts)-1]
-
 	if !strings.HasSuffix(fileName, ".db") {
+		return nil, false
+	}
+	if len(parts) < 4 || parts[len(parts)-3] != "os" {
 		return nil, false
 	}
 	repoName := strings.TrimSuffix(fileName, ".db")
 	if repoName == "" {
 		return nil, false
 	}
-	return &rootSpec{Repo: repoName, StorePath: trimmed}, true
+	rootPath := strings.Join(parts[:len(parts)-1], "/")
+	arch := parts[len(parts)-2]
+	if arch == "" {
+		return nil, false
+	}
+	return &rootSpec{Repo: repoName, Arch: arch, RootPath: rootPath}, true
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
@@ -81,10 +90,12 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 
 		blobReader, err := blob.Open()
 		if err != nil {
+			session.Release(target)
 			return nil, err
 		}
 		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 		if err != nil {
+			session.Release(target)
 			return nil, err
 		}
 		tarReader := tar.NewReader(reader)
@@ -96,6 +107,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 			}
 			if err != nil {
 				_ = reader.Close()
+				session.Release(target)
 				return nil, err
 			}
 			if path.Base(header.Name) != "desc" {
@@ -105,6 +117,7 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 			filename, err := parseDesc(tarReader)
 			if err != nil {
 				_ = reader.Close()
+				session.Release(target)
 				return nil, err
 			}
 			if filename == "" {
@@ -132,13 +145,14 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 		if err != nil {
 			return err
 		}
-		defer blob.Close()
 		blobReader, err := blob.Open()
 		if err != nil {
+			blob.Close()
 			return err
 		}
 		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 		if err != nil {
+			blob.Close()
 			return err
 		}
 		tarReader := tar.NewReader(reader)
@@ -149,6 +163,7 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			}
 			if err != nil {
 				_ = reader.Close()
+				blob.Close()
 				return err
 			}
 			if path.Base(header.Name) != "desc" {
@@ -157,6 +172,7 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			filename, err := parseDesc(tarReader)
 			if err != nil {
 				_ = reader.Close()
+				blob.Close()
 				return err
 			}
 			if filename != "" {
@@ -166,6 +182,7 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			}
 		}
 		_ = reader.Close()
+		blob.Close()
 	}
 	return nil
 }

@@ -48,25 +48,18 @@ type MetadataTarget struct {
 
 type MetadataBlob struct {
 	Path    string
-	file    *os.File
 	temp    string
 	Headers map[string]string
 }
 
-func (b MetadataBlob) Open() (io.ReadSeeker, error) {
-	if b.file == nil {
+func (b MetadataBlob) Open() (io.ReadSeekCloser, error) {
+	if b.temp == "" {
 		return nil, errors.New("metadata blob is closed")
 	}
-	if _, err := b.file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	return b.file, nil
+	return os.Open(b.temp)
 }
 
 func (b MetadataBlob) Close() {
-	if b.file != nil {
-		_ = b.file.Close()
-	}
 	if b.temp != "" {
 		_ = os.Remove(b.temp)
 	}
@@ -193,9 +186,6 @@ func (s *RefreshSession) Release(target MetadataTarget) {
 		delete(s.blobs, key)
 	}
 	for _, blob := range seen {
-		if blob.file != nil {
-			_ = blob.file.Close()
-		}
 		if blob.temp != "" {
 			_ = os.Remove(blob.temp)
 		}
@@ -211,9 +201,6 @@ func (s *RefreshSession) Close() {
 		delete(s.blobs, key)
 	}
 	for _, blob := range seen {
-		if blob.file != nil {
-			_ = blob.file.Close()
-		}
 		if blob.temp != "" {
 			_ = os.Remove(blob.temp)
 		}
@@ -256,7 +243,12 @@ func (s *LocalSession) Fetch(target MetadataTarget) (MetadataBlob, error) {
 		if err != nil {
 			return MetadataBlob{}, err
 		}
-		return MetadataBlob{Path: obj.Path, file: tempFile, temp: tempFile.Name()}, nil
+		tempPath := tempFile.Name()
+		if err := tempFile.Close(); err != nil {
+			_ = os.Remove(tempPath)
+			return MetadataBlob{}, err
+		}
+		return MetadataBlob{Path: obj.Path, temp: tempPath}, nil
 	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: errMetadataNotFound}
 }

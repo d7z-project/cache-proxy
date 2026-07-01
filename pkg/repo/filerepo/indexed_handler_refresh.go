@@ -36,10 +36,6 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 		if err != nil || entry.IsDir() || strings.Contains(objectPath, "/.roots/") {
 			return nil
 		}
-		objectInfo, statErr := h.store.StatObject(ctx, h.name, objectPath)
-		if statErr != nil || objectInfo.Options["indexed"] != "true" {
-			return nil
-		}
 		cleanPath := strings.TrimPrefix(objectPath, h.objectRoot+"/")
 		switch h.classify(cleanPath) {
 		case ResourceArtifact, ResourceAuxiliary:
@@ -119,6 +115,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 				if h.sh != nil {
 					h.sh.FinishRefresh(subPath, refreshGen, nil, targetsToProbe(current.Targets))
 				}
+				h.saveState(context.Background())
 				h.reportMetadataState()
 				slog.Debug("subpath refresh skipped unchanged metadata", "instance", h.name, "mode", h.mode, "subPath", subPath, "upstream", upstream)
 				return nil
@@ -145,6 +142,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 		h.rootSnapshots[subPath] = snapshot
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
+		h.saveState(context.Background())
 		h.reportMetadataState()
 		slog.Debug("subpath refresh succeeded", "instance", h.name, "mode", h.mode, "subPath", subPath, "upstream", upstream)
 		return nil
@@ -155,6 +153,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 	if h.sh != nil {
 		h.sh.FinishRefresh(subPath, refreshGen, refreshHealthError(firstErr), nil)
 	}
+	h.saveState(context.Background())
 	return firstErr
 }
 

@@ -136,10 +136,10 @@ func Validate(doc *config.Document) error {
 	b := bus.NewWithRegisterer(registry)
 	sched := scheduler.New(b, store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
+	_, err = planEntries(context.Background(), &copy, store, stats, downloads, sched, b)
 	sched.Start(validateCtx)
 	defer validateCancel()
-	defer func() { sched.Stop(validateCtx) }()
-	_, err = planEntries(context.Background(), &copy, store, stats, downloads, sched, b)
+	defer func() { _ = sched.Stop(validateCtx) }()
 	return err
 }
 
@@ -169,7 +169,6 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	sched := scheduler.New(b, store, metricsReg)
 
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
-	sched.Start(lifecycleCtx)
 	cleanupOpenFailure := func() {
 		stopRuntime()
 		stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
@@ -183,6 +182,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		cleanupOpenFailure()
 		return nil, err
 	}
+	sched.Start(lifecycleCtx)
 
 	app := &App{
 		config:        doc,

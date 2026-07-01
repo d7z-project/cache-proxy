@@ -76,7 +76,6 @@ func TestBusDroppedEventOnFullChannel(t *testing.T) {
 		b.Publish(Event{Type: EventMetadataDiscovered, Payload: MetadataDiscoveredPayload{Instance: "x"}})
 	}
 
-	time.Sleep(50 * time.Millisecond)
 	drained := 0
 	for {
 		select {
@@ -191,6 +190,6 @@ func metricValue(t *testing.T, metric prometheus.Metric) float64 {
 	if pb.Gauge != nil {
 		return pb.Gauge.GetValue()
 	}
-	t.Fatal("unsupported metric type")
+	require.FailNow(t, "unsupported metric type")
 	return 0
 }

@@ -1,6 +1,7 @@
 package filerepo
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"path"
@@ -49,6 +50,9 @@ func (h *IndexedHandler) discoverSubPath(cleanPath string) (subPath string, disc
 			entry.targets = entry.spec.Targets()
 		}
 		h.mu.Unlock()
+		if changed {
+			h.saveState(context.Background())
+		}
 		return subPath, true
 	}
 	h.roots[subPath] = &rootEntry{spec: spec, targets: newTargets}
@@ -58,6 +62,7 @@ func (h *IndexedHandler) discoverSubPath(cleanPath string) (subPath string, disc
 	if h.sh != nil {
 		h.sh.AddResource(subPath, targetsToProbe(newTargets), h.upstreams)
 	}
+	h.saveState(context.Background())
 	return subPath, true
 }
 

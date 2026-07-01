@@ -91,11 +91,12 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 	if err != nil {
 		return MetadataBlob{}, err
 	}
+	tempPath := tempFile.Name()
 	cleanupTemp := true
 	defer func() {
 		if cleanupTemp {
 			_ = tempFile.Close()
-			_ = os.Remove(tempFile.Name())
+			_ = os.Remove(tempPath)
 		}
 	}()
 	if size > maxMetadataObjectSize {
@@ -110,8 +111,11 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 	if err := h.putMetadataObject(ctx, rootKey, generation, cleanPath, tempFile, size, headers); err != nil {
 		return MetadataBlob{}, err
 	}
+	if err := tempFile.Close(); err != nil {
+		return MetadataBlob{}, err
+	}
 	cleanupTemp = false
-	return MetadataBlob{Path: cleanPath, file: tempFile, temp: tempFile.Name(), Headers: headers}, nil
+	return MetadataBlob{Path: cleanPath, temp: tempPath, Headers: headers}, nil
 }
 
 func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootKey, generation, cleanPath string, body io.ReadSeeker, size int64, headers map[string]string) error {

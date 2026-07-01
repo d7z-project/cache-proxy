@@ -1,10 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
+	"slices"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
@@ -23,13 +24,14 @@ func saveRegistry(ctx context.Context, store *blobfs.Store, doc *config.Document
 	for _, inst := range doc.Instances {
 		names = append(names, inst.Name)
 	}
+	slices.Sort(names)
 	manifest := registryManifest{
 		Instances: names,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	_ = store.MkdirAll(registryTenant+"/", 0o755)
 	data, _ := json.Marshal(manifest)
-	_, err := store.Put(ctx, registryTenant, "manifest.json", strings.NewReader(string(data)), nil)
+	_, err := store.Put(ctx, registryTenant, "manifest.json", bytes.NewReader(data), nil)
 	if err != nil {
 		slog.Warn("failed to save registry manifest", "err", err)
 	}

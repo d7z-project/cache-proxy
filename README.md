@@ -449,7 +449,7 @@ pacman:
   auxiliary_policy: revalidate
 ```
 
-Use this mode for Arch repositories discovered from `.db` and `.files` requests.
+Use this mode for Arch repositories discovered from `.db` requests.
 
 Same field set as `apk`, except `refresh_interval` defaults to `2m`.
 
@@ -491,10 +491,11 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 `apk`, `deb`, `rpm`, and `pacman` use background metadata refresh:
 
 - Repositories are discovered from client metadata requests.
+- Discovered repositories are persisted, so background refresh resumes after restart without waiting for another client metadata request.
 - Metadata is published only after a full generation is fetched and validated.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
 - Artifact and auxiliary downloads stay normal proxy/cache requests; they are not blocked by index misses.
-- Cleanup rebuilds a short-lived sorted path set from the current generation when needed. No package index is persisted for runtime validation.
+- Cleanup rebuilds a short-lived sorted path set from the current generation when needed and removes stale artifacts directly from the repository cache. No package index is persisted for runtime validation.
 
 ## Operations
 
