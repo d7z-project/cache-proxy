@@ -468,6 +468,99 @@ func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 	require.Equal(t, doc.Storage.Cleanup, got)
 }
 
+func TestStatusEndpointsReturnJSON(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
+	defer closeApp(t, app)
+
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("files", scheduler.TypeExpireCleanup, "/pool"),
+		StartedAt:  time.Unix(1710000000, 0).UTC(),
+		FinishedAt: time.Unix(1710000005, 0).UTC(),
+		Duration:   5 * time.Second,
+		Result:     "success",
+	})
+
+	for _, path := range []string{"/-/status/summary", "/-/status/disk", "/-/status/events?limit=1"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, path)
+		require.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+		require.NotEmpty(t, rec.Body.String())
+	}
+}
+
+func TestStatusEventsEndpointClampsLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), nil)
+	doc.Server.Status.EventLimit = 2
+	app := openApp(t, ctx, doc)
+	defer closeApp(t, app)
+
+	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("one", scheduler.TypeExpireCleanup, "/a"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("two", scheduler.TypeExpireCleanup, "/b"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("three", scheduler.TypeExpireCleanup, "/c"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+
+	req := httptest.NewRequest(http.MethodGet, "/-/status/events?limit=999", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"storage":"two"`)
+	require.Contains(t, rec.Body.String(), `"storage":"three"`)
+	require.NotContains(t, rec.Body.String(), `"storage":"one"`)
+}
+
+func TestStatusEndpointRejectsUnsupportedMethod(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
+	defer closeApp(t, app)
+
+	req := httptest.NewRequest(http.MethodPost, "/-/status/summary", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	require.Equal(t, "GET, HEAD", rec.Header().Get("Allow"))
+}
+
+func TestStatusEventsEndpointFallsBackOnInvalidLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), nil)
+	doc.Server.Status.EventLimit = 2
+	app := openApp(t, ctx, doc)
+	defer closeApp(t, app)
+
+	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("one", scheduler.TypeExpireCleanup, "/a"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("two", scheduler.TypeExpireCleanup, "/b"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+
+	req := httptest.NewRequest(http.MethodGet, "/-/status/events?limit=nope", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"storage":"one"`)
+	require.Contains(t, rec.Body.String(), `"storage":"two"`)
+}
+
+func TestValidateRejectsInvalidServerStatusWindow(t *testing.T) {
+	doc := testDocument(t.TempDir(), nil)
+	doc.Server.Status.DiskSampleInterval = config.Duration(30 * time.Minute)
+	doc.Server.Status.DiskHistoryWindow = config.Duration(15 * time.Minute)
+
+	err := Validate(doc)
+	require.ErrorContains(t, err, "disk_history_window must be greater than or equal")
+}
+
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
 	t.Helper()
 	app, err := Open(ctx, doc, "")

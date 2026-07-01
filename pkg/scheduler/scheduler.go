@@ -70,6 +70,15 @@ type TaskInfo struct {
 	Interval  time.Duration
 }
 
+type TaskRun struct {
+	Key        TaskKey
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Duration   time.Duration
+	Result     string
+	Err        string
+}
+
 type TaskFactory struct {
 	Instance        string
 	RefreshInterval time.Duration
@@ -120,6 +129,8 @@ type Scheduler struct {
 	m       *metrics
 
 	preStartTasks map[TaskKey]TaskDef
+	runObserver   func(TaskRun)
+	observerMu    sync.RWMutex
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -226,6 +237,12 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.startMu.Unlock()
 	s.wg.Add(1)
 	go s.loop()
+}
+
+func (s *Scheduler) SetRunObserver(fn func(TaskRun)) {
+	s.observerMu.Lock()
+	s.runObserver = fn
+	s.observerMu.Unlock()
 }
 
 func (s *Scheduler) Stop(ctx context.Context) error {

@@ -16,6 +16,18 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
+type releaseRuntime struct {
+	releases []proxyruntime.RootRelease
+}
+
+func (releaseRuntime) ServeHTTP(http.ResponseWriter, *http.Request)        {}
+func (releaseRuntime) Start(context.Context) error                         { return nil }
+func (releaseRuntime) Stop(context.Context) error                          { return nil }
+func (releaseRuntime) Cleanup(context.Context, config.CleanupConfig) error { return nil }
+func (r releaseRuntime) RootReleases() []proxyruntime.RootRelease {
+	return append([]proxyruntime.RootRelease(nil), r.releases...)
+}
+
 func TestHomePageShowsStatsAfterRequests(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -135,6 +147,91 @@ func TestBindHomePageShowsSingleInstanceView(t *testing.T) {
 	require.Contains(t, body, "registry")
 	require.Contains(t, body, "http://proxy.example.test:5000")
 	require.NotContains(t, body, "<section class=\"toolbar\">")
+}
+
+func TestHomePageReleaseGenerationUsesReadableLabel(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "packages",
+		Mode:    "pacman",
+		Enabled: true,
+		Path:    "/pacman",
+		Runtime: releaseRuntime{
+			releases: []proxyruntime.RootRelease{{
+				Key:           "core/os/x86_64",
+				Generation:    "djmsm2bdzupd",
+				HasCurrent:    true,
+				State:         "active",
+				ArtifactCount: 12,
+			}},
+		},
+		Home: proxyruntime.HomeEntry{
+			Name: "packages",
+			Mode: "pacman",
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      map[string]*proxyruntime.Entry{"packages": entry},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+	app.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/?lang=zh", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, body, "代次 djmsm2bdzupd")
+	require.Contains(t, body, "title=\"代次 djmsm2bdzupd\"")
+}
+
+func TestHomePageRendersStatusModalControls(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
+	defer closeApp(t, app)
+
+	req := httptest.NewRequest(http.MethodGet, "/?lang=zh", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Contains(t, body, `id="status-btn"`)
+	require.Contains(t, body, `id="status-modal"`)
+	require.Contains(t, body, `data-status-tab="disk"`)
+	require.Contains(t, body, `data-status-tab="events"`)
+	require.Contains(t, body, `>汉</button>`)
+	require.NotContains(t, body, "store-size")
+	require.Contains(t, body, "最近 %s，最小采样粒度 %s")
+	require.NotContains(t, body, "最近 24 小时，最小采样粒度 15 分钟")
+}
+
+func TestHomePageDefaultsToHealthyStatusWithoutStoreStats(t *testing.T) {
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      map[string]*proxyruntime.Entry{},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		lifecycleCtx: context.Background(),
+	}
+	app.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "healthy")
+	require.NotContains(t, rec.Body.String(), "0 degraded")
 }
 
 func TestFormatHitRate(t *testing.T) {

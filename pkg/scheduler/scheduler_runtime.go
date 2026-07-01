@@ -173,6 +173,19 @@ func (s *Scheduler) execute(ts *taskState) {
 		s.m.runs.WithLabelValues(ts.Key.Instance(), string(ts.Key.Type()), result).Inc()
 		s.m.duration.WithLabelValues(ts.Key.Instance(), string(ts.Key.Type()), result).Observe(dur.Seconds())
 	}
+	s.observerMu.RLock()
+	runObserver := s.runObserver
+	s.observerMu.RUnlock()
+	if runObserver != nil {
+		runObserver(TaskRun{
+			Key:        ts.Key,
+			StartedAt:  start,
+			FinishedAt: start.Add(dur),
+			Duration:   dur,
+			Result:     result,
+			Err:        ts.LastError,
+		})
+	}
 
 	if ts.Interval > 0 {
 		if ts.index >= 0 {

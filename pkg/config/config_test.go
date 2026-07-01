@@ -71,6 +71,10 @@ func TestDecodeDocument(t *testing.T) {
 server:
   bind: 127.0.0.1:8080
   backend: /tmp/cache
+  status:
+    disk_sample_interval: 15m
+    disk_history_window: 24h
+    event_limit: 500
 metrics:
   path: /metrics
   token: secret
@@ -97,6 +101,9 @@ instances:
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1:8080", doc.Server.Bind)
 	require.Equal(t, "/tmp/cache", doc.Server.Backend)
+	require.Equal(t, Duration(15*time.Minute), doc.Server.Status.DiskSampleInterval)
+	require.Equal(t, Duration(24*time.Hour), doc.Server.Status.DiskHistoryWindow)
+	require.Equal(t, 500, doc.Server.Status.EventLimit)
 	require.Equal(t, "/metrics", doc.Metrics.Path)
 	require.Equal(t, "secret", doc.Metrics.Token)
 	require.Equal(t, 32, doc.Storage.Download.MaxActive)
@@ -230,6 +237,16 @@ instances:
 	err = selected.Block.DecodeStrict(&block)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "field metadata_policy not found")
+}
+
+func TestDecodeRejectsUnknownServerStatusField(t *testing.T) {
+	_, err := Decode(strings.NewReader(`
+server:
+  status:
+    sample_every: 15m
+instances: []
+`))
+	require.ErrorContains(t, err, "field sample_every not found")
 }
 
 func TestDecodeGoProxyConfig(t *testing.T) {

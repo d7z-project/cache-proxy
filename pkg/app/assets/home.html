@@ -12,18 +12,20 @@
     <div class="header-brand">
       <h1>{{t "title"}}</h1>
     </div>
-    <div class="header-status">
-      {{if .StoreTotalSize}}
-      <span class="status-indicator{{if .StoreHealthy}} status-healthy{{else}} status-degraded{{end}}">
+    <div class="header-actions">
+      <button
+        id="status-btn"
+        class="header-btn status-indicator{{if .StoreHealthy}} status-healthy{{else}} status-degraded{{end}}"
+        type="button"
+        aria-haspopup="dialog"
+        aria-controls="status-modal"
+        onclick="openStatusModal()"
+      >
         <span class="dot{{if .StoreHealthy}} dot-green{{else}} dot-red{{end}}"></span>
         <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
-      </span>
-      <span class="store-size">{{.StoreTotalSize}}</span>
-      {{end}}
-    </div>
-    <div class="header-actions">
-      <button id="theme-btn" class="btn-icon" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}">{{.ThemeSwitch}}</button>
-      <button class="btn-icon" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{.LangSwitch}}</button>
+      </button>
+      <button id="theme-btn" class="header-btn icon-btn" type="button" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}"></button>
+      <button class="header-btn lang-btn" type="button" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{.LangSwitch}}</button>
     </div>
   </div>
 </header>
@@ -124,7 +126,7 @@
           <div class="release-row">
             <div class="release-row-top">
               <span class="release-key">{{.Key}}</span>
-              <span class="release-gen">{{.Gen}}</span>
+              <span class="release-gen" title="{{.Gen}}">{{.Gen}}</span>
               <span class="dot dot-{{.StateColor}}"></span>
               <span class="release-state">{{.StateLabel}}</span>
             </div>
@@ -158,6 +160,37 @@
       <div id="search-empty" class="empty search-empty" role="status" aria-live="polite" hidden>{{t "search_empty"}}</div>
   </div>
 </main>
+<div id="status-modal" class="modal-shell" hidden>
+  <div class="modal-backdrop" onclick="closeStatusModal()"></div>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="status-modal-title">
+    <div class="modal-head">
+      <div>
+        <div class="modal-kicker">{{t "server_status"}}</div>
+        <h2 id="status-modal-title">{{t "server_status"}}</h2>
+      </div>
+      <button class="header-btn icon-btn modal-close" type="button" onclick="closeStatusModal()" aria-label="{{t "close"}}">&times;</button>
+    </div>
+    <div class="status-summary" id="status-summary">
+      <div class="status-summary-line">{{t "loading"}}</div>
+    </div>
+    <div class="tab-bar" role="tablist" aria-label="{{t "server_status"}}">
+      <button class="tab-btn is-active" type="button" role="tab" data-status-tab="disk" aria-selected="true" onclick="switchStatusTab('disk')">{{t "disk_tab"}}</button>
+      <button class="tab-btn" type="button" role="tab" data-status-tab="events" aria-selected="false" onclick="switchStatusTab('events')">{{t "events_tab"}}</button>
+    </div>
+    <div class="tab-panel is-active" id="status-tab-disk" role="tabpanel">
+      <div class="panel-note" id="disk-panel-note">{{t "loading"}}</div>
+      <div class="chart-card">
+        <div id="disk-chart" class="disk-chart empty-state">{{t "loading"}}</div>
+      </div>
+    </div>
+    <div class="tab-panel" id="status-tab-events" role="tabpanel" hidden>
+      <div class="panel-note" id="events-panel-note">{{t "loading"}}</div>
+      <div class="table-wrap">
+        <div id="events-table" class="empty-state">{{t "loading"}}</div>
+      </div>
+    </div>
+  </section>
+</div>
 <script>window.I18N={{.I18NJSON}};</script>
 <script>{{js}}</script>
 </body>

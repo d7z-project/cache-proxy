@@ -19,6 +19,9 @@ import (
 const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 64
 const DefaultMaxActiveDownloadsPerInstance = 8
+const DefaultStatusDiskSampleInterval = 15 * time.Minute
+const DefaultStatusDiskHistoryWindow = 24 * time.Hour
+const DefaultStatusEventLimit = 500
 
 var driverSet = builtinDrivers
 
@@ -66,6 +69,15 @@ func normalizeDocument(doc *config.Document) {
 	if strings.TrimSpace(doc.Metrics.Path) == "" {
 		doc.Metrics.Path = DefaultMetricsPath
 	}
+	if doc.Server.Status.DiskSampleInterval <= 0 {
+		doc.Server.Status.DiskSampleInterval = config.Duration(DefaultStatusDiskSampleInterval)
+	}
+	if doc.Server.Status.DiskHistoryWindow <= 0 {
+		doc.Server.Status.DiskHistoryWindow = config.Duration(DefaultStatusDiskHistoryWindow)
+	}
+	if doc.Server.Status.EventLimit <= 0 {
+		doc.Server.Status.EventLimit = DefaultStatusEventLimit
+	}
 	if doc.Storage.GC.Blob <= 0 {
 		doc.Storage.GC.Blob = config.Duration(DefaultGCInterval)
 	}
@@ -93,6 +105,15 @@ func validateServerConfig(doc *config.Document) error {
 	}
 	if doc.Storage.Download.MaxActivePerInstance <= 0 {
 		return errors.New("download max_active_per_instance must be positive")
+	}
+	if doc.Server.Status.DiskSampleInterval <= 0 {
+		return errors.New("server status disk_sample_interval must be positive")
+	}
+	if doc.Server.Status.DiskHistoryWindow < doc.Server.Status.DiskSampleInterval {
+		return errors.New("server status disk_history_window must be greater than or equal to disk_sample_interval")
+	}
+	if doc.Server.Status.EventLimit <= 0 {
+		return errors.New("server status event_limit must be positive")
 	}
 	return nil
 }

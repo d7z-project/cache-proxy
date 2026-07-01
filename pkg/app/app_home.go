@@ -99,36 +99,28 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		instances = append(instances, hi)
 	}
 	langSwitch := "EN"
-	if locale == "en" {
-		langSwitch = "ZH"
-	}
-	themeSwitch := "\u591c"
-	if detectTheme(req) == "dark" {
-		themeSwitch = "\u65e5"
+	if locale == "zh" {
+		langSwitch = "汉"
+	} else {
+		langSwitch = "ENG"
 	}
 	i18nJSON, _ := json.Marshal(i18n)
-	var healthy bool
-	var degraded, objects int
-	var totalSize string
+	healthy := true
+	var degraded int
 	if storeStats != nil {
 		healthy = storeStats.DegradedObjects == 0
 		degraded = storeStats.DegradedObjects
-		objects = storeStats.Objects
-		totalSize = formatBytes(storeStats.Bytes.LogicalObjectBytes)
 	}
 	return homeData{
-		Instances:      instances,
-		Modes:          modes,
-		Single:         single,
-		Locale:         locale,
-		Theme:          detectTheme(req),
-		LangSwitch:     langSwitch,
-		ThemeSwitch:    themeSwitch,
-		I18NJSON:       template.JS(i18nJSON),
-		StoreHealthy:   healthy,
-		StoreDegraded:  degraded,
-		StoreObjects:   objects,
-		StoreTotalSize: totalSize,
+		Instances:     instances,
+		Modes:         modes,
+		Single:        single,
+		Locale:        locale,
+		Theme:         detectTheme(req),
+		LangSwitch:    langSwitch,
+		I18NJSON:      template.JS(i18nJSON),
+		StoreHealthy:  healthy,
+		StoreDegraded: degraded,
 	}
 }
 
@@ -187,9 +179,9 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 			if !r.LastRefreshAt.IsZero() {
 				lastTry = relativeTime(time.Since(r.LastRefreshAt), i18n)
 			}
-			gen := fmt.Sprintf("%s:%s", i18nStr(i18n, "gen"), r.Generation)
+			gen := fmt.Sprintf("%s %s", i18nStr(i18n, "release_generation"), r.Generation)
 			if !r.HasCurrent || r.Generation == "" {
-				gen = fmt.Sprintf("%s:%s", i18nStr(i18n, "gen"), i18nStr(i18n, "none"))
+				gen = fmt.Sprintf("%s %s", i18nStr(i18n, "release_generation"), i18nStr(i18n, "none"))
 			}
 			hi.Releases[i] = homeRelease{
 				Key:        r.Key,

@@ -46,6 +46,7 @@ type App struct {
 
 	scheduler *scheduler.Scheduler
 	bus       *bus.Bus
+	status    *appStatus
 
 	entries       map[string]*proxyruntime.Entry
 	handlers      []proxyruntime.Instance
@@ -123,6 +124,9 @@ func Validate(doc *config.Document) error {
 	copy := *doc
 	copy.Server.Backend = dir
 	normalizeDocument(&copy)
+	if err := validateServerConfig(&copy); err != nil {
+		return err
+	}
 	store, err := blobfs.Open(dir, appBlobFSConfig())
 	if err != nil {
 		return err
@@ -167,6 +171,8 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 
 	b := bus.NewWithRegisterer(metricsReg)
 	sched := scheduler.New(b, store, metricsReg)
+	status := newAppStatus(doc.Server.Status)
+	sched.SetRunObserver(status.observeTaskRun)
 
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
 	cleanupOpenFailure := func() {
@@ -193,6 +199,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		metricsReg:    metricsReg,
 		scheduler:     sched,
 		bus:           b,
+		status:        status,
 		entries:       entries,
 		pathHandlers:  map[string]http.Handler{},
 		bindHandlers:  map[string]http.Handler{},
@@ -205,6 +212,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		cleanupOpenFailure()
 		return nil, err
 	}
+	status.start(lifecycleCtx, app)
 
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),
@@ -231,6 +239,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	if req.Method == http.MethodGet && req.URL.Path == "/" {
 		a.serveHome(w, req)
+		return
+	}
+	if strings.HasPrefix(req.URL.Path, statusAPIPath) {
+		a.serveStatus(w, req)
 		return
 	}
 	if req.URL.Path == a.config.Metrics.Path {

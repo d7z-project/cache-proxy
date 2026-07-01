@@ -57,9 +57,16 @@ type Document struct {
 }
 
 type ServerConfig struct {
-	Bind      string `yaml:"bind"`
-	Backend   string `yaml:"backend"`
-	PublicURL string `yaml:"public_url,omitempty"`
+	Bind      string             `yaml:"bind"`
+	Backend   string             `yaml:"backend"`
+	PublicURL string             `yaml:"public_url,omitempty"`
+	Status    ServerStatusConfig `yaml:"status"`
+}
+
+type ServerStatusConfig struct {
+	DiskSampleInterval Duration `yaml:"disk_sample_interval"`
+	DiskHistoryWindow  Duration `yaml:"disk_history_window"`
+	EventLimit         int      `yaml:"event_limit"`
 }
 
 type MetricsConfig struct {
