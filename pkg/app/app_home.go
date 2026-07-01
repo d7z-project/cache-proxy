@@ -17,33 +17,37 @@ import (
 )
 
 type homeRelease struct {
-	Key        string
-	Gen        string
-	Published  string
-	Packages   string
-	Upstream   string
-	StateLabel string
-	StateColor string
-	LastOK     string
-	LastTry    string
-	LastError  string
+	Key            string
+	Gen            string
+	Published      string
+	PublishedTitle string
+	Packages       string
+	Upstream       string
+	StateLabel     string
+	StateColor     string
+	LastOK         string
+	LastOKTitle    string
+	LastTry        string
+	LastTryTitle   string
+	LastError      string
 }
 
 type homeInstance struct {
-	Name        string
-	Mode        string
-	URL         string
-	SetupNote   string
-	SetupCmd    string
-	SetupCopy   string
-	Requests    string
-	HitRate     string
-	DiskUsage   string
-	StatusColor string
-	StatusLabel string
-	StatusExtra string
-	HasReleases bool
-	Releases    []homeRelease
+	Name             string
+	Mode             string
+	URL              string
+	SetupNote        string
+	SetupCmd         string
+	SetupCopy        string
+	Requests         string
+	HitRate          string
+	DiskUsage        string
+	StatusColor      string
+	StatusLabel      string
+	StatusExtra      string
+	StatusExtraTitle string
+	HasReleases      bool
+	Releases         []homeRelease
 }
 
 func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
@@ -98,12 +102,6 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		}
 		instances = append(instances, hi)
 	}
-	langSwitch := "EN"
-	if locale == "zh" {
-		langSwitch = "汉"
-	} else {
-		langSwitch = "ENG"
-	}
 	i18nJSON, _ := json.Marshal(i18n)
 	healthy := true
 	var degraded int
@@ -117,7 +115,6 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		Single:        single,
 		Locale:        locale,
 		Theme:         detectTheme(req),
-		LangSwitch:    langSwitch,
 		I18NJSON:      template.JS(i18nJSON),
 		StoreHealthy:  healthy,
 		StoreDegraded: degraded,
@@ -126,6 +123,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 
 func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpcache.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
 	instURL := instURL(entry, baseURL, req)
+	now := time.Now()
 	hi := homeInstance{
 		Name: entry.Name,
 		Mode: entry.Mode,
@@ -143,61 +141,69 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 	if src, ok := entry.Runtime.(proxyruntime.StatusSource); ok {
 		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = src.DashboardStatus()
 	} else {
-		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = instanceStatus(s, i18n)
+		hi.StatusColor, hi.StatusLabel, hi.StatusExtra, hi.StatusExtraTitle = instanceStatus(s, i18n, now)
 	}
 	if src, ok := entry.Runtime.(proxyruntime.RootReleaseSource); ok {
 		releases := src.RootReleases()
 		hi.HasReleases = true
 		hi.Releases = make([]homeRelease, len(releases))
 		for i, r := range releases {
-			pub := ""
-			if !r.Published.IsZero() {
-				pub = relativeTime(time.Since(r.Published), i18n)
-			}
-			lok := ""
-			if !r.LastSuccessAt.IsZero() {
-				lok = relativeTime(time.Since(r.LastSuccessAt), i18n)
-			}
-			upstream := r.Upstream
-			if u, err := url.Parse(upstream); err == nil && u.Host != "" {
-				upstream = u.Host
-			}
-			stateStr := r.State
-			switch {
-			case r.Refreshing && r.HasCurrent:
-				stateStr = "refreshing"
-			case r.Refreshing:
-				stateStr = "bootstrapping"
-			case !r.HasCurrent && r.State == "blocked":
-				stateStr = "failed"
-			case !r.HasCurrent && (r.State == "" || r.State == "pending"):
-				stateStr = "booting"
-			case stateStr == "":
-				stateStr = "pending"
-			}
-			lastTry := ""
-			if !r.LastRefreshAt.IsZero() {
-				lastTry = relativeTime(time.Since(r.LastRefreshAt), i18n)
-			}
-			gen := fmt.Sprintf("%s %s", i18nStr(i18n, "release_generation"), r.Generation)
-			if !r.HasCurrent || r.Generation == "" {
-				gen = fmt.Sprintf("%s %s", i18nStr(i18n, "release_generation"), i18nStr(i18n, "none"))
-			}
-			hi.Releases[i] = homeRelease{
-				Key:        r.Key,
-				Gen:        gen,
-				Published:  pub,
-				Packages:   fmt.Sprintf("%d %s", r.ArtifactCount, i18nStr(i18n, "packages")),
-				Upstream:   upstream,
-				StateLabel: i18nStr(i18n, "release_state_"+stateStr),
-				StateColor: formatRootStateColor(stateStr),
-				LastOK:     lok,
-				LastTry:    lastTry,
-				LastError:  r.LastError,
-			}
+			hi.Releases[i] = buildHomeRelease(r, i18n, now)
 		}
 	}
 	return hi
+}
+
+func buildHomeRelease(r proxyruntime.RootRelease, i18n map[string]string, now time.Time) homeRelease {
+	pub, pubTitle := formatRecentTime(r.Published, i18n, now)
+	lastOK, lastOKTitle := formatRecentTime(r.LastSuccessAt, i18n, now)
+	lastTry, lastTryTitle := formatRecentTime(r.LastRefreshAt, i18n, now)
+	upstream := r.Upstream
+	if u, err := url.Parse(upstream); err == nil && u.Host != "" {
+		upstream = u.Host
+	}
+	state := releaseStateLabelKey(r)
+	return homeRelease{
+		Key:            r.Key,
+		Gen:            releaseGenerationLabel(r, i18n),
+		Published:      pub,
+		PublishedTitle: pubTitle,
+		Packages:       fmt.Sprintf("%d %s", r.ArtifactCount, i18nStr(i18n, "packages")),
+		Upstream:       upstream,
+		StateLabel:     i18nStr(i18n, "release_state_"+state),
+		StateColor:     formatRootStateColor(state),
+		LastOK:         lastOK,
+		LastOKTitle:    lastOKTitle,
+		LastTry:        lastTry,
+		LastTryTitle:   lastTryTitle,
+		LastError:      r.LastError,
+	}
+}
+
+func releaseStateLabelKey(r proxyruntime.RootRelease) string {
+	state := r.State
+	switch {
+	case r.Refreshing && r.HasCurrent:
+		return "refreshing"
+	case r.Refreshing:
+		return "bootstrapping"
+	case !r.HasCurrent && r.State == "blocked":
+		return "failed"
+	case !r.HasCurrent && (r.State == "" || r.State == "pending"):
+		return "booting"
+	case state == "":
+		return "pending"
+	default:
+		return state
+	}
+}
+
+func releaseGenerationLabel(r proxyruntime.RootRelease, i18n map[string]string) string {
+	generation := r.Generation
+	if !r.HasCurrent || generation == "" {
+		generation = i18nStr(i18n, "none")
+	}
+	return fmt.Sprintf("%s %s", i18nStr(i18n, "release_generation"), generation)
 }
 
 func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry {

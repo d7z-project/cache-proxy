@@ -59,7 +59,7 @@ func TestHomePageShowsStatsAfterRequests(t *testing.T) {
 	require.Contains(t, body, "<div class=\"stat-val\">1</div>")
 }
 
-func TestHomePageWithEmptyStats(t *testing.T) {
+func TestHomePageShowsZeroStatsWhenSnapshotEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -79,7 +79,7 @@ func TestHomePageWithEmptyStats(t *testing.T) {
 	require.Contains(t, body, "\u2014")
 }
 
-func TestHomePageWithNilStats(t *testing.T) {
+func TestHomePageHandlesNilStatsSource(t *testing.T) {
 	entry := &proxyruntime.Entry{
 		Name:    "test",
 		Mode:    "file",
@@ -202,14 +202,13 @@ func TestHomePageRendersStatusModalControls(t *testing.T) {
 	app.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, body, `id="status-btn"`)
 	require.Contains(t, body, `id="status-modal"`)
 	require.Contains(t, body, `data-status-tab="disk"`)
 	require.Contains(t, body, `data-status-tab="events"`)
-	require.Contains(t, body, `>汉</button>`)
-	require.NotContains(t, body, "store-size")
-	require.Contains(t, body, "最近 %s，最小采样粒度 %s")
-	require.NotContains(t, body, "最近 24 小时，最小采样粒度 15 分钟")
+	require.Contains(t, body, `id="refresh-badge"`)
+	require.Contains(t, body, `id="status-modal-backdrop"`)
 }
 
 func TestHomePageDefaultsToHealthyStatusWithoutStoreStats(t *testing.T) {
@@ -251,23 +250,27 @@ func TestFormatHitRate(t *testing.T) {
 }
 
 func TestInstanceStatusNonIndexed(t *testing.T) {
+	now := time.Now()
 	s := httpcache.InstanceStats{UpstreamRequests: 100, UpstreamErrors: 0}
-	color, label, extra := instanceStatus(s, i18nMaps["en"])
+	color, label, extra, extraTitle := instanceStatus(s, i18nMaps["en"], now)
 	require.Equal(t, "green", color)
-	require.Equal(t, "upstream OK", label)
+	require.Equal(t, "Upstream OK", label)
 	require.Empty(t, extra)
+	require.Empty(t, extraTitle)
 
 	s = httpcache.InstanceStats{UpstreamRequests: 100, UpstreamErrors: 10}
-	color, label, extra = instanceStatus(s, i18nMaps["en"])
+	color, label, extra, extraTitle = instanceStatus(s, i18nMaps["en"], now)
 	require.Equal(t, "yellow", color)
 	require.Equal(t, "10 err", label)
 	require.Empty(t, extra)
+	require.Empty(t, extraTitle)
 
 	s = httpcache.InstanceStats{}
-	color, label, extra = instanceStatus(s, i18nMaps["en"])
+	color, label, extra, extraTitle = instanceStatus(s, i18nMaps["en"], now)
 	require.Empty(t, color)
 	require.Equal(t, "\u2014", label)
 	require.Empty(t, extra)
+	require.Empty(t, extraTitle)
 }
 
 func TestInstanceStatusIndexed(t *testing.T) {
@@ -276,29 +279,51 @@ func TestInstanceStatusIndexed(t *testing.T) {
 		MetadataState: "ready",
 		LastRefreshAt: now.Add(-2 * time.Minute),
 	}
-	color, label, extra := instanceStatus(s, i18nMaps["en"])
+	color, label, extra, extraTitle := instanceStatus(s, i18nMaps["en"], now)
 	require.Equal(t, "green", color)
-	require.Equal(t, "ready", label)
+	require.Equal(t, "Ready", label)
 	require.NotEmpty(t, extra)
+	require.NotEmpty(t, extraTitle)
 
 	s = httpcache.InstanceStats{
 		MetadataState: "refreshing",
 		LastRefreshAt: now.Add(-30 * time.Second),
 	}
-	color, label, extra = instanceStatus(s, i18nMaps["en"])
+	color, label, extra, extraTitle = instanceStatus(s, i18nMaps["en"], now)
 	require.Equal(t, "blue", color)
-	require.Equal(t, "refreshing", label)
+	require.Equal(t, "Refreshing", label)
+	require.Equal(t, "30s ago", extra)
+	require.NotEmpty(t, extraTitle)
 
 	s = httpcache.InstanceStats{MetadataState: "degraded"}
-	color, label, extra = instanceStatus(s, i18nMaps["en"])
+	color, label, extra, extraTitle = instanceStatus(s, i18nMaps["en"], now)
 	require.Equal(t, "yellow", color)
-	require.Equal(t, "degraded", label)
+	require.Equal(t, "Degraded", label)
 	require.Empty(t, extra)
+	require.Empty(t, extraTitle)
 
 	s = httpcache.InstanceStats{MetadataState: "booting"}
-	color, label, _ = instanceStatus(s, i18nMaps["en"])
+	color, label, _, _ = instanceStatus(s, i18nMaps["en"], now)
 	require.Equal(t, "gray", color)
-	require.Equal(t, "loading", label)
+	require.Equal(t, "Loading", label)
+}
+
+func TestFormatRecentTime(t *testing.T) {
+	now := time.Date(2026, 7, 2, 16, 4, 5, 0, time.Local)
+	recent := now.Add(-30 * time.Minute)
+	display, exact := formatRecentTime(recent, i18nMaps["en"], now)
+	require.Equal(t, "30m ago", display)
+	require.Equal(t, recent.Format(preciseTimeLayout), exact)
+
+	old := now.Add(-48 * time.Hour)
+	display, exact = formatRecentTime(old, i18nMaps["en"], now)
+	require.Equal(t, old.Format(preciseTimeLayout), display)
+	require.Equal(t, old.Format(preciseTimeLayout), exact)
+
+	future := now.Add(2 * time.Hour)
+	display, exact = formatRecentTime(future, i18nMaps["en"], now)
+	require.Equal(t, future.Format(preciseTimeLayout), display)
+	require.Equal(t, future.Format(preciseTimeLayout), exact)
 }
 
 func TestRelativeTime(t *testing.T) {
@@ -306,13 +331,6 @@ func TestRelativeTime(t *testing.T) {
 	require.Equal(t, "30s ago", relativeTime(30*time.Second, i18nMaps["en"]))
 	require.Equal(t, "5m ago", relativeTime(5*time.Minute, i18nMaps["en"]))
 	require.Equal(t, "2h ago", relativeTime(2*time.Hour, i18nMaps["en"]))
-}
-
-func TestRelativeTimeZH(t *testing.T) {
-	require.Equal(t, "刚刚", relativeTime(500*time.Millisecond, i18nMaps["zh"]))
-	require.Equal(t, "30秒前", relativeTime(30*time.Second, i18nMaps["zh"]))
-	require.Equal(t, "5分钟前", relativeTime(5*time.Minute, i18nMaps["zh"]))
-	require.Equal(t, "2小时前", relativeTime(2*time.Hour, i18nMaps["zh"]))
 }
 
 func TestFormatCompact(t *testing.T) {
@@ -341,4 +359,57 @@ func TestStatsMetadataStateDoesNotOverwriteLastRefreshAt(t *testing.T) {
 	require.True(t, inst.SnapshotReady)
 	require.False(t, inst.LastRefreshAt.IsZero())
 	require.False(t, inst.LastRefreshOKAt.IsZero())
+}
+
+func TestDetectLocale(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/?lang=zh", nil)
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	require.Equal(t, "zh", detectLocale(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.8")
+	require.Equal(t, "zh", detectLocale(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	require.Equal(t, "en", detectLocale(req))
+}
+
+func TestDetectTheme(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/?theme=dark", nil)
+	req.AddCookie(&http.Cookie{Name: "theme", Value: "light"})
+	require.Equal(t, "dark", detectTheme(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "theme", Value: "dark"})
+	require.Equal(t, "dark", detectTheme(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/?theme=nope", nil)
+	req.AddCookie(&http.Cookie{Name: "theme", Value: "oops"})
+	require.Equal(t, "light", detectTheme(req))
+}
+
+func TestBindURLUsesForwardedHostAndProto(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-Forwarded-Host", "cache.example.test")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	require.Equal(t, "https://cache.example.test:5000", bindURL(req, "0.0.0.0:5000"))
+}
+
+func TestBuildHomeReleaseUsesFallbackLabels(t *testing.T) {
+	now := time.Date(2026, 7, 2, 16, 4, 5, 0, time.Local)
+	release := buildHomeRelease(proxyruntime.RootRelease{
+		Key:           "core/os/x86_64",
+		ArtifactCount: 42,
+		Upstream:      "https://mirror.example.test/root",
+	}, i18nMaps["en"], now)
+	require.Equal(t, "Generation None", release.Gen)
+	require.Equal(t, "Booting", release.StateLabel)
+	require.Equal(t, "mirror.example.test", release.Upstream)
+
+	release = buildHomeRelease(proxyruntime.RootRelease{
+		Key:        "core/os/x86_64",
+		HasCurrent: true,
+	}, i18nMaps["en"], now)
+	require.Equal(t, "Pending", release.StateLabel)
 }

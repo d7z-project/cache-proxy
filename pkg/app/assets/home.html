@@ -25,7 +25,7 @@
         <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
       </button>
       <button id="theme-btn" class="header-btn icon-btn" type="button" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}"></button>
-      <button class="header-btn lang-btn" type="button" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{.LangSwitch}}</button>
+      <button class="header-btn lang-btn" type="button" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{t "lang_switch_label"}}</button>
     </div>
   </div>
 </header>
@@ -89,16 +89,16 @@
           <span>{{.StatusLabel}}</span>
         </span>
       </div>
-      <div class="card-note{{if not .StatusExtra}} card-note-empty{{end}}">
+      <div class="card-note{{if not .StatusExtra}} card-note-empty{{end}}"{{if .StatusExtraTitle}} title="{{.StatusExtraTitle}}"{{end}}>
         {{if .StatusExtra}}{{.StatusExtra}}{{else}}&nbsp;{{end}}
       </div>
       <div class="card-section">
         <div class="section-head">
           <span class="section-title">{{t "endpoint"}}</span>
-          <button class="section-action" data-copy="{{.URL}}" onclick="copyURL(this)">{{t "copy"}}</button>
+          <button class="section-action" data-copy="{{.URL}}" onclick="copyToClipboard(this)">{{t "copy"}}</button>
         </div>
         <div class="card-url">
-          <a href="{{.URL}}">{{.URL}}</a>
+          <a href="{{.URL}}" rel="noopener">{{.URL}}</a>
         </div>
       </div>
       <div class="card-stats">
@@ -131,11 +131,11 @@
               <span class="release-state">{{.StateLabel}}</span>
             </div>
             <div class="release-row-meta">
-              {{if .Published}}<span>{{.Published}}</span>{{end}}
+              {{if .Published}}<span{{if .PublishedTitle}} title="{{.PublishedTitle}}"{{end}}>{{.Published}}</span>{{end}}
               <span>{{.Packages}}</span>
               <span>{{t "upstream"}}: {{.Upstream}}</span>
-              {{if .LastOK}}<span>{{t "last_ok"}}: {{.LastOK}}</span>{{end}}
-              {{if .LastTry}}<span>{{t "last_try"}}: {{.LastTry}}</span>{{end}}
+              {{if .LastOK}}<span{{if .LastOKTitle}} title="{{.LastOKTitle}}"{{end}}>{{t "last_ok"}}: {{.LastOK}}</span>{{end}}
+              {{if .LastTry}}<span{{if .LastTryTitle}} title="{{.LastTryTitle}}"{{end}}>{{t "last_try"}}: {{.LastTry}}</span>{{end}}
               {{if .LastError}}<span>{{t "last_error"}}: {{.LastError}}</span>{{end}}
             </div>
           </div>
@@ -146,7 +146,7 @@
       <div class="card-section card-section-setup">
         <div class="section-head">
           <span class="section-title">{{t "setup"}}</span>
-          <button class="section-action" data-copy="{{.SetupCopy}}" onclick="copyCode(this)">{{t "copy"}}</button>
+          <button class="section-action" data-copy="{{.SetupCopy}}" onclick="copyToClipboard(this)">{{t "copy"}}</button>
         </div>
         <div class="card-cmd-wrap">
           {{if .SetupNote}}<div class="card-cmd-note">{{.SetupNote}}</div>{{end}}
@@ -161,13 +161,10 @@
   </div>
 </main>
 <div id="status-modal" class="modal-shell" hidden>
-  <div class="modal-backdrop" onclick="closeStatusModal()"></div>
+  <div class="modal-backdrop" id="status-modal-backdrop"></div>
   <section class="modal" role="dialog" aria-modal="true" aria-labelledby="status-modal-title">
     <div class="modal-head">
-      <div>
-        <div class="modal-kicker">{{t "server_status"}}</div>
-        <h2 id="status-modal-title">{{t "server_status"}}</h2>
-      </div>
+      <h2 id="status-modal-title">{{t "diagnostics"}}</h2>
       <button class="header-btn icon-btn modal-close" type="button" onclick="closeStatusModal()" aria-label="{{t "close"}}">&times;</button>
     </div>
     <div class="status-summary" id="status-summary">
@@ -176,6 +173,11 @@
     <div class="tab-bar" role="tablist" aria-label="{{t "server_status"}}">
       <button class="tab-btn is-active" type="button" role="tab" data-status-tab="disk" aria-selected="true" onclick="switchStatusTab('disk')">{{t "disk_tab"}}</button>
       <button class="tab-btn" type="button" role="tab" data-status-tab="events" aria-selected="false" onclick="switchStatusTab('events')">{{t "events_tab"}}</button>
+      <span class="tab-spacer"></span>
+      <span class="refresh-badge" id="refresh-badge">
+        <span class="refresh-dot"></span>
+        <span class="refresh-label">{{t "auto_refresh"}}</span>
+      </span>
     </div>
     <div class="tab-panel is-active" id="status-tab-disk" role="tabpanel">
       <div class="panel-note" id="disk-panel-note">{{t "loading"}}</div>

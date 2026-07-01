@@ -21,7 +21,9 @@ func formatHitRate(cache map[string]uint64) string {
 	return fmt.Sprintf("%.1f%%", float64(served)/float64(total)*100)
 }
 
-func instanceStatus(s httpcache.InstanceStats, i18n map[string]string) (color, label, extra string) {
+const preciseTimeLayout = "2006/01/02 15:04:05"
+
+func instanceStatus(s httpcache.InstanceStats, i18n map[string]string, now time.Time) (color, label, extra, extraTitle string) {
 	if s.MetadataState != "" {
 		switch s.MetadataState {
 		case "ready":
@@ -40,20 +42,42 @@ func instanceStatus(s httpcache.InstanceStats, i18n map[string]string) (color, l
 		label = i18nStr(i18n, key)
 		switch {
 		case !s.LastStateChangeAt.IsZero():
-			extra = relativeTime(time.Since(s.LastStateChangeAt), i18n)
+			extra, extraTitle = formatRecentTime(s.LastStateChangeAt, i18n, now)
 		case !s.LastRefreshAt.IsZero():
-			extra = relativeTime(time.Since(s.LastRefreshAt), i18n)
+			extra, extraTitle = formatRecentTime(s.LastRefreshAt, i18n, now)
 		}
 		return
 	}
 	if s.UpstreamRequests == 0 {
-		return "", "\u2014", ""
+		return "", "\u2014", "", ""
 	}
 	errRate := float64(s.UpstreamErrors) / float64(s.UpstreamRequests) * 100
 	if errRate >= 5 {
-		return "yellow", i18nStr(i18n, "n_err", int(s.UpstreamErrors)), ""
+		return "yellow", i18nStr(i18n, "n_err", int(s.UpstreamErrors)), "", ""
 	}
-	return "green", i18nStr(i18n, "upstream_ok"), ""
+	return "green", i18nStr(i18n, "upstream_ok"), "", ""
+}
+
+func formatPreciseTime(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.Local().Format(preciseTimeLayout)
+}
+
+func formatRecentTime(ts time.Time, i18n map[string]string, now time.Time) (display, precise string) {
+	if ts.IsZero() {
+		return "", ""
+	}
+	precise = formatPreciseTime(ts)
+	if now.IsZero() {
+		now = time.Now()
+	}
+	d := now.Sub(ts)
+	if d >= 0 && d < 24*time.Hour {
+		return relativeTime(d, i18n), precise
+	}
+	return precise, precise
 }
 
 func relativeTime(d time.Duration, i18n map[string]string) string {

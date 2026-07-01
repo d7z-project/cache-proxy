@@ -121,8 +121,7 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, "files")
 	require.Contains(t, body, "http://proxy.example.test/files")
 	require.Contains(t, body, `class="badge badge-file"`)
-	require.Contains(t, body, "copyURL")
-	require.Contains(t, body, "copyCode")
+	require.Contains(t, body, "copyToClipboard")
 }
 
 func TestHomePageUsesPublicURL(t *testing.T) {
