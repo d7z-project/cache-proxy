@@ -13,6 +13,7 @@
       <h1>{{t "title"}}</h1>
     </div>
     <div class="header-actions">
+      {{if not .Single}}
       <button
         id="status-btn"
         class="header-btn status-indicator{{if .StoreHealthy}} status-healthy{{else}} status-degraded{{end}}"
@@ -23,6 +24,7 @@
         <span class="dot{{if .StoreHealthy}} dot-green{{else}} dot-red{{end}}"></span>
         <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
       </button>
+      {{end}}
       <button id="theme-btn" class="header-btn icon-btn" type="button" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}"></button>
       <button class="header-btn lang-btn" type="button" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{t "lang_switch_label"}}</button>
     </div>
@@ -159,6 +161,7 @@
       <div id="search-empty" class="empty search-empty" role="status" aria-live="polite" hidden>{{t "search_empty"}}</div>
   </div>
 </main>
+{{if not .Single}}
 <div id="status-modal" class="modal-shell" hidden>
   <div class="modal-backdrop" id="status-modal-backdrop"></div>
   <section class="modal" role="dialog" aria-modal="true" aria-labelledby="status-modal-title">
@@ -204,6 +207,7 @@
     </div>
   </section>
 </div>
+{{end}}
 <script>window.I18N={{.I18NJSON}};</script>
 <script>{{js}}</script>
 </body>

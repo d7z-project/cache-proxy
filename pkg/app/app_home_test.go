@@ -147,6 +147,8 @@ func TestBindHomePageShowsSingleInstanceView(t *testing.T) {
 	require.Contains(t, body, "registry")
 	require.Contains(t, body, "http://proxy.example.test:5000")
 	require.NotContains(t, body, "<section class=\"toolbar\">")
+	require.NotContains(t, body, `id="status-btn"`)
+	require.NotContains(t, body, `id="status-modal"`)
 }
 
 func TestHomePageReleaseGenerationUsesReadableLabel(t *testing.T) {
