@@ -13,6 +13,7 @@ import (
 
 func (s *Scheduler) loop() {
 	defer s.wg.Done()
+	close(s.startGate)
 
 	for _, def := range s.preStartTasks {
 		s.registerLocked(def, "plan", time.Time{})
@@ -109,6 +110,9 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 func (s *Scheduler) processDue() {
 	now := time.Now()
 	for {
+		if s.stopped.Load() {
+			return
+		}
 		ts := s.heapPeek()
 		if ts == nil || ts.NextRun.After(now) {
 			return
@@ -134,6 +138,11 @@ func (s *Scheduler) execute(ts *taskState) {
 	start := time.Now()
 	err := safeCall(ctx, ts.handler)
 	dur := time.Since(start)
+
+	if s.stopped.Load() {
+		return
+	}
+
 	result := "success"
 
 	ts.LastRun = start
@@ -235,6 +244,14 @@ func (s *Scheduler) unregisterLocked(key TaskKey, reason string) {
 		s.m.unregistered.WithLabelValues(key.Instance(), string(key.Type()), reason).Inc()
 	}
 	delete(s.tasks, key)
+
+	instance := key.Instance()
+	for k := range s.tasks {
+		if k.Instance() == instance {
+			return
+		}
+	}
+	delete(s.metricInstances, instance)
 }
 
 func (s *Scheduler) triggerLocked(key TaskKey) {

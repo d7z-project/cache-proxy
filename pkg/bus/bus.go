@@ -100,3 +100,24 @@ func (b *Bus) Publish(evt Event) {
 		b.m.delivered.WithLabelValues(eventType).Add(float64(delivered))
 	}
 }
+
+func (b *Bus) Unsubscribe(ch <-chan Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for t, old := range b.subs {
+		filtered := make([]chan Event, 0, len(old))
+		for _, sub := range old {
+			if sub != ch {
+				filtered = append(filtered, sub)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(b.subs, t)
+		} else {
+			b.subs[t] = filtered
+		}
+		if b.m != nil {
+			b.m.subscribers.WithLabelValues(string(t)).Set(float64(len(filtered)))
+		}
+	}
+}

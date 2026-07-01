@@ -3,7 +3,6 @@ package health
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -77,7 +76,6 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 		return
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -123,7 +121,7 @@ func (h *ServiceHealth) probeDo(ctx context.Context, uh *UpstreamHealth) (*http.
 
 	idx := int(atomic.AddInt32(&uh.probeIdx, 1)) % len(targets)
 	targetURL := uh.URL + "/" + targets[idx].Path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, targetURL, nil)
 	if err != nil {
 		return nil, err
 	}

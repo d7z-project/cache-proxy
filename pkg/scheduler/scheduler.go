@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -115,7 +116,10 @@ type cmd struct {
 
 type Scheduler struct {
 	cmdCh           chan cmd
+	bus             *bus.Bus
 	busSub          <-chan bus.Event
+	startGate       chan struct{}
+	stopped         atomic.Bool
 	factories       map[string]*TaskFactory
 	metricInstances map[string]struct{}
 	tasks           map[TaskKey]*taskState
@@ -139,8 +143,10 @@ type Scheduler struct {
 
 func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler {
 	return &Scheduler{
-		cmdCh:           make(chan cmd),
+		cmdCh:           make(chan cmd, 16),
+		bus:             b,
 		busSub:          b.Subscribe(bus.EventMetadataDiscovered, bus.EventMetadataRemoved),
+		startGate:       make(chan struct{}),
 		factories:       map[string]*TaskFactory{},
 		metricInstances: map[string]struct{}{},
 		tasks:           map[TaskKey]*taskState{},
@@ -158,6 +164,7 @@ func (s *Scheduler) Register(def TaskDef) {
 	}) {
 		return
 	}
+	<-s.startGate
 	respCh := make(chan any, 1)
 	s.cmdCh <- cmd{kind: cmdRegister, def: def, respCh: respCh}
 	<-respCh
@@ -169,6 +176,7 @@ func (s *Scheduler) RegisterFactory(factory TaskFactory) {
 	}) {
 		return
 	}
+	<-s.startGate
 	respCh := make(chan any, 1)
 	s.cmdCh <- cmd{kind: cmdRegisterFactory, factory: factory, respCh: respCh}
 	<-respCh
@@ -180,6 +188,7 @@ func (s *Scheduler) Unregister(key TaskKey) {
 	}) {
 		return
 	}
+	<-s.startGate
 	respCh := make(chan any, 1)
 	s.cmdCh <- cmd{kind: cmdUnregister, key: key, respCh: respCh}
 	<-respCh
@@ -200,6 +209,7 @@ func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
 		return TaskInfo{}, false
 	}
 	s.startMu.Unlock()
+	<-s.startGate
 	respCh := make(chan any, 1)
 	s.cmdCh <- cmd{kind: cmdInfo, key: key, respCh: respCh}
 	result := (<-respCh).(TaskInfo)
@@ -221,6 +231,7 @@ func (s *Scheduler) Snapshot() []TaskInfo {
 		return infos
 	}
 	s.startMu.Unlock()
+	<-s.startGate
 	respCh := make(chan any, 1)
 	s.cmdCh <- cmd{kind: cmdSnapshot, respCh: respCh}
 	return (<-respCh).([]TaskInfo)
@@ -257,8 +268,11 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	select {
 	case <-done:
 	case <-ctx.Done():
+		s.stopped.Store(true)
+		s.bus.Unsubscribe(s.busSub)
 		return ctx.Err()
 	}
+	s.bus.Unsubscribe(s.busSub)
 	s.saveState()
 	return nil
 }

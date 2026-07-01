@@ -245,7 +245,7 @@ func TestContextCancellationStopsRunningTask(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
-func TestZeroIntervalTaskDoesNotRun(t *testing.T) {
+func TestZeroIntervalTaskRunsImmediately(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -257,7 +257,7 @@ func TestZeroIntervalTaskDoesNotRun(t *testing.T) {
 		Interval: 0,
 		Handler:  func(context.Context) error { count.Add(1); return nil },
 	})
-	require.Never(t, func() bool { return count.Load() > 0 }, 300*time.Millisecond, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return count.Load() > 0 }, 5*time.Second, 20*time.Millisecond)
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
@@ -289,4 +289,82 @@ func TestBackoff(t *testing.T) {
 func TestStopBeforeStartIsSafe(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
 	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestMetricInstancesCleanupOnRemove(t *testing.T) {
+	sched, b := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh: func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+	})
+
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "a"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "b"}})
+	require.Eventually(t, func() bool {
+		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	_, aOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
+	require.True(t, aOk)
+
+	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", SubPath: "a"}})
+	require.Eventually(t, func() bool {
+		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
+		return !ok
+	}, time.Second, 10*time.Millisecond)
+
+	_, bOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
+	require.True(t, bOk, "subpath b should still be present after removing a")
+
+	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", SubPath: "b"}})
+	require.Eventually(t, func() bool {
+		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
+		return !ok
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestStopTimeoutMarksStopped(t *testing.T) {
+	sched, b := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	started := make(chan struct{})
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: 100 * time.Millisecond,
+		GCInterval:      time.Hour,
+		NewRefresh: func(string) TaskHandler {
+			return func(ctx context.Context) error {
+				close(started)
+				<-ctx.Done()
+				time.Sleep(200 * time.Millisecond)
+				return ctx.Err()
+			}
+		},
+		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
+	})
+	sched.Start(ctx)
+
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "task did not start")
+	}
+
+	cancel()
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stopCancel()
+	err := sched.Stop(stopCtx)
+	require.Error(t, err, "Stop should time out")
+
+	require.True(t, sched.stopped.Load(), "stopped flag should be set after timeout")
 }

@@ -180,6 +180,43 @@ func TestBusMetrics(t *testing.T) {
 	require.Equal(t, float64(1), metricValue(t, b.m.dropped.WithLabelValues(string(EventMetadataRemoved), "no_subscriber")))
 }
 
+func TestBusUnsubscribe(t *testing.T) {
+	b := New()
+	ch := b.Subscribe(EventMetadataDiscovered, EventMetadataRemoved)
+
+	b.Publish(Event{Type: EventMetadataDiscovered, Payload: MetadataDiscoveredPayload{Instance: "x"}})
+	<-ch
+
+	b.Unsubscribe(ch)
+	b.Publish(Event{Type: EventMetadataDiscovered, Payload: MetadataDiscoveredPayload{Instance: "y"}})
+	b.Publish(Event{Type: EventMetadataRemoved, Payload: MetadataRemovedPayload{Instance: "y"}})
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("received event after unsubscribe: %v", evt.Type)
+	default:
+	}
+}
+
+func TestBusUnsubscribeWithMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	b := NewWithRegisterer(reg)
+	ch := b.Subscribe(EventMetadataDiscovered)
+
+	require.Equal(t, float64(1), metricValue(t, b.m.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
+
+	b.Unsubscribe(ch)
+
+	require.Equal(t, float64(0), metricValue(t, b.m.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
+}
+
+func TestBusUnsubscribeIdempotent(t *testing.T) {
+	b := New()
+	ch := b.Subscribe(EventMetadataDiscovered)
+	b.Unsubscribe(ch)
+	b.Unsubscribe(ch) // should not panic
+}
+
 func metricValue(t *testing.T, metric prometheus.Metric) float64 {
 	t.Helper()
 	var pb dto.Metric
