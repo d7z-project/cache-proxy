@@ -6,7 +6,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
-	"net/url"
+	urlpkg "net/url"
 	"strings"
 	"time"
 
@@ -159,7 +159,7 @@ func buildHomeRelease(r proxyruntime.RootRelease, i18n map[string]string, now ti
 	lastOK, lastOKTitle := formatRecentTime(r.LastSuccessAt, i18n, now)
 	lastTry, lastTryTitle := formatRecentTime(r.LastRefreshAt, i18n, now)
 	upstream := r.Upstream
-	if u, err := url.Parse(upstream); err == nil && u.Host != "" {
+	if u, err := urlpkg.Parse(upstream); err == nil && u.Host != "" {
 		upstream = u.Host
 	}
 	state := releaseStateLabelKey(r)
@@ -277,7 +277,13 @@ func setupCommand(mode, url string) (note, cmd string) {
 	case "pypi":
 		return "# Replace {package} with the package you want to install", "pip install --index-url " + url + "/simple {package}"
 	case "oci":
-		return "# Replace {image} and {tag}", "docker pull " + url + "/{image}:{tag}"
+		registry := url
+		if parsed, err := urlpkg.Parse(url); err == nil && parsed.Host != "" {
+			registry = parsed.Host
+		}
+		return "# Replace {image} and {tag}\ndocker / podman image reference must not include http:// or https://",
+			"docker pull " + registry + "/{image}:{tag}\n" +
+				"podman pull " + registry + "/{image}:{tag}"
 	case "apk":
 		return "# Replace {alpine_branch} and {repository}", url + "/{alpine_branch}/{repository}"
 	case "deb":

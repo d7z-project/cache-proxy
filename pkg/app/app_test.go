@@ -207,7 +207,7 @@ func TestSetupCommandGeneration(t *testing.T) {
 		{"maven", "http://cache/maven", "{mirror_id}", "http://cache/maven</url>"},
 		{"cargo", "http://cache/cargo", "{source_name}", "sparse+http://cache/cargo/"},
 		{"pypi", "http://cache/pypi", "{package}", "pip install --index-url http://cache/pypi/simple {package}"},
-		{"oci", "http://cache:5000", "{image}", "docker pull http://cache:5000/{image}:{tag}"},
+		{"oci", "http://cache:5000", "must not include http:// or https://", "docker pull cache:5000/{image}:{tag}"},
 		{"apk", "http://cache/apk", "{alpine_branch}", "http://cache/apk/{alpine_branch}/{repository}"},
 		{"deb", "http://cache/deb", "{distribution}", "deb http://cache/deb {distribution} {component}"},
 		{"rpm", "http://cache/rpm", "{releasever}", "baseurl=http://cache/rpm/{releasever}/{repository}/{arch}"},
@@ -219,8 +219,25 @@ func TestSetupCommandGeneration(t *testing.T) {
 			note, cmd := setupCommand(tt.mode, tt.url)
 			require.Contains(t, note, tt.noteContain)
 			require.Contains(t, cmd, tt.cmdContain)
+			if tt.mode == "oci" {
+				require.Contains(t, cmd, "podman pull cache:5000/{image}:{tag}")
+				require.NotContains(t, cmd, "docker pull http://")
+				require.NotContains(t, cmd, "docker pull https://")
+				require.NotContains(t, cmd, "podman pull http://")
+				require.NotContains(t, cmd, "podman pull https://")
+			}
 		})
 	}
+}
+
+func TestSetupCommandGenerationOCIStripsHTTPScheme(t *testing.T) {
+	note, cmd := setupCommand("oci", "https://cache.example.com:5443")
+
+	require.Contains(t, note, "must not include http:// or https://")
+	require.Contains(t, cmd, "docker pull cache.example.com:5443/{image}:{tag}")
+	require.Contains(t, cmd, "podman pull cache.example.com:5443/{image}:{tag}")
+	require.NotContains(t, cmd, "https://")
+	require.NotContains(t, cmd, "http://")
 }
 
 func TestValidateRejectsUnknownModeField(t *testing.T) {
