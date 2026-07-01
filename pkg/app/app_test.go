@@ -622,8 +622,48 @@ func TestStatusCapturesUpstreamStateEvents(t *testing.T) {
 	require.Equal(t, "debian", events[0].Storage)
 	require.Equal(t, "upstream_state", events[0].TaskType)
 	require.Equal(t, "degraded", events[0].Result)
+	require.Equal(t, "closed", events[0].StateFrom)
+	require.Equal(t, "failure", events[0].ReasonCode)
+	require.Equal(t, "HTTP 502", events[0].Detail)
 	require.Contains(t, events[0].Message, "failure")
 	require.Contains(t, events[0].Message, "HTTP 502")
+}
+
+func TestStatusCapturesRecoveryUpstreamStateEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := bus.New()
+	status := newAppStatus(config.ServerStatusConfig{
+		DiskSampleInterval: config.Duration(time.Minute),
+		DiskHistoryWindow:  config.Duration(time.Hour),
+		EventLimit:         8,
+	}, nil)
+	status.start(ctx, &App{}, b)
+
+	b.Publish(bus.Event{
+		Type: bus.EventUpstreamState,
+		Payload: bus.UpstreamStatePayload{
+			Instance: "debian",
+			Mode:     "deb",
+			Upstream: "https://mirror.sjtu.edu.cn/debian",
+			From:     "degraded",
+			To:       "closed",
+			Reason:   "success",
+		},
+	})
+
+	require.Eventually(t, func() bool {
+		events := status.taskEvents(8)
+		return len(events) == 1 && events[0].ReasonCode == "success"
+	}, time.Second, 20*time.Millisecond)
+
+	events := status.taskEvents(8)
+	require.Equal(t, "closed", events[0].Result)
+	require.Equal(t, "degraded", events[0].StateFrom)
+	require.Equal(t, "success", events[0].ReasonCode)
+	require.Contains(t, events[0].Message, "degraded")
+	require.Contains(t, events[0].Message, "closed")
 }
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {

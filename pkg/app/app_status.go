@@ -44,6 +44,9 @@ type taskEvent struct {
 	FinishedAt string `json:"finished_at"`
 	DurationMS int64  `json:"duration_ms"`
 	Result     string `json:"result"`
+	StateFrom  string `json:"state_from,omitempty"`
+	ReasonCode string `json:"reason_code,omitempty"`
+	Detail     string `json:"detail,omitempty"`
 	Message    string `json:"message,omitempty"`
 }
 
@@ -316,6 +319,9 @@ func (s *appStatus) busLoop(ctx context.Context, ch <-chan bus.Event) {
 				FinishedAt: timestamp.Format(time.RFC3339),
 				DurationMS: 0,
 				Result:     payload.To,
+				StateFrom:  payload.From,
+				ReasonCode: payload.Reason,
+				Detail:     payload.Detail,
 				Message:    message,
 			})
 		}

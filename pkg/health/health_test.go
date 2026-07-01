@@ -547,6 +547,53 @@ func TestProbeDirectConnectionFailure(t *testing.T) {
 	require.NotEmpty(t, uh.lastProbeErr)
 }
 
+func TestProbeFailurePublishesOriginalErrorDetail(t *testing.T) {
+	b := bus.New()
+	h := New("test", "apk", DefaultConfig(), []string{"http://127.0.0.1:1"}, &testStats{}, "ua")
+	h.SetBus(b)
+	ch := b.Subscribe(bus.EventUpstreamState)
+
+	for i := 0; i < minSampleSize; i++ {
+		h.probeOne(h.upstreams["http://127.0.0.1:1"])
+	}
+
+	select {
+	case evt := <-ch:
+		payload, ok := evt.Payload.(bus.UpstreamStatePayload)
+		require.True(t, ok)
+		require.Equal(t, "failure", payload.Reason)
+		require.NotEmpty(t, payload.Detail)
+	case <-time.After(time.Second):
+		t.Fatal("expected upstream state event")
+	}
+}
+
+func TestProbeHTTP5xxPublishesStatusDetail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	b := bus.New()
+	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	h.SetBus(b)
+	ch := b.Subscribe(bus.EventUpstreamState)
+
+	for i := 0; i < minSampleSize; i++ {
+		h.probeOne(h.upstreams[server.URL])
+	}
+
+	select {
+	case evt := <-ch:
+		payload, ok := evt.Payload.(bus.UpstreamStatePayload)
+		require.True(t, ok)
+		require.Equal(t, "failure", payload.Reason)
+		require.Equal(t, "HTTP 502", payload.Detail)
+	case <-time.After(time.Second):
+		t.Fatal("expected upstream state event")
+	}
+}
+
 func TestProbeRecoversBlockedResource(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
 	rh := h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})

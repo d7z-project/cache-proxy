@@ -2,7 +2,6 @@ package health
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -65,8 +64,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 
 	if err != nil {
 		h.mu.Lock()
-		transition := uh.recordProbe(false, 0, h.config)
-		uh.lastProbeErr = err.Error()
+		transition := uh.recordFailure(err, h.config)
 		h.emitUpstreamMetrics(uh)
 		if transition != nil {
 			h.recordCircuitEvent(uh.URL, transition)
@@ -83,8 +81,7 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 	var transition *stateTransition
 	switch {
 	case resp.StatusCode >= 500:
-		transition = uh.recordProbe(false, 0, h.config)
-		uh.lastProbeErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		transition = uh.recordFailure(formatStatusError(resp.StatusCode), h.config)
 	case resp.StatusCode == 404 || resp.StatusCode == 403 || resp.StatusCode == 410:
 		transition = uh.recordProbe(true, latency, h.config)
 		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil {

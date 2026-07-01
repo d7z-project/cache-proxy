@@ -19,7 +19,6 @@
         type="button"
         aria-haspopup="dialog"
         aria-controls="status-modal"
-        onclick="openStatusModal()"
       >
         <span class="dot{{if .StoreHealthy}} dot-green{{else}} dot-red{{end}}"></span>
         <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
@@ -187,6 +186,18 @@
     </div>
     <div class="tab-panel" id="status-tab-events" role="tabpanel" hidden>
       <div class="panel-note" id="events-panel-note">{{t "loading"}}</div>
+      <div class="events-toolbar">
+        <div class="search-box events-search-box">
+          <label class="search-label" for="events-search">{{t "events_search_label"}}</label>
+          <input
+            id="events-search"
+            class="search-input"
+            type="search"
+            placeholder="{{t "events_search_placeholder"}}"
+            aria-label="{{t "events_search_label"}}"
+          >
+        </div>
+      </div>
       <div class="table-wrap">
         <div id="events-table" class="empty-state">{{t "loading"}}</div>
       </div>
