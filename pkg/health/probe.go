@@ -66,11 +66,11 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 
 	if err != nil {
 		h.mu.Lock()
-		event := uh.recordProbe(false, 0, h.config)
+		transition := uh.recordProbe(false, 0, h.config)
 		uh.lastProbeErr = err.Error()
 		h.emitUpstreamMetrics(uh)
-		if event != "" {
-			h.recordCircuitEvent(uh.URL, event)
+		if transition != nil {
+			h.recordCircuitEvent(uh.URL, transition)
 		}
 		h.recomputeAggregateLocked()
 		h.mu.Unlock()
@@ -82,18 +82,18 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	var event string
+	var transition *stateTransition
 	switch {
 	case resp.StatusCode >= 500:
-		event = uh.recordProbe(false, 0, h.config)
+		transition = uh.recordProbe(false, 0, h.config)
 		uh.lastProbeErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	case resp.StatusCode == 404 || resp.StatusCode == 403 || resp.StatusCode == 410:
-		event = uh.recordProbe(true, latency, h.config)
+		transition = uh.recordProbe(true, latency, h.config)
 		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil {
 			h.applyResourceErrorLocked(rh, statusToResourceError(resp.StatusCode))
 		}
 	default:
-		event = uh.recordProbe(true, latency, h.config)
+		transition = uh.recordProbe(true, latency, h.config)
 		if rh := h.findResourceForProbe(resp.Request.URL.Path); rh != nil && rh.State == RBlocked {
 			rh.State = RPending
 			rh.NextRefreshAt = time.Time{}
@@ -104,8 +104,8 @@ func (h *ServiceHealth) probeOne(uh *UpstreamHealth) {
 	}
 
 	h.emitUpstreamMetrics(uh)
-	if event != "" {
-		h.recordCircuitEvent(uh.URL, event)
+	if transition != nil {
+		h.recordCircuitEvent(uh.URL, transition)
 	}
 	h.recomputeAggregateLocked()
 }

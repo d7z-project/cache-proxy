@@ -153,15 +153,15 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 	if !ok {
 		return
 	}
-	var event string
+	var transition *stateTransition
 	if status >= 500 || status == 0 {
-		event = uh.recordFailure(formatStatusError(status), h.config)
+		transition = uh.recordFailure(formatStatusError(status), h.config)
 	} else {
-		event = uh.recordSuccess(latency, h.config)
+		transition = uh.recordSuccess(latency, h.config)
 	}
 	h.emitUpstreamMetrics(uh)
-	if event != "" {
-		h.recordCircuitEvent(url, event)
+	if transition != nil {
+		h.recordCircuitEvent(url, transition)
 		h.recomputeAggregateLocked()
 	}
 }
@@ -176,10 +176,10 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 	if !ok {
 		return
 	}
-	event := uh.recordFailure(err, h.config)
+	transition := uh.recordFailure(err, h.config)
 	h.emitUpstreamMetrics(uh)
-	if event != "" {
-		h.recordCircuitEvent(url, event)
+	if transition != nil {
+		h.recordCircuitEvent(url, transition)
 		h.recomputeAggregateLocked()
 	}
 }
@@ -443,9 +443,27 @@ func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) {
 		uh.ewmaLatency.Seconds())
 }
 
-func (h *ServiceHealth) recordCircuitEvent(upstream, event string) {
+func (h *ServiceHealth) recordCircuitEvent(upstream string, transition *stateTransition) {
+	if transition == nil {
+		return
+	}
+	event := transition.From + "->" + transition.To
 	if h.stats != nil {
 		h.stats.RecordCircuitEvent(h.name, h.mode, upstream, event)
+	}
+	if h.bus != nil {
+		h.bus.Publish(bus.Event{
+			Type: bus.EventUpstreamState,
+			Payload: bus.UpstreamStatePayload{
+				Instance: h.name,
+				Mode:     h.mode,
+				Upstream: upstream,
+				From:     transition.From,
+				To:       transition.To,
+				Reason:   transition.Reason,
+				Detail:   transition.Detail,
+			},
+		})
 	}
 }
 

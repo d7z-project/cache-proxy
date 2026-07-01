@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -559,6 +560,71 @@ func TestValidateRejectsInvalidServerStatusWindow(t *testing.T) {
 
 	err := Validate(doc)
 	require.ErrorContains(t, err, "disk_history_window must be greater than or equal")
+}
+
+func TestStatusPersistsAndRestoresHistory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
+	defer closeApp(t, app)
+
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("files", scheduler.TypeExpireCleanup, "/pool"),
+		StartedAt:  time.Unix(1710000000, 0).UTC(),
+		FinishedAt: time.Unix(1710000004, 0).UTC(),
+		Duration:   4 * time.Second,
+		Result:     "success",
+	})
+	app.status.recordDiskUsage(ctx, app)
+	app.status.persist()
+
+	restored := newAppStatus(app.config.Server.Status, app.store)
+	restored.restore()
+
+	require.NotEmpty(t, restored.diskSamples())
+	events := restored.taskEvents(app.config.Server.Status.EventLimit)
+	require.Len(t, events, 1)
+	require.Equal(t, "files", events[0].Storage)
+	require.Equal(t, "expire_cleanup", events[0].TaskType)
+}
+
+func TestStatusCapturesUpstreamStateEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := bus.New()
+	status := newAppStatus(config.ServerStatusConfig{
+		DiskSampleInterval: config.Duration(time.Minute),
+		DiskHistoryWindow:  config.Duration(time.Hour),
+		EventLimit:         8,
+	}, nil)
+	status.start(ctx, &App{}, b)
+
+	b.Publish(bus.Event{
+		Type: bus.EventUpstreamState,
+		Payload: bus.UpstreamStatePayload{
+			Instance: "debian",
+			Mode:     "deb",
+			Upstream: "https://deb.example.com",
+			From:     "closed",
+			To:       "degraded",
+			Reason:   "failure",
+			Detail:   "HTTP 502",
+		},
+	})
+
+	require.Eventually(t, func() bool {
+		events := status.taskEvents(8)
+		return len(events) == 1 && events[0].Message != ""
+	}, time.Second, 20*time.Millisecond)
+
+	events := status.taskEvents(8)
+	require.Equal(t, "debian", events[0].Storage)
+	require.Equal(t, "upstream_state", events[0].TaskType)
+	require.Equal(t, "degraded", events[0].Result)
+	require.Contains(t, events[0].Message, "failure")
+	require.Contains(t, events[0].Message, "HTTP 502")
 }
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {

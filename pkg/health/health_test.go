@@ -681,6 +681,30 @@ func TestAggregateStateString(t *testing.T) {
 	require.Equal(t, "unhealthy", StateUnhealthy.String())
 }
 
+func TestRecordFailurePublishesUpstreamStateEvent(t *testing.T) {
+	b := bus.New()
+	h := New("repo", "deb", DefaultConfig(), []string{"https://a.example.com"}, nil, "test-agent")
+	h.SetBus(b)
+	ch := b.Subscribe(bus.EventUpstreamState)
+
+	for i := 0; i < minSampleSize; i++ {
+		h.RecordFailure("https://a.example.com", errors.New("boom"))
+	}
+
+	select {
+	case evt := <-ch:
+		payload, ok := evt.Payload.(bus.UpstreamStatePayload)
+		require.True(t, ok)
+		require.Equal(t, "repo", payload.Instance)
+		require.Equal(t, "deb", payload.Mode)
+		require.Equal(t, "https://a.example.com", payload.Upstream)
+		require.Equal(t, "failure", payload.Reason)
+		require.NotEmpty(t, payload.To)
+	case <-time.After(time.Second):
+		t.Fatal("expected upstream state event")
+	}
+}
+
 func upstreamURLs(t *testing.T, h *ServiceHealth) []string {
 	t.Helper()
 	urls := make([]string, 0, len(h.upstreams))

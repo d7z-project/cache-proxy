@@ -46,6 +46,7 @@
   "finished_at": "Finished",
   "duration": "Duration",
   "result": "Result",
+  "reason": "Reason",
   "close": "Close",
   "no_data": "No data",
   "just_now": "just now",

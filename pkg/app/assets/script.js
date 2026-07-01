@@ -529,6 +529,7 @@ function renderEventsTable(target, events) {
             '<td>' + escapeHTML(formatDateTime(item.finished_at)) + '</td>' +
             '<td>' + escapeHTML(formatDurationMS(item.duration_ms)) + '</td>' +
             '<td>' + escapeHTML(item.result) + '</td>' +
+            '<td title="' + escapeHTML(item.message || '') + '"><span class="clip-cell">' + escapeHTML(item.message || '') + '</span></td>' +
             '</tr>';
     });
     target.className = '';
@@ -542,6 +543,7 @@ function renderEventsTable(target, events) {
         '<th>' + escapeHTML(t.finished_at || 'Finished') + '</th>' +
         '<th>' + escapeHTML(t.duration || 'Duration') + '</th>' +
         '<th>' + escapeHTML(t.result || 'Result') + '</th>' +
+        '<th>' + escapeHTML(t.reason || 'Reason') + '</th>' +
         '</tr></thead>' +
         '<tbody>' + rows.join('') + '</tbody>' +
         '</table>';

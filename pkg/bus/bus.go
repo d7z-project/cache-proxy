@@ -13,6 +13,7 @@ type EventType string
 const (
 	EventMetadataDiscovered EventType = "metadata_discovered"
 	EventMetadataRemoved    EventType = "metadata_removed"
+	EventUpstreamState      EventType = "upstream_state"
 )
 
 type Event struct {
@@ -29,6 +30,16 @@ type MetadataDiscoveredPayload struct {
 type MetadataRemovedPayload struct {
 	Instance string
 	SubPath  string
+}
+
+type UpstreamStatePayload struct {
+	Instance string
+	Mode     string
+	Upstream string
+	From     string
+	To       string
+	Reason   string
+	Detail   string
 }
 
 type Bus struct {

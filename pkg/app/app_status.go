@@ -1,19 +1,26 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path"
 	"sync"
 	"time"
 
+	"gopkg.d7z.net/blobfs"
+
+	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 const statusAPIPath = "/-/status/"
+const statusTenant = "_status"
+const statusStatePath = "status/state.json"
 
 type statusSummary struct {
 	Healthy            bool   `json:"healthy"`
@@ -46,6 +53,9 @@ type appStatus struct {
 	diskSampleInterval time.Duration
 	diskHistoryWindow  time.Duration
 	eventLimit         int
+	blobStore          *blobfs.Store
+	persistCh          chan struct{}
+	ctx                context.Context
 }
 
 type statusStore struct {
@@ -60,7 +70,13 @@ type statusStore struct {
 	eventFilled bool
 }
 
-func newAppStatus(cfg config.ServerStatusConfig) *appStatus {
+type persistedStatus struct {
+	Version int          `json:"version"`
+	Disk    []diskSample `json:"disk"`
+	Events  []taskEvent  `json:"events"`
+}
+
+func newAppStatus(cfg config.ServerStatusConfig, store *blobfs.Store) *appStatus {
 	diskInterval := cfg.DiskSampleInterval.Duration()
 	diskWindow := cfg.DiskHistoryWindow.Duration()
 	diskCapacity := int(diskWindow / diskInterval)
@@ -75,12 +91,20 @@ func newAppStatus(cfg config.ServerStatusConfig) *appStatus {
 		diskSampleInterval: diskInterval,
 		diskHistoryWindow:  diskWindow,
 		eventLimit:         cfg.EventLimit,
+		blobStore:          store,
+		persistCh:          make(chan struct{}, 1),
 	}
 }
 
-func (s *appStatus) start(ctx context.Context, app *App) {
+func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	s.ctx = ctx
+	s.restore()
+	go s.persistLoop()
+	if b != nil {
+		go s.busLoop(ctx, b.Subscribe(bus.EventUpstreamState))
 	}
 	s.recordDiskUsage(ctx, app)
 	go func() {
@@ -98,14 +122,11 @@ func (s *appStatus) start(ctx context.Context, app *App) {
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
-	if len(s.store.events) == 0 {
-		return
-	}
 	target := run.Key.SubPath()
 	if target == "" {
 		target = "/"
 	}
-	event := taskEvent{
+	s.appendEvent(taskEvent{
 		Storage:    run.Key.Instance(),
 		TaskType:   string(run.Key.Type()),
 		Target:     target,
@@ -113,11 +134,14 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 		FinishedAt: run.FinishedAt.Format(time.RFC3339),
 		DurationMS: run.Duration.Milliseconds(),
 		Result:     run.Result,
-	}
-	if run.Err != "" {
-		event.Message = run.Err
-	}
+		Message:    run.Err,
+	})
+}
 
+func (s *appStatus) appendEvent(event taskEvent) {
+	if len(s.store.events) == 0 {
+		return
+	}
 	s.store.eventMu.Lock()
 	s.store.events[s.store.eventNext] = event
 	s.store.eventNext = (s.store.eventNext + 1) % len(s.store.events)
@@ -125,6 +149,7 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 		s.store.eventFilled = true
 	}
 	s.store.eventMu.Unlock()
+	s.markDirty()
 }
 
 func (s *appStatus) summary(app *App) statusSummary {
@@ -204,6 +229,7 @@ func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
 		s.store.diskFilled = true
 	}
 	s.store.diskMu.Unlock()
+	s.markDirty()
 }
 
 func (s *statusStore) diskSnapshotLocked() []diskSample {
@@ -252,6 +278,145 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 	default:
 		http.NotFound(w, req)
 	}
+}
+
+func (s *appStatus) busLoop(ctx context.Context, ch <-chan bus.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt := <-ch:
+			if evt.Type != bus.EventUpstreamState {
+				continue
+			}
+			payload, ok := evt.Payload.(bus.UpstreamStatePayload)
+			if !ok {
+				continue
+			}
+			timestamp := evt.Timestamp
+			if timestamp.IsZero() {
+				timestamp = time.Now()
+			}
+			message := payload.Reason
+			if payload.Detail != "" {
+				message += ": " + payload.Detail
+			}
+			if payload.From != "" && payload.To != "" {
+				if message != "" {
+					message += " (" + payload.From + " -> " + payload.To + ")"
+				} else {
+					message = payload.From + " -> " + payload.To
+				}
+			}
+			s.appendEvent(taskEvent{
+				Storage:    payload.Instance,
+				TaskType:   "upstream_state",
+				Target:     payload.Upstream,
+				StartedAt:  timestamp.Format(time.RFC3339),
+				FinishedAt: timestamp.Format(time.RFC3339),
+				DurationMS: 0,
+				Result:     payload.To,
+				Message:    message,
+			})
+		}
+	}
+}
+
+func (s *appStatus) markDirty() {
+	select {
+	case s.persistCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *appStatus) persistLoop() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			s.persist()
+			return
+		case <-s.persistCh:
+			s.persist()
+		}
+	}
+}
+
+func (s *appStatus) persist() {
+	if s.blobStore == nil {
+		return
+	}
+	state := persistedStatus{
+		Version: 1,
+		Disk:    s.diskSamples(),
+		Events:  s.taskEvents(s.eventLimit),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.blobStore.MkdirAll(path.Join(statusTenant, path.Dir(statusStatePath)), 0o755); err != nil {
+		return
+	}
+	_, _ = s.blobStore.Put(ctx, statusTenant, statusStatePath, bytes.NewReader(data), map[string]string{
+		"content-type": "application/json",
+	})
+}
+
+func (s *appStatus) restore() {
+	if s.blobStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	reader, err := s.blobStore.OpenObject(ctx, statusTenant, statusStatePath)
+	if err != nil {
+		return
+	}
+	defer reader.Close()
+	var state persistedStatus
+	if err := json.NewDecoder(reader).Decode(&state); err != nil {
+		return
+	}
+	s.restoreDisk(state.Disk)
+	s.restoreEvents(state.Events)
+}
+
+func (s *appStatus) restoreDisk(samples []diskSample) {
+	if len(s.store.disk) == 0 || len(samples) == 0 {
+		return
+	}
+	if len(samples) > len(s.store.disk) {
+		samples = samples[len(samples)-len(s.store.disk):]
+	}
+	s.store.diskMu.Lock()
+	copy(s.store.disk, samples)
+	s.store.diskNext = len(samples)
+	s.store.diskFilled = false
+	if len(samples) == len(s.store.disk) {
+		s.store.diskNext = 0
+		s.store.diskFilled = true
+	}
+	s.store.diskMu.Unlock()
+}
+
+func (s *appStatus) restoreEvents(events []taskEvent) {
+	if len(s.store.events) == 0 || len(events) == 0 {
+		return
+	}
+	if len(events) > len(s.store.events) {
+		events = events[len(events)-len(s.store.events):]
+	}
+	s.store.eventMu.Lock()
+	copy(s.store.events, events)
+	s.store.eventNext = len(events)
+	s.store.eventFilled = false
+	if len(events) == len(s.store.events) {
+		s.store.eventNext = 0
+		s.store.eventFilled = true
+	}
+	s.store.eventMu.Unlock()
 }
 
 func parseStatusLimit(req *http.Request, fallback int) int {

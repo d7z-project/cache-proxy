@@ -46,6 +46,7 @@
   "finished_at": "完成时间",
   "duration": "耗时",
   "result": "结果",
+  "reason": "原因",
   "close": "关闭",
   "no_data": "暂无数据",
   "just_now": "刚刚",

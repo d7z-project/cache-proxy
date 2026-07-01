@@ -10,7 +10,7 @@ A caching reverse proxy for package registries and artifact repositories. Single
 - Background blob GC and expired-object cleanup
 - Background metadata refresh for Linux repositories (`apk`, `deb`, `rpm`, `pacman`)
 - Prometheus metrics and built-in home page
-- Built-in server status modal with disk history and recent scheduler events
+- Built-in server status modal with persisted disk history and recent scheduler/upstream events
 
 ## Quick Start
 
@@ -48,8 +48,8 @@ Top-level fields:
 | `server.backend` | path | `/tmp/cache-proxy` | Storage directory |
 | `server.public_url` | URL | — | Public base URL shown on the home page |
 | `server.status.disk_sample_interval` | duration | `15m` | Disk usage sampling interval for the home page status modal |
-| `server.status.disk_history_window` | duration | `24h` | Disk history retention window for the home page status modal |
-| `server.status.event_limit` | int | `500` | Maximum retained scheduler events exposed by the home page status modal |
+| `server.status.disk_history_window` | duration | `24h` | Persisted disk history retention window for the home page status modal |
+| `server.status.event_limit` | int | `500` | Persisted scheduler/upstream event retention limit for the home page status modal |
 | `metrics.path` | path | `/metrics` | Prometheus endpoint |
 | `metrics.token` | string | — | Optional bearer token for `/metrics` |
 | `storage.gc.blob` | duration | `24h` | Blob storage GC interval |
@@ -88,6 +88,7 @@ Notes:
 - `git` has its own block shape and does not use `expire_after` or `transport`.
 - `transport.health` exists for upstream health tuning, but most deployments should use defaults.
 - The built-in home page fetches status data from `/-/status/summary`, `/-/status/disk`, and `/-/status/events`.
+- Status history is persisted in bounded form and trimmed by `server.status.disk_history_window` and `server.status.event_limit`.
 
 ## Mode Overview
 

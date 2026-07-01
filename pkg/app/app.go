@@ -171,7 +171,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 
 	b := bus.NewWithRegisterer(metricsReg)
 	sched := scheduler.New(b, store, metricsReg)
-	status := newAppStatus(doc.Server.Status)
+	status := newAppStatus(doc.Server.Status, store)
 	sched.SetRunObserver(status.observeTaskRun)
 
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
@@ -212,7 +212,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		cleanupOpenFailure()
 		return nil, err
 	}
-	status.start(lifecycleCtx, app)
+	status.start(lifecycleCtx, app, b)
 
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),

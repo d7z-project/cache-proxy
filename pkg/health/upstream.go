@@ -49,6 +49,13 @@ type UpstreamHealth struct {
 	probeIdx int32
 }
 
+type stateTransition struct {
+	From   string
+	To     string
+	Reason string
+	Detail string
+}
+
 func newUpstreamHealth(url string, evalWindow time.Duration) *UpstreamHealth {
 	return &UpstreamHealth{
 		URL:    url,
@@ -58,7 +65,7 @@ func newUpstreamHealth(url string, evalWindow time.Duration) *UpstreamHealth {
 	}
 }
 
-func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) string {
+func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) *stateTransition {
 	wasState := uh.State
 
 	if uh.latencySamples == 0 {
@@ -91,12 +98,16 @@ func (uh *UpstreamHealth) recordSuccess(latency time.Duration, cfg Config) strin
 	uh.computeWeight(cfg)
 	if wasState != uh.State {
 		uh.logChange(wasState, "success", "")
-		return wasState.String() + "->" + uh.State.String()
+		return &stateTransition{
+			From:   wasState.String(),
+			To:     uh.State.String(),
+			Reason: "success",
+		}
 	}
-	return ""
+	return nil
 }
 
-func (uh *UpstreamHealth) recordFailure(err error, cfg Config) string {
+func (uh *UpstreamHealth) recordFailure(err error, cfg Config) *stateTransition {
 	wasState := uh.State
 
 	uh.window.record(false)
@@ -121,12 +132,17 @@ func (uh *UpstreamHealth) recordFailure(err error, cfg Config) string {
 			detail = err.Error()
 		}
 		uh.logChange(wasState, "failure", detail)
-		return wasState.String() + "->" + uh.State.String()
+		return &stateTransition{
+			From:   wasState.String(),
+			To:     uh.State.String(),
+			Reason: "failure",
+			Detail: detail,
+		}
 	}
-	return ""
+	return nil
 }
 
-func (uh *UpstreamHealth) recordProbe(success bool, latency time.Duration, cfg Config) string {
+func (uh *UpstreamHealth) recordProbe(success bool, latency time.Duration, cfg Config) *stateTransition {
 	uh.lastProbeAt = time.Now()
 	if success {
 		return uh.recordSuccess(latency, cfg)
