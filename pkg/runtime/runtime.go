@@ -32,23 +32,32 @@ type StatusSource interface {
 	DashboardStatus() (color, label, extra string)
 }
 
-type RootRelease struct {
-	Key           string
-	Generation    string
-	HasCurrent    bool
-	Published     time.Time
-	Upstream      string
-	ArtifactCount int
-	MetadataCount int
-	State         string
-	Refreshing    bool
-	LastError     string
-	LastSuccessAt time.Time
-	LastRefreshAt time.Time
+type RepositoryAttribute struct {
+	LabelKey string
+	Value    string
 }
 
-type RootReleaseSource interface {
-	RootReleases() []RootRelease
+type RepositoryStatus struct {
+	ID              string
+	Path            string
+	DisplayName     string
+	PrimaryMetadata []string
+	Attributes      []RepositoryAttribute
+	Generation      string
+	HasCurrent      bool
+	Published       time.Time
+	Upstream        string
+	ArtifactCount   int
+	MetadataCount   int
+	State           string
+	Refreshing      bool
+	LastError       string
+	LastSuccessAt   time.Time
+	LastRefreshAt   time.Time
+}
+
+type RepositoryStatusSource interface {
+	RepositoryStatuses() []RepositoryStatus
 }
 
 type HandlerInstance struct {

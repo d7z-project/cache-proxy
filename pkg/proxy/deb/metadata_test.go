@@ -41,3 +41,37 @@ func TestReleaseIndexTargetsPreferXZOverGZAndPlain(t *testing.T) {
 		"dists/bookworm/main/binary-amd64/Packages",
 	}, targets[0].Candidates)
 }
+
+func TestDiscovererCreatesRootFromReleaseUnderPrefix(t *testing.T) {
+	result := (discoverer{}).Discover("proxmox/debian/pve/dists/trixie/InRelease")
+	require.True(t, result.Matched)
+	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
+	require.Equal(t, "proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, []string{
+		"proxmox/debian/pve/dists/trixie/InRelease",
+		"proxmox/debian/pve/dists/trixie/Release",
+	}, result.Root.PrimaryMetadata)
+}
+
+func TestDiscovererTreatsPackagesAsUpdateOnly(t *testing.T) {
+	result := (discoverer{}).Discover("proxmox/debian/pve/dists/trixie/pve-no-subscription/binary-amd64/Packages.gz")
+	require.True(t, result.Matched)
+	require.Equal(t, filerepo.DiscoveryUpdateRoot, result.Role)
+	require.Equal(t, "proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, []string{"pve-no-subscription"}, result.Root.Components)
+	require.Equal(t, []string{"amd64"}, result.Root.Architectures)
+}
+
+func TestDiscovererTreatsSourcesAsUpdateOnly(t *testing.T) {
+	result := (discoverer{}).Discover("proxmox/debian/pve/dists/trixie/pve-no-subscription/source/Sources.xz")
+	require.True(t, result.Matched)
+	require.Equal(t, filerepo.DiscoveryUpdateRoot, result.Role)
+	require.Equal(t, "proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, []string{"pve-no-subscription"}, result.Root.Components)
+	require.True(t, result.Root.Source)
+}
+
+func TestDiscovererRejectsNonMetadataPath(t *testing.T) {
+	result := (discoverer{}).Discover("proxmox/debian/pve/pool/main/p/pkg/pkg_1.0_amd64.deb")
+	require.False(t, result.Matched)
+}

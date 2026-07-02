@@ -48,7 +48,7 @@ func TestTaskKey(t *testing.T) {
 	require.Equal(t, "inst:metadata_refresh:sub/path", key.String())
 	require.Equal(t, "inst", key.Instance())
 	require.Equal(t, TypeMetadataRefresh, key.Type())
-	require.Equal(t, "sub/path", key.SubPath())
+	require.Equal(t, "sub/path", key.RootID())
 }
 
 func TestRegisterInfoAndSnapshotBeforeStart(t *testing.T) {
@@ -106,7 +106,7 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 		},
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 	select {
 	case result := <-executed:
 		require.Equal(t, "refresh:root", result)
@@ -137,13 +137,13 @@ func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return ok
 	}, time.Second, 10*time.Millisecond)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", SubPath: "root"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "root"}})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return !ok
@@ -171,7 +171,7 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 	require.Eventually(t, func() bool {
 		info, _ := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return info.Status == StatusFailed
@@ -229,7 +229,7 @@ func TestContextCancellationStopsRunningTask(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
@@ -301,12 +301,12 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      time.Hour,
-		NewRefresh: func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
 		NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "a"}})
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "b"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "a"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "b"}})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 		return ok
@@ -315,7 +315,7 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 	_, aOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
 	require.True(t, aOk)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", SubPath: "a"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "a"}})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
 		return !ok
@@ -324,7 +324,7 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 	_, bOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 	require.True(t, bOk, "subpath b should still be present after removing a")
 
-	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", SubPath: "b"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "b"}})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 		return !ok
@@ -353,7 +353,7 @@ func TestStopTimeoutMarksStopped(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):

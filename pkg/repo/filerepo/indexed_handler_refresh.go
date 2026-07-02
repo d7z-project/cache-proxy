@@ -59,19 +59,20 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 	})
 }
 
-func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) error {
+func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	h.mu.RLock()
-	entry, ok := h.roots[subPath]
+	entry, ok := h.roots[rootID]
 	h.mu.RUnlock()
-	if !ok || entry == nil || len(entry.targets) == 0 {
-		return fmt.Errorf("root %s not found or has no targets", subPath)
+	if !ok || entry == nil || len(entry.root.Targets) == 0 {
+		return fmt.Errorf("root %s not found or has no targets", rootID)
 	}
+	targets := append([]MetadataTarget(nil), entry.root.Targets...)
 	var (
 		refreshGen uint64
 		release    func()
 	)
 	if h.sh != nil {
-		rh, done, err := h.sh.TryStartRefresh(subPath, time.Now())
+		rh, done, err := h.sh.TryStartRefresh(rootID, time.Now())
 		if err != nil {
 			reason := "rejected"
 			switch {
@@ -82,7 +83,7 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
 				reason = "removed"
 			}
-			slog.Debug("subpath refresh skipped", "instance", h.name, "mode", h.mode, "subPath", subPath, "reason", reason)
+			slog.Debug("repository refresh skipped", "instance", h.name, "mode", h.mode, "root_id", rootID, "reason", reason)
 			return scheduler.ErrTaskSkipped
 		}
 		refreshGen = rh.Generation
@@ -102,31 +103,31 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
 	var firstErr error
 	for _, upstream := range upstreams {
-		if current := h.rootSnapshot(subPath); current != nil && current.Upstream == upstream {
-			unchanged, err := h.canSkipRefresh(ctx, current, upstream, entry.targets)
+		if current := h.rootSnapshot(rootID); current != nil && current.Upstream == upstream {
+			unchanged, err := h.canSkipRefresh(ctx, current, upstream, targets)
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
-				slog.Debug("subpath refresh head check failed", "instance", h.name, "subPath", subPath, "upstream", upstream, "err", err)
+				slog.Debug("repository refresh head check failed", "instance", h.name, "root_id", rootID, "upstream", upstream, "err", err)
 				continue
 			}
 			if unchanged {
 				if h.sh != nil {
-					h.sh.FinishRefresh(subPath, refreshGen, nil, targetsToProbe(current.Targets))
+					h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToProbe(current.Targets))
 				}
 				h.saveState(context.Background())
 				h.reportMetadataState()
-				slog.Debug("subpath refresh skipped unchanged metadata", "instance", h.name, "mode", h.mode, "subPath", subPath, "upstream", upstream)
+				slog.Debug("repository refresh skipped unchanged metadata", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
 				return nil
 			}
 		}
-		snapshot, err := h.buildSnapshot(ctx, subPath, generation, upstream, entry.targets)
+		snapshot, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
-			slog.Debug("subpath refresh failed on upstream", "instance", h.name, "subPath", subPath, "upstream", upstream, "err", err)
+			slog.Debug("repository refresh failed on upstream", "instance", h.name, "root_id", rootID, "upstream", upstream, "err", err)
 			continue
 		}
 		if err := h.publishSnapshot(ctx, snapshot); err != nil {
@@ -136,30 +137,30 @@ func (h *IndexedHandler) RefreshSubPath(ctx context.Context, subPath string) err
 			continue
 		}
 		if h.sh != nil {
-			h.sh.FinishRefresh(subPath, refreshGen, nil, targetsToProbe(snapshot.Targets))
+			h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToProbe(snapshot.Targets))
 		}
 		h.mu.Lock()
-		h.rootSnapshots[subPath] = snapshot
+		h.rootSnapshots[rootID] = snapshot
 		h.rebuildAggregateLocked()
 		h.mu.Unlock()
 		h.saveState(context.Background())
 		h.reportMetadataState()
-		slog.Debug("subpath refresh succeeded", "instance", h.name, "mode", h.mode, "subPath", subPath, "upstream", upstream)
+		slog.Debug("repository refresh succeeded", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
 		return nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataTransient
 	}
 	if h.sh != nil {
-		h.sh.FinishRefresh(subPath, refreshGen, refreshHealthError(firstErr), nil)
+		h.sh.FinishRefresh(rootID, refreshGen, refreshHealthError(firstErr), nil)
 	}
 	h.saveState(context.Background())
 	return firstErr
 }
 
-func (h *IndexedHandler) CleanupSubPath(ctx context.Context, subPath string) error {
-	rootDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(subPath), "generations")
-	currentGen := h.currentGeneration(subPath)
+func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string) error {
+	rootDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "generations")
+	currentGen := h.currentGeneration(rootID)
 	if currentGen == "" {
 		return nil
 	}
@@ -184,14 +185,14 @@ func (h *IndexedHandler) CleanupSubPath(ctx context.Context, subPath string) err
 	return nil
 }
 
-func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation, upstream string, targets []MetadataTarget) (*LiveSnapshot, error) {
+func (h *IndexedHandler) buildSnapshot(ctx context.Context, root RepositoryRoot, generation, upstream string) (*LiveSnapshot, error) {
 	session := &RefreshSession{
 		handler:    h,
-		rootKey:    rootKey,
+		rootID:     root.ID,
 		upstream:   upstream,
 		generation: generation,
 		blobs:      map[string]*MetadataBlob{},
-		targets:    append([]MetadataTarget(nil), targets...),
+		targets:    append([]MetadataTarget(nil), root.Targets...),
 	}
 	defer session.Close()
 	indexBuilder := &PathIndexBuilder{}
@@ -205,16 +206,17 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, rootKey, generation,
 	if snapshot.Metadata == nil {
 		snapshot.Metadata = map[string]MetadataObject{}
 	}
-	snapshot.RootKey = rootKey
+	snapshot.RootID = root.ID
+	snapshot.RootPath = root.Path
 	snapshot.Generation = generation
 	snapshot.Upstream = upstream
 	snapshot.Published = time.Now().UTC()
-	snapshot.Targets = targets
+	snapshot.Targets = append([]MetadataTarget(nil), root.Targets...)
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {
 			obj.Path = pathKey
 		}
-		obj.StorePath = h.generationMetadataPath(rootKey, generation, obj.Path)
+		obj.StorePath = h.generationMetadataPath(root.ID, generation, obj.Path)
 		snapshot.Metadata[pathKey] = obj
 		if obj.Required {
 			if _, err := h.store.StatObject(ctx, h.name, obj.StorePath); err != nil {

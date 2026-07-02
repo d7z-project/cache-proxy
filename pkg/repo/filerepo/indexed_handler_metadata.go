@@ -53,7 +53,7 @@ func (h *IndexedHandler) tryServeMetadata(w http.ResponseWriter, req *http.Reque
 	return true
 }
 
-func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, generation, upstream, cleanPath string) (MetadataBlob, error) {
+func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, generation, upstream, cleanPath string) (MetadataBlob, error) {
 	targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -108,7 +108,7 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 			headers[http.CanonicalHeaderKey(key)] = value[0]
 		}
 	}
-	if err := h.putMetadataObject(ctx, rootKey, generation, cleanPath, tempFile, size, headers); err != nil {
+	if err := h.putMetadataObject(ctx, rootID, generation, cleanPath, tempFile, size, headers); err != nil {
 		return MetadataBlob{}, err
 	}
 	if err := tempFile.Close(); err != nil {
@@ -118,8 +118,8 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootKey, gener
 	return MetadataBlob{Path: cleanPath, temp: tempPath, Headers: headers}, nil
 }
 
-func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootKey, generation, cleanPath string, body io.ReadSeeker, size int64, headers map[string]string) error {
-	objectPath := h.generationMetadataPath(rootKey, generation, cleanPath)
+func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootID, generation, cleanPath string, body io.ReadSeeker, size int64, headers map[string]string) error {
+	objectPath := h.generationMetadataPath(rootID, generation, cleanPath)
 	meta := map[string]string{
 		"content-type":   headers["Content-Type"],
 		"content-length": headers["Content-Length"],
@@ -152,8 +152,8 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	if err != nil {
 		return err
 	}
-	snapshotPath := h.snapshotPath(snapshot.RootKey, snapshot.Generation)
-	currentPath := h.currentPath(snapshot.RootKey)
+	snapshotPath := h.snapshotPath(snapshot.RootID, snapshot.Generation)
+	currentPath := h.currentPath(snapshot.RootID)
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(snapshotPath)), 0o755); err != nil {
 		return err
 	}
@@ -167,9 +167,9 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 		return err
 	}
 	refData, err := yaml.Marshal(struct {
-		RootKey    string `yaml:"root_key"`
+		RootID     string `yaml:"root_id"`
 		Generation string `yaml:"generation"`
-	}{RootKey: snapshot.RootKey, Generation: snapshot.Generation})
+	}{RootID: snapshot.RootID, Generation: snapshot.Generation})
 	if err != nil {
 		return err
 	}

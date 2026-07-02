@@ -8,100 +8,85 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"slices"
+	"sort"
 	"strings"
 
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type rootSpec struct {
-	Suite         string
-	Components    []string
-	Architectures []string
-	Source        bool
-}
-
-func (s *rootSpec) Key() string { return s.Suite }
-
-func (s *rootSpec) SubPath() string {
-	if len(s.Components) > 0 && len(s.Architectures) > 0 {
-		return "dists/" + s.Suite + "/" + s.Components[0] + "/binary-" + s.Architectures[0]
-	}
-	if s.Source {
-		return "dists/" + s.Suite + "/" + s.Components[0] + "/source"
-	}
-	return "dists/" + s.Suite
-}
-
-func (s *rootSpec) Targets() []filerepo.MetadataTarget {
-	return []filerepo.MetadataTarget{{
-		URL:        path.Join("dists", s.Suite, "InRelease"),
-		Candidates: []string{path.Join("dists", s.Suite, "Release")},
-		Kind:       "release",
-	}}
-}
-
-func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
-	candidate, ok := other.(*rootSpec)
-	if !ok || s.Suite != candidate.Suite {
-		return false
-	}
-	changed := false
-	for _, component := range candidate.Components {
-		if !slices.Contains(s.Components, component) {
-			s.Components = append(s.Components, component)
-			changed = true
-		}
-	}
-	for _, arch := range candidate.Architectures {
-		if !slices.Contains(s.Architectures, arch) {
-			s.Architectures = append(s.Architectures, arch)
-			changed = true
-		}
-	}
-	if candidate.Source && !s.Source {
-		s.Source = true
-		changed = true
-	}
-	return changed
-}
-
 type discoverer struct{}
 
-func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
+func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
 	parts := strings.Split(trimmed, "/")
-	if len(parts) < 3 || parts[0] != "dists" {
-		return nil, false
-	}
-	suite := parts[1]
-	if suite == "" {
-		return nil, false
-	}
-	if len(parts) == 3 && (parts[2] == "InRelease" || parts[2] == "Release") {
-		return &rootSpec{Suite: suite}, true
-	}
-	if len(parts) < 5 {
-		return nil, false
-	}
-	component := parts[2]
-	segment := parts[3]
-	fileName := parts[4]
-	switch {
-	case strings.HasPrefix(segment, "binary-") && strings.HasPrefix(fileName, "Packages"):
-		arch := strings.TrimPrefix(segment, "binary-")
-		if component == "" || arch == "" {
-			return nil, false
+	for i := len(parts) - 3; i >= 0; i-- {
+		if parts[i] != "dists" || parts[i+1] == "" {
+			continue
 		}
-		return &rootSpec{Suite: suite, Components: []string{component}, Architectures: []string{arch}}, true
-	case segment == "source" && strings.HasPrefix(fileName, "Sources"):
-		if component == "" {
-			return nil, false
+		suite := parts[i+1]
+		rootPath := strings.Join(parts[:i+2], "/")
+		root := debRepositoryRoot(rootPath, suite, nil, nil, false)
+		if i+2 == len(parts)-1 && (parts[i+2] == "InRelease" || parts[i+2] == "Release") {
+			return filerepo.DiscoveryResult{Matched: true, Role: filerepo.DiscoveryCreateRoot, Root: root}
 		}
-		return &rootSpec{Suite: suite, Components: []string{component}, Source: true}, true
-	default:
-		return nil, false
+		if i+4 >= len(parts) {
+			continue
+		}
+		component := parts[i+2]
+		segment := parts[i+3]
+		fileName := parts[i+4]
+		switch {
+		case strings.HasPrefix(segment, "binary-") && strings.HasPrefix(fileName, "Packages"):
+			arch := strings.TrimPrefix(segment, "binary-")
+			if component == "" || arch == "" {
+				return filerepo.DiscoveryResult{}
+			}
+			root = debRepositoryRoot(rootPath, suite, []string{component}, []string{arch}, false)
+			return filerepo.DiscoveryResult{Matched: true, Role: filerepo.DiscoveryUpdateRoot, Root: root}
+		case segment == "source" && strings.HasPrefix(fileName, "Sources"):
+			if component == "" {
+				return filerepo.DiscoveryResult{}
+			}
+			root = debRepositoryRoot(rootPath, suite, []string{component}, nil, true)
+			return filerepo.DiscoveryResult{Matched: true, Role: filerepo.DiscoveryUpdateRoot, Root: root}
+		}
 	}
+	return filerepo.DiscoveryResult{}
+}
+
+func debRepositoryRoot(rootPath, suite string, components, arches []string, source bool) filerepo.RepositoryRoot {
+	sort.Strings(components)
+	sort.Strings(arches)
+	root := filerepo.RepositoryRoot{
+		ID:              rootPath,
+		Path:            rootPath,
+		DisplayName:     suite,
+		PrimaryMetadata: []string{path.Join(rootPath, "InRelease"), path.Join(rootPath, "Release")},
+		Targets: []filerepo.MetadataTarget{{
+			URL:        path.Join(rootPath, "InRelease"),
+			Candidates: []string{path.Join(rootPath, "Release")},
+			Kind:       "release",
+		}},
+		Kind:          "deb",
+		Suite:         suite,
+		Components:    append([]string(nil), components...),
+		Architectures: append([]string(nil), arches...),
+		Source:        source,
+	}
+	root.Attributes = []filerepo.RepositoryAttribute{
+		{LabelKey: "repo_path", Value: rootPath},
+		{LabelKey: "suite", Value: suite},
+	}
+	if len(components) > 0 {
+		root.Attributes = append(root.Attributes, filerepo.RepositoryAttribute{LabelKey: "components", Value: strings.Join(components, ", ")})
+	}
+	if len(arches) > 0 {
+		root.Attributes = append(root.Attributes, filerepo.RepositoryAttribute{LabelKey: "architectures", Value: strings.Join(arches, ", ")})
+	}
+	if source {
+		root.Attributes = append(root.Attributes, filerepo.RepositoryAttribute{LabelKey: "source_packages", Value: "yes"})
+	}
+	return root
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
@@ -303,7 +288,7 @@ func sortedKeys[T any](items map[string]T) []string {
 	for key := range items {
 		keys = append(keys, key)
 	}
-	slices.Sort(keys)
+	sort.Strings(keys)
 	return keys
 }
 

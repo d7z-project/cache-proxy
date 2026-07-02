@@ -40,19 +40,19 @@ var errHandlerPanic = errors.New("handler panic")
 type TaskKey struct {
 	instance string
 	typ      TaskType
-	subPath  string
+	rootID   string
 	str      string
 }
 
-func NewTaskKey(instance string, typ TaskType, subPath string) TaskKey {
-	s := instance + ":" + string(typ) + ":" + subPath
-	return TaskKey{instance: instance, typ: typ, subPath: subPath, str: s}
+func NewTaskKey(instance string, typ TaskType, rootID string) TaskKey {
+	s := instance + ":" + string(typ) + ":" + rootID
+	return TaskKey{instance: instance, typ: typ, rootID: rootID, str: s}
 }
 
 func (k TaskKey) String() string   { return k.str }
 func (k TaskKey) Instance() string { return k.instance }
 func (k TaskKey) Type() TaskType   { return k.typ }
-func (k TaskKey) SubPath() string  { return k.subPath }
+func (k TaskKey) RootID() string   { return k.rootID }
 
 type TaskDef struct {
 	Key      TaskKey
@@ -84,8 +84,8 @@ type TaskFactory struct {
 	Instance        string
 	RefreshInterval time.Duration
 	GCInterval      time.Duration
-	NewRefresh      func(subPath string) TaskHandler
-	NewGC           func(subPath string) TaskHandler
+	NewRefresh      func(rootID string) TaskHandler
+	NewGC           func(rootID string) TaskHandler
 }
 
 type taskState struct {

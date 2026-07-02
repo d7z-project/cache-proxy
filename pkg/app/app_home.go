@@ -16,20 +16,29 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-type homeRelease struct {
-	Key            string
-	Gen            string
-	Published      string
-	PublishedTitle string
-	Packages       string
-	Upstream       string
-	StateLabel     string
-	StateColor     string
-	LastOK         string
-	LastOKTitle    string
-	LastTry        string
-	LastTryTitle   string
-	LastError      string
+type homeRepositoryAttribute struct {
+	Label string
+	Value string
+}
+
+type homeRepository struct {
+	DisplayName     string
+	Path            string
+	PrimaryMetadata string
+	Generation      string
+	Published       string
+	PublishedTitle  string
+	ArtifactCount   string
+	MetadataCount   string
+	Upstream        string
+	StateLabel      string
+	StateColor      string
+	LastOK          string
+	LastOKTitle     string
+	LastTry         string
+	LastTryTitle    string
+	LastError       string
+	Attributes      []homeRepositoryAttribute
 }
 
 type homeInstance struct {
@@ -46,8 +55,8 @@ type homeInstance struct {
 	StatusLabel      string
 	StatusExtra      string
 	StatusExtraTitle string
-	HasReleases      bool
-	Releases         []homeRelease
+	HasRepositories  bool
+	Repositories     []homeRepository
 }
 
 func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
@@ -143,53 +152,68 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 	} else {
 		hi.StatusColor, hi.StatusLabel, hi.StatusExtra, hi.StatusExtraTitle = instanceStatus(s, i18n, now)
 	}
-	if src, ok := entry.Runtime.(proxyruntime.RootReleaseSource); ok {
-		releases := src.RootReleases()
-		hi.HasReleases = true
-		hi.Releases = make([]homeRelease, len(releases))
-		for i, r := range releases {
-			hi.Releases[i] = buildHomeRelease(r, i18n, now)
+	if src, ok := entry.Runtime.(proxyruntime.RepositoryStatusSource); ok {
+		repositories := src.RepositoryStatuses()
+		hi.HasRepositories = true
+		hi.Repositories = make([]homeRepository, len(repositories))
+		for i, repository := range repositories {
+			hi.Repositories[i] = buildHomeRepository(repository, i18n, now)
 		}
 	}
 	return hi
 }
 
-func buildHomeRelease(r proxyruntime.RootRelease, i18n map[string]string, now time.Time) homeRelease {
-	pub, pubTitle := formatRecentTime(r.Published, i18n, now)
-	lastOK, lastOKTitle := formatRecentTime(r.LastSuccessAt, i18n, now)
-	lastTry, lastTryTitle := formatRecentTime(r.LastRefreshAt, i18n, now)
-	upstream := r.Upstream
+func buildHomeRepository(repository proxyruntime.RepositoryStatus, i18n map[string]string, now time.Time) homeRepository {
+	pub, pubTitle := formatRecentTime(repository.Published, i18n, now)
+	lastOK, lastOKTitle := formatRecentTime(repository.LastSuccessAt, i18n, now)
+	lastTry, lastTryTitle := formatRecentTime(repository.LastRefreshAt, i18n, now)
+	upstream := repository.Upstream
 	if u, err := urlpkg.Parse(upstream); err == nil && u.Host != "" {
 		upstream = u.Host
 	}
-	state := releaseStateLabelKey(r)
-	return homeRelease{
-		Key:            r.Key,
-		Gen:            releaseGenerationLabel(r, i18n),
-		Published:      pub,
-		PublishedTitle: pubTitle,
-		Packages:       fmt.Sprintf("%d %s", r.ArtifactCount, i18nStr(i18n, "packages")),
-		Upstream:       upstream,
-		StateLabel:     i18nStr(i18n, "release_state_"+state),
-		StateColor:     formatRootStateColor(state),
-		LastOK:         lastOK,
-		LastOKTitle:    lastOKTitle,
-		LastTry:        lastTry,
-		LastTryTitle:   lastTryTitle,
-		LastError:      r.LastError,
+	state := repositoryStateLabelKey(repository)
+	attributes := make([]homeRepositoryAttribute, len(repository.Attributes))
+	for i, attr := range repository.Attributes {
+		attributes[i] = homeRepositoryAttribute{Label: i18nStr(i18n, attr.LabelKey), Value: attr.Value}
+	}
+	displayName := repository.DisplayName
+	if displayName == "" {
+		displayName = repository.Path
+	}
+	if displayName == "" {
+		displayName = repository.ID
+	}
+	return homeRepository{
+		DisplayName:     displayName,
+		Path:            repository.Path,
+		PrimaryMetadata: strings.Join(repository.PrimaryMetadata, ", "),
+		Generation:      repositoryGenerationLabel(repository, i18n),
+		Published:       pub,
+		PublishedTitle:  pubTitle,
+		ArtifactCount:   fmt.Sprintf("%d %s", repository.ArtifactCount, i18nStr(i18n, "packages")),
+		MetadataCount:   fmt.Sprintf("%d %s", repository.MetadataCount, i18nStr(i18n, "metadata_objects")),
+		Upstream:        upstream,
+		StateLabel:      i18nStr(i18n, "repository_state_"+state),
+		StateColor:      formatRootStateColor(state),
+		LastOK:          lastOK,
+		LastOKTitle:     lastOKTitle,
+		LastTry:         lastTry,
+		LastTryTitle:    lastTryTitle,
+		LastError:       repository.LastError,
+		Attributes:      attributes,
 	}
 }
 
-func releaseStateLabelKey(r proxyruntime.RootRelease) string {
-	state := r.State
+func repositoryStateLabelKey(repository proxyruntime.RepositoryStatus) string {
+	state := repository.State
 	switch {
-	case r.Refreshing && r.HasCurrent:
+	case repository.Refreshing && repository.HasCurrent:
 		return "refreshing"
-	case r.Refreshing:
+	case repository.Refreshing:
 		return "bootstrapping"
-	case !r.HasCurrent && r.State == "blocked":
+	case !repository.HasCurrent && repository.State == "blocked":
 		return "failed"
-	case !r.HasCurrent && (r.State == "" || r.State == "pending"):
+	case !repository.HasCurrent && (repository.State == "" || repository.State == "pending"):
 		return "booting"
 	case state == "":
 		return "pending"
@@ -198,12 +222,12 @@ func releaseStateLabelKey(r proxyruntime.RootRelease) string {
 	}
 }
 
-func releaseGenerationLabel(r proxyruntime.RootRelease, i18n map[string]string) string {
-	generation := r.Generation
-	if !r.HasCurrent || generation == "" {
+func repositoryGenerationLabel(repository proxyruntime.RepositoryStatus, i18n map[string]string) string {
+	generation := repository.Generation
+	if !repository.HasCurrent || generation == "" {
 		generation = i18nStr(i18n, "none")
 	}
-	return fmt.Sprintf("%s %s", i18nStr(i18n, "release_generation"), generation)
+	return fmt.Sprintf("%s %s", i18nStr(i18n, "repository_generation"), generation)
 }
 
 func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry {

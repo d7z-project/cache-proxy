@@ -19,7 +19,7 @@ func TestParsePrimaryBuildsCleanupPaths(t *testing.T) {
 }
 
 func TestDiscovererDetectsRPMRoot(t *testing.T) {
-	spec, ok := (discoverer{}).Discover("repo/os/repodata/repomd.xml")
-	require.True(t, ok)
-	require.Equal(t, "repo/os", spec.Key())
+	result := (discoverer{}).Discover("mirror/repo/os/repodata/repomd.xml")
+	require.True(t, result.Matched)
+	require.Equal(t, "mirror/repo/os", result.Root.ID)
 }

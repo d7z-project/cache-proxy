@@ -16,16 +16,16 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-type releaseRuntime struct {
-	releases []proxyruntime.RootRelease
+type repositoryRuntime struct {
+	repositories []proxyruntime.RepositoryStatus
 }
 
-func (releaseRuntime) ServeHTTP(http.ResponseWriter, *http.Request)        {}
-func (releaseRuntime) Start(context.Context) error                         { return nil }
-func (releaseRuntime) Stop(context.Context) error                          { return nil }
-func (releaseRuntime) Cleanup(context.Context, config.CleanupConfig) error { return nil }
-func (r releaseRuntime) RootReleases() []proxyruntime.RootRelease {
-	return append([]proxyruntime.RootRelease(nil), r.releases...)
+func (repositoryRuntime) ServeHTTP(http.ResponseWriter, *http.Request)        {}
+func (repositoryRuntime) Start(context.Context) error                         { return nil }
+func (repositoryRuntime) Stop(context.Context) error                          { return nil }
+func (repositoryRuntime) Cleanup(context.Context, config.CleanupConfig) error { return nil }
+func (r repositoryRuntime) RepositoryStatuses() []proxyruntime.RepositoryStatus {
+	return append([]proxyruntime.RepositoryStatus(nil), r.repositories...)
 }
 
 func TestHomePageShowsStatsAfterRequests(t *testing.T) {
@@ -151,15 +151,17 @@ func TestBindHomePageShowsSingleInstanceView(t *testing.T) {
 	require.NotContains(t, body, `id="status-modal"`)
 }
 
-func TestHomePageReleaseGenerationUsesReadableLabel(t *testing.T) {
+func TestHomePageRepositoryGenerationUsesReadableLabel(t *testing.T) {
 	entry := &proxyruntime.Entry{
 		Name:    "packages",
 		Mode:    "pacman",
 		Enabled: true,
 		Path:    "/pacman",
-		Runtime: releaseRuntime{
-			releases: []proxyruntime.RootRelease{{
-				Key:           "core/os/x86_64",
+		Runtime: repositoryRuntime{
+			repositories: []proxyruntime.RepositoryStatus{{
+				ID:            "core/os/x86_64",
+				Path:          "core/os/x86_64",
+				DisplayName:   "core/os/x86_64",
 				Generation:    "djmsm2bdzupd",
 				HasCurrent:    true,
 				State:         "active",
@@ -190,6 +192,7 @@ func TestHomePageReleaseGenerationUsesReadableLabel(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, body, "代次 djmsm2bdzupd")
 	require.Contains(t, body, "title=\"代次 djmsm2bdzupd\"")
+	require.Contains(t, body, "根路径")
 }
 
 func TestHomePageRendersStatusModalControls(t *testing.T) {
@@ -390,6 +393,22 @@ func TestDetectTheme(t *testing.T) {
 	require.Equal(t, "light", detectTheme(req))
 }
 
+func TestI18NMapsShareSameKeys(t *testing.T) {
+	en := i18nMaps["en"]
+	zh := i18nMaps["zh"]
+	require.NotEmpty(t, en)
+	require.NotEmpty(t, zh)
+
+	for key := range en {
+		_, ok := zh[key]
+		require.Truef(t, ok, "missing zh key %q", key)
+	}
+	for key := range zh {
+		_, ok := en[key]
+		require.Truef(t, ok, "missing en key %q", key)
+	}
+}
+
 func TestBindURLUsesForwardedHostAndProto(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "127.0.0.1:8080"
@@ -398,20 +417,24 @@ func TestBindURLUsesForwardedHostAndProto(t *testing.T) {
 	require.Equal(t, "https://cache.example.test:5000", bindURL(req, "0.0.0.0:5000"))
 }
 
-func TestBuildHomeReleaseUsesFallbackLabels(t *testing.T) {
+func TestBuildHomeRepositoryUsesFallbackLabels(t *testing.T) {
 	now := time.Date(2026, 7, 2, 16, 4, 5, 0, time.Local)
-	release := buildHomeRelease(proxyruntime.RootRelease{
-		Key:           "core/os/x86_64",
+	repository := buildHomeRepository(proxyruntime.RepositoryStatus{
+		ID:            "core/os/x86_64",
+		Path:          "core/os/x86_64",
+		DisplayName:   "core/os/x86_64",
 		ArtifactCount: 42,
 		Upstream:      "https://mirror.example.test/root",
 	}, i18nMaps["en"], now)
-	require.Equal(t, "Generation None", release.Gen)
-	require.Equal(t, "Booting", release.StateLabel)
-	require.Equal(t, "mirror.example.test", release.Upstream)
+	require.Equal(t, "Generation None", repository.Generation)
+	require.Equal(t, "Booting", repository.StateLabel)
+	require.Equal(t, "mirror.example.test", repository.Upstream)
 
-	release = buildHomeRelease(proxyruntime.RootRelease{
-		Key:        "core/os/x86_64",
-		HasCurrent: true,
+	repository = buildHomeRepository(proxyruntime.RepositoryStatus{
+		ID:          "core/os/x86_64",
+		Path:        "core/os/x86_64",
+		DisplayName: "core/os/x86_64",
+		HasCurrent:  true,
 	}, i18nMaps["en"], now)
-	require.Equal(t, "Pending", release.StateLabel)
+	require.Equal(t, "Pending", repository.StateLabel)
 }

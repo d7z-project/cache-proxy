@@ -358,7 +358,7 @@ func TestRemovedResourcePublishesRemovedEvent(t *testing.T) {
 		payload, ok := evt.Payload.(bus.MetadataRemovedPayload)
 		require.True(t, ok)
 		require.Equal(t, "test", payload.Instance)
-		require.Equal(t, rh.Path, payload.SubPath)
+		require.Equal(t, rh.Path, payload.RootID)
 	case <-time.After(time.Second):
 		t.Fatal("expected metadata removed event")
 	}

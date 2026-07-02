@@ -58,8 +58,25 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 		health.New("repo", "test", health.DefaultConfig(), upstreams, stats, "cache-proxy-test"),
 		nil,
 	)
-	handler.AddRoot("root", []MetadataTarget{{URL: "meta/index.txt"}})
+	handler.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
 	return handler
+}
+
+type staticDiscoverer func(string) DiscoveryResult
+
+func (d staticDiscoverer) Discover(cleanPath string) DiscoveryResult {
+	return d(cleanPath)
+}
+
+func testRepositoryRoot(id, metadataPath string) RepositoryRoot {
+	return RepositoryRoot{
+		ID:              id,
+		Path:            id,
+		DisplayName:     id,
+		PrimaryMetadata: []string{metadataPath},
+		Targets:         []MetadataTarget{{URL: metadataPath}},
+		Attributes:      []RepositoryAttribute{{LabelKey: "repo_path", Value: id}},
+	}
 }
 
 func TestRefreshPublishesSnapshotAndCleanupUsesRebuiltPaths(t *testing.T) {
@@ -96,10 +113,10 @@ func TestRefreshPublishesSnapshotAndCleanupUsesRebuiltPaths(t *testing.T) {
 		},
 	)
 
-	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
-	releases := handler.RootReleases()
-	require.Len(t, releases, 1)
-	require.Equal(t, 1, releases[0].ArtifactCount)
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, 1, statuses[0].ArtifactCount)
 
 	require.NoError(t, store.MkdirAll("repo/repo/pool", 0o755))
 	_, err := store.Put(ctx, "repo", "repo/pool/pkg.deb", strings.NewReader("keep"), nil)
@@ -115,23 +132,84 @@ func TestRefreshPublishesSnapshotAndCleanupUsesRebuiltPaths(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDiscoverRootIgnoresUpdateOnlyRootCreation(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewIndexedHandler(
+		"repo",
+		"test",
+		"repo",
+		func(string) ResourceClass { return ResourceMetadata },
+		[]string{"https://upstream.example"},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		staticDiscoverer(func(string) DiscoveryResult {
+			return DiscoveryResult{
+				Matched: true,
+				Role:    DiscoveryUpdateRoot,
+				Root:    testRepositoryRoot("root", "meta/index.txt"),
+			}
+		}),
+		nil,
+		nil,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, nil, "cache-proxy-test"),
+		nil,
+	)
+
+	rootID, created := handler.discoverRoot("meta/index.txt")
+	require.Equal(t, "root", rootID)
+	require.False(t, created)
+	require.Empty(t, handler.RepositoryStatuses())
+}
+
+func TestDiscoverRootMergesExistingRepositoryDetails(t *testing.T) {
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
+	handler.discover = staticDiscoverer(func(string) DiscoveryResult {
+		return DiscoveryResult{
+			Matched: true,
+			Role:    DiscoveryUpdateRoot,
+			Root: RepositoryRoot{
+				ID:            "root",
+				Path:          "root",
+				DisplayName:   "root",
+				Targets:       []MetadataTarget{{URL: "meta/index.txt"}},
+				Architectures: []string{"amd64"},
+				Attributes: []RepositoryAttribute{
+					{LabelKey: "repo_path", Value: "root"},
+					{LabelKey: "architecture", Value: "amd64"},
+				},
+			},
+		}
+	})
+
+	rootID, created := handler.discoverRoot("meta/index.txt")
+	require.Equal(t, "root", rootID)
+	require.False(t, created)
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, "amd64", statuses[0].Attributes[1].Value)
+}
+
 func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
-	handler.AddRoot("root", []MetadataTarget{{URL: "meta/index.txt"}})
+	handler.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
 	handler.sh.AddResource("root", targetsToProbe([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
 	handler.saveState(ctx)
 
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
 	restored.restoreRoots(ctx)
 
-	releases := restored.RootReleases()
-	require.Len(t, releases, 1)
-	require.Equal(t, "root", releases[0].Key)
-	require.False(t, releases[0].HasCurrent)
+	statuses := restored.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, "root", statuses[0].ID)
+	require.False(t, statuses[0].HasCurrent)
 
 	info, ok := restored.sh.ResourceHealth("root")
 	require.True(t, ok)
@@ -143,11 +221,11 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	entry := restored.roots["root"]
 	restored.mu.RUnlock()
 	require.NotNil(t, entry)
-	require.Len(t, entry.targets, 1)
-	require.Equal(t, "meta/index.txt", entry.targets[0].URL)
+	require.Len(t, entry.root.Targets, 1)
+	require.Equal(t, "meta/index.txt", entry.root.Targets[0].URL)
 }
 
-func TestRootReleasesIncludesPendingAndRefreshingRoots(t *testing.T) {
+func TestRepositoryStatusesIncludePendingAndRefreshingRoots(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -183,15 +261,15 @@ func TestRootReleasesIncludesPendingAndRefreshingRoots(t *testing.T) {
 
 	refreshErr := make(chan error, 1)
 	go func() {
-		refreshErr <- handler.RefreshSubPath(ctx, "root")
+		refreshErr <- handler.RefreshRoot(ctx, "root")
 	}()
 	<-started
 
-	releases := handler.RootReleases()
-	require.Len(t, releases, 1)
-	require.Equal(t, "root", releases[0].Key)
-	require.False(t, releases[0].HasCurrent)
-	require.True(t, releases[0].Refreshing)
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, "root", statuses[0].ID)
+	require.False(t, statuses[0].HasCurrent)
+	require.True(t, statuses[0].Refreshing)
 
 	stats := handler.stats.Snapshot()
 	require.Equal(t, "bootstrapping", stats.Instances["repo"].MetadataState)
@@ -199,11 +277,11 @@ func TestRootReleasesIncludesPendingAndRefreshingRoots(t *testing.T) {
 	close(unblock)
 	require.NoError(t, <-refreshErr)
 
-	releases = handler.RootReleases()
-	require.Len(t, releases, 1)
-	require.True(t, releases[0].HasCurrent)
-	require.False(t, releases[0].Refreshing)
-	require.Equal(t, "active", releases[0].State)
+	statuses = handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.True(t, statuses[0].HasCurrent)
+	require.False(t, statuses[0].Refreshing)
+	require.Equal(t, "active", statuses[0].State)
 }
 
 func TestRefreshFailureKeepsBootingStateWithoutCurrentGeneration(t *testing.T) {
@@ -218,7 +296,7 @@ func TestRefreshFailureKeepsBootingStateWithoutCurrentGeneration(t *testing.T) {
 		nil,
 	)
 
-	require.Error(t, handler.RefreshSubPath(ctx, "root"))
+	require.Error(t, handler.RefreshRoot(ctx, "root"))
 	require.Nil(t, handler.currentSnapshot())
 
 	stats := handler.stats.Snapshot()
@@ -233,7 +311,8 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
 
 	snapshot := &LiveSnapshot{
-		RootKey:    "root",
+		RootID:     "root",
+		RootPath:   "root",
 		Generation: "gen1",
 		Upstream:   "https://upstream.example",
 		Published:  time.Now().UTC(),
@@ -256,19 +335,19 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	require.NoError(t, err)
 
 	refData, err := yaml.Marshal(struct {
-		RootKey    string `yaml:"root_key"`
+		RootID     string `yaml:"root_id"`
 		Generation string `yaml:"generation"`
-	}{RootKey: "root", Generation: "gen1"})
+	}{RootID: "root", Generation: "gen1"})
 	require.NoError(t, err)
 	_, err = store.Put(ctx, "repo", handler.currentPath("root"), bytes.NewReader(refData), nil)
 	require.NoError(t, err)
 
 	handler.restoreGenerations(ctx)
 
-	releases := handler.RootReleases()
-	require.Len(t, releases, 1)
-	require.True(t, releases[0].HasCurrent)
-	require.Equal(t, "active", releases[0].State)
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.True(t, statuses[0].HasCurrent)
+	require.Equal(t, "active", statuses[0].State)
 
 	stats := handler.stats.Snapshot()
 	require.Equal(t, "ready", stats.Instances["repo"].MetadataState)
@@ -333,7 +412,7 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 		nil,
 	)
 
-	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	require.Equal(t, 1, builderCalls)
 	first := handler.rootSnapshot("root")
 	require.NotNil(t, first)
@@ -345,7 +424,7 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, `"meta-v1"`, info.Options["etag"])
 
-	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	require.Equal(t, 1, builderCalls)
 	require.Equal(t, 1, headRequests)
 	stats := handler.stats.Snapshot()
@@ -454,7 +533,7 @@ func TestRefreshSkipsRebuildWhenMetadataHeadReturns200(t *testing.T) {
 		nil,
 	)
 
-	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	require.Equal(t, 1, builderCalls)
 	first := handler.rootSnapshot("root")
 	require.NotNil(t, first)
@@ -464,6 +543,6 @@ func TestRefreshSkipsRebuildWhenMetadataHeadReturns200(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, `"meta-v2"`, info.Options["etag"])
 
-	require.NoError(t, handler.RefreshSubPath(ctx, "root"))
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	require.Equal(t, 2, builderCalls, "should rebuild since ETag changed")
 }

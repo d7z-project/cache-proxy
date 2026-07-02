@@ -116,29 +116,39 @@
           <div class="stat-val">{{.DiskUsage}}</div>
         </div>
       </div>
-      {{if .HasReleases}}
+      {{if .HasRepositories}}
       <div class="card-releases">
         <button class="release-toggle" type="button" onclick="toggleReleases(this)" aria-expanded="false">
           <span class="release-arrow">&#9654;</span>
-          {{t "releases"}} ({{len .Releases}})
+          {{t "repositories"}} ({{len .Repositories}})
         </button>
         <div class="release-body" role="region">
-          {{range .Releases}}
+          {{range .Repositories}}
           <div class="release-row">
             <div class="release-row-top">
-              <span class="release-key">{{.Key}}</span>
-              <span class="release-gen" title="{{.Gen}}">{{.Gen}}</span>
+              <span class="release-key" title="{{.Path}}">{{.DisplayName}}</span>
+              <span class="release-gen" title="{{.Generation}}">{{.Generation}}</span>
               <span class="dot dot-{{.StateColor}}"></span>
               <span class="release-state">{{.StateLabel}}</span>
             </div>
             <div class="release-row-meta">
+              <span>{{t "root_path"}}: {{.Path}}</span>
+              {{if .PrimaryMetadata}}<span title="{{.PrimaryMetadata}}">{{t "primary_metadata"}}: {{.PrimaryMetadata}}</span>{{end}}
               {{if .Published}}<span{{if .PublishedTitle}} title="{{.PublishedTitle}}"{{end}}>{{.Published}}</span>{{end}}
-              <span>{{.Packages}}</span>
+              <span>{{.ArtifactCount}}</span>
+              <span>{{.MetadataCount}}</span>
               <span>{{t "upstream"}}: {{.Upstream}}</span>
               {{if .LastOK}}<span{{if .LastOKTitle}} title="{{.LastOKTitle}}"{{end}}>{{t "last_ok"}}: {{.LastOK}}</span>{{end}}
               {{if .LastTry}}<span{{if .LastTryTitle}} title="{{.LastTryTitle}}"{{end}}>{{t "last_try"}}: {{.LastTry}}</span>{{end}}
               {{if .LastError}}<span>{{t "last_error"}}: {{.LastError}}</span>{{end}}
             </div>
+            {{if .Attributes}}
+            <div class="release-row-meta">
+              {{range .Attributes}}
+              <span>{{.Label}}: {{.Value}}</span>
+              {{end}}
+            </div>
+            {{end}}
           </div>
           {{end}}
         </div>

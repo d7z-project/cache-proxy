@@ -12,42 +12,42 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type rootSpec struct {
-	Branch string
-	Repo   string
-	Arch   string
-}
-
-func (s *rootSpec) Key() string {
-	return strings.Join([]string{s.Branch, s.Repo, s.Arch}, "|")
-}
-
-func (s *rootSpec) SubPath() string {
-	return s.Branch + "/" + s.Repo + "/" + s.Arch
-}
-
-func (s *rootSpec) Targets() []filerepo.MetadataTarget {
-	return []filerepo.MetadataTarget{{URL: path.Join(s.Branch, s.Repo, s.Arch, "APKINDEX.tar.gz")}}
-}
-
-func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
-	return false
-}
-
 type discoverer struct{}
 
-func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
+func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
 	parts := strings.Split(trimmed, "/")
-	if len(parts) != 4 || parts[3] != "APKINDEX.tar.gz" {
-		return nil, false
+	if len(parts) < 4 || parts[len(parts)-1] != "APKINDEX.tar.gz" {
+		return filerepo.DiscoveryResult{}
 	}
-	for _, part := range parts[:3] {
+	base := parts[len(parts)-4 : len(parts)-1]
+	for _, part := range base {
 		if part == "" {
-			return nil, false
+			return filerepo.DiscoveryResult{}
 		}
 	}
-	return &rootSpec{Branch: parts[0], Repo: parts[1], Arch: parts[2]}, true
+	rootPath := strings.Join(parts[:len(parts)-1], "/")
+	return filerepo.DiscoveryResult{
+		Matched: true,
+		Role:    filerepo.DiscoveryCreateRoot,
+		Root: filerepo.RepositoryRoot{
+			ID:              rootPath,
+			Path:            rootPath,
+			DisplayName:     strings.Join(base, "/"),
+			PrimaryMetadata: []string{path.Join(rootPath, "APKINDEX.tar.gz")},
+			Targets:         []filerepo.MetadataTarget{{URL: path.Join(rootPath, "APKINDEX.tar.gz")}},
+			Kind:            "apk",
+			Branch:          base[0],
+			Repo:            base[1],
+			Arch:            base[2],
+			Attributes: []filerepo.RepositoryAttribute{
+				{LabelKey: "repo_path", Value: rootPath},
+				{LabelKey: "branch", Value: base[0]},
+				{LabelKey: "repository", Value: base[1]},
+				{LabelKey: "architecture", Value: base[2]},
+			},
+		},
+	}
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {

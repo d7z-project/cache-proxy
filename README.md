@@ -88,6 +88,7 @@ Notes:
 - `git` has its own block shape and does not use `expire_after` or `transport`.
 - `transport.health` exists for upstream health tuning, but most deployments should use defaults.
 - The built-in home page fetches status data from `/-/status/summary`, `/-/status/disk`, and `/-/status/events`.
+- Linux repository modes expose discovered repository roots on the home page, including the root path, primary metadata paths, refresh state, and mode-specific attributes.
 - Status history is persisted in bounded form and trimmed by `server.status.disk_history_window` and `server.status.event_limit`.
 
 ## Mode Overview

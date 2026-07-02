@@ -77,7 +77,7 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 		if factory == nil {
 			return
 		}
-		refreshKey := NewTaskKey(p.Instance, TypeMetadataRefresh, p.SubPath)
+		refreshKey := NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID)
 		if _, exists := s.tasks[refreshKey]; exists {
 			return
 		}
@@ -85,25 +85,25 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 		s.registerLocked(TaskDef{
 			Key:      refreshKey,
 			Interval: factory.RefreshInterval,
-			Handler:  factory.NewRefresh(p.SubPath),
+			Handler:  factory.NewRefresh(p.RootID),
 		}, "discovery", now)
 		s.registerLocked(TaskDef{
-			Key:      NewTaskKey(p.Instance, TypeMetadataGC, p.SubPath),
+			Key:      NewTaskKey(p.Instance, TypeMetadataGC, p.RootID),
 			Interval: factory.GCInterval,
-			Handler:  factory.NewGC(p.SubPath),
+			Handler:  factory.NewGC(p.RootID),
 		}, "discovery", time.Time{})
 		s.triggerLocked(refreshKey)
-		s.updateHeap(NewTaskKey(p.Instance, TypeMetadataGC, p.SubPath))
+		s.updateHeap(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID))
 		s.refreshMetrics()
 		s.saveState()
-		slog.Debug("scheduler registered metadata tasks", "instance", p.Instance, "sub_path", p.SubPath)
+		slog.Debug("scheduler registered metadata tasks", "instance", p.Instance, "root_id", p.RootID)
 	case bus.EventMetadataRemoved:
 		p := evt.Payload.(bus.MetadataRemovedPayload)
-		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataRefresh, p.SubPath), "removed")
-		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataGC, p.SubPath), "removed")
+		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID), "removed")
+		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID), "removed")
 		s.refreshMetrics()
 		s.saveState()
-		slog.Debug("scheduler removed metadata tasks", "instance", p.Instance, "sub_path", p.SubPath)
+		slog.Debug("scheduler removed metadata tasks", "instance", p.Instance, "root_id", p.RootID)
 	}
 }
 

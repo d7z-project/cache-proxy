@@ -13,34 +13,34 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type rootSpec struct {
-	RepoPath string
-}
-
-func (s *rootSpec) Key() string     { return s.RepoPath }
-func (s *rootSpec) SubPath() string { return s.RepoPath }
-
-func (s *rootSpec) Targets() []filerepo.MetadataTarget {
-	return []filerepo.MetadataTarget{{URL: path.Join(s.RepoPath, "repodata", "repomd.xml")}}
-}
-
-func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
-	return false
-}
-
 type discoverer struct{}
 
-func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
+func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
 	if !strings.HasSuffix(trimmed, "/repodata/repomd.xml") {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
 	repoPath := strings.TrimSuffix(trimmed, "/repodata/repomd.xml")
 	repoPath = strings.Trim(repoPath, "/")
 	if repoPath == "" {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
-	return &rootSpec{RepoPath: repoPath}, true
+	return filerepo.DiscoveryResult{
+		Matched: true,
+		Role:    filerepo.DiscoveryCreateRoot,
+		Root: filerepo.RepositoryRoot{
+			ID:              repoPath,
+			Path:            repoPath,
+			DisplayName:     repoPath,
+			PrimaryMetadata: []string{path.Join(repoPath, "repodata", "repomd.xml")},
+			Targets:         []filerepo.MetadataTarget{{URL: path.Join(repoPath, "repodata", "repomd.xml")}},
+			Kind:            "rpm",
+			Attributes: []filerepo.RepositoryAttribute{
+				{LabelKey: "repo_path", Value: repoPath},
+				{LabelKey: "primary_metadata", Value: path.Join(repoPath, "repodata", "repomd.xml")},
+			},
+		},
+	}
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {

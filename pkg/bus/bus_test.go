@@ -15,7 +15,7 @@ func TestBusSubscribeAndPublish(t *testing.T) {
 
 	b.Publish(Event{
 		Type:    EventMetadataDiscovered,
-		Payload: MetadataDiscoveredPayload{Instance: "test", SubPath: "path"},
+		Payload: MetadataDiscoveredPayload{Instance: "test", RootID: "path"},
 	})
 
 	select {
@@ -24,7 +24,7 @@ func TestBusSubscribeAndPublish(t *testing.T) {
 		p, ok := evt.Payload.(MetadataDiscoveredPayload)
 		require.True(t, ok)
 		require.Equal(t, "test", p.Instance)
-		require.Equal(t, "path", p.SubPath)
+		require.Equal(t, "path", p.RootID)
 		require.False(t, evt.Timestamp.IsZero())
 	case <-time.After(time.Second):
 		t.Fatal("expected event not received")

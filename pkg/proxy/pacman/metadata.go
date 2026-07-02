@@ -11,52 +11,53 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type rootSpec struct {
-	Repo     string
-	Arch     string
-	RootPath string
-}
-
-func (s *rootSpec) Key() string     { return s.RootPath }
-func (s *rootSpec) SubPath() string { return s.RootPath }
-
-func (s *rootSpec) Targets() []filerepo.MetadataTarget {
-	return []filerepo.MetadataTarget{{
-		URL:  path.Join(s.RootPath, s.Repo+".db"),
-		Repo: s.Repo,
-		Arch: s.Arch,
-	}}
-}
-
-func (s *rootSpec) Merge(other filerepo.RootSpec) bool {
-	return false
-}
-
 type discoverer struct{}
 
-func (discoverer) Discover(cleanPath string) (filerepo.RootSpec, bool) {
+func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) == 0 || parts[0] == "" {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
 	fileName := parts[len(parts)-1]
 	if !strings.HasSuffix(fileName, ".db") {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
 	if len(parts) < 4 || parts[len(parts)-3] != "os" {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
 	repoName := strings.TrimSuffix(fileName, ".db")
 	if repoName == "" {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
 	rootPath := strings.Join(parts[:len(parts)-1], "/")
 	arch := parts[len(parts)-2]
 	if arch == "" {
-		return nil, false
+		return filerepo.DiscoveryResult{}
 	}
-	return &rootSpec{Repo: repoName, Arch: arch, RootPath: rootPath}, true
+	return filerepo.DiscoveryResult{
+		Matched: true,
+		Role:    filerepo.DiscoveryCreateRoot,
+		Root: filerepo.RepositoryRoot{
+			ID:              rootPath,
+			Path:            rootPath,
+			DisplayName:     rootPath,
+			PrimaryMetadata: []string{path.Join(rootPath, repoName+".db")},
+			Targets: []filerepo.MetadataTarget{{
+				URL:  path.Join(rootPath, repoName+".db"),
+				Repo: repoName,
+				Arch: arch,
+			}},
+			Kind: "pacman",
+			Repo: repoName,
+			Arch: arch,
+			Attributes: []filerepo.RepositoryAttribute{
+				{LabelKey: "repo_path", Value: rootPath},
+				{LabelKey: "repository", Value: repoName},
+				{LabelKey: "architecture", Value: arch},
+			},
+		},
+	}
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {

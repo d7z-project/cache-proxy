@@ -375,7 +375,7 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 			rh.Generation++
 			delete(h.resources, rh.Path)
 			if h.bus != nil {
-				h.bus.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: h.name, SubPath: path}})
+				h.bus.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: h.name, RootID: path}})
 			}
 		} else {
 			rh.State = RSuspect

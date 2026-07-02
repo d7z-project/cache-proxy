@@ -30,7 +30,7 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
-		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 		require.Eventually(t, func() bool {
 			_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 			return ok
@@ -83,7 +83,7 @@ func TestPersistenceRestoreSkipsMissingFactory(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
-		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "ghost", SubPath: "x"}})
+		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "ghost", RootID: "x"}})
 		require.Eventually(t, func() bool {
 			_, ok := sched.Info(NewTaskKey("ghost", TypeMetadataRefresh, "x"))
 			return ok
@@ -129,7 +129,7 @@ func TestRestoreMetrics(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
-		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", SubPath: "root"}})
+		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 		require.Eventually(t, func() bool {
 			return metricValue(t, sched.m.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")) == 1
 		}, time.Second, 10*time.Millisecond)

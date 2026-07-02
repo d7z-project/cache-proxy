@@ -14,7 +14,7 @@ import (
 type persistedTask struct {
 	Instance  string        `yaml:"instance"`
 	Type      string        `yaml:"type"`
-	SubPath   string        `yaml:"sub_path"`
+	RootID    string        `yaml:"root_id"`
 	Interval  time.Duration `yaml:"interval_ns"`
 	NextRun   time.Time     `yaml:"next_run,omitempty"`
 	LastRun   time.Time     `yaml:"last_run,omitempty"`
@@ -49,7 +49,7 @@ func (s *Scheduler) saveStateLocked() {
 		state.Tasks = append(state.Tasks, persistedTask{
 			Instance:  ts.Key.Instance(),
 			Type:      string(ts.Key.Type()),
-			SubPath:   ts.Key.SubPath(),
+			RootID:    ts.Key.RootID(),
 			Interval:  ts.Interval,
 			NextRun:   ts.NextRun,
 			LastRun:   ts.LastRun,
@@ -109,9 +109,9 @@ func (s *Scheduler) restoreFromStore() {
 		var handler TaskHandler
 		switch TaskType(pt.Type) {
 		case TypeMetadataRefresh:
-			handler = factory.NewRefresh(pt.SubPath)
+			handler = factory.NewRefresh(pt.RootID)
 		case TypeMetadataGC:
-			handler = factory.NewGC(pt.SubPath)
+			handler = factory.NewGC(pt.RootID)
 		default:
 			if s.m != nil {
 				s.m.restoreSkipped.WithLabelValues(pt.Type, "unknown_type").Inc()
@@ -119,7 +119,7 @@ func (s *Scheduler) restoreFromStore() {
 			continue
 		}
 
-		key := NewTaskKey(pt.Instance, TaskType(pt.Type), pt.SubPath)
+		key := NewTaskKey(pt.Instance, TaskType(pt.Type), pt.RootID)
 		ts := &taskState{
 			TaskInfo: TaskInfo{
 				Key:       key,

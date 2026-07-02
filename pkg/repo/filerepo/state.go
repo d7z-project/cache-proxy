@@ -17,9 +17,8 @@ import (
 const rootsStateFileName = "_roots.yaml"
 
 type persistedRoot struct {
-	Path    string                  `yaml:"path"`
-	Targets []MetadataTarget        `yaml:"targets,omitempty"`
-	State   health.ResourceSnapshot `yaml:"state"`
+	Root  RepositoryRoot          `yaml:"root"`
+	State health.ResourceSnapshot `yaml:"state"`
 }
 
 type persistedState struct {
@@ -40,16 +39,16 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 	}
 
 	h.mu.RLock()
-	rootTargets := make(map[string][]MetadataTarget, len(h.roots))
+	roots := make(map[string]RepositoryRoot, len(h.roots))
 	currentRoots := make(map[string]struct{}, len(h.rootSnapshots))
-	for rootKey, entry := range h.roots {
+	for rootID, entry := range h.roots {
 		if entry == nil {
 			continue
 		}
-		rootTargets[rootKey] = append([]MetadataTarget(nil), entry.targets...)
+		roots[rootID] = entry.root
 	}
-	for rootKey := range h.rootSnapshots {
-		currentRoots[rootKey] = struct{}{}
+	for rootID := range h.rootSnapshots {
+		currentRoots[rootID] = struct{}{}
 	}
 	h.mu.RUnlock()
 
@@ -60,29 +59,28 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 		}
 	}
 
-	keys := make([]string, 0, len(rootTargets))
-	for rootKey := range rootTargets {
-		keys = append(keys, rootKey)
+	keys := make([]string, 0, len(roots))
+	for rootID := range roots {
+		keys = append(keys, rootID)
 	}
 	sort.Strings(keys)
 
 	state := persistedState{Version: 1}
-	for _, rootKey := range keys {
-		snapshot, ok := resources[rootKey]
+	for _, rootID := range keys {
+		snapshot, ok := resources[rootID]
 		if !ok {
-			if _, keep := currentRoots[rootKey]; !keep {
+			if _, keep := currentRoots[rootID]; !keep {
 				continue
 			}
 			snapshot = health.ResourceSnapshot{
-				Path:         rootKey,
+				Path:         rootID,
 				State:        health.RActive.String(),
 				UpstreamURLs: append([]string(nil), h.upstreams...),
 			}
 		}
 		state.Roots = append(state.Roots, persistedRoot{
-			Path:    rootKey,
-			Targets: rootTargets[rootKey],
-			State:   snapshot,
+			Root:  roots[rootID],
+			State: snapshot,
 		})
 	}
 
@@ -122,12 +120,12 @@ func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 	persisted := h.loadState(ctx)
 	var resources []health.ResourceSnapshot
 	for _, root := range persisted.Roots {
-		if root.Path == "" {
+		if root.Root.ID == "" {
 			continue
 		}
-		h.AddRoot(root.Path, root.Targets)
+		h.AddRepository(root.Root)
 		if root.State.Path == "" {
-			root.State.Path = root.Path
+			root.State.Path = root.Root.ID
 		}
 		if len(root.State.UpstreamURLs) == 0 {
 			root.State.UpstreamURLs = append([]string(nil), h.upstreams...)
@@ -151,21 +149,21 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		}
 		for key, obj := range snapshot.Metadata {
 			if obj.StorePath == "" {
-				obj.StorePath = h.generationMetadataPath(snapshot.RootKey, snapshot.Generation, obj.Path)
+				obj.StorePath = h.generationMetadataPath(snapshot.RootID, snapshot.Generation, obj.Path)
 				snapshot.Metadata[key] = obj
 			}
 		}
 		h.mu.Lock()
-		h.rootSnapshots[snapshot.RootKey] = snapshot
+		h.rootSnapshots[snapshot.RootID] = snapshot
 		h.rebuildAggregateLocked()
-		if entry, ok := h.roots[snapshot.RootKey]; ok && len(entry.targets) == 0 && len(snapshot.Targets) > 0 {
-			entry.targets = append([]MetadataTarget(nil), snapshot.Targets...)
+		if entry, ok := h.roots[snapshot.RootID]; ok && len(entry.root.Targets) == 0 && len(snapshot.Targets) > 0 {
+			entry.root.Targets = append([]MetadataTarget(nil), snapshot.Targets...)
 		}
 		h.mu.Unlock()
 
 		if h.sh != nil {
-			h.sh.AddResource(snapshot.RootKey, targetsToProbe(snapshot.Targets), h.upstreams)
-			h.sh.MarkResourceActive(snapshot.RootKey, targetsToProbe(snapshot.Targets))
+			h.sh.AddResource(snapshot.RootID, targetsToProbe(snapshot.Targets), h.upstreams)
+			h.sh.MarkResourceActive(snapshot.RootID, targetsToProbe(snapshot.Targets))
 		}
 		h.reportMetadataState()
 		return nil
@@ -180,11 +178,11 @@ func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath st
 	if err == nil {
 		defer reader.Close()
 		var ref struct {
-			RootKey    string `yaml:"root_key"`
+			RootID     string `yaml:"root_id"`
 			Generation string `yaml:"generation"`
 		}
-		if yaml.NewDecoder(reader).Decode(&ref) == nil && ref.RootKey != "" && ref.Generation != "" {
-			if snapshot, ok := h.loadSnapshot(ctx, h.snapshotPath(ref.RootKey, ref.Generation)); ok {
+		if yaml.NewDecoder(reader).Decode(&ref) == nil && ref.RootID != "" && ref.Generation != "" {
+			if snapshot, ok := h.loadSnapshot(ctx, h.snapshotPath(ref.RootID, ref.Generation)); ok {
 				return snapshot, true
 			}
 		}
@@ -234,7 +232,7 @@ func (h *IndexedHandler) loadSnapshot(ctx context.Context, objectPath string) (*
 	defer reader.Close()
 
 	var snapshot LiveSnapshot
-	if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootKey == "" {
+	if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootID == "" {
 		return nil, false
 	}
 	return &snapshot, true

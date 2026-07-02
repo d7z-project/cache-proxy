@@ -20,8 +20,7 @@ import (
 const maxMetadataObjectSize = 512 << 20
 
 type rootEntry struct {
-	spec    RootSpec
-	targets []MetadataTarget
+	root RepositoryRoot
 }
 
 type IndexedHandler struct {
@@ -94,16 +93,16 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if class == ResourceMetadata {
-		subPath, discovered := h.discoverSubPath(cleanPath)
+		rootID, created := h.discoverRoot(cleanPath)
 		if h.tryServeMetadata(w, req, cleanPath) {
 			return
 		}
-		if discovered && h.bus != nil {
+		if created && h.bus != nil {
 			h.bus.Publish(bus.Event{
 				Type: bus.EventMetadataDiscovered,
 				Payload: bus.MetadataDiscoveredPayload{
 					Instance: h.name,
-					SubPath:  subPath,
+					RootID:   rootID,
 				},
 			})
 		}

@@ -27,7 +27,8 @@ func TestParseIndexBuildsCleanupPaths(t *testing.T) {
 }
 
 func TestDiscovererDetectsAPKRoot(t *testing.T) {
-	spec, ok := (discoverer{}).Discover("v3.20/main/x86_64/APKINDEX.tar.gz")
-	require.True(t, ok)
-	require.Equal(t, "v3.20|main|x86_64", spec.Key())
+	result := (discoverer{}).Discover("mirror/alpine/v3.20/main/x86_64/APKINDEX.tar.gz")
+	require.True(t, result.Matched)
+	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
+	require.Equal(t, "mirror/alpine/v3.20/main/x86_64", result.Root.ID)
 }

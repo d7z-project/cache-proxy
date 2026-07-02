@@ -67,14 +67,14 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 		Instance:        plan.Name(),
 		RefreshInterval: refreshInterval,
 		GCInterval:      gcInterval,
-		NewRefresh: func(subPath string) scheduler.TaskHandler {
+		NewRefresh: func(rootID string) scheduler.TaskHandler {
 			return func(ctx context.Context) error {
-				return handler.RefreshSubPath(ctx, subPath)
+				return handler.RefreshRoot(ctx, rootID)
 			}
 		},
-		NewGC: func(subPath string) scheduler.TaskHandler {
+		NewGC: func(rootID string) scheduler.TaskHandler {
 			return func(ctx context.Context) error {
-				return handler.CleanupSubPath(ctx, subPath)
+				return handler.CleanupRoot(ctx, rootID)
 			}
 		},
 	})

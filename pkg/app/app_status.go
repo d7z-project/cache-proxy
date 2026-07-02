@@ -125,7 +125,7 @@ func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
-	target := run.Key.SubPath()
+	target := run.Key.RootID()
 	if target == "" {
 		target = "/"
 	}

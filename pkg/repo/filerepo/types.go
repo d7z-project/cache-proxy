@@ -71,8 +71,31 @@ type MetadataObject struct {
 	StorePath string `yaml:"store_path,omitempty"`
 }
 
+type RepositoryAttribute struct {
+	LabelKey string `yaml:"label_key"`
+	Value    string `yaml:"value"`
+}
+
+type RepositoryRoot struct {
+	ID              string                `yaml:"id"`
+	Path            string                `yaml:"path"`
+	DisplayName     string                `yaml:"display_name"`
+	PrimaryMetadata []string              `yaml:"primary_metadata,omitempty"`
+	Attributes      []RepositoryAttribute `yaml:"attributes,omitempty"`
+	Targets         []MetadataTarget      `yaml:"targets,omitempty"`
+	Kind            string                `yaml:"kind,omitempty"`
+	Suite           string                `yaml:"suite,omitempty"`
+	Components      []string              `yaml:"components,omitempty"`
+	Architectures   []string              `yaml:"architectures,omitempty"`
+	Source          bool                  `yaml:"source,omitempty"`
+	Branch          string                `yaml:"branch,omitempty"`
+	Repo            string                `yaml:"repo,omitempty"`
+	Arch            string                `yaml:"arch,omitempty"`
+}
+
 type LiveSnapshot struct {
-	RootKey       string                    `yaml:"root_key"`
+	RootID        string                    `yaml:"root_id"`
+	RootPath      string                    `yaml:"root_path"`
 	Generation    string                    `yaml:"generation"`
 	Upstream      string                    `yaml:"upstream"`
 	Published     time.Time                 `yaml:"published"`
@@ -124,7 +147,7 @@ func (b *PathIndexBuilder) Finalize() []string {
 
 type RefreshSession struct {
 	handler    *IndexedHandler
-	rootKey    string
+	rootID     string
 	upstream   string
 	generation string
 	blobs      map[string]*MetadataBlob
@@ -144,7 +167,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		blob, err := s.handler.fetchMetadataObject(ctx, s.rootKey, s.generation, s.upstream, candidate)
+		blob, err := s.handler.fetchMetadataObject(ctx, s.rootID, s.generation, s.upstream, candidate)
 		if err != nil {
 			lastErr = err
 			continue
@@ -169,7 +192,7 @@ func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (
 	if err != nil {
 		var mfe MetadataFetchError
 		if errors.As(err, &mfe) && (errors.Is(mfe.Err, errMetadataNotFound) || errors.Is(mfe.Err, errMetadataForbidden)) {
-			slog.Debug("derived metadata not available", "path", derivedPath, "root", s.rootKey, "upstream", s.upstream)
+			slog.Debug("derived metadata not available", "path", derivedPath, "root", s.rootID, "upstream", s.upstream)
 			return MetadataObject{}, nil
 		}
 		return MetadataObject{}, err
@@ -261,15 +284,22 @@ func DeduceCompanions(basePath string) []string {
 	return companions
 }
 
-type RootSpec interface {
-	Key() string
-	SubPath() string
-	Targets() []MetadataTarget
-	Merge(RootSpec) bool
+type DiscoveryRole string
+
+const (
+	DiscoveryCreateRoot DiscoveryRole = "create_root"
+	DiscoveryUpdateRoot DiscoveryRole = "update_root"
+	DiscoveryIgnore     DiscoveryRole = "ignore"
+)
+
+type DiscoveryResult struct {
+	Matched bool
+	Role    DiscoveryRole
+	Root    RepositoryRoot
 }
 
 type Discoverer interface {
-	Discover(cleanPath string) (RootSpec, bool)
+	Discover(cleanPath string) DiscoveryResult
 }
 
 func metadataStorePath(root, rootKey, generation, cleanPath string) string {

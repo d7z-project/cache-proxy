@@ -24,12 +24,12 @@ type Event struct {
 
 type MetadataDiscoveredPayload struct {
 	Instance string
-	SubPath  string
+	RootID   string
 }
 
 type MetadataRemovedPayload struct {
 	Instance string
-	SubPath  string
+	RootID   string
 }
 
 type UpstreamStatePayload struct {
