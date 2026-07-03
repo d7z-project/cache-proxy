@@ -26,9 +26,27 @@ func TestParseIndexBuildsCleanupPaths(t *testing.T) {
 	}, paths.Finalize())
 }
 
-func TestDiscovererDetectsAPKRoot(t *testing.T) {
-	result := (discoverer{}).Discover("mirror/alpine/v3.20/main/x86_64/APKINDEX.tar.gz")
-	require.True(t, result.Matched)
+func TestAnalyzerDetectsAPKRoot(t *testing.T) {
+	result := (inspector{}).InspectPath("mirror/alpine/v3.20/main/x86_64/APKINDEX.tar.gz")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
 	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
-	require.Equal(t, "mirror/alpine/v3.20/main/x86_64", result.Root.ID)
+	require.Equal(t, "apk:mirror/alpine/v3.20/main/x86_64", result.Root.ID)
+	require.Equal(t, "mirror/alpine/v3.20/main/x86_64", result.Root.Path)
+	require.Equal(t, filerepo.LayoutAPK, result.Root.Layout)
+	require.Empty(t, result.Root.Attributes)
+}
+
+func TestAnalyzerDetectsRootLevelAPKRepository(t *testing.T) {
+	result := (inspector{}).InspectPath("APKINDEX.tar.gz")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
+	require.Equal(t, "apk:/", result.Root.ID)
+	require.Empty(t, result.Root.Path)
+	require.Equal(t, "/", result.Root.DisplayName)
+}
+
+func TestAnalyzerClassifiesAPKSignatureAsAuxiliary(t *testing.T) {
+	result := (inspector{}).InspectPath("mirror/alpine/v3.20/main/x86_64/APKINDEX.tar.gz.sig")
+	require.Equal(t, filerepo.ResourceAuxiliary, result.Class)
+	require.Equal(t, filerepo.DiscoveryIgnore, result.Role)
 }

@@ -208,10 +208,10 @@ func TestSetupCommandGeneration(t *testing.T) {
 		{"cargo", "http://cache/cargo", "{source_name}", "sparse+http://cache/cargo/"},
 		{"pypi", "http://cache/pypi", "{package}", "pip install --index-url http://cache/pypi/simple {package}"},
 		{"oci", "http://cache:5000", "must not include http:// or https://", "docker pull cache:5000/{image}:{tag}"},
-		{"apk", "http://cache/apk", "{alpine_branch}", "http://cache/apk/{alpine_branch}/{repository}"},
+		{"apk", "http://cache/apk", "APKINDEX.tar.gz", "http://cache/apk"},
 		{"deb", "http://cache/deb", "{distribution}", "deb http://cache/deb {distribution} {component}"},
-		{"rpm", "http://cache/rpm", "{releasever}", "baseurl=http://cache/rpm/{releasever}/{repository}/{arch}"},
-		{"pacman", "http://cache/pacman", "{repo}", "Server = http://cache/pacman/{repo}/os/{arch}"},
+		{"rpm", "http://cache/rpm", "repomd.xml", "baseurl=http://cache/rpm"},
+		{"pacman", "http://cache/pacman", "common layouts", "Server = http://cache/pacman"},
 		{"file", "http://cache/files", "Base URL", "http://cache/files"},
 	}
 	for _, tt := range tests {

@@ -22,7 +22,7 @@ type RepoBlock struct {
 	Policy          BasicPolicy             `yaml:",inline"`
 }
 
-func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor config.Freshness, defaultRefreshInterval time.Duration, classify func(string) ResourceClass, discover Discoverer, build SnapshotBuilder, rebuild CleanupIndexBuilder) error {
+func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor config.Freshness, defaultRefreshInterval time.Duration, inspector PathInspector, build SnapshotBuilder, rebuild CleanupIndexBuilder) error {
 	var block RepoBlock
 	if err := plan.Decode(&block); err != nil {
 		return err
@@ -49,7 +49,7 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	}
 	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats(), httpcache.ModeUserAgent(mode))
 	sh.SetBus(plan.Bus())
-	handler := NewIndexedHandler(plan.Name(), mode, mode, classify, upstreams, block.Transport, config.ExpirationNever, policy, discover, build, rebuild, plan.Store(), plan.Stats(), sh, plan.Downloads())
+	handler := NewIndexedHandler(plan.Name(), mode, mode, inspector, upstreams, block.Transport, config.ExpirationNever, policy, build, rebuild, plan.Store(), plan.Stats(), sh, plan.Downloads())
 	handler.SetBus(plan.Bus())
 
 	sched := plan.Scheduler()

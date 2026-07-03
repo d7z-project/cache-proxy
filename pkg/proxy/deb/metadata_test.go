@@ -42,36 +42,64 @@ func TestReleaseIndexTargetsPreferXZOverGZAndPlain(t *testing.T) {
 	}, targets[0].Candidates)
 }
 
-func TestDiscovererCreatesRootFromReleaseUnderPrefix(t *testing.T) {
-	result := (discoverer{}).Discover("proxmox/debian/pve/dists/trixie/InRelease")
-	require.True(t, result.Matched)
+func TestAnalyzerCreatesRootFromReleaseUnderPrefix(t *testing.T) {
+	result := (inspector{}).InspectPath("proxmox/debian/pve/dists/trixie/InRelease")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
 	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
-	require.Equal(t, "proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, "deb_distribution:proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, filerepo.LayoutDebDistribution, result.Root.Layout)
 	require.Equal(t, []string{
 		"proxmox/debian/pve/dists/trixie/InRelease",
 		"proxmox/debian/pve/dists/trixie/Release",
 	}, result.Root.PrimaryMetadata)
 }
 
-func TestDiscovererTreatsPackagesAsUpdateOnly(t *testing.T) {
-	result := (discoverer{}).Discover("proxmox/debian/pve/dists/trixie/pve-no-subscription/binary-amd64/Packages.gz")
-	require.True(t, result.Matched)
+func TestAnalyzerTreatsPackagesAsUpdateOnly(t *testing.T) {
+	result := (inspector{}).InspectPath("proxmox/debian/pve/dists/trixie/pve-no-subscription/binary-amd64/Packages.gz")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
 	require.Equal(t, filerepo.DiscoveryUpdateRoot, result.Role)
-	require.Equal(t, "proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, "deb_distribution:proxmox/debian/pve/dists/trixie", result.Root.ID)
 	require.Equal(t, []string{"pve-no-subscription"}, result.Root.Components)
 	require.Equal(t, []string{"amd64"}, result.Root.Architectures)
 }
 
-func TestDiscovererTreatsSourcesAsUpdateOnly(t *testing.T) {
-	result := (discoverer{}).Discover("proxmox/debian/pve/dists/trixie/pve-no-subscription/source/Sources.xz")
-	require.True(t, result.Matched)
+func TestAnalyzerTreatsSourcesAsUpdateOnly(t *testing.T) {
+	result := (inspector{}).InspectPath("proxmox/debian/pve/dists/trixie/pve-no-subscription/source/Sources.xz")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
 	require.Equal(t, filerepo.DiscoveryUpdateRoot, result.Role)
-	require.Equal(t, "proxmox/debian/pve/dists/trixie", result.Root.ID)
+	require.Equal(t, "deb_distribution:proxmox/debian/pve/dists/trixie", result.Root.ID)
 	require.Equal(t, []string{"pve-no-subscription"}, result.Root.Components)
 	require.True(t, result.Root.Source)
 }
 
-func TestDiscovererRejectsNonMetadataPath(t *testing.T) {
-	result := (discoverer{}).Discover("proxmox/debian/pve/pool/main/p/pkg/pkg_1.0_amd64.deb")
-	require.False(t, result.Matched)
+func TestAnalyzerCreatesFlatRootFromPackagesAtRepositoryRoot(t *testing.T) {
+	result := (inspector{}).InspectPath("Packages.gz")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
+	require.Equal(t, "deb_flat:/", result.Root.ID)
+	require.Equal(t, "/", result.Root.DisplayName)
+	require.Equal(t, filerepo.LayoutDebFlat, result.Root.Layout)
+	require.Equal(t, []string{"Packages.xz"}, result.Root.PrimaryMetadata[:1])
+}
+
+func TestAnalyzerCreatesFlatRootFromNestedSources(t *testing.T) {
+	result := (inspector{}).InspectPath("local/repo/Sources.xz")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
+	require.Equal(t, "deb_flat:local/repo", result.Root.ID)
+	require.Equal(t, "local/repo", result.Root.Path)
+	require.True(t, result.Root.Source)
+	require.Equal(t, []string{"local/repo/Sources.xz"}, result.Root.PrimaryMetadata[:1])
+}
+
+func TestAnalyzerClassifiesPrefixedArtifactPath(t *testing.T) {
+	result := (inspector{}).InspectPath("proxmox/debian/pve/pool/main/p/pkg/pkg_1.0_amd64.deb")
+	require.Equal(t, filerepo.ResourceArtifact, result.Class)
+	require.Equal(t, filerepo.DiscoveryIgnore, result.Role)
+}
+
+func TestAnalyzerClassifiesMetadataWithoutCreatingRoot(t *testing.T) {
+	result := (inspector{}).InspectPath("proxmox/debian/pve/dists/trixie/by-hash/SHA256/abcdef")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryIgnore, result.Role)
 }

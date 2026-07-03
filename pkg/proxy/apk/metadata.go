@@ -12,40 +12,53 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type discoverer struct{}
+type inspector struct{}
 
-func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
+func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
+	repoPath := root.Path
+	if repoPath == "" {
+		repoPath = "/"
+	}
+	root.Attributes = []filerepo.RepositoryAttribute{{LabelKey: "repo_path", Value: repoPath}}
+	return root
+}
+
+func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
+	switch {
+	case strings.HasSuffix(cleanPath, "/APKINDEX.tar.gz"), cleanPath == "APKINDEX.tar.gz":
+		return analyzeMetadataPath(cleanPath)
+	case strings.HasSuffix(cleanPath, "/APKINDEX.tar.gz.sig"), cleanPath == "APKINDEX.tar.gz.sig", strings.HasSuffix(cleanPath, ".apk.sig"), strings.HasSuffix(cleanPath, ".apk.asc"), strings.HasSuffix(cleanPath, ".apk.sha256"), strings.HasSuffix(cleanPath, ".apk.sha512"):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+	case strings.HasSuffix(cleanPath, ".apk"):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
+	default:
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
+	}
+}
+
+func analyzeMetadataPath(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) < 4 || parts[len(parts)-1] != "APKINDEX.tar.gz" {
-		return filerepo.DiscoveryResult{}
+	if path.Base(trimmed) != "APKINDEX.tar.gz" {
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
 	}
-	base := parts[len(parts)-4 : len(parts)-1]
-	for _, part := range base {
-		if part == "" {
-			return filerepo.DiscoveryResult{}
-		}
+	rootPath := strings.Trim(strings.TrimSpace(path.Dir(trimmed)), "/")
+	if rootPath == "." {
+		rootPath = ""
 	}
-	rootPath := strings.Join(parts[:len(parts)-1], "/")
+	displayName := rootPath
+	if displayName == "" {
+		displayName = "/"
+	}
 	return filerepo.DiscoveryResult{
-		Matched: true,
-		Role:    filerepo.DiscoveryCreateRoot,
+		Class: filerepo.ResourceMetadata,
+		Role:  filerepo.DiscoveryCreateRoot,
 		Root: filerepo.RepositoryRoot{
-			ID:              rootPath,
+			ID:              filerepo.RepositoryID(filerepo.LayoutAPK, rootPath),
 			Path:            rootPath,
-			DisplayName:     strings.Join(base, "/"),
+			DisplayName:     displayName,
+			Layout:          filerepo.LayoutAPK,
 			PrimaryMetadata: []string{path.Join(rootPath, "APKINDEX.tar.gz")},
 			Targets:         []filerepo.MetadataTarget{{URL: path.Join(rootPath, "APKINDEX.tar.gz")}},
-			Kind:            "apk",
-			Branch:          base[0],
-			Repo:            base[1],
-			Arch:            base[2],
-			Attributes: []filerepo.RepositoryAttribute{
-				{LabelKey: "repo_path", Value: rootPath},
-				{LabelKey: "branch", Value: base[0]},
-				{LabelKey: "repository", Value: base[1]},
-				{LabelKey: "architecture", Value: base[2]},
-			},
 		},
 	}
 }

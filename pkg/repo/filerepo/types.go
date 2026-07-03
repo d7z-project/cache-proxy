@@ -80,17 +80,38 @@ type RepositoryRoot struct {
 	ID              string                `yaml:"id"`
 	Path            string                `yaml:"path"`
 	DisplayName     string                `yaml:"display_name"`
+	Layout          string                `yaml:"layout,omitempty"`
 	PrimaryMetadata []string              `yaml:"primary_metadata,omitempty"`
 	Attributes      []RepositoryAttribute `yaml:"attributes,omitempty"`
 	Targets         []MetadataTarget      `yaml:"targets,omitempty"`
-	Kind            string                `yaml:"kind,omitempty"`
 	Suite           string                `yaml:"suite,omitempty"`
 	Components      []string              `yaml:"components,omitempty"`
 	Architectures   []string              `yaml:"architectures,omitempty"`
 	Source          bool                  `yaml:"source,omitempty"`
-	Branch          string                `yaml:"branch,omitempty"`
 	Repo            string                `yaml:"repo,omitempty"`
 	Arch            string                `yaml:"arch,omitempty"`
+}
+
+const (
+	LayoutDebDistribution = "deb_distribution"
+	LayoutDebFlat         = "deb_flat"
+	LayoutAPK             = "apk"
+	LayoutPacman          = "pacman"
+	LayoutRPM             = "rpm"
+)
+
+func RepositoryID(layout, rootPath string) string {
+	rootPath = strings.Trim(strings.TrimSpace(rootPath), "/")
+	if layout == "" {
+		if rootPath == "" {
+			return "/"
+		}
+		return rootPath
+	}
+	if rootPath == "" {
+		return layout + ":/"
+	}
+	return layout + ":" + rootPath
 }
 
 type LiveSnapshot struct {
@@ -293,13 +314,17 @@ const (
 )
 
 type DiscoveryResult struct {
-	Matched bool
-	Role    DiscoveryRole
-	Root    RepositoryRoot
+	Class ResourceClass
+	Role  DiscoveryRole
+	Root  RepositoryRoot
 }
 
-type Discoverer interface {
-	Discover(cleanPath string) DiscoveryResult
+type PathInspector interface {
+	InspectPath(cleanPath string) DiscoveryResult
+}
+
+type RootFinalizer interface {
+	FinalizeRoot(root RepositoryRoot) RepositoryRoot
 }
 
 func metadataStorePath(root, rootKey, generation, cleanPath string) string {

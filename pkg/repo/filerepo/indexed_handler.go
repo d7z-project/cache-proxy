@@ -29,11 +29,11 @@ type IndexedHandler struct {
 	objectRoot string
 	store      *blobfs.Store
 	stats      *httpcache.Stats
-	classifier func(string) ResourceClass
+	inspector  PathInspector
+	finalizer  RootFinalizer
 	base       *httpcache.Handler
 	client     *utils.HttpClientWrapper
 	upstreams  []string
-	discover   Discoverer
 	build      SnapshotBuilder
 	rebuild    CleanupIndexBuilder
 	sh         *health.ServiceHealth
@@ -47,7 +47,7 @@ type IndexedHandler struct {
 	wait          sync.WaitGroup
 }
 
-func NewIndexedHandler(name, mode, objectRoot string, classifier func(string) ResourceClass, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, discover Discoverer, builder SnapshotBuilder, rebuild CleanupIndexBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
+func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, rebuild CleanupIndexBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
 		name:          name,
@@ -55,14 +55,16 @@ func NewIndexedHandler(name, mode, objectRoot string, classifier func(string) Re
 		objectRoot:    objectRoot,
 		store:         store,
 		stats:         stats,
-		classifier:    classifier,
+		inspector:     inspector,
 		upstreams:     append([]string(nil), upstreams...),
-		discover:      discover,
 		build:         builder,
 		rebuild:       rebuild,
 		sh:            svcHealth,
 		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
+	}
+	if finalizer, ok := inspector.(RootFinalizer); ok {
+		handler.finalizer = finalizer
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:            mode,
@@ -87,13 +89,14 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.base.ProxyPassthrough(w, req, "", "")
 		return
 	}
-	class := h.classify(cleanPath)
+	analysis := h.inspect(cleanPath)
+	class := analysis.Class
 	if class == ResourceUnknown {
 		h.base.ProxyPassthrough(w, req, cleanPath, h.currentPreferredUpstream())
 		return
 	}
 	if class == ResourceMetadata {
-		rootID, created := h.discoverRoot(cleanPath)
+		rootID, created := h.registerRoot(analysis)
 		if h.tryServeMetadata(w, req, cleanPath) {
 			return
 		}
@@ -134,11 +137,11 @@ func (h *IndexedHandler) Stop(ctx context.Context) error {
 	return h.base.CloseContext(ctx)
 }
 
-func (h *IndexedHandler) classify(cleanPath string) ResourceClass {
-	if h.classifier == nil {
-		return ResourceAuxiliary
+func (h *IndexedHandler) inspect(cleanPath string) DiscoveryResult {
+	if h.inspector == nil {
+		return DiscoveryResult{Class: ResourceAuxiliary}
 	}
-	return h.classifier(cleanPath)
+	return h.inspector.InspectPath(cleanPath)
 }
 
 func (h *IndexedHandler) rootSnapshot(rootKey string) *LiveSnapshot {

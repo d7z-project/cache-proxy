@@ -19,6 +19,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func newTestStore(t *testing.T) *blobfs.Store {
@@ -36,21 +37,20 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 		"repo",
 		"test",
 		"repo",
-		func(cleanPath string) ResourceClass {
+		staticInspector(func(cleanPath string) DiscoveryResult {
 			switch {
 			case strings.HasPrefix(cleanPath, "meta/"):
-				return ResourceMetadata
+				return DiscoveryResult{Class: ResourceMetadata}
 			case strings.HasSuffix(cleanPath, ".sig"):
-				return ResourceAuxiliary
+				return DiscoveryResult{Class: ResourceAuxiliary}
 			default:
-				return ResourceArtifact
+				return DiscoveryResult{Class: ResourceArtifact}
 			}
-		},
+		}),
 		upstreams,
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		nil,
 		builder,
 		rebuild,
 		store,
@@ -62,10 +62,23 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 	return handler
 }
 
-type staticDiscoverer func(string) DiscoveryResult
+type staticInspector func(string) DiscoveryResult
 
-func (d staticDiscoverer) Discover(cleanPath string) DiscoveryResult {
+func (d staticInspector) InspectPath(cleanPath string) DiscoveryResult {
 	return d(cleanPath)
+}
+
+type finalizingInspector struct {
+	inspect func(string) DiscoveryResult
+}
+
+func (i finalizingInspector) InspectPath(cleanPath string) DiscoveryResult {
+	return i.inspect(cleanPath)
+}
+
+func (finalizingInspector) FinalizeRoot(root RepositoryRoot) RepositoryRoot {
+	root.Attributes = []RepositoryAttribute{{LabelKey: "repo_path", Value: root.Path}, {LabelKey: "layout", Value: root.Layout}}
+	return root
 }
 
 func testRepositoryRoot(id, metadataPath string) RepositoryRoot {
@@ -138,18 +151,17 @@ func TestDiscoverRootIgnoresUpdateOnlyRootCreation(t *testing.T) {
 		"repo",
 		"test",
 		"repo",
-		func(string) ResourceClass { return ResourceMetadata },
+		staticInspector(func(string) DiscoveryResult {
+			return DiscoveryResult{
+				Class: ResourceMetadata,
+				Role:  DiscoveryUpdateRoot,
+				Root:  testRepositoryRoot("root", "meta/index.txt"),
+			}
+		}),
 		[]string{"https://upstream.example"},
 		nil,
 		config.Expiration(time.Hour),
 		&Policy{},
-		staticDiscoverer(func(string) DiscoveryResult {
-			return DiscoveryResult{
-				Matched: true,
-				Role:    DiscoveryUpdateRoot,
-				Root:    testRepositoryRoot("root", "meta/index.txt"),
-			}
-		}),
 		nil,
 		nil,
 		store,
@@ -158,7 +170,7 @@ func TestDiscoverRootIgnoresUpdateOnlyRootCreation(t *testing.T) {
 		nil,
 	)
 
-	rootID, created := handler.discoverRoot("meta/index.txt")
+	rootID, created := handler.registerRoot(handler.inspect("meta/index.txt"))
 	require.Equal(t, "root", rootID)
 	require.False(t, created)
 	require.Empty(t, handler.RepositoryStatuses())
@@ -167,10 +179,10 @@ func TestDiscoverRootIgnoresUpdateOnlyRootCreation(t *testing.T) {
 func TestDiscoverRootMergesExistingRepositoryDetails(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil, nil)
-	handler.discover = staticDiscoverer(func(string) DiscoveryResult {
+	handler.inspector = staticInspector(func(string) DiscoveryResult {
 		return DiscoveryResult{
-			Matched: true,
-			Role:    DiscoveryUpdateRoot,
+			Class: ResourceMetadata,
+			Role:  DiscoveryUpdateRoot,
 			Root: RepositoryRoot{
 				ID:            "root",
 				Path:          "root",
@@ -185,12 +197,61 @@ func TestDiscoverRootMergesExistingRepositoryDetails(t *testing.T) {
 		}
 	})
 
-	rootID, created := handler.discoverRoot("meta/index.txt")
+	rootID, created := handler.registerRoot(handler.inspect("meta/index.txt"))
 	require.Equal(t, "root", rootID)
 	require.False(t, created)
 	statuses := handler.RepositoryStatuses()
 	require.Len(t, statuses, 1)
 	require.Equal(t, "amd64", statuses[0].Attributes[1].Value)
+}
+
+func TestRegisterRootFinalizesMergedRoot(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewIndexedHandler(
+		"repo",
+		"test",
+		"repo",
+		finalizingInspector{inspect: func(string) DiscoveryResult {
+			return DiscoveryResult{
+				Class: ResourceMetadata,
+				Role:  DiscoveryCreateRoot,
+				Root: RepositoryRoot{
+					ID:     "flat:/",
+					Path:   "",
+					Layout: "flat",
+				},
+			}
+		}},
+		[]string{"https://upstream.example"},
+		nil,
+		config.Expiration(time.Hour),
+		&Policy{},
+		nil,
+		nil,
+		store,
+		httpcache.NewStats(prometheus.NewRegistry()),
+		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, nil, "cache-proxy-test"),
+		nil,
+	)
+
+	rootID, created := handler.registerRoot(handler.inspect("meta/index.txt"))
+	require.Equal(t, "flat:/", rootID)
+	require.True(t, created)
+	handler.mu.RLock()
+	entry := handler.roots[rootID]
+	handler.mu.RUnlock()
+	require.NotNil(t, entry)
+	require.Equal(t, "", entry.root.Path)
+	require.Equal(t, []RepositoryAttribute{
+		{LabelKey: "repo_path", Value: ""},
+		{LabelKey: "layout", Value: "flat"},
+	}, entry.root.Attributes)
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, []runtime.RepositoryAttribute{
+		{LabelKey: "repo_path", Value: ""},
+		{LabelKey: "layout", Value: "flat"},
+	}, statuses[0].Attributes)
 }
 
 func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {

@@ -13,32 +13,58 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type discoverer struct{}
+type inspector struct{}
 
-func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
+func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
+	repoPath := root.Path
+	if repoPath == "" {
+		repoPath = "/"
+	}
+	attrs := []filerepo.RepositoryAttribute{{LabelKey: "repo_path", Value: repoPath}}
+	if len(root.PrimaryMetadata) > 0 {
+		attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "primary_metadata", Value: root.PrimaryMetadata[0]})
+	}
+	root.Attributes = attrs
+	return root
+}
+
+func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
+	switch {
+	case strings.HasPrefix(cleanPath, "repodata/"), strings.Contains(cleanPath, "/repodata/"), strings.HasSuffix(cleanPath, "/repomd.xml"), cleanPath == "repomd.xml", strings.HasSuffix(cleanPath, "/mirrorlist"), cleanPath == "mirrorlist", strings.HasSuffix(cleanPath, "/metalink"), cleanPath == "metalink":
+		return analyzeMetadataPath(cleanPath)
+	case strings.HasSuffix(cleanPath, ".rpm"), strings.HasSuffix(cleanPath, ".drpm"):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
+	case strings.HasSuffix(cleanPath, ".sig"), strings.HasSuffix(cleanPath, ".asc"), strings.HasSuffix(cleanPath, ".sha256"), strings.HasSuffix(cleanPath, ".sha512"), strings.HasSuffix(cleanPath, ".md5"):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+	default:
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
+	}
+}
+
+func analyzeMetadataPath(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
-	if !strings.HasSuffix(trimmed, "/repodata/repomd.xml") {
-		return filerepo.DiscoveryResult{}
+	if trimmed != "repodata/repomd.xml" && !strings.HasSuffix(trimmed, "/repodata/repomd.xml") {
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
 	}
 	repoPath := strings.TrimSuffix(trimmed, "/repodata/repomd.xml")
+	if repoPath == trimmed {
+		repoPath = ""
+	}
 	repoPath = strings.Trim(repoPath, "/")
-	if repoPath == "" {
-		return filerepo.DiscoveryResult{}
+	displayName := repoPath
+	if displayName == "" {
+		displayName = "/"
 	}
 	return filerepo.DiscoveryResult{
-		Matched: true,
-		Role:    filerepo.DiscoveryCreateRoot,
+		Class: filerepo.ResourceMetadata,
+		Role:  filerepo.DiscoveryCreateRoot,
 		Root: filerepo.RepositoryRoot{
-			ID:              repoPath,
+			ID:              filerepo.RepositoryID(filerepo.LayoutRPM, repoPath),
 			Path:            repoPath,
-			DisplayName:     repoPath,
+			DisplayName:     displayName,
+			Layout:          filerepo.LayoutRPM,
 			PrimaryMetadata: []string{path.Join(repoPath, "repodata", "repomd.xml")},
 			Targets:         []filerepo.MetadataTarget{{URL: path.Join(repoPath, "repodata", "repomd.xml")}},
-			Kind:            "rpm",
-			Attributes: []filerepo.RepositoryAttribute{
-				{LabelKey: "repo_path", Value: repoPath},
-				{LabelKey: "primary_metadata", Value: path.Join(repoPath, "repodata", "repomd.xml")},
-			},
 		},
 	}
 }

@@ -24,6 +24,7 @@ type homeRepositoryAttribute struct {
 type homeRepository struct {
 	DisplayName     string
 	Path            string
+	Layout          string
 	PrimaryMetadata string
 	Generation      string
 	Published       string
@@ -174,7 +175,11 @@ func buildHomeRepository(repository proxyruntime.RepositoryStatus, i18n map[stri
 	state := repositoryStateLabelKey(repository)
 	attributes := make([]homeRepositoryAttribute, len(repository.Attributes))
 	for i, attr := range repository.Attributes {
-		attributes[i] = homeRepositoryAttribute{Label: i18nStr(i18n, attr.LabelKey), Value: attr.Value}
+		label := i18nStr(i18n, attr.LabelKey)
+		if label == "" {
+			label = attr.LabelKey
+		}
+		attributes[i] = homeRepositoryAttribute{Label: label, Value: attr.Value}
 	}
 	displayName := repository.DisplayName
 	if displayName == "" {
@@ -183,9 +188,21 @@ func buildHomeRepository(repository proxyruntime.RepositoryStatus, i18n map[stri
 	if displayName == "" {
 		displayName = repository.ID
 	}
+	rootPath := repository.Path
+	if rootPath == "" {
+		rootPath = "/"
+	}
+	layout := ""
+	if repository.Layout != "" {
+		layout = i18nStr(i18n, "repository_layout_"+repository.Layout)
+		if layout == "" {
+			layout = repository.Layout
+		}
+	}
 	return homeRepository{
 		DisplayName:     displayName,
-		Path:            repository.Path,
+		Path:            rootPath,
+		Layout:          layout,
 		PrimaryMetadata: strings.Join(repository.PrimaryMetadata, ", "),
 		Generation:      repositoryGenerationLabel(repository, i18n),
 		Published:       pub,
@@ -309,13 +326,14 @@ func setupCommand(mode, url string) (note, cmd string) {
 			"docker pull " + registry + "/{image}:{tag}\n" +
 				"podman pull " + registry + "/{image}:{tag}"
 	case "apk":
-		return "# Replace {alpine_branch} and {repository}", url + "/{alpine_branch}/{repository}"
+		return "# Repository URL; apk fetches APKINDEX.tar.gz from this directory", url
 	case "deb":
-		return "# Replace {distribution} and {component}", "deb " + url + " {distribution} {component}"
+		return "# Standard repo: replace {distribution} and {component}\n# Flat repo: use ./ as suite with an exact path URL", "deb " + url + " {distribution} {component}\n" +
+			"deb [trusted=yes] file:///absolute/path/to/repo ./"
 	case "rpm":
-		return "# Replace {releasever}, {repository}, and {arch}", "baseurl=" + url + "/{releasever}/{repository}/{arch}"
+		return "# Repository base URL; DNF/YUM will fetch repodata/repomd.xml below it", "baseurl=" + url
 	case "pacman":
-		return "# Replace {repo} and {arch}", "Server = " + url + "/{repo}/os/{arch}"
+		return "# Repository base URL; common layouts may still include $repo/os/$arch", "Server = " + url
 	default:
 		return "# Base URL for file access", url
 	}

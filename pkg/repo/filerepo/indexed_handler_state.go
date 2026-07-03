@@ -25,16 +25,13 @@ func (h *IndexedHandler) weightedUpstreams() []string {
 	return upstreams
 }
 
-func (h *IndexedHandler) discoverRoot(cleanPath string) (string, bool) {
-	if h.discover == nil {
-		return "", false
-	}
-	result := h.discover.Discover(cleanPath)
-	if !result.Matched || result.Role == DiscoveryIgnore || result.Root.ID == "" {
+func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool) {
+	if result.Class != ResourceMetadata || result.Role == DiscoveryIgnore || result.Root.ID == "" {
 		return "", false
 	}
 
 	rootID := result.Root.ID
+	root := h.finalizeRoot(result.Root)
 	created := false
 	changed := false
 
@@ -42,9 +39,9 @@ func (h *IndexedHandler) discoverRoot(cleanPath string) (string, bool) {
 	entry, exists := h.roots[rootID]
 	switch {
 	case exists:
-		changed = mergeRepositoryRoot(&entry.root, result.Root)
+		changed = h.mergeAndFinalizeRoot(&entry.root, root)
 	case result.Role == DiscoveryCreateRoot:
-		h.roots[rootID] = &rootEntry{root: result.Root}
+		h.roots[rootID] = &rootEntry{root: root}
 		created = true
 		changed = true
 	}
@@ -76,24 +73,18 @@ func mergeRepositoryRoot(current *RepositoryRoot, next RepositoryRoot) bool {
 		current.DisplayName = next.DisplayName
 		changed = true
 	}
-	if current.Kind == "" && next.Kind != "" {
-		current.Kind = next.Kind
+	if current.Layout == "" && next.Layout != "" {
+		current.Layout = next.Layout
 		changed = true
 	}
-	if len(next.PrimaryMetadata) > 0 && !equalStringSlices(current.PrimaryMetadata, next.PrimaryMetadata) {
-		current.PrimaryMetadata = append([]string(nil), next.PrimaryMetadata...)
+	if mergeOrderedStrings(&current.PrimaryMetadata, next.PrimaryMetadata) {
 		changed = true
 	}
-	if len(next.Targets) > 0 && !equalTargets(current.Targets, next.Targets) {
-		current.Targets = append([]MetadataTarget(nil), next.Targets...)
+	if mergeTargets(&current.Targets, next.Targets) {
 		changed = true
 	}
 	if current.Suite == "" && next.Suite != "" {
 		current.Suite = next.Suite
-		changed = true
-	}
-	if current.Branch == "" && next.Branch != "" {
-		current.Branch = next.Branch
 		changed = true
 	}
 	if current.Repo == "" && next.Repo != "" {
@@ -136,6 +127,53 @@ func mergeStringSet(dst *[]string, src []string) bool {
 	return changed
 }
 
+func mergeOrderedStrings(dst *[]string, src []string) bool {
+	changed := false
+	for _, item := range src {
+		if item == "" || slices.Contains(*dst, item) {
+			continue
+		}
+		*dst = append(*dst, item)
+		changed = true
+	}
+	return changed
+}
+
+func mergeTargets(dst *[]MetadataTarget, src []MetadataTarget) bool {
+	changed := false
+	for _, item := range src {
+		if item.URL == "" {
+			continue
+		}
+		matched := false
+		for i := range *dst {
+			current := &(*dst)[i]
+			if current.URL != item.URL {
+				continue
+			}
+			matched = true
+			if mergeOrderedStrings(&current.Candidates, item.Candidates) {
+				changed = true
+			}
+			if current.Repo == "" && item.Repo != "" {
+				current.Repo = item.Repo
+				changed = true
+			}
+			if current.Arch == "" && item.Arch != "" {
+				current.Arch = item.Arch
+				changed = true
+			}
+			break
+		}
+		if matched {
+			continue
+		}
+		*dst = append(*dst, item)
+		changed = true
+	}
+	return changed
+}
+
 func equalStringSlices(left, right []string) bool {
 	return slices.Equal(left, right)
 }
@@ -160,9 +198,10 @@ func (h *IndexedHandler) AddRepository(root RepositoryRoot) {
 	if root.ID == "" {
 		return
 	}
+	root = h.finalizeRoot(root)
 	h.mu.Lock()
 	if entry, ok := h.roots[root.ID]; ok {
-		mergeRepositoryRoot(&entry.root, root)
+		h.mergeAndFinalizeRoot(&entry.root, root)
 		h.mu.Unlock()
 		return
 	}
@@ -171,6 +210,39 @@ func (h *IndexedHandler) AddRepository(root RepositoryRoot) {
 	if h.sh != nil {
 		h.sh.AddResource(root.ID, targetsToProbe(root.Targets), h.upstreams)
 	}
+}
+
+func (h *IndexedHandler) finalizeRoot(root RepositoryRoot) RepositoryRoot {
+	if h == nil || h.finalizer == nil {
+		return root
+	}
+	return h.finalizer.FinalizeRoot(root)
+}
+
+func (h *IndexedHandler) mergeAndFinalizeRoot(current *RepositoryRoot, next RepositoryRoot) bool {
+	changed := mergeRepositoryRoot(current, next)
+	finalized := h.finalizeRoot(*current)
+	if equalRoots(*current, finalized) {
+		return changed
+	}
+	*current = finalized
+	return true
+}
+
+func equalRoots(left, right RepositoryRoot) bool {
+	return left.ID == right.ID &&
+		left.Path == right.Path &&
+		left.DisplayName == right.DisplayName &&
+		left.Layout == right.Layout &&
+		left.Suite == right.Suite &&
+		left.Source == right.Source &&
+		left.Repo == right.Repo &&
+		left.Arch == right.Arch &&
+		slices.Equal(left.PrimaryMetadata, right.PrimaryMetadata) &&
+		slices.Equal(left.Components, right.Components) &&
+		slices.Equal(left.Architectures, right.Architectures) &&
+		equalTargets(left.Targets, right.Targets) &&
+		equalAttributes(left.Attributes, right.Attributes)
 }
 
 func (h *IndexedHandler) rebuildAggregateLocked() {
@@ -257,6 +329,7 @@ func (h *IndexedHandler) RepositoryStatuses() []runtime.RepositoryStatus {
 			ID:              rootID,
 			Path:            entry.root.Path,
 			DisplayName:     entry.root.DisplayName,
+			Layout:          entry.root.Layout,
 			PrimaryMetadata: append([]string(nil), entry.root.PrimaryMetadata...),
 			Attributes:      toRuntimeAttributes(entry.root.Attributes),
 		}

@@ -162,6 +162,7 @@ func TestHomePageRepositoryGenerationUsesReadableLabel(t *testing.T) {
 				ID:            "core/os/x86_64",
 				Path:          "core/os/x86_64",
 				DisplayName:   "core/os/x86_64",
+				Layout:        "pacman",
 				Generation:    "djmsm2bdzupd",
 				HasCurrent:    true,
 				State:         "active",
@@ -193,6 +194,7 @@ func TestHomePageRepositoryGenerationUsesReadableLabel(t *testing.T) {
 	require.Contains(t, body, "代次 djmsm2bdzupd")
 	require.Contains(t, body, "title=\"代次 djmsm2bdzupd\"")
 	require.Contains(t, body, "根路径")
+	require.Contains(t, body, "Pacman 仓库")
 }
 
 func TestHomePageRendersStatusModalControls(t *testing.T) {
@@ -423,18 +425,22 @@ func TestBuildHomeRepositoryUsesFallbackLabels(t *testing.T) {
 		ID:            "core/os/x86_64",
 		Path:          "core/os/x86_64",
 		DisplayName:   "core/os/x86_64",
+		Layout:        "pacman",
 		ArtifactCount: 42,
 		Upstream:      "https://mirror.example.test/root",
 	}, i18nMaps["en"], now)
 	require.Equal(t, "Generation None", repository.Generation)
 	require.Equal(t, "Booting", repository.StateLabel)
 	require.Equal(t, "mirror.example.test", repository.Upstream)
+	require.Equal(t, "Pacman Repository", repository.Layout)
 
 	repository = buildHomeRepository(proxyruntime.RepositoryStatus{
-		ID:          "core/os/x86_64",
-		Path:        "core/os/x86_64",
-		DisplayName: "core/os/x86_64",
+		ID:          "deb_flat:/",
+		DisplayName: "/",
+		Layout:      "deb_flat",
 		HasCurrent:  true,
 	}, i18nMaps["en"], now)
 	require.Equal(t, "Pending", repository.StateLabel)
+	require.Equal(t, "/", repository.Path)
+	require.Equal(t, "Debian Flat", repository.Layout)
 }

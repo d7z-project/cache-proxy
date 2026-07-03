@@ -127,6 +127,7 @@
           <div class="release-row">
             <div class="release-row-top">
               <span class="release-key" title="{{.Path}}">{{.DisplayName}}</span>
+              {{if .Layout}}<span class="badge">{{.Layout}}</span>{{end}}
               <span class="release-gen" title="{{.Generation}}">{{.Generation}}</span>
               <span class="dot dot-{{.StateColor}}"></span>
               <span class="release-state">{{.StateLabel}}</span>

@@ -14,9 +14,57 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type discoverer struct{}
+type inspector struct{}
 
-func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
+func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
+	repoPath := root.Path
+	if repoPath == "" {
+		repoPath = "/"
+	}
+	attrs := []filerepo.RepositoryAttribute{{LabelKey: "repo_path", Value: repoPath}}
+	switch root.Layout {
+	case filerepo.LayoutDebDistribution:
+		if root.Suite != "" {
+			attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "suite", Value: root.Suite})
+		}
+		if len(root.Components) > 0 {
+			attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "components", Value: strings.Join(root.Components, ", ")})
+		}
+		if len(root.Architectures) > 0 {
+			attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "architectures", Value: strings.Join(root.Architectures, ", ")})
+		}
+		if root.Source {
+			attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "source_packages", Value: "yes"})
+		}
+	case filerepo.LayoutDebFlat:
+		if root.Source {
+			attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "source_packages", Value: "yes"})
+		}
+	}
+	root.Attributes = attrs
+	return root
+}
+
+func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
+	if result, ok := analyzeDistributionMetadataPath(cleanPath); ok {
+		return result
+	}
+	if result, ok := analyzeFlatMetadataPath(cleanPath); ok {
+		return result
+	}
+	if strings.Contains(strings.Trim(strings.TrimSpace(cleanPath), "/"), "/by-hash/") {
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
+	}
+	if isDebArtifactPath(cleanPath) {
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
+	}
+	if isDebAuxiliaryPath(cleanPath) {
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+	}
+	return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
+}
+
+func analyzeDistributionMetadataPath(cleanPath string) (filerepo.DiscoveryResult, bool) {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
 	parts := strings.Split(trimmed, "/")
 	for i := len(parts) - 3; i >= 0; i-- {
@@ -25,9 +73,9 @@ func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
 		}
 		suite := parts[i+1]
 		rootPath := strings.Join(parts[:i+2], "/")
-		root := debRepositoryRoot(rootPath, suite, nil, nil, false)
+		root := debDistributionRoot(rootPath, suite, nil, nil, false)
 		if i+2 == len(parts)-1 && (parts[i+2] == "InRelease" || parts[i+2] == "Release") {
-			return filerepo.DiscoveryResult{Matched: true, Role: filerepo.DiscoveryCreateRoot, Root: root}
+			return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryCreateRoot, Root: root}, true
 		}
 		if i+4 >= len(parts) {
 			continue
@@ -39,54 +87,129 @@ func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
 		case strings.HasPrefix(segment, "binary-") && strings.HasPrefix(fileName, "Packages"):
 			arch := strings.TrimPrefix(segment, "binary-")
 			if component == "" || arch == "" {
-				return filerepo.DiscoveryResult{}
+				return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
 			}
-			root = debRepositoryRoot(rootPath, suite, []string{component}, []string{arch}, false)
-			return filerepo.DiscoveryResult{Matched: true, Role: filerepo.DiscoveryUpdateRoot, Root: root}
+			root = debDistributionRoot(rootPath, suite, []string{component}, []string{arch}, false)
+			return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryUpdateRoot, Root: root}, true
 		case segment == "source" && strings.HasPrefix(fileName, "Sources"):
 			if component == "" {
-				return filerepo.DiscoveryResult{}
+				return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
 			}
-			root = debRepositoryRoot(rootPath, suite, []string{component}, nil, true)
-			return filerepo.DiscoveryResult{Matched: true, Role: filerepo.DiscoveryUpdateRoot, Root: root}
+			root = debDistributionRoot(rootPath, suite, []string{component}, nil, true)
+			return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryUpdateRoot, Root: root}, true
 		}
 	}
-	return filerepo.DiscoveryResult{}
+	return filerepo.DiscoveryResult{}, false
 }
 
-func debRepositoryRoot(rootPath, suite string, components, arches []string, source bool) filerepo.RepositoryRoot {
+func analyzeFlatMetadataPath(cleanPath string) (filerepo.DiscoveryResult, bool) {
+	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
+	fileName := path.Base(trimmed)
+	kind := debFlatMetadataKind(fileName)
+	if kind == "" {
+		return filerepo.DiscoveryResult{}, false
+	}
+	rootPath := strings.Trim(strings.TrimSpace(path.Dir(trimmed)), "/")
+	if rootPath == "." {
+		rootPath = ""
+	}
+	root := debFlatRoot(rootPath, kind == "sources")
+	switch kind {
+	case "release", "packages", "sources":
+		root.Targets = []filerepo.MetadataTarget{debFlatIndexTarget(rootPath, kind)}
+		root.PrimaryMetadata = []string{root.Targets[0].URL}
+		if kind == "release" {
+			root.PrimaryMetadata = []string{path.Join(rootPath, "InRelease"), path.Join(rootPath, "Release")}
+		}
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryCreateRoot, Root: root}, true
+	default:
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
+	}
+}
+
+func isDebArtifactPath(cleanPath string) bool {
+	cleanPath = strings.Trim(strings.TrimSpace(cleanPath), "/")
+	if cleanPath == "" || !(strings.HasSuffix(cleanPath, ".deb") || strings.HasSuffix(cleanPath, ".udeb") || strings.HasSuffix(cleanPath, ".ddeb") || strings.HasSuffix(cleanPath, ".dsc") || strings.Contains(cleanPath, ".orig.tar.") || strings.Contains(cleanPath, ".debian.tar.") || strings.HasSuffix(cleanPath, ".diff.gz")) {
+		return false
+	}
+	return cleanPath == "pool" || strings.HasPrefix(cleanPath, "pool/") || strings.Contains(cleanPath, "/pool/")
+}
+
+func isDebAuxiliaryPath(cleanPath string) bool {
+	return strings.HasSuffix(cleanPath, ".gpg") || strings.HasSuffix(cleanPath, ".sig") || strings.HasSuffix(cleanPath, ".asc") || strings.HasSuffix(cleanPath, ".sha256") || strings.HasSuffix(cleanPath, ".sha512") || strings.HasSuffix(cleanPath, ".md5sum")
+}
+
+func debDistributionRoot(rootPath, suite string, components, arches []string, source bool) filerepo.RepositoryRoot {
 	sort.Strings(components)
 	sort.Strings(arches)
 	root := filerepo.RepositoryRoot{
-		ID:              rootPath,
+		ID:              filerepo.RepositoryID(filerepo.LayoutDebDistribution, rootPath),
 		Path:            rootPath,
 		DisplayName:     suite,
+		Layout:          filerepo.LayoutDebDistribution,
 		PrimaryMetadata: []string{path.Join(rootPath, "InRelease"), path.Join(rootPath, "Release")},
 		Targets: []filerepo.MetadataTarget{{
 			URL:        path.Join(rootPath, "InRelease"),
 			Candidates: []string{path.Join(rootPath, "Release")},
 			Kind:       "release",
 		}},
-		Kind:          "deb",
 		Suite:         suite,
 		Components:    append([]string(nil), components...),
 		Architectures: append([]string(nil), arches...),
 		Source:        source,
 	}
-	root.Attributes = []filerepo.RepositoryAttribute{
-		{LabelKey: "repo_path", Value: rootPath},
-		{LabelKey: "suite", Value: suite},
+	return root
+}
+
+func debFlatRoot(rootPath string, source bool) filerepo.RepositoryRoot {
+	displayName := rootPath
+	if displayName == "" {
+		displayName = "/"
 	}
-	if len(components) > 0 {
-		root.Attributes = append(root.Attributes, filerepo.RepositoryAttribute{LabelKey: "components", Value: strings.Join(components, ", ")})
-	}
-	if len(arches) > 0 {
-		root.Attributes = append(root.Attributes, filerepo.RepositoryAttribute{LabelKey: "architectures", Value: strings.Join(arches, ", ")})
-	}
-	if source {
-		root.Attributes = append(root.Attributes, filerepo.RepositoryAttribute{LabelKey: "source_packages", Value: "yes"})
+	root := filerepo.RepositoryRoot{
+		ID:          filerepo.RepositoryID(filerepo.LayoutDebFlat, rootPath),
+		Path:        rootPath,
+		DisplayName: displayName,
+		Layout:      filerepo.LayoutDebFlat,
+		Source:      source,
 	}
 	return root
+}
+
+func debFlatMetadataKind(fileName string) string {
+	switch {
+	case fileName == "InRelease" || fileName == "Release":
+		return "release"
+	case strings.HasPrefix(fileName, "Packages"):
+		return "packages"
+	case strings.HasPrefix(fileName, "Sources"):
+		return "sources"
+	default:
+		return ""
+	}
+}
+
+func debFlatIndexTarget(rootPath, kind string) filerepo.MetadataTarget {
+	switch kind {
+	case "release":
+		return filerepo.MetadataTarget{
+			URL:        path.Join(rootPath, "InRelease"),
+			Candidates: []string{path.Join(rootPath, "Release")},
+			Kind:       "release",
+		}
+	case "sources":
+		return filerepo.MetadataTarget{
+			URL:        path.Join(rootPath, "Sources.xz"),
+			Candidates: []string{path.Join(rootPath, "Sources.gz"), path.Join(rootPath, "Sources")},
+			Kind:       "sources",
+		}
+	default:
+		return filerepo.MetadataTarget{
+			URL:        path.Join(rootPath, "Packages.xz"),
+			Candidates: []string{path.Join(rootPath, "Packages.gz"), path.Join(rootPath, "Packages")},
+			Kind:       "packages",
+		}
+	}
 }
 
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
@@ -95,73 +218,138 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	artifactCount := 0
 	for _, target := range session.Targets() {
-		if target.Kind != "release" {
-			return nil, fmt.Errorf("%s: unsupported seed metadata target kind %q", target.URL, target.Kind)
-		}
-		blob, err := session.Fetch(ctx, target)
-		if err != nil {
-			return nil, err
-		}
-		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-		for _, candidate := range append([]string{target.URL}, target.Candidates...) {
-			if candidate != blob.Path {
-				snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: blob.Path, Required: false}
-			}
-		}
-		if strings.HasSuffix(blob.Path, "/Release") {
-			for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
-				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-					return nil, err
-				} else if companion.Path != "" {
-					snapshot.Metadata[companion.Path] = companion
-				}
-			}
-		}
-		releaseSums, err := parseReleaseSHA256(blob)
-		if err != nil {
-			session.Release(target)
-			return nil, err
-		}
-		session.Release(target)
-
-		targets := releaseIndexTargets(blob.Path, releaseSums)
-		if len(targets) == 0 {
-			return nil, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
-		}
-		for _, indexTarget := range targets {
-			indexBlob, err := session.Fetch(ctx, indexTarget)
+		switch target.Kind {
+		case "release":
+			blob, err := session.Fetch(ctx, target)
 			if err != nil {
 				return nil, err
 			}
-			if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
+			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
+			for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+				if candidate != blob.Path {
+					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: blob.Path, Required: false}
+				}
+			}
+			if strings.HasSuffix(blob.Path, "/Release") {
+				for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
+					if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+						return nil, err
+					} else if companion.Path != "" {
+						snapshot.Metadata[companion.Path] = companion
+					}
+				}
+			}
+			releaseSums, err := parseReleaseSHA256(blob)
+			if err != nil {
+				session.Release(target)
+				return nil, err
+			}
+			session.Release(target)
+
+			targets := releaseIndexTargets(blob.Path, releaseSums)
+			if len(targets) == 0 {
+				return nil, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
+			}
+			for _, indexTarget := range targets {
+				indexBlob, err := session.Fetch(ctx, indexTarget)
+				if err != nil {
+					return nil, err
+				}
+				if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
+					return nil, err
+				}
+				snapshot.Metadata[indexBlob.Path] = filerepo.MetadataObject{Path: indexBlob.Path, Required: true}
+				for _, candidate := range append([]string{indexTarget.URL}, indexTarget.Candidates...) {
+					if candidate != indexBlob.Path {
+						snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: indexBlob.Path, Required: false}
+					}
+				}
+				blobReader, err := indexBlob.Open()
+				if err != nil {
+					session.Release(indexTarget)
+					return nil, err
+				}
+				reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
+				if err != nil {
+					session.Release(indexTarget)
+					return nil, err
+				}
+				if indexTarget.Kind == "packages" {
+					artifactCount, err = parsePackages(reader, paths, artifactCount)
+				} else {
+					artifactCount, err = parseSources(reader, paths, artifactCount)
+				}
+				_ = reader.Close()
+				session.Release(indexTarget)
+				if err != nil {
+					return nil, err
+				}
+			}
+		case "packages", "sources":
+			indexBlob, err := session.Fetch(ctx, target)
+			if err != nil {
 				return nil, err
 			}
 			snapshot.Metadata[indexBlob.Path] = filerepo.MetadataObject{Path: indexBlob.Path, Required: true}
-			for _, candidate := range append([]string{indexTarget.URL}, indexTarget.Candidates...) {
+			for _, candidate := range append([]string{target.URL}, target.Candidates...) {
 				if candidate != indexBlob.Path {
 					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: indexBlob.Path, Required: false}
 				}
 			}
+			rootPath := strings.Trim(strings.TrimSpace(path.Dir(indexBlob.Path)), "/")
+			if rootPath == "." {
+				rootPath = ""
+			}
+			releaseTarget := debFlatIndexTarget(rootPath, "release")
+			if releaseBlob, err := session.Fetch(ctx, releaseTarget); err == nil {
+				snapshot.Metadata[releaseBlob.Path] = filerepo.MetadataObject{Path: releaseBlob.Path, Required: false}
+				for _, candidate := range append([]string{releaseTarget.URL}, releaseTarget.Candidates...) {
+					if candidate != releaseBlob.Path {
+						snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: releaseBlob.Path, Required: false}
+					}
+				}
+				if strings.HasSuffix(releaseBlob.Path, "Release") {
+					for _, companionPath := range filerepo.DeduceCompanions(releaseBlob.Path) {
+						if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+							return nil, err
+						} else if companion.Path != "" {
+							snapshot.Metadata[companion.Path] = companion
+						}
+					}
+				}
+				if releaseSums, err := parseReleaseSHA256(releaseBlob); err != nil {
+					session.Release(releaseTarget)
+					return nil, err
+				} else if len(releaseSums) > 0 {
+					if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
+						session.Release(releaseTarget)
+						return nil, err
+					}
+				}
+				session.Release(releaseTarget)
+			}
 			blobReader, err := indexBlob.Open()
 			if err != nil {
-				session.Release(indexTarget)
+				session.Release(target)
 				return nil, err
 			}
 			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
 			if err != nil {
-				session.Release(indexTarget)
+				session.Release(target)
 				return nil, err
 			}
-			if indexTarget.Kind == "packages" {
+			if target.Kind == "packages" {
 				artifactCount, err = parsePackages(reader, paths, artifactCount)
 			} else {
 				artifactCount, err = parseSources(reader, paths, artifactCount)
 			}
 			_ = reader.Close()
-			session.Release(indexTarget)
+			session.Release(target)
 			if err != nil {
 				return nil, err
 			}
+		default:
+			return nil, fmt.Errorf("%s: unsupported seed metadata target kind %q", target.URL, target.Kind)
 		}
 	}
 	snapshot.ArtifactCount = artifactCount
@@ -171,38 +359,65 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
 	artifactCount := 0
 	for _, target := range session.Targets() {
-		if target.Kind != "release" {
-			continue
-		}
-		blob, err := session.Fetch(target)
-		if err != nil {
-			return err
-		}
-		releaseSums, err := parseReleaseSHA256(blob)
-		if err != nil {
-			blob.Close()
-			return err
-		}
-		targets := releaseIndexTargets(blob.Path, releaseSums)
-		for _, indexTarget := range targets {
-			indexBlob, err := session.Fetch(indexTarget)
+		switch target.Kind {
+		case "release":
+			blob, err := session.Fetch(target)
+			if err != nil {
+				return err
+			}
+			releaseSums, err := parseReleaseSHA256(blob)
 			if err != nil {
 				blob.Close()
+				return err
+			}
+			targets := releaseIndexTargets(blob.Path, releaseSums)
+			for _, indexTarget := range targets {
+				indexBlob, err := session.Fetch(indexTarget)
+				if err != nil {
+					blob.Close()
+					return err
+				}
+				blobReader, err := indexBlob.Open()
+				if err != nil {
+					indexBlob.Close()
+					blob.Close()
+					return err
+				}
+				reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
+				if err != nil {
+					indexBlob.Close()
+					blob.Close()
+					return err
+				}
+				if indexTarget.Kind == "packages" {
+					artifactCount, err = parsePackages(reader, paths, artifactCount)
+				} else {
+					artifactCount, err = parseSources(reader, paths, artifactCount)
+				}
+				_ = reader.Close()
+				indexBlob.Close()
+				if err != nil {
+					blob.Close()
+					return err
+				}
+			}
+			blob.Close()
+		case "packages", "sources":
+			indexBlob, err := session.Fetch(target)
+			if err != nil {
 				return err
 			}
 			blobReader, err := indexBlob.Open()
 			if err != nil {
 				indexBlob.Close()
-				blob.Close()
 				return err
 			}
 			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
 			if err != nil {
 				indexBlob.Close()
-				blob.Close()
 				return err
 			}
-			if indexTarget.Kind == "packages" {
+			if target.Kind == "packages" {
 				artifactCount, err = parsePackages(reader, paths, artifactCount)
 			} else {
 				artifactCount, err = parseSources(reader, paths, artifactCount)
@@ -210,11 +425,9 @@ func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, path
 			_ = reader.Close()
 			indexBlob.Close()
 			if err != nil {
-				blob.Close()
 				return err
 			}
 		}
-		blob.Close()
 	}
 	return nil
 }
@@ -359,12 +572,20 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filere
 	if len(sums) == 0 {
 		return fmt.Errorf("%s: Release SHA256 section is missing", cleanPath)
 	}
-	trimmed := strings.TrimPrefix(cleanPath, "dists/")
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) == 2 {
-		trimmed = parts[1]
+	expected := sums[cleanPath]
+	if expected == "" {
+		trimmed := cleanPath
+		if index := strings.LastIndex(trimmed, "/dists/"); index >= 0 {
+			trimmed = trimmed[index+len("/dists/"):]
+		} else {
+			trimmed = strings.TrimPrefix(trimmed, "dists/")
+		}
+		parts := strings.SplitN(trimmed, "/", 2)
+		if len(parts) == 2 {
+			trimmed = parts[1]
+		}
+		expected = sums[trimmed]
 	}
-	expected := sums[trimmed]
 	if expected == "" {
 		return fmt.Errorf("%s: missing Release SHA256", cleanPath)
 	}

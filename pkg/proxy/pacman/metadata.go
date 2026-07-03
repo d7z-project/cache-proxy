@@ -11,51 +11,81 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
-type discoverer struct{}
+var (
+	pacmanDBSuffixes = []string{
+		".db", ".db.tar", ".db.tar.bz2", ".db.tar.gz", ".db.tar.lrz",
+		".db.tar.lz", ".db.tar.lz4", ".db.tar.lzo", ".db.tar.xz", ".db.tar.zst", ".db.tar.Z",
+	}
+	pacmanFilesSuffixes = []string{
+		".files", ".files.tar", ".files.tar.bz2", ".files.tar.gz", ".files.tar.lrz",
+		".files.tar.lz", ".files.tar.lz4", ".files.tar.lzo", ".files.tar.xz", ".files.tar.zst", ".files.tar.Z",
+	}
+)
 
-func (discoverer) Discover(cleanPath string) filerepo.DiscoveryResult {
+type inspector struct{}
+
+func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
+	repoPath := root.Path
+	if repoPath == "" {
+		repoPath = "/"
+	}
+	attrs := []filerepo.RepositoryAttribute{{LabelKey: "repo_path", Value: repoPath}}
+	if root.Repo != "" {
+		attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "repository", Value: root.Repo})
+	}
+	if root.Arch != "" {
+		attrs = append(attrs, filerepo.RepositoryAttribute{LabelKey: "architecture", Value: root.Arch})
+	}
+	root.Attributes = attrs
+	return root
+}
+
+func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
+	switch {
+	case pacmanDBName(path.Base(cleanPath)) != "":
+		return analyzeMetadataPath(cleanPath)
+	case pacmanFilesName(path.Base(cleanPath)) != "", pacmanDBSignatureName(path.Base(cleanPath)) != "", pacmanFilesSignatureName(path.Base(cleanPath)) != "":
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
+	case strings.Contains(cleanPath, ".pkg.tar.") && strings.HasSuffix(cleanPath, ".sig"):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+	case strings.Contains(cleanPath, ".pkg.tar."):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
+	case strings.HasSuffix(cleanPath, ".sig"), strings.HasSuffix(cleanPath, ".asc"), strings.HasSuffix(cleanPath, ".sha256"), strings.HasSuffix(cleanPath, ".sha512"):
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+	default:
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
+	}
+}
+
+func analyzeMetadataPath(cleanPath string) filerepo.DiscoveryResult {
 	trimmed := strings.Trim(strings.TrimSpace(cleanPath), "/")
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		return filerepo.DiscoveryResult{}
+	fileName := path.Base(trimmed)
+	dbName := pacmanDBName(fileName)
+	if dbName == "" {
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
 	}
-	fileName := parts[len(parts)-1]
-	if !strings.HasSuffix(fileName, ".db") {
-		return filerepo.DiscoveryResult{}
+	rootPath := strings.Trim(strings.TrimSpace(path.Dir(trimmed)), "/")
+	if rootPath == "." {
+		rootPath = ""
 	}
-	if len(parts) < 4 || parts[len(parts)-3] != "os" {
-		return filerepo.DiscoveryResult{}
-	}
-	repoName := strings.TrimSuffix(fileName, ".db")
-	if repoName == "" {
-		return filerepo.DiscoveryResult{}
-	}
-	rootPath := strings.Join(parts[:len(parts)-1], "/")
-	arch := parts[len(parts)-2]
-	if arch == "" {
-		return filerepo.DiscoveryResult{}
+	displayName := dbName
+	if rootPath != "" {
+		displayName = path.Join(rootPath, dbName)
 	}
 	return filerepo.DiscoveryResult{
-		Matched: true,
-		Role:    filerepo.DiscoveryCreateRoot,
+		Class: filerepo.ResourceMetadata,
+		Role:  filerepo.DiscoveryCreateRoot,
 		Root: filerepo.RepositoryRoot{
-			ID:              rootPath,
+			ID:              filerepo.RepositoryID(filerepo.LayoutPacman, rootPath),
 			Path:            rootPath,
-			DisplayName:     rootPath,
-			PrimaryMetadata: []string{path.Join(rootPath, repoName+".db")},
+			DisplayName:     displayName,
+			Layout:          filerepo.LayoutPacman,
+			PrimaryMetadata: []string{path.Join(rootPath, fileName)},
 			Targets: []filerepo.MetadataTarget{{
-				URL:  path.Join(rootPath, repoName+".db"),
-				Repo: repoName,
-				Arch: arch,
+				URL:  path.Join(rootPath, fileName),
+				Repo: dbName,
 			}},
-			Kind: "pacman",
-			Repo: repoName,
-			Arch: arch,
-			Attributes: []filerepo.RepositoryAttribute{
-				{LabelKey: "repo_path", Value: rootPath},
-				{LabelKey: "repository", Value: repoName},
-				{LabelKey: "architecture", Value: arch},
-			},
+			Repo: dbName,
 		},
 	}
 }
@@ -72,13 +102,23 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 		}
 		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
 
-		dbPath := strings.TrimSuffix(blob.Path, ".db")
+		dbPath := pacmanDBBase(blob.Path)
 		for _, suffix := range []string{".files", ".files.sig"} {
 			companionPath := dbPath + suffix
 			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
 				return nil, err
 			} else if companion.Path != "" {
 				snapshot.Metadata[companion.Path] = companion
+			}
+		}
+		if archiveExt := pacmanDBArchiveExt(blob.Path); archiveExt != "" {
+			for _, suffix := range []string{".files" + archiveExt, ".files" + archiveExt + ".sig"} {
+				companionPath := dbPath + suffix
+				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
+					return nil, err
+				} else if companion.Path != "" {
+					snapshot.Metadata[companion.Path] = companion
+				}
 			}
 		}
 		for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
@@ -204,4 +244,59 @@ func parseDesc(input io.Reader) (string, error) {
 		}
 	}
 	return filename, scanner.Err()
+}
+
+func pacmanDBName(fileName string) string {
+	for _, suffix := range pacmanDBSuffixes {
+		if strings.HasSuffix(fileName, suffix) {
+			return strings.TrimSuffix(fileName, suffix)
+		}
+	}
+	return ""
+}
+
+func pacmanDBBase(cleanPath string) string {
+	fileName := path.Base(cleanPath)
+	name := pacmanDBName(fileName)
+	if name == "" {
+		return strings.TrimSuffix(cleanPath, ".db")
+	}
+	dir := path.Dir(cleanPath)
+	if dir == "." {
+		return name
+	}
+	return path.Join(dir, name)
+}
+
+func pacmanDBArchiveExt(cleanPath string) string {
+	fileName := path.Base(cleanPath)
+	for _, suffix := range pacmanDBSuffixes[1:] {
+		if strings.HasSuffix(fileName, suffix) {
+			return strings.TrimPrefix(suffix, ".db")
+		}
+	}
+	return ""
+}
+
+func pacmanFilesName(fileName string) string {
+	for _, suffix := range pacmanFilesSuffixes {
+		if strings.HasSuffix(fileName, suffix) {
+			return strings.TrimSuffix(fileName, suffix)
+		}
+	}
+	return ""
+}
+
+func pacmanDBSignatureName(fileName string) string {
+	if !strings.HasSuffix(fileName, ".sig") {
+		return ""
+	}
+	return pacmanDBName(strings.TrimSuffix(fileName, ".sig"))
+}
+
+func pacmanFilesSignatureName(fileName string) string {
+	if !strings.HasSuffix(fileName, ".sig") {
+		return ""
+	}
+	return pacmanFilesName(strings.TrimSuffix(fileName, ".sig"))
 }

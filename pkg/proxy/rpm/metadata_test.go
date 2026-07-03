@@ -18,8 +18,24 @@ func TestParsePrimaryBuildsCleanupPaths(t *testing.T) {
 	require.Contains(t, paths.Finalize(), "repo/os/Packages/h/hello.rpm")
 }
 
-func TestDiscovererDetectsRPMRoot(t *testing.T) {
-	result := (discoverer{}).Discover("mirror/repo/os/repodata/repomd.xml")
-	require.True(t, result.Matched)
-	require.Equal(t, "mirror/repo/os", result.Root.ID)
+func TestAnalyzerDetectsRPMRoot(t *testing.T) {
+	result := (inspector{}).InspectPath("mirror/repo/os/repodata/repomd.xml")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, "rpm:mirror/repo/os", result.Root.ID)
+	require.Equal(t, filerepo.LayoutRPM, result.Root.Layout)
+}
+
+func TestAnalyzerClassifiesMirrorlistAsMetadataWithoutDiscovery(t *testing.T) {
+	result := (inspector{}).InspectPath("mirror/repo/os/mirrorlist")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryIgnore, result.Role)
+}
+
+func TestAnalyzerSupportsRootLevelRPMRepository(t *testing.T) {
+	result := (inspector{}).InspectPath("repodata/repomd.xml")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryCreateRoot, result.Role)
+	require.Equal(t, "rpm:/", result.Root.ID)
+	require.Empty(t, result.Root.Path)
+	require.Equal(t, "/", result.Root.DisplayName)
 }

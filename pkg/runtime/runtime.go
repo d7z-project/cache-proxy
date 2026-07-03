@@ -41,6 +41,7 @@ type RepositoryStatus struct {
 	ID              string
 	Path            string
 	DisplayName     string
+	Layout          string
 	PrimaryMetadata []string
 	Attributes      []RepositoryAttribute
 	Generation      string

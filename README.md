@@ -114,7 +114,11 @@ Client examples:
 - Go: `go env -w GOPROXY=http://cache.lan:8080/go`
 - Cargo: `registry = "sparse+http://cache.lan:8080/cargo/"`
 - PyPI: `pip install --index-url http://cache.lan:8080/pypi/simple <pkg>`
-- Debian: `deb http://cache.lan:8080/deb bookworm main`
+- APK: `/etc/apk/repositories` entry `http://cache.lan:8080/apk`
+- Debian distribution repo: `deb http://cache.lan:8080/deb bookworm main`
+- Debian flat repo: `deb [trusted=yes] file:///absolute/path/to/repo ./`
+- RPM: `baseurl=http://cache.lan:8080/rpm`
+- Pacman: `Server = http://cache.lan:8080/pacman`
 - OCI: `docker pull cache.lan:5000/library/alpine:latest`
 
 ## Mode Reference
@@ -383,7 +387,7 @@ apk:
   auxiliary_policy: revalidate
 ```
 
-Use this mode for Alpine repositories discovered from `APKINDEX.tar.gz` requests.
+Use this mode for Alpine repositories discovered from `APKINDEX.tar.gz` requests. The repository root is the directory that contains `APKINDEX.tar.gz`.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -416,7 +420,7 @@ deb:
   auxiliary_policy: revalidate
 ```
 
-Use this mode for Debian-style repositories discovered from `Release` and `InRelease`.
+Use this mode for Debian-style repositories discovered from `Release`, `InRelease`, `Packages*`, and `Sources*` metadata requests. Both standard `dists/<suite>/...` layouts and flat repositories are supported.
 
 Same field set as `apk`.
 
@@ -436,7 +440,7 @@ rpm:
   auxiliary_policy: revalidate
 ```
 
-Use this mode for RPM repositories discovered from `repomd.xml`.
+Use this mode for RPM repositories discovered from `repodata/repomd.xml`.
 
 Same field set as `apk`.
 
@@ -456,7 +460,7 @@ pacman:
   auxiliary_policy: revalidate
 ```
 
-Use this mode for Arch repositories discovered from `.db` requests.
+Use this mode for Arch repositories discovered from repository database requests such as `.db` and `.db.tar.*`.
 
 Same field set as `apk`, except `refresh_interval` defaults to `2m`.
 

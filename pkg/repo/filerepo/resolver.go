@@ -41,7 +41,7 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 		return httpcache.Route{}, errors.New("invalid request path")
 	}
 
-	class := r.handler.classify(cleanPath)
+	class := r.handler.inspect(cleanPath).Class
 	profile := r.profileFor(class)
 	route := httpcache.Route{
 		ObjectPath:   path.Join(r.handler.objectRoot, cleanPath),

@@ -37,7 +37,7 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 			return nil
 		}
 		cleanPath := strings.TrimPrefix(objectPath, h.objectRoot+"/")
-		switch h.classify(cleanPath) {
+		switch h.inspect(cleanPath).Class {
 		case ResourceArtifact, ResourceAuxiliary:
 			if containsSortedPath(currentPaths, cleanPath) {
 				return nil
