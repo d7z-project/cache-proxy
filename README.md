@@ -395,11 +395,11 @@ Use this mode for Alpine repositories discovered from `APKINDEX.tar.gz` requests
 | `upstreams` | `[]URL` | required | Upstream mirrors |
 | `refresh_interval` | duration | `1h` | Background metadata refresh interval |
 | `cleanup_interval` | duration | `6h` | Indexed cleanup interval |
-| `artifact_policy` | policy | `immutable` | Policy for package files |
+| `artifact_policy` | policy | `immutable` | Policy for package files inside the current published generation |
 | `artifact_fresh_for` | freshness | — | Freshness for package files |
 | `artifact_busy_policy` | busy policy | `bypass` | Busy policy for package files |
 | `artifact_expire_after` | expiration | — | Expiration override for package files |
-| `auxiliary_policy` | policy | `revalidate` | Policy for signatures and checksums |
+| `auxiliary_policy` | policy | `revalidate` | Policy for auxiliary files inside the current published generation |
 | `auxiliary_fresh_for` | freshness | `30s` | Freshness for auxiliary files |
 | `auxiliary_busy_policy` | busy policy | `bypass` | Busy policy for auxiliary files |
 | `auxiliary_expire_after` | expiration | — | Expiration override for auxiliary files |
@@ -502,11 +502,13 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 `apk`, `deb`, `rpm`, and `pacman` use background metadata refresh:
 
 - Repositories are discovered from client metadata requests.
-- Discovered repositories are persisted, so background refresh resumes after restart without waiting for another client metadata request.
+- Discovered repositories are persisted, and startup reconciles refresh tasks from the persisted repository set.
 - Metadata is published only after a full generation is fetched and validated.
+- The current generation is the authoritative serving view for repository metadata, including companion files such as signatures and checksums.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
-- Artifact and auxiliary downloads stay normal proxy/cache requests; they are not blocked by index misses.
-- Cleanup rebuilds a short-lived sorted path set from the current generation when needed and removes stale artifacts directly from the repository cache. No package index is persisted for runtime validation.
+- Artifact and auxiliary cache objects are generation-scoped. Switching current generation changes visible repository content immediately without in-place overwrites.
+- Artifact and auxiliary downloads are still independent requests; they are not blocked by index misses or refresh failure.
+- Cleanup removes obsolete non-generation repository objects, and metadata GC removes superseded generations. No package index is persisted for runtime validation.
 
 ## Operations
 

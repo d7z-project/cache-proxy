@@ -268,33 +268,29 @@ func (s *LocalSession) Fetch(target MetadataTarget) (MetadataBlob, error) {
 	if s.snapshot == nil {
 		return MetadataBlob{}, errors.New("snapshot is nil")
 	}
-	candidates := append([]string{target.URL}, target.Candidates...)
-	for _, candidate := range candidates {
-		obj, ok := s.snapshot.Metadata[candidate]
-		if !ok {
-			continue
-		}
-		ctx := s.ctx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		reader, err := s.handler.store.OpenObject(ctx, s.handler.name, obj.StorePath)
-		if err != nil {
-			return MetadataBlob{}, err
-		}
-		tempFile, _, err := utils.TempFileFromReader(reader)
-		reader.Close()
-		if err != nil {
-			return MetadataBlob{}, err
-		}
-		tempPath := tempFile.Name()
-		if err := tempFile.Close(); err != nil {
-			_ = os.Remove(tempPath)
-			return MetadataBlob{}, err
-		}
-		return MetadataBlob{Path: obj.Path, temp: tempPath}, nil
+	obj, ok := resolveSnapshotMetadata(s.snapshot, target)
+	if !ok || obj.StorePath == "" {
+		return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: errMetadataNotFound}
 	}
-	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: errMetadataNotFound}
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	reader, err := s.handler.store.OpenObject(ctx, s.handler.name, obj.StorePath)
+	if err != nil {
+		return MetadataBlob{}, err
+	}
+	tempFile, _, err := utils.TempFileFromReader(reader)
+	reader.Close()
+	if err != nil {
+		return MetadataBlob{}, err
+	}
+	tempPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return MetadataBlob{}, err
+	}
+	return MetadataBlob{Path: obj.Path, temp: tempPath}, nil
 }
 
 func DeduceCompanions(basePath string) []string {

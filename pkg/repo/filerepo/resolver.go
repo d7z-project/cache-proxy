@@ -41,20 +41,20 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 		return httpcache.Route{}, errors.New("invalid request path")
 	}
 
-	class := r.handler.inspect(cleanPath).Class
+	current, ok := r.handler.lookupCurrent(cleanPath)
+	if !ok {
+		return httpcache.Route{}, fmt.Errorf("path %s is not in current generation", cleanPath)
+	}
+	class := current.Class
 	profile := r.profileFor(class)
 	route := httpcache.Route{
-		ObjectPath:   path.Join(r.handler.objectRoot, cleanPath),
-		UpstreamPath: cleanPath,
-		Policy:       profile.Policy,
-		FreshFor:     profile.FreshFor,
-		BusyPolicy:   profile.BusyPolicy,
-		ExpireAfter:  profile.ExpireAfter,
-	}
-	if class == ResourceArtifact || class == ResourceAuxiliary {
-		if snap := r.handler.currentSnapshot(); snap != nil && snap.Upstream != "" {
-			route.PreferredUpstream = snap.Upstream
-		}
+		ObjectPath:        r.handler.generationContentPath(current.RootID, current.Generation, class, cleanPath),
+		UpstreamPath:      cleanPath,
+		Policy:            profile.Policy,
+		FreshFor:          profile.FreshFor,
+		BusyPolicy:        profile.BusyPolicy,
+		ExpireAfter:       profile.ExpireAfter,
+		PreferredUpstream: current.PreferredUpstream,
 	}
 	return route, nil
 }

@@ -188,7 +188,6 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		cleanupOpenFailure()
 		return nil, err
 	}
-	sched.Start(lifecycleCtx)
 
 	app := &App{
 		config:        doc,
@@ -212,6 +211,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		cleanupOpenFailure()
 		return nil, err
 	}
+	sched.Start(lifecycleCtx)
 	status.start(lifecycleCtx, app, b)
 
 	sched.Register(scheduler.TaskDef{

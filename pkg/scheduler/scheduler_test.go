@@ -181,6 +181,36 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
+func TestRetryAtKeepsTaskDoneAndSchedulesExactRetry(t *testing.T) {
+	sched, b := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	delayedUntil := time.Now().Add(2 * time.Minute).UTC().Round(time.Second)
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh: func(string) TaskHandler {
+			return func(context.Context) error {
+				return RetryAt(delayedUntil)
+			}
+		},
+		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
+	})
+
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	require.Eventually(t, func() bool {
+		info, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
+		if !ok {
+			return false
+		}
+		return info.Status == StatusDone && info.NextRun.Equal(delayedUntil)
+	}, 5*time.Second, 20*time.Millisecond)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
 func TestHandlerPanicMarksTaskFailed(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())

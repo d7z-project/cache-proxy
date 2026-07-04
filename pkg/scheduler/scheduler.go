@@ -37,6 +37,18 @@ var ErrTaskSkipped = errors.New("task skipped")
 
 var errHandlerPanic = errors.New("handler panic")
 
+type RetryAtError struct {
+	At time.Time
+}
+
+func (e RetryAtError) Error() string {
+	return "retry at " + e.At.UTC().Format(time.RFC3339Nano)
+}
+
+func RetryAt(at time.Time) error {
+	return RetryAtError{At: at}
+}
+
 type TaskKey struct {
 	instance string
 	typ      TaskType

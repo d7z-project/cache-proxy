@@ -18,41 +18,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *IndexedHandler) tryServeMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) bool {
-	snapshot := h.currentSnapshot()
-	if snapshot == nil {
-		return false
-	}
-	obj, ok := snapshot.Metadata[cleanPath]
-	if !ok {
-		return false
-	}
-	if obj.Path != cleanPath {
-		http.Redirect(w, req, req.Header.Get("X-Cache-Proxy-Prefix")+"/"+obj.Path, http.StatusFound)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusFound, 0)
-		return true
-	}
-	reader, err := h.store.OpenObject(req.Context(), h.name, obj.StorePath)
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusInternalServerError, 0)
-		return true
-	}
-	size := reader.Info().Size
-	headers := map[string]string{
-		"Content-Length": strconv.FormatInt(size, 10),
-		"X-Cache":        "GENERATION",
-	}
-	for key, value := range reader.Info().Options {
-		headers[httpcache.HeaderName(key)] = value
-	}
-	httpcache.StripInternal(headers)
-	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}
-	result.FlushClose(req, w)
-	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
-	return true
-}
-
 func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, generation, upstream, cleanPath string) (MetadataBlob, error) {
 	targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)

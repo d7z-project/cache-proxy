@@ -148,20 +148,28 @@ func (s *Scheduler) execute(ts *taskState) {
 	ts.LastRun = start
 	ts.RunCount++
 	if err != nil && !errors.Is(err, ErrTaskSkipped) {
-		ts.LastError = err.Error()
-		ts.ErrCount++
-		ts.Status = StatusFailed
-		retryAfter := backoff(ts.ErrCount, ts.Interval)
-		ts.NextRun = time.Now().Add(retryAfter)
-		switch {
-		case ctx.Err() == context.DeadlineExceeded, errors.Is(err, context.DeadlineExceeded):
-			result = "timeout"
-		case errors.Is(err, errHandlerPanic):
-			result = "panic"
-		default:
-			result = "failed"
+		var retryAt RetryAtError
+		if errors.As(err, &retryAt) {
+			ts.LastError = ""
+			ts.Status = StatusDone
+			ts.NextRun = retryAt.At
+			result = "delayed"
+		} else {
+			ts.LastError = err.Error()
+			ts.ErrCount++
+			ts.Status = StatusFailed
+			retryAfter := backoff(ts.ErrCount, ts.Interval)
+			ts.NextRun = time.Now().Add(retryAfter)
+			switch {
+			case ctx.Err() == context.DeadlineExceeded, errors.Is(err, context.DeadlineExceeded):
+				result = "timeout"
+			case errors.Is(err, errHandlerPanic):
+				result = "panic"
+			default:
+				result = "failed"
+			}
+			slog.Info("scheduler task failed", "key", ts.Key.String(), "err", err, "duration", dur)
 		}
-		slog.Info("scheduler task failed", "key", ts.Key.String(), "err", err, "duration", dur)
 	} else {
 		ts.LastError = ""
 		ts.Status = StatusDone

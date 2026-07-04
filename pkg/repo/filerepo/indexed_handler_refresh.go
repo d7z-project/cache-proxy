@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,13 +17,6 @@ import (
 )
 
 func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
-	if !h.hasAnyRootSnapshot() {
-		return nil
-	}
-	currentPaths, err := h.currentCleanupPaths(ctx)
-	if err != nil {
-		return err
-	}
 	deleted := 0
 	return fs.WalkDir(h.store.TenantFS(h.name), h.objectRoot, func(objectPath string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
@@ -34,15 +26,6 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 			return fs.SkipAll
 		}
 		if err != nil || entry.IsDir() || strings.Contains(objectPath, "/.roots/") {
-			return nil
-		}
-		cleanPath := strings.TrimPrefix(objectPath, h.objectRoot+"/")
-		switch h.inspect(cleanPath).Class {
-		case ResourceArtifact, ResourceAuxiliary:
-			if containsSortedPath(currentPaths, cleanPath) {
-				return nil
-			}
-		default:
 			return nil
 		}
 		if opts.DryRun {
@@ -74,17 +57,18 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	if h.sh != nil {
 		rh, done, err := h.sh.TryStartRefresh(rootID, time.Now())
 		if err != nil {
-			reason := "rejected"
 			switch {
 			case errors.Is(err, health.ErrRefreshAlreadyRunning):
-				reason = "already_refreshing"
+				return scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshBlockedUntil):
-				reason = "blocked"
+				if blockedUntil, ok := h.sh.RefreshBlockedUntil(rootID); ok && !blockedUntil.IsZero() {
+					return scheduler.RetryAt(blockedUntil)
+				}
+				return scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
-				reason = "removed"
+				return scheduler.ErrTaskSkipped
 			}
-			slog.Debug("repository refresh skipped", "instance", h.name, "mode", h.mode, "root_id", rootID, "reason", reason)
-			return scheduler.ErrTaskSkipped
+			return fmt.Errorf("start refresh %s: %w", rootID, err)
 		}
 		refreshGen = rh.Generation
 		release = done
@@ -122,7 +106,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 				return nil
 			}
 		}
-		snapshot, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
+		snapshot, managedPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -139,10 +123,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 		if h.sh != nil {
 			h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToProbe(snapshot.Targets))
 		}
-		h.mu.Lock()
-		h.rootSnapshots[rootID] = snapshot
-		h.rebuildAggregateLocked()
-		h.mu.Unlock()
+		h.setRootSnapshot(rootID, snapshot, managedPaths)
 		h.saveState(context.Background())
 		h.reportMetadataState()
 		slog.Debug("repository refresh succeeded", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
@@ -185,7 +166,11 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string) error {
 	return nil
 }
 
-func (h *IndexedHandler) buildSnapshot(ctx context.Context, root RepositoryRoot, generation, upstream string) (*LiveSnapshot, error) {
+func (h *IndexedHandler) buildSnapshot(
+	ctx context.Context,
+	root RepositoryRoot,
+	generation, upstream string,
+) (*LiveSnapshot, []string, error) {
 	session := &RefreshSession{
 		handler:    h,
 		rootID:     root.ID,
@@ -198,10 +183,10 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, root RepositoryRoot,
 	indexBuilder := &PathIndexBuilder{}
 	snapshot, err := h.build(ctx, session, indexBuilder)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if snapshot == nil {
-		return nil, errors.New("metadata refresh produced no snapshot")
+		return nil, nil, errors.New("metadata refresh produced no snapshot")
 	}
 	if snapshot.Metadata == nil {
 		snapshot.Metadata = map[string]MetadataObject{}
@@ -212,6 +197,7 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, root RepositoryRoot,
 	snapshot.Upstream = upstream
 	snapshot.Published = time.Now().UTC()
 	snapshot.Targets = append([]MetadataTarget(nil), root.Targets...)
+	managedPaths := indexBuilder.Finalize()
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {
 			obj.Path = pathKey
@@ -220,42 +206,11 @@ func (h *IndexedHandler) buildSnapshot(ctx context.Context, root RepositoryRoot,
 		snapshot.Metadata[pathKey] = obj
 		if obj.Required {
 			if _, err := h.store.StatObject(ctx, h.name, obj.StorePath); err != nil {
-				return nil, fmt.Errorf("%s: required metadata missing", obj.Path)
+				return nil, nil, fmt.Errorf("%s: required metadata missing", obj.Path)
 			}
 		}
 	}
-	return snapshot, nil
-}
-
-func (h *IndexedHandler) currentCleanupPaths(ctx context.Context) ([]string, error) {
-	h.mu.RLock()
-	snapshots := make([]*LiveSnapshot, 0, len(h.rootSnapshots))
-	for _, snapshot := range h.rootSnapshots {
-		snapshots = append(snapshots, snapshot)
-	}
-	h.mu.RUnlock()
-
-	var all []string
-	for _, snapshot := range snapshots {
-		paths, err := h.cleanupPathsForSnapshot(ctx, snapshot)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, paths...)
-	}
-	if len(all) == 0 {
-		return nil, nil
-	}
-	sort.Strings(all)
-	n := 1
-	for i := 1; i < len(all); i++ {
-		if all[i] == all[n-1] {
-			continue
-		}
-		all[n] = all[i]
-		n++
-	}
-	return all[:n], nil
+	return snapshot, managedPaths, nil
 }
 
 func (h *IndexedHandler) cleanupPathsForSnapshot(ctx context.Context, snapshot *LiveSnapshot) ([]string, error) {
@@ -270,12 +225,4 @@ func (h *IndexedHandler) cleanupPathsForSnapshot(ctx context.Context, snapshot *
 		return nil, err
 	}
 	return builder.Finalize(), nil
-}
-
-func containsSortedPath(paths []string, cleanPath string) bool {
-	if len(paths) == 0 {
-		return false
-	}
-	idx := sort.SearchStrings(paths, cleanPath)
-	return idx < len(paths) && paths[idx] == cleanPath
 }

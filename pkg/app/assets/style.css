@@ -193,6 +193,8 @@ header .wrap{
 .header-actions{
   display:flex;align-items:center;gap:8px;flex-wrap:wrap;
   justify-content:flex-end;
+  min-width:0;
+  flex:1 1 16rem;
 }
 .status-indicator{
   display:inline-flex;align-items:center;gap:6px;
@@ -320,6 +322,8 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 }
 .chip-group{
   display:flex;flex-direction:column;gap:8px;
+  min-width:0;
+  flex:1 1 18rem;
 }
 .chip-label{
   font-size:11px;font-weight:700;letter-spacing:.08em;
@@ -327,6 +331,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 }
 .chips{
   display:flex;gap:8px;flex-wrap:wrap;
+  min-width:0;
 }
 .filter-chip{
   height:32px;
@@ -411,7 +416,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 
 .card-head{
   display:grid;align-items:start;gap:10px 12px;
-  grid-template-columns:minmax(0,1fr) auto;
+  grid-template-columns:minmax(0,1fr) minmax(8rem,max-content);
   grid-template-areas:
     "badge status"
     "name name";
@@ -440,11 +445,12 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   padding:5px 10px;border-radius:var(--radius-pill);
   background:var(--card-bg-soft);border:1px solid var(--border-light);color:var(--text-secondary);
   font-size:11px;font-weight:600;letter-spacing:.03em;
-  white-space:nowrap;overflow:hidden;
+  white-space:normal;overflow:visible;
+  text-align:right;
+  line-height:1.35;
 }
 .status-pill span:last-child{
-  overflow:hidden;
-  text-overflow:ellipsis;
+  overflow-wrap:anywhere;
 }
 .status-pill-green{color:var(--dot-ok)}
 .status-pill-blue{color:var(--dot-refreshing)}
@@ -455,6 +461,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 .card-note{
   padding:0 24px 12px;
   font-size:12px;line-height:1.5;color:var(--text-secondary);
+  min-height:2.4em;
 }
 .card-note-empty{
   visibility:hidden;
@@ -475,6 +482,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 .section-head{
   display:flex;align-items:center;justify-content:space-between;
   gap:12px;margin-bottom:10px;
+  flex-wrap:wrap;
 }
 .section-title{
   font-size:11px;font-weight:700;letter-spacing:.08em;
@@ -562,20 +570,20 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 }
 .release-row:first-child{border-top:none}
 .release-row-top{
-  display:grid;align-items:center;gap:8px;
-  grid-template-columns:minmax(0,1fr) auto auto auto;
+  display:flex;align-items:center;gap:8px;
+  flex-wrap:wrap;
 }
 .release-key{
   font:12px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace;
   color:var(--text);overflow-wrap:break-word;min-width:0;
+  flex:1 1 14rem;
 }
 .release-gen{
   font:11px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace;
   color:var(--text-muted);
-  max-width:18rem;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
+  flex:0 1 18rem;
+  min-width:10rem;
+  overflow-wrap:anywhere;
 }
 .release-state{
   font-size:11px;font-weight:600;color:var(--text-secondary);flex-shrink:0;
@@ -583,6 +591,10 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 .release-row-meta{
   display:flex;gap:12px;flex-wrap:wrap;margin-top:4px;
   font-size:11px;color:var(--text-muted);
+}
+.release-row-meta span{
+  min-width:0;
+  overflow-wrap:anywhere;
 }
 
 .card-cmd-wrap{
@@ -614,9 +626,9 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   padding:14px 18px 0;
   color:var(--cmd-note);
   font:12px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace;
-  white-space:pre;
-  word-break:normal;
-  min-width:max-content;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  min-width:0;
   margin-bottom:-4px;
 }
 .card-cmd{
@@ -624,8 +636,9 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   background:var(--cmd-bg);color:var(--cmd-text);
   padding:6px 18px 16px;
   font:12px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",monospace;
-  white-space:pre;word-break:normal;
-  min-width:max-content;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  min-width:0;
   user-select:all;min-height:52px;
 }
 
@@ -787,6 +800,8 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   font-size:11px;font-weight:600;
   color:var(--text-muted);
   white-space:nowrap;
+  margin-left:auto;
+  min-width:0;
 }
 .refresh-dot{
   width:7px;height:7px;
@@ -839,6 +854,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   display:flex;
   align-items:flex-end;
   gap:12px;
+  flex-wrap:wrap;
 }
 .events-search-box{
   flex:1 1 18rem;
@@ -1032,12 +1048,9 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   .card-cmd-note{padding:12px 14px 0;margin-bottom:-4px}
   .card-cmd{padding:8px 14px 12px}
   .status-pill{margin-left:0}
-  .release-row-top{
-    grid-template-columns:minmax(0,1fr) auto auto;
-  }
   .release-gen{
-    grid-column:1 / -1;
-    max-width:none;
+    flex-basis:100%;
+    min-width:0;
   }
   .release-state{
     justify-self:start;

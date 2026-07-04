@@ -39,12 +39,13 @@ type IndexedHandler struct {
 	sh         *health.ServiceHealth
 	bus        *bus.Bus
 
-	mu            sync.RWMutex
-	snapshot      *LiveSnapshot
-	roots         map[string]*rootEntry
-	rootSnapshots map[string]*LiveSnapshot
-	lifecycleCtx  context.Context
-	wait          sync.WaitGroup
+	mu               sync.RWMutex
+	roots            map[string]*rootEntry
+	rootSnapshots    map[string]*LiveSnapshot
+	rootManagedPaths map[string][]string
+	currentView      map[string]currentViewEntry
+	lifecycleCtx     context.Context
+	wait             sync.WaitGroup
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, rebuild CleanupIndexBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
@@ -62,6 +63,7 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		sh:            svcHealth,
 		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
+		currentView:   map[string]currentViewEntry{},
 	}
 	if finalizer, ok := inspector.(RootFinalizer); ok {
 		handler.finalizer = finalizer
@@ -89,30 +91,29 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.base.ProxyPassthrough(w, req, "", "")
 		return
 	}
+	if current, ok := h.lookupCurrent(cleanPath); ok {
+		if current.Class == ResourceMetadata {
+			h.serveCurrentMetadata(w, req, current)
+			return
+		}
+		h.base.ServeHTTP(w, req)
+		return
+	}
 	analysis := h.inspect(cleanPath)
 	class := analysis.Class
 	if class == ResourceUnknown {
-		h.base.ProxyPassthrough(w, req, cleanPath, h.currentPreferredUpstream())
+		h.base.ProxyPassthrough(w, req, cleanPath, "")
 		return
 	}
 	if class == ResourceMetadata {
-		rootID, created := h.registerRoot(analysis)
-		if h.tryServeMetadata(w, req, cleanPath) {
-			return
+		rootID, created, changed := h.registerRoot(analysis)
+		if h.bus != nil && (created || changed || h.rootSnapshot(rootID) == nil) {
+			h.publishDiscovered(rootID)
 		}
-		if created && h.bus != nil {
-			h.bus.Publish(bus.Event{
-				Type: bus.EventMetadataDiscovered,
-				Payload: bus.MetadataDiscoveredPayload{
-					Instance: h.name,
-					RootID:   rootID,
-				},
-			})
-		}
-		h.base.ProxyPassthrough(w, req, cleanPath, h.currentPreferredUpstream())
+		h.base.ProxyPassthrough(w, req, cleanPath, "")
 		return
 	}
-	h.base.ServeHTTP(w, req)
+	h.base.ProxyPassthrough(w, req, cleanPath, "")
 }
 
 func (h *IndexedHandler) Start(ctx context.Context) error {
@@ -122,6 +123,7 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 	}
 	h.restoreRoots(ctx)
 	h.restoreGenerations(ctx)
+	h.reconcileMetadataTasks()
 	return nil
 }
 
@@ -148,6 +150,31 @@ func (h *IndexedHandler) rootSnapshot(rootKey string) *LiveSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rootSnapshots[rootKey]
+}
+
+func (h *IndexedHandler) publishDiscovered(rootID string) {
+	if h.bus == nil || rootID == "" {
+		return
+	}
+	h.bus.Publish(bus.Event{
+		Type: bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{
+			Instance: h.name,
+			RootID:   rootID,
+		},
+	})
+}
+
+func (h *IndexedHandler) reconcileMetadataTasks() {
+	h.mu.RLock()
+	rootIDs := make([]string, 0, len(h.roots))
+	for rootID := range h.roots {
+		rootIDs = append(rootIDs, rootID)
+	}
+	h.mu.RUnlock()
+	for _, rootID := range rootIDs {
+		h.publishDiscovered(rootID)
+	}
 }
 
 func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnapshot, upstream string, targets []MetadataTarget) (bool, error) {
