@@ -37,6 +37,8 @@ var ErrTaskSkipped = errors.New("task skipped")
 
 var errHandlerPanic = errors.New("handler panic")
 
+const maxTaskErrorBytes = 4096
+
 type RetryAtError struct {
 	At time.Time
 }

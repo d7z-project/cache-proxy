@@ -27,8 +27,8 @@
 - 客户端 metadata 请求只读取 current generation；没有 current 时才允许直连上游并触发后台刷新
 - 自动发现只允许由主元数据请求触发；伴生文件请求不能创建或识别新仓库
 - artifact / auxiliary 下载不能依赖包索引命中，也不能因为 refresh 失败被阻断
-- 包索引只用于清理旧缓存：只保留相对路径集合，用排序后的路径集做快查
-- 不落盘长期 artifact index，不把索引作为运行时下载校验或准入条件
+- 包索引只用于清理旧缓存：refresh 阶段生成完整相对路径集合，并随 generation 持久化为本地 cleanup index，供后续清理工具直接读取
+- cleanup index 不进入运行时长期内存，不作为下载校验或准入条件；metadata GC 删除旧 generation 时同步删除对应 cleanup index
 - metadata 下载、解压、解析必须走流式 reader 或临时文件，禁止对大 metadata 整体 `io.ReadAll`
 - 伴生文件获取里 `404` / `403` 视为非致命
 

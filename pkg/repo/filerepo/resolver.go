@@ -43,7 +43,14 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 
 	current, ok := r.handler.lookupCurrent(cleanPath)
 	if !ok {
-		return httpcache.Route{}, fmt.Errorf("path %s is not in current generation", cleanPath)
+		analysis := r.handler.inspect(cleanPath)
+		if analysis.Class == ResourceUnknown || analysis.Class == ResourceMetadata {
+			return httpcache.Route{}, fmt.Errorf("path %s is not in current generation", cleanPath)
+		}
+		current, ok = r.handler.lookupCurrentContent(cleanPath, analysis.Class)
+		if !ok {
+			return httpcache.Route{}, fmt.Errorf("path %s is not in current generation", cleanPath)
+		}
 	}
 	class := current.Class
 	profile := r.profileFor(class)

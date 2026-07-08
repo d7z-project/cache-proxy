@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
@@ -155,7 +156,7 @@ func (s *Scheduler) execute(ts *taskState) {
 			ts.NextRun = retryAt.At
 			result = "delayed"
 		} else {
-			ts.LastError = err.Error()
+			ts.LastError = taskErrorString(err)
 			ts.ErrCount++
 			ts.Status = StatusFailed
 			retryAfter := backoff(ts.ErrCount, ts.Interval)
@@ -213,6 +214,7 @@ func (s *Scheduler) execute(ts *taskState) {
 	}
 	s.refreshMetrics()
 	s.saveState()
+	debug.FreeOSMemory()
 }
 
 func (s *Scheduler) registerLocked(def TaskDef, source string, discoveredAt time.Time) {
@@ -344,6 +346,17 @@ func backoff(failures uint64, interval time.Duration) time.Duration {
 		d = interval / 2
 	}
 	return d
+}
+
+func taskErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if len(msg) <= maxTaskErrorBytes {
+		return msg
+	}
+	return msg[:maxTaskErrorBytes] + "...(truncated)"
 }
 
 func safeCall(ctx context.Context, handler TaskHandler) (err error) {

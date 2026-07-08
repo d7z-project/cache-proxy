@@ -45,8 +45,8 @@ func TestResolverClassifiesMetadata(t *testing.T) {
 
 func TestResolverTarballWithQueryString(t *testing.T) {
 	cfg := &Policy{
-		MetadataPolicy:     config.PolicyRevalidate,
-		TarballPolicy:      config.PolicyImmutable,
+		MetadataPolicy: config.PolicyRevalidate,
+		TarballPolicy:  config.PolicyImmutable,
 	}
 	r := New(cfg)
 

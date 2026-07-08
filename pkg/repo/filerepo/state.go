@@ -153,11 +153,7 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 				snapshot.Metadata[key] = obj
 			}
 		}
-		managedPaths, rebuildErr := h.cleanupPathsForSnapshot(ctx, snapshot)
-		if rebuildErr != nil {
-			slog.Warn("indexed generation rebuild failed", "instance", h.name, "root_id", snapshot.RootID, "err", rebuildErr)
-		}
-		h.setRootSnapshot(snapshot.RootID, snapshot, managedPaths)
+		h.setRootSnapshot(snapshot.RootID, snapshot)
 
 		if h.sh != nil {
 			h.sh.AddResource(snapshot.RootID, targetsToProbe(snapshot.Targets), h.upstreams)

@@ -33,6 +33,46 @@ func (h *IndexedHandler) lookupCurrent(cleanPath string) (currentViewEntry, bool
 	return current, ok
 }
 
+func (h *IndexedHandler) lookupCurrentContent(cleanPath string, class ResourceClass) (currentViewEntry, bool) {
+	if class != ResourceArtifact && class != ResourceAuxiliary {
+		return currentViewEntry{}, false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var (
+		selectedRoot string
+		selected     *LiveSnapshot
+		selectedRank int
+	)
+	for rootID, snapshot := range h.rootSnapshots {
+		if snapshot == nil {
+			continue
+		}
+		rank := 0
+		rootPath := strings.Trim(strings.TrimSpace(snapshot.RootPath), "/")
+		if rootPath != "" && (cleanPath == rootPath || strings.HasPrefix(cleanPath, rootPath+"/")) {
+			rank = len(rootPath)
+		}
+		if selected == nil ||
+			rank > selectedRank ||
+			(rank == selectedRank && snapshot.Published.After(selected.Published)) ||
+			(rank == selectedRank && snapshot.Published.Equal(selected.Published) && rootID < selectedRoot) {
+			selectedRoot = rootID
+			selected = snapshot
+			selectedRank = rank
+		}
+	}
+	if selected == nil {
+		return currentViewEntry{}, false
+	}
+	return currentViewEntry{
+		RootID:            selectedRoot,
+		Generation:        selected.Generation,
+		Class:             class,
+		PreferredUpstream: selected.Upstream,
+	}, true
+}
+
 func (h *IndexedHandler) currentGeneration(rootID string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -69,46 +109,33 @@ func (h *IndexedHandler) rebuildCurrentViewLocked() {
 				PreferredUpstream: snapshot.Upstream,
 			}
 		}
-		for _, cleanPath := range h.rootManagedPaths[rootID] {
-			class := h.inspect(cleanPath).Class
-			if class != ResourceArtifact && class != ResourceAuxiliary {
-				class = ResourceAuxiliary
-			}
-			view[cleanPath] = currentViewEntry{
-				RootID:            rootID,
-				Generation:        snapshot.Generation,
-				Class:             class,
-				PreferredUpstream: snapshot.Upstream,
-			}
-		}
 	}
 	h.currentView = view
 }
 
-func (h *IndexedHandler) setRootSnapshot(rootID string, snapshot *LiveSnapshot, managedPaths []string) {
+func (h *IndexedHandler) setRootSnapshot(rootID string, snapshot *LiveSnapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.rootManagedPaths == nil {
-		h.rootManagedPaths = map[string][]string{}
-	}
 	if h.currentView == nil {
 		h.currentView = map[string]currentViewEntry{}
 	}
 	if snapshot == nil {
 		delete(h.rootSnapshots, rootID)
-		delete(h.rootManagedPaths, rootID)
 		h.rebuildCurrentViewLocked()
 		return
 	}
 	h.rootSnapshots[rootID] = snapshot
-	if managedPaths == nil {
-		delete(h.rootManagedPaths, rootID)
-	} else {
-		h.rootManagedPaths[rootID] = append([]string(nil), managedPaths...)
-	}
 	if entry, ok := h.roots[rootID]; ok && len(entry.root.Targets) == 0 && len(snapshot.Targets) > 0 {
 		entry.root.Targets = append([]MetadataTarget(nil), snapshot.Targets...)
 	}
+	h.rebuildCurrentViewLocked()
+}
+
+func (h *IndexedHandler) removeRoot(rootID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.roots, rootID)
+	delete(h.rootSnapshots, rootID)
 	h.rebuildCurrentViewLocked()
 }
 
@@ -174,6 +201,10 @@ func (h *IndexedHandler) generationContentPath(rootID, generation string, class 
 		kind = "artifacts"
 	}
 	return path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "generations", generation, kind, cleanPath)
+}
+
+func (h *IndexedHandler) cleanupIndexPath(rootID, generation string) string {
+	return path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "generations", generation, "cleanup", "paths.txt")
 }
 
 func (h *IndexedHandler) currentPath(rootID string) string {

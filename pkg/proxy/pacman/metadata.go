@@ -180,54 +180,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	return snapshot, nil
 }
 
-func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
-	for _, target := range session.Targets() {
-		blob, err := session.Fetch(target)
-		if err != nil {
-			return err
-		}
-		blobReader, err := blob.Open()
-		if err != nil {
-			blob.Close()
-			return err
-		}
-		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
-		if err != nil {
-			blob.Close()
-			return err
-		}
-		tarReader := tar.NewReader(reader)
-		for {
-			header, err := tarReader.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				_ = reader.Close()
-				blob.Close()
-				return err
-			}
-			if path.Base(header.Name) != "desc" {
-				continue
-			}
-			filename, err := parseDesc(tarReader)
-			if err != nil {
-				_ = reader.Close()
-				blob.Close()
-				return err
-			}
-			if filename != "" {
-				artifactPath := path.Join(path.Dir(blob.Path), filename)
-				paths.Add(artifactPath)
-				paths.AddAuxiliary(artifactPath)
-			}
-		}
-		_ = reader.Close()
-		blob.Close()
-	}
-	return nil
-}
-
 func parseDesc(input io.Reader) (string, error) {
 	var filename string
 	scanner := bufio.NewScanner(input)

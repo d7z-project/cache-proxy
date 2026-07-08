@@ -156,15 +156,15 @@ func TestRewriteNPMTarballsStandardMetadata(t *testing.T) {
 	publicBase := "https://proxy/npm"
 
 	doc := map[string]any{
-		"name":    "react",
+		"name":      "react",
 		"dist-tags": map[string]any{"latest": "18.2.0"},
 		"versions": map[string]any{
 			"18.2.0": map[string]any{
 				"name":    "react",
 				"version": "18.2.0",
 				"dist": map[string]any{
-					"tarball":  "https://registry.npmjs.org/react/-/react-18.2.0.tgz",
-					"shasum":   "abc123",
+					"tarball":   "https://registry.npmjs.org/react/-/react-18.2.0.tgz",
+					"shasum":    "abc123",
 					"integrity": "sha512-xyz",
 				},
 			},
@@ -308,4 +308,3 @@ func TestPublicBaseURLPrefixTrailingSlash(t *testing.T) {
 	base := publicBaseURL(req)
 	require.Equal(t, "https://cache.example.com/npm-proxy", base)
 }
-

@@ -1,6 +1,7 @@
 package filerepo
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
@@ -66,6 +68,8 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 				}
 				return scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
+				h.removeRoot(rootID)
+				h.saveState(context.Background())
 				return scheduler.ErrTaskSkipped
 			}
 			return fmt.Errorf("start refresh %s: %w", rootID, err)
@@ -106,7 +110,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 				return nil
 			}
 		}
-		snapshot, managedPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
+		snapshot, cleanupPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -114,7 +118,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 			slog.Debug("repository refresh failed on upstream", "instance", h.name, "root_id", rootID, "upstream", upstream, "err", err)
 			continue
 		}
-		if err := h.publishSnapshot(ctx, snapshot); err != nil {
+		if err := h.publishSnapshot(ctx, snapshot, cleanupPaths); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -123,7 +127,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 		if h.sh != nil {
 			h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToProbe(snapshot.Targets))
 		}
-		h.setRootSnapshot(rootID, snapshot, managedPaths)
+		h.setRootSnapshot(rootID, snapshot)
 		h.saveState(context.Background())
 		h.reportMetadataState()
 		slog.Debug("repository refresh succeeded", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
@@ -134,24 +138,49 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	}
 	if h.sh != nil {
 		h.sh.FinishRefresh(rootID, refreshGen, refreshHealthError(firstErr), nil)
+		if _, ok := h.sh.ResourceHealth(rootID); !ok {
+			h.removeRoot(rootID)
+		}
 	}
 	h.saveState(context.Background())
 	return firstErr
 }
 
-func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string) error {
+func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts config.CleanupConfig) error {
 	rootDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "generations")
 	currentGen := h.currentGeneration(rootID)
 	if currentGen == "" {
 		return nil
 	}
+	keep, err := h.loadCleanupPathSet(ctx, rootID, currentGen)
+	if err != nil {
+		return err
+	}
+	deleted := 0
 	var toDelete []string
 	if err := fs.WalkDir(h.store.TenantFS(h.name), rootDir, func(objectPath string, entry fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if opts.BatchSize > 0 && deleted+len(toDelete) >= opts.BatchSize {
+			return fs.SkipAll
+		}
 		if err != nil || entry.IsDir() {
 			return nil
 		}
-		parts := strings.Split(strings.TrimPrefix(objectPath, rootDir+"/"), "/")
-		if len(parts) > 0 && parts[0] != currentGen {
+		rel := strings.TrimPrefix(objectPath, rootDir+"/")
+		parts := strings.SplitN(rel, "/", 3)
+		if len(parts) == 0 {
+			return nil
+		}
+		if parts[0] != currentGen {
+			toDelete = append(toDelete, objectPath)
+			return nil
+		}
+		if len(parts) != 3 || (parts[1] != "artifacts" && parts[1] != "auxiliary") {
+			return nil
+		}
+		if _, ok := keep[parts[2]]; !ok {
 			toDelete = append(toDelete, objectPath)
 		}
 		return nil
@@ -159,9 +188,15 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string) error {
 		return err
 	}
 	for _, item := range toDelete {
+		if opts.DryRun {
+			deleted++
+			slog.Info("metadata gc dry-run delete", "instance", h.name, "root_id", rootID, "path", item)
+			continue
+		}
 		if err := h.store.DeleteObject(ctx, h.name, item); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Debug("metadata gc failed", "path", item, "err", err)
 		}
+		deleted++
 	}
 	return nil
 }
@@ -197,7 +232,7 @@ func (h *IndexedHandler) buildSnapshot(
 	snapshot.Upstream = upstream
 	snapshot.Published = time.Now().UTC()
 	snapshot.Targets = append([]MetadataTarget(nil), root.Targets...)
-	managedPaths := indexBuilder.Finalize()
+	cleanupPaths := indexBuilder.Finalize()
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {
 			obj.Path = pathKey
@@ -210,19 +245,28 @@ func (h *IndexedHandler) buildSnapshot(
 			}
 		}
 	}
-	return snapshot, managedPaths, nil
+	return snapshot, cleanupPaths, nil
 }
 
-func (h *IndexedHandler) cleanupPathsForSnapshot(ctx context.Context, snapshot *LiveSnapshot) ([]string, error) {
-	if snapshot == nil {
-		return nil, nil
+func (h *IndexedHandler) loadCleanupPathSet(ctx context.Context, rootID, generation string) (map[string]struct{}, error) {
+	reader, err := h.store.OpenObject(ctx, h.name, h.cleanupIndexPath(rootID, generation))
+	if err != nil {
+		return nil, fmt.Errorf("load cleanup index for root %s generation %s: %w", rootID, generation, err)
 	}
-	if h.rebuild == nil {
-		return nil, nil
+	defer reader.Close()
+
+	paths := map[string]struct{}{}
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		cleanPath := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(scanner.Text())), "/")
+		if cleanPath == "." || cleanPath == "" || !httpcache.SafePath(cleanPath) {
+			continue
+		}
+		paths[cleanPath] = struct{}{}
 	}
-	builder := &PathIndexBuilder{}
-	if err := h.rebuild(ctx, &LocalSession{handler: h, snapshot: snapshot, ctx: ctx}, builder); err != nil {
+	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	return builder.Finalize(), nil
+	return paths, nil
 }

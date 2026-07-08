@@ -126,50 +126,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	return snapshot, nil
 }
 
-func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
-	for _, target := range session.Targets() {
-		blob, err := session.Fetch(target)
-		if err != nil {
-			return err
-		}
-		blobReader, err := blob.Open()
-		if err != nil {
-			blob.Close()
-			return err
-		}
-		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
-		if err != nil {
-			blob.Close()
-			return err
-		}
-		tarReader := tar.NewReader(reader)
-		for {
-			header, err := tarReader.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				_ = reader.Close()
-				blob.Close()
-				return err
-			}
-			if path.Base(header.Name) != "APKINDEX" {
-				continue
-			}
-			_, err = parseIndex(path.Dir(blob.Path), tarReader, paths)
-			_ = reader.Close()
-			blob.Close()
-			if err != nil {
-				return err
-			}
-			break
-		}
-		_ = reader.Close()
-		blob.Close()
-	}
-	return nil
-}
-
 func parseIndex(basePath string, input io.Reader, paths *filerepo.PathIndexBuilder) (int, error) {
 	var name string
 	var version string

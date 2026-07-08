@@ -35,20 +35,18 @@ type IndexedHandler struct {
 	client     *utils.HttpClientWrapper
 	upstreams  []string
 	build      SnapshotBuilder
-	rebuild    CleanupIndexBuilder
 	sh         *health.ServiceHealth
 	bus        *bus.Bus
 
-	mu               sync.RWMutex
-	roots            map[string]*rootEntry
-	rootSnapshots    map[string]*LiveSnapshot
-	rootManagedPaths map[string][]string
-	currentView      map[string]currentViewEntry
-	lifecycleCtx     context.Context
-	wait             sync.WaitGroup
+	mu            sync.RWMutex
+	roots         map[string]*rootEntry
+	rootSnapshots map[string]*LiveSnapshot
+	currentView   map[string]currentViewEntry
+	lifecycleCtx  context.Context
+	wait          sync.WaitGroup
 }
 
-func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, rebuild CleanupIndexBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
+func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
 		name:          name,
@@ -59,7 +57,6 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		inspector:     inspector,
 		upstreams:     append([]string(nil), upstreams...),
 		build:         builder,
-		rebuild:       rebuild,
 		sh:            svcHealth,
 		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
@@ -111,6 +108,10 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			h.publishDiscovered(rootID)
 		}
 		h.base.ProxyPassthrough(w, req, cleanPath, "")
+		return
+	}
+	if _, ok := h.lookupCurrentContent(cleanPath, class); ok {
+		h.base.ServeHTTP(w, req)
 		return
 	}
 	h.base.ProxyPassthrough(w, req, cleanPath, "")
@@ -179,6 +180,9 @@ func (h *IndexedHandler) reconcileMetadataTasks() {
 
 func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnapshot, upstream string, targets []MetadataTarget) (bool, error) {
 	if snapshot == nil || len(targets) == 0 {
+		return false, nil
+	}
+	if _, err := h.store.StatObject(ctx, h.name, h.cleanupIndexPath(snapshot.RootID, snapshot.Generation)); err != nil {
 		return false, nil
 	}
 	for _, target := range targets {

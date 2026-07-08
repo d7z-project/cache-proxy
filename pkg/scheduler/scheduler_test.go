@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	goruntime "runtime"
+	"runtime/debug"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,12 +45,54 @@ func metricValue(t *testing.T, metric prometheus.Metric) float64 {
 	return 0
 }
 
+func schedulerHeapAllocAfterGC() uint64 {
+	for i := 0; i < 3; i++ {
+		goruntime.GC()
+		debug.FreeOSMemory()
+	}
+	var stats goruntime.MemStats
+	goruntime.ReadMemStats(&stats)
+	return stats.HeapAlloc
+}
+
 func TestTaskKey(t *testing.T) {
 	key := NewTaskKey("inst", TypeMetadataRefresh, "sub/path")
 	require.Equal(t, "inst:metadata_refresh:sub/path", key.String())
 	require.Equal(t, "inst", key.Instance())
 	require.Equal(t, TypeMetadataRefresh, key.Type())
 	require.Equal(t, "sub/path", key.RootID())
+}
+
+func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	var runs atomic.Int32
+	key := NewTaskKey("stress", TypeBlobGC, "")
+	sched.Register(TaskDef{
+		Key:      key,
+		Interval: 10 * time.Millisecond,
+		Handler: func(context.Context) error {
+			buf := make([]byte, 16<<20)
+			for i := 0; i < len(buf); i += 4096 {
+				buf[i] = byte(i)
+			}
+			runs.Add(1)
+			return nil
+		},
+	})
+
+	require.Eventually(t, func() bool { return runs.Load() >= 1 }, 5*time.Second, 20*time.Millisecond)
+	baseline := schedulerHeapAllocAfterGC()
+	require.Eventually(t, func() bool { return runs.Load() >= 6 }, 5*time.Second, 20*time.Millisecond)
+	after := schedulerHeapAllocAfterGC()
+	if after > baseline {
+		require.LessOrEqual(t, after-baseline, uint64(4<<20))
+	}
+	t.Logf("scheduler stress heap_alloc baseline=%d after=%d delta=%d", baseline, after, int64(after)-int64(baseline))
+	require.NoError(t, sched.Stop(context.Background()))
 }
 
 func TestRegisterInfoAndSnapshotBeforeStart(t *testing.T) {

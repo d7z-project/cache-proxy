@@ -1,6 +1,7 @@
 package filerepo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -112,14 +113,18 @@ func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootID, generati
 	return err
 }
 
-func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnapshot) error {
+func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnapshot, cleanupPaths []string) error {
 	data, err := yaml.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
 	snapshotPath := h.snapshotPath(snapshot.RootID, snapshot.Generation)
+	cleanupPath := h.cleanupIndexPath(snapshot.RootID, snapshot.Generation)
 	currentPath := h.currentPath(snapshot.RootID)
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(snapshotPath)), 0o755); err != nil {
+		return err
+	}
+	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(cleanupPath)), 0o755); err != nil {
 		return err
 	}
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(currentPath)), 0o755); err != nil {
@@ -127,6 +132,26 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	}
 	if _, err = h.store.Put(ctx, h.name, snapshotPath, bytes.NewReader(data), map[string]string{
 		"content-type": "application/yaml",
+		"mode":         h.mode,
+	}); err != nil {
+		return err
+	}
+	cleanupData := bytes.Buffer{}
+	writer := bufio.NewWriter(&cleanupData)
+	for _, item := range cleanupPaths {
+		item = strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(item)), "/")
+		if item == "." || item == "" || !httpcache.SafePath(item) {
+			continue
+		}
+		if _, err := writer.WriteString(item + "\n"); err != nil {
+			return err
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	if _, err = h.store.Put(ctx, h.name, cleanupPath, bytes.NewReader(cleanupData.Bytes()), map[string]string{
+		"content-type": "text/plain; charset=utf-8",
 		"mode":         h.mode,
 	}); err != nil {
 		return err

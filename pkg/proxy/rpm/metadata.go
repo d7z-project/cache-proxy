@@ -146,50 +146,6 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	return snapshot, nil
 }
 
-func rebuildCleanupIndex(_ context.Context, session *filerepo.LocalSession, paths *filerepo.PathIndexBuilder) error {
-	for _, target := range session.Targets() {
-		repomd, err := session.Fetch(target)
-		if err != nil {
-			return err
-		}
-		root, err := parseRepomd(repomd)
-		if err != nil {
-			repomd.Close()
-			return err
-		}
-		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
-		for _, item := range root {
-			if item.Type != "primary" || item.Location == "" {
-				continue
-			}
-			blob, err := session.Fetch(filerepo.MetadataTarget{URL: path.Join(repoRoot, item.Location)})
-			if err != nil {
-				repomd.Close()
-				return err
-			}
-			blobReader, err := blob.Open()
-			if err != nil {
-				blob.Close()
-				repomd.Close()
-				return err
-			}
-			reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
-			if err != nil {
-				blob.Close()
-				repomd.Close()
-				return err
-			}
-			_, err = parsePrimary(reader, paths, repoRoot)
-			_ = reader.Close()
-			blob.Close()
-			repomd.Close()
-			return err
-		}
-		repomd.Close()
-	}
-	return nil
-}
-
 type repomdItem struct {
 	Type     string
 	Location string

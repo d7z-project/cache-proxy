@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 var (
@@ -126,18 +126,17 @@ type LiveSnapshot struct {
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession, *PathIndexBuilder) (*LiveSnapshot, error)
-type CleanupIndexBuilder func(context.Context, *LocalSession, *PathIndexBuilder) error
 
 type PathIndexBuilder struct {
 	paths []string
 }
 
-func (b *PathIndexBuilder) Add(path string) {
-	path = strings.Trim(strings.TrimSpace(path), "/")
-	if path == "" {
+func (b *PathIndexBuilder) Add(rawPath string) {
+	cleanPath := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(rawPath)), "/")
+	if cleanPath == "." || cleanPath == "" || !httpcache.SafePath(cleanPath) {
 		return
 	}
-	b.paths = append(b.paths, path)
+	b.paths = append(b.paths, cleanPath)
 }
 
 func (b *PathIndexBuilder) AddAuxiliary(basePath string) {
@@ -146,7 +145,7 @@ func (b *PathIndexBuilder) AddAuxiliary(basePath string) {
 		return
 	}
 	for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
-		b.paths = append(b.paths, basePath+suffix)
+		b.Add(basePath + suffix)
 	}
 }
 
@@ -249,48 +248,6 @@ func (s *RefreshSession) Close() {
 			_ = os.Remove(blob.temp)
 		}
 	}
-}
-
-type LocalSession struct {
-	handler  *IndexedHandler
-	snapshot *LiveSnapshot
-	ctx      context.Context
-}
-
-func (s *LocalSession) Targets() []MetadataTarget {
-	if s.snapshot == nil {
-		return nil
-	}
-	return append([]MetadataTarget(nil), s.snapshot.Targets...)
-}
-
-func (s *LocalSession) Fetch(target MetadataTarget) (MetadataBlob, error) {
-	if s.snapshot == nil {
-		return MetadataBlob{}, errors.New("snapshot is nil")
-	}
-	obj, ok := resolveSnapshotMetadata(s.snapshot, target)
-	if !ok || obj.StorePath == "" {
-		return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: errMetadataNotFound}
-	}
-	ctx := s.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	reader, err := s.handler.store.OpenObject(ctx, s.handler.name, obj.StorePath)
-	if err != nil {
-		return MetadataBlob{}, err
-	}
-	tempFile, _, err := utils.TempFileFromReader(reader)
-	reader.Close()
-	if err != nil {
-		return MetadataBlob{}, err
-	}
-	tempPath := tempFile.Name()
-	if err := tempFile.Close(); err != nil {
-		_ = os.Remove(tempPath)
-		return MetadataBlob{}, err
-	}
-	return MetadataBlob{Path: obj.Path, temp: tempPath}, nil
 }
 
 func DeduceCompanions(basePath string) []string {
