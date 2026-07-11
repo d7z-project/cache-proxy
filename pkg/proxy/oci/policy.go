@@ -79,8 +79,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: 6 * time.Hour,
-		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
-			return scheduler.TaskOutcome{}, handler.Cleanup(ctx, plan.CleanupConfig())
+		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 	return plan.BindAddr(block.Bind, expireAfter, handler)

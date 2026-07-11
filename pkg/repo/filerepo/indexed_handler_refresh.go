@@ -52,12 +52,12 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	return err
 }
 
-func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (scheduler.TaskOutcome, error) {
+func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*scheduler.TaskOutcome, error) {
 	h.mu.RLock()
 	entry, ok := h.roots[rootID]
 	h.mu.RUnlock()
 	if !ok || entry == nil || len(entry.root.Targets) == 0 {
-		return scheduler.TaskOutcome{}, fmt.Errorf("root %s not found or has no targets", rootID)
+		return nil, fmt.Errorf("root %s not found or has no targets", rootID)
 	}
 	targets := append([]MetadataTarget(nil), entry.root.Targets...)
 	var (
@@ -69,18 +69,18 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 		if err != nil {
 			switch {
 			case errors.Is(err, health.ErrRefreshAlreadyRunning):
-				return scheduler.TaskOutcome{}, scheduler.ErrTaskSkipped
+				return nil, scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshBlockedUntil):
 				if blockedUntil, ok := h.sh.RefreshBlockedUntil(rootID); ok && !blockedUntil.IsZero() {
-					return scheduler.TaskOutcome{}, scheduler.RetryAt(blockedUntil)
+					return nil, scheduler.RetryAt(blockedUntil)
 				}
-				return scheduler.TaskOutcome{}, scheduler.ErrTaskSkipped
+				return nil, scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
 				h.removeRoot(rootID)
 				h.saveState(context.Background())
-				return scheduler.TaskOutcome{}, scheduler.ErrTaskSkipped
+				return nil, scheduler.ErrTaskSkipped
 			}
-			return scheduler.TaskOutcome{}, fmt.Errorf("start refresh %s: %w", rootID, err)
+			return nil, fmt.Errorf("start refresh %s: %w", rootID, err)
 		}
 		refreshGen = rh.Generation
 		release = done
@@ -94,7 +94,7 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 	h.reportMetadataState()
 	upstreams := h.weightedUpstreams()
 	if len(upstreams) == 0 {
-		return scheduler.TaskOutcome{}, errors.New("no upstreams available")
+		return nil, errors.New("no upstreams available")
 	}
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
 	var firstErr error
@@ -105,7 +105,13 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 				if firstErr == nil {
 					firstErr = err
 				}
-				slog.Debug("repository refresh head check failed", "instance", h.name, "root_id", rootID, "upstream", upstream, "err", err)
+				slog.Debug(
+					"repository refresh head check failed",
+					"instance", h.name,
+					"root_id", rootID,
+					"upstream", upstream,
+					"err", err,
+				)
 				continue
 			}
 			if unchanged {
@@ -114,7 +120,13 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 				}
 				h.saveState(context.Background())
 				h.reportMetadataState()
-				slog.Debug("repository refresh skipped unchanged metadata", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
+				slog.Debug(
+					"repository refresh skipped unchanged metadata",
+					"instance", h.name,
+					"mode", h.mode,
+					"root_id", rootID,
+					"upstream", upstream,
+				)
 				return repositoryRefreshOutcome("unchanged", "same_as_current", current.Generation, upstream), nil
 			}
 		}
@@ -124,7 +136,13 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 			if firstErr == nil {
 				firstErr = err
 			}
-			slog.Debug("repository refresh failed on upstream", "instance", h.name, "root_id", rootID, "upstream", upstream, "err", err)
+			slog.Debug(
+				"repository refresh failed on upstream",
+				"instance", h.name,
+				"root_id", rootID,
+				"upstream", upstream,
+				"err", err,
+			)
 			continue
 		}
 		if current := h.rootSnapshot(rootID); h.canReuseCurrentSnapshot(ctx, current) &&
@@ -157,7 +175,13 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 		h.setRootSnapshot(rootID, snapshot)
 		h.saveState(context.Background())
 		h.reportMetadataState()
-		slog.Debug("repository refresh succeeded", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
+		slog.Debug(
+			"repository refresh succeeded",
+			"instance", h.name,
+			"mode", h.mode,
+			"root_id", rootID,
+			"upstream", upstream,
+		)
 		return repositoryRefreshOutcome("updated", "published", snapshot.Generation, upstream), nil
 	}
 	if firstErr == nil {
@@ -170,7 +194,7 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (sc
 		}
 	}
 	h.saveState(context.Background())
-	return scheduler.TaskOutcome{}, firstErr
+	return nil, firstErr
 }
 
 func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
@@ -343,15 +367,18 @@ func snapshotsMetadataEqual(current, next *LiveSnapshot) bool {
 	return true
 }
 
-func repositoryRefreshOutcome(result, reasonCode, generation, upstream string) scheduler.TaskOutcome {
-	return scheduler.TaskOutcome{
+func repositoryRefreshOutcome(result, reasonCode, generation, upstream string) *scheduler.TaskOutcome {
+	return &scheduler.TaskOutcome{
 		Result:     result,
 		ReasonCode: reasonCode,
 		Detail:     fmt.Sprintf("generation=%s upstream=%s", generation, upstream),
 	}
 }
 
-func (h *IndexedHandler) loadCleanupPathSet(ctx context.Context, rootID, generation string) (map[string]struct{}, error) {
+func (h *IndexedHandler) loadCleanupPathSet(
+	ctx context.Context,
+	rootID, generation string,
+) (map[string]struct{}, error) {
 	reader, err := h.store.OpenObject(ctx, h.name, h.cleanupIndexPath(rootID, generation))
 	if err != nil {
 		return nil, fmt.Errorf("load cleanup index for root %s generation %s: %w", rootID, generation, err)

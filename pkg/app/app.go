@@ -135,7 +135,10 @@ func Validate(doc *config.Document) error {
 
 	registry := prometheus.NewRegistry()
 	stats := httpcache.NewStats(registry)
-	downloads := httpcache.NewDownloadLimiter(docCopy.Storage.Download.MaxActive, docCopy.Storage.Download.MaxActivePerInstance)
+	downloads := httpcache.NewDownloadLimiter(
+		docCopy.Storage.Download.MaxActive,
+		docCopy.Storage.Download.MaxActivePerInstance,
+	)
 
 	b := bus.NewWithRegisterer(registry)
 	sched := scheduler.New(b, store, registry)
@@ -217,9 +220,9 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),
 		Interval: doc.Storage.GC.Blob.Duration(),
-		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
+		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
 			_, err := app.store.RunGC(ctx, blobfs.GCOptions{Compact: true})
-			return scheduler.TaskOutcome{}, err
+			return nil, err
 		},
 	})
 

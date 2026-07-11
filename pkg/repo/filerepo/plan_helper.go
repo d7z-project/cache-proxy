@@ -22,7 +22,14 @@ type RepoBlock struct {
 	Policy          BasicPolicy             `yaml:",inline"`
 }
 
-func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor config.Freshness, defaultRefreshInterval time.Duration, inspector PathInspector, build SnapshotBuilder) error {
+func PlanRepoMode(
+	plan *proxyruntime.InstancePlan,
+	mode string,
+	defaultFreshFor config.Freshness,
+	defaultRefreshInterval time.Duration,
+	inspector PathInspector,
+	build SnapshotBuilder,
+) error {
 	var block RepoBlock
 	if err := plan.Decode(&block); err != nil {
 		return err
@@ -49,7 +56,21 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	}
 	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats(), httpcache.ModeUserAgent(mode))
 	sh.SetBus(plan.Bus())
-	handler := NewIndexedHandler(plan.Name(), mode, mode, inspector, upstreams, block.Transport, config.ExpirationNever, policy, build, plan.Store(), plan.Stats(), sh, plan.Downloads())
+	handler := NewIndexedHandler(
+		plan.Name(),
+		mode,
+		mode,
+		inspector,
+		upstreams,
+		block.Transport,
+		config.ExpirationNever,
+		policy,
+		build,
+		plan.Store(),
+		plan.Stats(),
+		sh,
+		plan.Downloads(),
+	)
 	handler.SetBus(plan.Bus())
 
 	sched := plan.Scheduler()
@@ -58,8 +79,8 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: cleanupInterval,
-		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
-			return scheduler.TaskOutcome{}, handler.Cleanup(ctx, plan.CleanupConfig())
+		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 
@@ -68,13 +89,13 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 		RefreshInterval: refreshInterval,
 		GCInterval:      gcInterval,
 		NewRefresh: func(rootID string) scheduler.TaskHandler {
-			return func(ctx context.Context) (scheduler.TaskOutcome, error) {
+			return func(ctx context.Context) (*scheduler.TaskOutcome, error) {
 				return handler.RefreshRootTask(ctx, rootID)
 			}
 		},
 		NewGC: func(rootID string) scheduler.TaskHandler {
-			return func(ctx context.Context) (scheduler.TaskOutcome, error) {
-				return scheduler.TaskOutcome{}, handler.CleanupRoot(ctx, rootID, plan.CleanupConfig())
+			return func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+				return nil, handler.CleanupRoot(ctx, rootID, plan.CleanupConfig())
 			}
 		},
 	})

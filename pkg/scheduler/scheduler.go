@@ -32,7 +32,7 @@ const (
 )
 
 // TaskHandler runs a scheduled task and may report a structured successful outcome.
-type TaskHandler func(ctx context.Context) (TaskOutcome, error)
+type TaskHandler func(ctx context.Context) (*TaskOutcome, error)
 
 // TaskOutcome describes the semantic result of a completed task.
 type TaskOutcome struct {

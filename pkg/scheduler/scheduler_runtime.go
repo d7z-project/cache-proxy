@@ -144,7 +144,14 @@ func (s *Scheduler) execute(ts *taskState) {
 		return
 	}
 
-	result := outcome.Result
+	result := "success"
+	var reasonCode, detail, message string
+	if outcome != nil {
+		result = outcome.Result
+		reasonCode = outcome.ReasonCode
+		detail = outcome.Detail
+		message = outcome.Message
+	}
 	if result == "" {
 		result = "success"
 	}
@@ -185,7 +192,8 @@ func (s *Scheduler) execute(ts *taskState) {
 
 	if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone {
 		if !ts.discoveredAt.IsZero() && s.m != nil {
-			s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), result).Observe(time.Since(ts.discoveredAt).Seconds())
+			s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), result).
+				Observe(time.Since(ts.discoveredAt).Seconds())
 		}
 		ts.firstRunDone = true
 		ts.discoveredAt = time.Time{}
@@ -204,9 +212,9 @@ func (s *Scheduler) execute(ts *taskState) {
 			FinishedAt: start.Add(dur),
 			Duration:   dur,
 			Result:     result,
-			ReasonCode: outcome.ReasonCode,
-			Detail:     outcome.Detail,
-			Message:    outcome.Message,
+			ReasonCode: reasonCode,
+			Detail:     detail,
+			Message:    message,
 			Err:        ts.LastError,
 		})
 	}
@@ -254,7 +262,8 @@ func (s *Scheduler) unregisterLocked(key TaskKey, reason string) {
 		heap.Remove(&s.heap, ts.index)
 	}
 	if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone && !ts.discoveredAt.IsZero() && s.m != nil {
-		s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), "removed_before_refresh").Observe(time.Since(ts.discoveredAt).Seconds())
+		s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), "removed_before_refresh").
+			Observe(time.Since(ts.discoveredAt).Seconds())
 	}
 	if s.m != nil {
 		s.m.unregistered.WithLabelValues(key.Instance(), string(key.Type()), reason).Inc()
@@ -336,7 +345,8 @@ func (s *Scheduler) refreshMetrics() {
 			s.m.overdue.WithLabelValues(inst, string(typ)).Set(overdue[key])
 			s.m.backoff.WithLabelValues(inst, string(typ)).Set(backoffVals[key])
 			for _, status := range []TaskStatus{StatusIdle, StatusRunning, StatusDone, StatusFailed} {
-				s.m.status.WithLabelValues(inst, string(typ), string(status)).Set(statuses[[3]string{inst, string(typ), string(status)}])
+				s.m.status.WithLabelValues(inst, string(typ), string(status)).
+					Set(statuses[[3]string{inst, string(typ), string(status)}])
 			}
 		}
 		s.m.discoveriesPending.WithLabelValues(inst).Set(pending[inst])
@@ -365,7 +375,7 @@ func taskErrorString(err error) string {
 	return msg[:maxTaskErrorBytes] + "...(truncated)"
 }
 
-func safeCall(ctx context.Context, handler TaskHandler) (outcome TaskOutcome, err error) {
+func safeCall(ctx context.Context, handler TaskHandler) (outcome *TaskOutcome, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%w: %v", errHandlerPanic, r)

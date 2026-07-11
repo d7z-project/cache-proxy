@@ -69,8 +69,8 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 	return handler
 }
 
-func noopSchedulerTask(context.Context) (scheduler.TaskOutcome, error) {
-	return scheduler.TaskOutcome{}, nil
+func noopSchedulerTask(context.Context) (*scheduler.TaskOutcome, error) {
+	return nil, nil
 }
 
 type staticInspector func(string) DiscoveryResult

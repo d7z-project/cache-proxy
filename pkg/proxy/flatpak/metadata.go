@@ -46,7 +46,7 @@ func (h *Handler) Refresh(ctx context.Context) error {
 	return err
 }
 
-func (h *Handler) RefreshTask(ctx context.Context) (scheduler.TaskOutcome, error) {
+func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, error) {
 	h.refreshMu.Lock()
 	defer h.refreshMu.Unlock()
 
@@ -70,7 +70,7 @@ func (h *Handler) RefreshTask(ctx context.Context) (scheduler.TaskOutcome, error
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
-	return scheduler.TaskOutcome{}, firstErr
+	return nil, firstErr
 }
 
 func (h *Handler) CleanupMetadata(ctx context.Context) error {
@@ -211,7 +211,11 @@ func (d *metadataDownload) Close() {
 	}
 }
 
-func (h *Handler) fetchMetadata(ctx context.Context, upstream, cleanPath string, required bool) (*metadataDownload, error) {
+func (h *Handler) fetchMetadata(
+	ctx context.Context,
+	upstream, cleanPath string,
+	required bool,
+) (*metadataDownload, error) {
 	targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -292,8 +296,8 @@ func metadataFingerprint(objects map[string]*metadataDownload) string {
 	return "sha256:" + hex.EncodeToString(sum.Sum(nil))
 }
 
-func flatpakRefreshOutcome(result, reasonCode, generation, upstream string) scheduler.TaskOutcome {
-	return scheduler.TaskOutcome{
+func flatpakRefreshOutcome(result, reasonCode, generation, upstream string) *scheduler.TaskOutcome {
+	return &scheduler.TaskOutcome{
 		Result:     result,
 		ReasonCode: reasonCode,
 		Detail:     fmt.Sprintf("generation=%s upstream=%s", generation, upstream),

@@ -31,8 +31,8 @@ func newTestScheduler(t *testing.T, store *blobfs.Store) (*Scheduler, *bus.Bus) 
 	return New(b, store, reg), b
 }
 
-func noopTask(context.Context) (TaskOutcome, error) {
-	return TaskOutcome{}, nil
+func noopTask(context.Context) (*TaskOutcome, error) {
+	return nil, nil
 }
 
 func metricValue(t *testing.T, metric prometheus.Metric) float64 {
@@ -78,13 +78,13 @@ func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      key,
 		Interval: 10 * time.Millisecond,
-		Handler: func(context.Context) (TaskOutcome, error) {
+		Handler: func(context.Context) (*TaskOutcome, error) {
 			buf := make([]byte, 16<<20)
 			for i := 0; i < len(buf); i += 4096 {
 				buf[i] = byte(i)
 			}
 			runs.Add(1)
-			return TaskOutcome{}, nil
+			return nil, nil
 		},
 	})
 
@@ -159,8 +159,8 @@ func TestTaskOutcomeReportsExplicitResult(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      NewTaskKey("repo", TypeMetadataRefresh, "root"),
 		Interval: 0,
-		Handler: func(context.Context) (TaskOutcome, error) {
-			return TaskOutcome{
+		Handler: func(context.Context) (*TaskOutcome, error) {
+			return &TaskOutcome{
 				Result:     "unchanged",
 				ReasonCode: "same_as_current",
 				Detail:     "generation=abc",
@@ -193,20 +193,23 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(subPath string) TaskHandler {
-			return func(context.Context) (TaskOutcome, error) {
+			return func(context.Context) (*TaskOutcome, error) {
 				executed <- "refresh:" + subPath
-				return TaskOutcome{}, nil
+				return nil, nil
 			}
 		},
 		NewGC: func(subPath string) TaskHandler {
-			return func(context.Context) (TaskOutcome, error) {
+			return func(context.Context) (*TaskOutcome, error) {
 				executed <- "gc:" + subPath
-				return TaskOutcome{}, nil
+				return nil, nil
 			}
 		},
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
 	select {
 	case result := <-executed:
 		require.Equal(t, "refresh:root", result)
@@ -220,7 +223,11 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 	require.True(t, ok)
 	_, ok = sched.Info(gcKey)
 	require.True(t, ok)
-	require.Equal(t, float64(1), metricValue(t, sched.m.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")))
+	require.Equal(
+		t,
+		float64(1),
+		metricValue(t, sched.m.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")),
+	)
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
@@ -237,13 +244,19 @@ func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return ok
 	}, time.Second, 10*time.Millisecond)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataRemoved,
+		Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "root"},
+	})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return !ok
@@ -263,21 +276,28 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(context.Context) (TaskOutcome, error) {
+			return func(context.Context) (*TaskOutcome, error) {
 				calls.Add(1)
-				return TaskOutcome{}, context.DeadlineExceeded
+				return nil, context.DeadlineExceeded
 			}
 		},
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
 	require.Eventually(t, func() bool {
 		info, _ := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return info.Status == StatusFailed
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Greater(t, calls.Load(), int32(0))
-	require.Greater(t, metricValue(t, sched.m.backoff.WithLabelValues("repo", string(TypeMetadataRefresh))), float64(0))
+	require.Greater(
+		t,
+		metricValue(t, sched.m.backoff.WithLabelValues("repo", string(TypeMetadataRefresh))),
+		float64(0),
+	)
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
@@ -293,14 +313,17 @@ func TestRetryAtKeepsTaskDoneAndSchedulesExactRetry(t *testing.T) {
 		RefreshInterval: time.Hour,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(context.Context) (TaskOutcome, error) {
-				return TaskOutcome{}, RetryAt(delayedUntil)
+			return func(context.Context) (*TaskOutcome, error) {
+				return nil, RetryAt(delayedUntil)
 			}
 		},
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
 	require.Eventually(t, func() bool {
 		info, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		if !ok {
@@ -322,7 +345,7 @@ func TestHandlerPanicMarksTaskFailed(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      key,
 		Interval: 50 * time.Millisecond,
-		Handler: func(context.Context) (TaskOutcome, error) {
+		Handler: func(context.Context) (*TaskOutcome, error) {
 			called.Store(true)
 			panic("unexpected handler panic")
 		},
@@ -348,18 +371,21 @@ func TestContextCancellationStopsRunningTask(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(ctx context.Context) (TaskOutcome, error) {
+			return func(ctx context.Context) (*TaskOutcome, error) {
 				close(started)
 				<-ctx.Done()
 				close(done)
-				return TaskOutcome{}, ctx.Err()
+				return nil, ctx.Err()
 			}
 		},
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
@@ -385,9 +411,9 @@ func TestZeroIntervalTaskRunsImmediately(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      NewTaskKey("zero", TypeBlobGC, ""),
 		Interval: 0,
-		Handler: func(context.Context) (TaskOutcome, error) {
+		Handler: func(context.Context) (*TaskOutcome, error) {
 			count.Add(1)
-			return TaskOutcome{}, nil
+			return nil, nil
 		},
 	})
 	require.Eventually(t, func() bool { return count.Load() > 0 }, 5*time.Second, 20*time.Millisecond)
@@ -438,8 +464,14 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 		NewGC:           func(string) TaskHandler { return noopTask },
 	})
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "a"}})
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "b"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "a"},
+	})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "b"},
+	})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 		return ok
@@ -448,7 +480,10 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 	_, aOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
 	require.True(t, aOk)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "a"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataRemoved,
+		Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "a"},
+	})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
 		return !ok
@@ -457,7 +492,10 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 	_, bOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 	require.True(t, bOk, "subpath b should still be present after removing a")
 
-	b.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "b"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataRemoved,
+		Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "b"},
+	})
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 		return !ok
@@ -475,18 +513,21 @@ func TestStopTimeoutMarksStopped(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(ctx context.Context) (TaskOutcome, error) {
+			return func(ctx context.Context) (*TaskOutcome, error) {
 				close(started)
 				<-ctx.Done()
 				time.Sleep(200 * time.Millisecond)
-				return TaskOutcome{}, ctx.Err()
+				return nil, ctx.Err()
 			}
 		},
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):

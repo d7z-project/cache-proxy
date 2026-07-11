@@ -100,8 +100,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: cleanupInterval,
-		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
-			return scheduler.TaskOutcome{}, handler.Cleanup(ctx, plan.CleanupConfig())
+		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 	plan.Scheduler().Register(scheduler.TaskDef{
@@ -112,8 +112,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataGC, ""),
 		Interval: max(refreshInterval*3, 6*time.Hour),
-		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
-			return scheduler.TaskOutcome{}, handler.CleanupMetadata(ctx)
+		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+			return nil, handler.CleanupMetadata(ctx)
 		},
 	})
 	plan.SetHomeSnippet(plan.RenderSnippet())

@@ -525,9 +525,28 @@ func TestStatusEventsEndpointClampsLimit(t *testing.T) {
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
-	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("one", scheduler.TypeExpireCleanup, "/a"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
-	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("two", scheduler.TypeExpireCleanup, "/b"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
-	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("three", scheduler.TypeExpireCleanup, "/c"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+	now := time.Now().UTC()
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("one", scheduler.TypeExpireCleanup, "/a"),
+		StartedAt:  now,
+		FinishedAt: now,
+		Duration:   time.Second,
+		Result:     "success",
+	})
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("two", scheduler.TypeExpireCleanup, "/b"),
+		StartedAt:  now,
+		FinishedAt: now,
+		Duration:   time.Second,
+		Result:     "success",
+	})
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("three", scheduler.TypeExpireCleanup, "/c"),
+		StartedAt:  now,
+		FinishedAt: now,
+		Duration:   time.Second,
+		Result:     "success",
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/-/status/events?limit=999", nil)
 	rec := httptest.NewRecorder()
@@ -563,8 +582,21 @@ func TestStatusEventsEndpointFallsBackOnInvalidLimit(t *testing.T) {
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
-	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("one", scheduler.TypeExpireCleanup, "/a"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
-	app.status.observeTaskRun(scheduler.TaskRun{Key: scheduler.NewTaskKey("two", scheduler.TypeExpireCleanup, "/b"), StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Duration: time.Second, Result: "success"})
+	now := time.Now().UTC()
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("one", scheduler.TypeExpireCleanup, "/a"),
+		StartedAt:  now,
+		FinishedAt: now,
+		Duration:   time.Second,
+		Result:     "success",
+	})
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:        scheduler.NewTaskKey("two", scheduler.TypeExpireCleanup, "/b"),
+		StartedAt:  now,
+		FinishedAt: now,
+		Duration:   time.Second,
+		Result:     "success",
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/-/status/events?limit=nope", nil)
 	rec := httptest.NewRecorder()
@@ -826,11 +858,11 @@ func (d startFailingDriver) Plan(_ context.Context, plan *proxyruntime.InstanceP
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: 10 * time.Millisecond,
-		Handler: func(context.Context) (scheduler.TaskOutcome, error) {
+		Handler: func(context.Context) (*scheduler.TaskOutcome, error) {
 			if d.runs != nil {
 				d.runs.Add(1)
 			}
-			return scheduler.TaskOutcome{}, nil
+			return nil, nil
 		},
 	})
 	return plan.BindPath("/files", config.Expiration(time.Hour), startContextInstance{
