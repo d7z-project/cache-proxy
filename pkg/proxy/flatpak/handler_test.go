@@ -58,6 +58,38 @@ func TestRefreshUsesOneUpstreamForMetadataGeneration(t *testing.T) {
 	requireStoreObject(t, store, "flatpak-test", "flatpak/metadata/"+current.Generation+"/config")
 }
 
+func TestRefreshTaskReportsUnchangedWithoutPublishingGeneration(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/summary":
+			_, _ = w.Write([]byte("summary-data"))
+		case "/summary.sig":
+			_, _ = w.Write([]byte("signature-data"))
+		case "/config":
+			_, _ = w.Write([]byte("config-data"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := openTestStore(t)
+	handler := newTestHandler(t, store, []string{upstream.URL})
+	outcome, err := handler.RefreshTask(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
+	require.Equal(t, "published", outcome.ReasonCode)
+	current := handler.currentSnapshot()
+	require.NotEmpty(t, current.Generation)
+	require.NotEmpty(t, current.Fingerprint)
+
+	outcome, err = handler.RefreshTask(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", outcome.Result)
+	require.Equal(t, "same_as_current", outcome.ReasonCode)
+	require.Equal(t, current.Generation, handler.currentSnapshot().Generation)
+}
+
 func TestSummarySigRequestDoesNotCreateGeneration(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/summary.sig", r.URL.Path)

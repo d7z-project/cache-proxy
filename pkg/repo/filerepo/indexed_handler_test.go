@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +69,10 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 	return handler
 }
 
+func noopSchedulerTask(context.Context) (scheduler.TaskOutcome, error) {
+	return scheduler.TaskOutcome{}, nil
+}
+
 type staticInspector func(string) DiscoveryResult
 
 func (d staticInspector) InspectPath(cleanPath string) DiscoveryResult {
@@ -120,9 +125,11 @@ func TestRefreshPersistsCleanupIndexAndCleanupUsesStoredPaths(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	var indexVersion atomic.Int32
+	indexVersion.Store(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/meta/index.txt" {
-			_, _ = io.WriteString(w, "index")
+			_, _ = fmt.Fprintf(w, "index-%d", indexVersion.Load())
 			return
 		}
 		http.NotFound(w, r)
@@ -332,9 +339,11 @@ func TestGenerationResolverUsesGenerationScopedObjectPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	var indexVersion atomic.Int32
+	indexVersion.Store(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/meta/index.txt" {
-			_, _ = io.WriteString(w, "index")
+			_, _ = fmt.Fprintf(w, "index-%d", indexVersion.Load())
 			return
 		}
 		http.NotFound(w, r)
@@ -363,6 +372,7 @@ func TestGenerationResolverUsesGenerationScopedObjectPath(t *testing.T) {
 	require.Contains(t, firstRoute.ObjectPath, "/artifacts/pool/pkg.deb")
 
 	time.Sleep(time.Nanosecond)
+	indexVersion.Store(2)
 	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	secondRoute, err := (&generationResolver{handler: handler, policy: &Policy{}}).Resolve(
 		httptest.NewRequest(http.MethodGet, "/pool/pkg.deb", nil),
@@ -386,8 +396,8 @@ func TestStartReconcilesMetadataTasksWithoutSchedulerState(t *testing.T) {
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      6 * time.Hour,
-		NewRefresh:      func(string) scheduler.TaskHandler { return func(context.Context) error { return nil } },
-		NewGC:           func(string) scheduler.TaskHandler { return func(context.Context) error { return nil } },
+		NewRefresh:      func(string) scheduler.TaskHandler { return noopSchedulerTask },
+		NewGC:           func(string) scheduler.TaskHandler { return noopSchedulerTask },
 	})
 
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
@@ -853,7 +863,10 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 		},
 	)
 
-	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	outcome, err := handler.RefreshRootTask(ctx, "root")
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
+	require.Equal(t, "published", outcome.ReasonCode)
 	require.Equal(t, 1, builderCalls)
 	first := handler.rootSnapshot("root")
 	require.NotNil(t, first)
@@ -865,7 +878,10 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, `"meta-v1"`, info.Options["etag"])
 
-	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	outcome, err = handler.RefreshRootTask(ctx, "root")
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", outcome.Result)
+	require.Equal(t, "same_as_current", outcome.ReasonCode)
 	require.Equal(t, 1, builderCalls)
 	require.Equal(t, 1, headRequests)
 	stats := handler.stats.Snapshot()
@@ -907,17 +923,21 @@ func TestRefreshRebuildsWhenCleanupIndexMissing(t *testing.T) {
 		},
 	)
 
-	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	outcome, err := handler.RefreshRootTask(ctx, "root")
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
 	first := handler.rootSnapshot("root")
 	require.NotNil(t, first)
 	require.NoError(t, store.DeleteObject(ctx, "repo", handler.cleanupIndexPath("root", first.Generation)))
 
-	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	outcome, err = handler.RefreshRootTask(ctx, "root")
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
 	require.Equal(t, 2, builderCalls)
 	require.Equal(t, 0, headRequests)
 	current := handler.rootSnapshot("root")
 	require.NotNil(t, current)
-	_, err := store.StatObject(ctx, "repo", handler.cleanupIndexPath("root", current.Generation))
+	_, err = store.StatObject(ctx, "repo", handler.cleanupIndexPath("root", current.Generation))
 	require.NoError(t, err)
 }
 

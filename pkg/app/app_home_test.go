@@ -456,6 +456,15 @@ func TestI18NMapsShareSameKeys(t *testing.T) {
 		_, ok := en[key]
 		require.Truef(t, ok, "missing en key %q", key)
 	}
+	for _, key := range []string{
+		"result_updated",
+		"result_unchanged",
+		"reason_published",
+		"reason_same_as_current",
+	} {
+		require.NotEmpty(t, en[key])
+		require.NotEmpty(t, zh[key])
+	}
 }
 
 func TestBindURLUsesForwardedHostAndProto(t *testing.T) {

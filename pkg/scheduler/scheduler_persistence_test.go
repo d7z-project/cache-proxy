@@ -25,8 +25,8 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 			Instance:        "repo",
 			RefreshInterval: time.Hour,
 			GCInterval:      2 * time.Hour,
-			NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-			NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+			NewRefresh:      func(string) TaskHandler { return noopTask },
+			NewGC:           func(string) TaskHandler { return noopTask },
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
@@ -51,8 +51,8 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      2 * time.Hour,
-		NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-		NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewRefresh:      func(string) TaskHandler { return noopTask },
+		NewGC:           func(string) TaskHandler { return noopTask },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -78,8 +78,8 @@ func TestPersistenceRestoreSkipsMissingFactory(t *testing.T) {
 			Instance:        "ghost",
 			RefreshInterval: time.Hour,
 			GCInterval:      time.Hour,
-			NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-			NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+			NewRefresh:      func(string) TaskHandler { return noopTask },
+			NewGC:           func(string) TaskHandler { return noopTask },
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
@@ -124,8 +124,8 @@ func TestRestoreMetrics(t *testing.T) {
 			Instance:        "repo",
 			RefreshInterval: time.Hour,
 			GCInterval:      time.Hour,
-			NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-			NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+			NewRefresh:      func(string) TaskHandler { return noopTask },
+			NewGC:           func(string) TaskHandler { return noopTask },
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
@@ -149,8 +149,8 @@ func TestRestoreMetrics(t *testing.T) {
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      time.Hour,
-		NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-		NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewRefresh:      func(string) TaskHandler { return noopTask },
+		NewGC:           func(string) TaskHandler { return noopTask },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

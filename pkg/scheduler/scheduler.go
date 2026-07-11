@@ -31,7 +31,16 @@ const (
 	StatusFailed  TaskStatus = "failed"
 )
 
-type TaskHandler func(ctx context.Context) error
+// TaskHandler runs a scheduled task and may report a structured successful outcome.
+type TaskHandler func(ctx context.Context) (TaskOutcome, error)
+
+// TaskOutcome describes the semantic result of a completed task.
+type TaskOutcome struct {
+	Result     string
+	ReasonCode string
+	Detail     string
+	Message    string
+}
 
 var ErrTaskSkipped = errors.New("task skipped")
 
@@ -91,6 +100,9 @@ type TaskRun struct {
 	FinishedAt time.Time
 	Duration   time.Duration
 	Result     string
+	ReasonCode string
+	Detail     string
+	Message    string
 	Err        string
 }
 

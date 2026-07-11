@@ -137,8 +137,17 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 		FinishedAt: run.FinishedAt.Format(time.RFC3339),
 		DurationMS: run.Duration.Milliseconds(),
 		Result:     run.Result,
-		Message:    run.Err,
+		ReasonCode: run.ReasonCode,
+		Detail:     run.Detail,
+		Message:    taskRunMessage(run),
 	})
+}
+
+func taskRunMessage(run scheduler.TaskRun) string {
+	if run.Message != "" {
+		return run.Message
+	}
+	return run.Err
 }
 
 func (s *appStatus) appendEvent(event taskEvent) {

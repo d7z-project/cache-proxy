@@ -23,9 +23,10 @@ const (
 )
 
 type currentMetadata struct {
-	Generation string    `yaml:"generation"`
-	Upstream   string    `yaml:"upstream"`
-	Published  time.Time `yaml:"published"`
+	Generation  string    `yaml:"generation"`
+	Upstream    string    `yaml:"upstream"`
+	Published   time.Time `yaml:"published"`
+	Fingerprint string    `yaml:"fingerprint,omitempty"`
 }
 
 type Handler struct {

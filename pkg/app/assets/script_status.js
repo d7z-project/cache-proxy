@@ -196,7 +196,8 @@ function translateTaskType(taskType) {
 
 function resultClass(result) {
     var lower = String(result).toLowerCase();
-    if (['success', 'ok', 'active', 'up', 'healthy', 'closed'].indexOf(lower) !== -1) return 'result-ok';
+    var okResults = ['success', 'updated', 'unchanged', 'ok', 'active', 'up', 'healthy', 'closed'];
+    if (okResults.indexOf(lower) !== -1) return 'result-ok';
     if (['failed', 'error', 'failure', 'degraded', 'down', 'err', 'open'].indexOf(lower) !== -1) return 'result-err';
     if (['aborted', 'timeout', 'cancelled', 'suspect', 'halfopen'].indexOf(lower) !== -1) return 'result-warn';
     return '';
@@ -204,7 +205,17 @@ function resultClass(result) {
 
 function formatEventMessage(item) {
     if (item.task_type !== 'upstream_state') {
-        return item.message || '';
+        var taskParts = [];
+        if (item.reason_code) {
+            taskParts.push(translateReason(item.reason_code));
+        }
+        if (item.detail) {
+            taskParts.push(item.detail);
+        }
+        if (item.message) {
+            taskParts.push(item.message);
+        }
+        return taskParts.join(' · ');
     }
     var parts = [];
     if (item.reason_code) {

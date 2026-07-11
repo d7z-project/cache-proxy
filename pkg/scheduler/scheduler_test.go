@@ -31,6 +31,10 @@ func newTestScheduler(t *testing.T, store *blobfs.Store) (*Scheduler, *bus.Bus) 
 	return New(b, store, reg), b
 }
 
+func noopTask(context.Context) (TaskOutcome, error) {
+	return TaskOutcome{}, nil
+}
+
 func metricValue(t *testing.T, metric prometheus.Metric) float64 {
 	t.Helper()
 	var pb dto.Metric
@@ -74,13 +78,13 @@ func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      key,
 		Interval: 10 * time.Millisecond,
-		Handler: func(context.Context) error {
+		Handler: func(context.Context) (TaskOutcome, error) {
 			buf := make([]byte, 16<<20)
 			for i := 0; i < len(buf); i += 4096 {
 				buf[i] = byte(i)
 			}
 			runs.Add(1)
-			return nil
+			return TaskOutcome{}, nil
 		},
 	})
 
@@ -98,7 +102,7 @@ func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
 func TestRegisterInfoAndSnapshotBeforeStart(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
 	key := NewTaskKey("pre", TypeExpireCleanup, "")
-	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) error { return nil }})
+	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: noopTask})
 
 	info, ok := sched.Info(key)
 	require.True(t, ok)
@@ -114,7 +118,7 @@ func TestRegisterAndUnregisterAfterStart(t *testing.T) {
 	sched.Start(ctx)
 
 	key := NewTaskKey("test", TypeExpireCleanup, "")
-	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) error { return nil }})
+	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: noopTask})
 	info, ok := sched.Info(key)
 	require.True(t, ok)
 	require.Equal(t, key, info.Key)
@@ -122,6 +126,58 @@ func TestRegisterAndUnregisterAfterStart(t *testing.T) {
 	sched.Unregister(key)
 	_, ok = sched.Info(key)
 	require.False(t, ok)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestTaskOutcomeDefaultsToSuccess(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runs := make(chan TaskRun, 1)
+	sched.SetRunObserver(func(run TaskRun) { runs <- run })
+	sched.Start(ctx)
+	sched.Register(TaskDef{Key: NewTaskKey("test", TypeBlobGC, ""), Interval: 0, Handler: noopTask})
+
+	select {
+	case run := <-runs:
+		require.Equal(t, "success", run.Result)
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "task run was not observed")
+	}
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestTaskOutcomeReportsExplicitResult(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runs := make(chan TaskRun, 1)
+	sched.SetRunObserver(func(run TaskRun) { runs <- run })
+	sched.Start(ctx)
+	sched.Register(TaskDef{
+		Key:      NewTaskKey("repo", TypeMetadataRefresh, "root"),
+		Interval: 0,
+		Handler: func(context.Context) (TaskOutcome, error) {
+			return TaskOutcome{
+				Result:     "unchanged",
+				ReasonCode: "same_as_current",
+				Detail:     "generation=abc",
+				Message:    "metadata unchanged",
+			}, nil
+		},
+	})
+
+	select {
+	case run := <-runs:
+		require.Equal(t, "unchanged", run.Result)
+		require.Equal(t, "same_as_current", run.ReasonCode)
+		require.Equal(t, "generation=abc", run.Detail)
+		require.Equal(t, "metadata unchanged", run.Message)
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "task run was not observed")
+	}
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
@@ -137,15 +193,15 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(subPath string) TaskHandler {
-			return func(context.Context) error {
+			return func(context.Context) (TaskOutcome, error) {
 				executed <- "refresh:" + subPath
-				return nil
+				return TaskOutcome{}, nil
 			}
 		},
 		NewGC: func(subPath string) TaskHandler {
-			return func(context.Context) error {
+			return func(context.Context) (TaskOutcome, error) {
 				executed <- "gc:" + subPath
-				return nil
+				return TaskOutcome{}, nil
 			}
 		},
 	})
@@ -176,8 +232,8 @@ func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      time.Hour,
-		NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-		NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewRefresh:      func(string) TaskHandler { return noopTask },
+		NewGC:           func(string) TaskHandler { return noopTask },
 	})
 	sched.Start(ctx)
 
@@ -207,12 +263,12 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(context.Context) error {
+			return func(context.Context) (TaskOutcome, error) {
 				calls.Add(1)
-				return context.DeadlineExceeded
+				return TaskOutcome{}, context.DeadlineExceeded
 			}
 		},
-		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewGC: func(string) TaskHandler { return noopTask },
 	})
 
 	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
@@ -237,11 +293,11 @@ func TestRetryAtKeepsTaskDoneAndSchedulesExactRetry(t *testing.T) {
 		RefreshInterval: time.Hour,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(context.Context) error {
-				return RetryAt(delayedUntil)
+			return func(context.Context) (TaskOutcome, error) {
+				return TaskOutcome{}, RetryAt(delayedUntil)
 			}
 		},
-		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewGC: func(string) TaskHandler { return noopTask },
 	})
 
 	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
@@ -266,7 +322,7 @@ func TestHandlerPanicMarksTaskFailed(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      key,
 		Interval: 50 * time.Millisecond,
-		Handler: func(context.Context) error {
+		Handler: func(context.Context) (TaskOutcome, error) {
 			called.Store(true)
 			panic("unexpected handler panic")
 		},
@@ -292,14 +348,14 @@ func TestContextCancellationStopsRunningTask(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(ctx context.Context) error {
+			return func(ctx context.Context) (TaskOutcome, error) {
 				close(started)
 				<-ctx.Done()
 				close(done)
-				return ctx.Err()
+				return TaskOutcome{}, ctx.Err()
 			}
 		},
-		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewGC: func(string) TaskHandler { return noopTask },
 	})
 	sched.Start(ctx)
 
@@ -329,7 +385,10 @@ func TestZeroIntervalTaskRunsImmediately(t *testing.T) {
 	sched.Register(TaskDef{
 		Key:      NewTaskKey("zero", TypeBlobGC, ""),
 		Interval: 0,
-		Handler:  func(context.Context) error { count.Add(1); return nil },
+		Handler: func(context.Context) (TaskOutcome, error) {
+			count.Add(1)
+			return TaskOutcome{}, nil
+		},
 	})
 	require.Eventually(t, func() bool { return count.Load() > 0 }, 5*time.Second, 20*time.Millisecond)
 	require.NoError(t, sched.Stop(context.Background()))
@@ -342,8 +401,8 @@ func TestDuplicateRegisterKeepsLatestDefinition(t *testing.T) {
 	sched.Start(ctx)
 
 	key := NewTaskKey("dup", TypeBlobGC, "")
-	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) error { return nil }})
-	sched.Register(TaskDef{Key: key, Interval: time.Minute, Handler: func(context.Context) error { return nil }})
+	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: noopTask})
+	sched.Register(TaskDef{Key: key, Interval: time.Minute, Handler: noopTask})
 
 	info, ok := sched.Info(key)
 	require.True(t, ok)
@@ -375,8 +434,8 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      time.Hour,
-		NewRefresh:      func(string) TaskHandler { return func(context.Context) error { return nil } },
-		NewGC:           func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewRefresh:      func(string) TaskHandler { return noopTask },
+		NewGC:           func(string) TaskHandler { return noopTask },
 	})
 
 	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "a"}})
@@ -416,14 +475,14 @@ func TestStopTimeoutMarksStopped(t *testing.T) {
 		RefreshInterval: 100 * time.Millisecond,
 		GCInterval:      time.Hour,
 		NewRefresh: func(string) TaskHandler {
-			return func(ctx context.Context) error {
+			return func(ctx context.Context) (TaskOutcome, error) {
 				close(started)
 				<-ctx.Done()
 				time.Sleep(200 * time.Millisecond)
-				return ctx.Err()
+				return TaskOutcome{}, ctx.Err()
 			}
 		},
-		NewGC: func(string) TaskHandler { return func(context.Context) error { return nil } },
+		NewGC: func(string) TaskHandler { return noopTask },
 	})
 	sched.Start(ctx)
 

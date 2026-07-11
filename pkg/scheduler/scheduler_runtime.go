@@ -137,14 +137,17 @@ func (s *Scheduler) execute(ts *taskState) {
 
 	ts.Status = StatusRunning
 	start := time.Now()
-	err := safeCall(ctx, ts.handler)
+	outcome, err := safeCall(ctx, ts.handler)
 	dur := time.Since(start)
 
 	if s.stopped.Load() {
 		return
 	}
 
-	result := "success"
+	result := outcome.Result
+	if result == "" {
+		result = "success"
+	}
 
 	ts.LastRun = start
 	ts.RunCount++
@@ -201,6 +204,9 @@ func (s *Scheduler) execute(ts *taskState) {
 			FinishedAt: start.Add(dur),
 			Duration:   dur,
 			Result:     result,
+			ReasonCode: outcome.ReasonCode,
+			Detail:     outcome.Detail,
+			Message:    outcome.Message,
 			Err:        ts.LastError,
 		})
 	}
@@ -359,7 +365,7 @@ func taskErrorString(err error) string {
 	return msg[:maxTaskErrorBytes] + "...(truncated)"
 }
 
-func safeCall(ctx context.Context, handler TaskHandler) (err error) {
+func safeCall(ctx context.Context, handler TaskHandler) (outcome TaskOutcome, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%w: %v", errHandlerPanic, r)

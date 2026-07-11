@@ -100,19 +100,21 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: cleanupInterval,
-		Handler: func(ctx context.Context) error {
-			return handler.Cleanup(ctx, plan.CleanupConfig())
+		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
+			return scheduler.TaskOutcome{}, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataRefresh, ""),
 		Interval: refreshInterval,
-		Handler:  handler.Refresh,
+		Handler:  handler.RefreshTask,
 	})
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataGC, ""),
 		Interval: max(refreshInterval*3, 6*time.Hour),
-		Handler:  handler.CleanupMetadata,
+		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
+			return scheduler.TaskOutcome{}, handler.CleanupMetadata(ctx)
+		},
 	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, handler)

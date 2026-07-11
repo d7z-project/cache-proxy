@@ -217,9 +217,9 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),
 		Interval: doc.Storage.GC.Blob.Duration(),
-		Handler: func(ctx context.Context) error {
+		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
 			_, err := app.store.RunGC(ctx, blobfs.GCOptions{Compact: true})
-			return err
+			return scheduler.TaskOutcome{}, err
 		},
 	})
 

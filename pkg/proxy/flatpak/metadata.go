@@ -3,6 +3,8 @@ package flatpak
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +21,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -34,31 +37,40 @@ type generationEntry struct {
 type metadataDownload struct {
 	temp    string
 	size    int64
+	digest  string
 	headers map[string]string
 }
 
 func (h *Handler) Refresh(ctx context.Context) error {
+	_, err := h.RefreshTask(ctx)
+	return err
+}
+
+func (h *Handler) RefreshTask(ctx context.Context) (scheduler.TaskOutcome, error) {
 	h.refreshMu.Lock()
 	defer h.refreshMu.Unlock()
 
 	var firstErr error
 	for _, upstream := range h.upstreams {
-		next, err := h.refreshFromUpstream(ctx, upstream)
+		next, changed, err := h.refreshFromUpstream(ctx, upstream)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
+		if !changed {
+			return flatpakRefreshOutcome("unchanged", "same_as_current", next.Generation, upstream), nil
+		}
 		h.mu.Lock()
 		h.current = next
 		h.mu.Unlock()
-		return nil
+		return flatpakRefreshOutcome("updated", "published", next.Generation, upstream), nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
-	return firstErr
+	return scheduler.TaskOutcome{}, firstErr
 }
 
 func (h *Handler) CleanupMetadata(ctx context.Context) error {
@@ -149,38 +161,48 @@ func (h *Handler) serveMetadataObject(w http.ResponseWriter, req *http.Request, 
 	h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "GENERATION", http.StatusOK, uint64(info.Size))
 }
 
-func (h *Handler) refreshFromUpstream(ctx context.Context, upstream string) (currentMetadata, error) {
+func (h *Handler) refreshFromUpstream(ctx context.Context, upstream string) (currentMetadata, bool, error) {
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
 	summary, err := h.fetchMetadata(ctx, upstream, "summary", true)
 	if err != nil {
-		return currentMetadata{}, err
+		return currentMetadata{}, false, err
 	}
 	defer summary.Close()
 	if err := validateSummary(summary); err != nil {
-		return currentMetadata{}, err
+		return currentMetadata{}, false, err
 	}
 
 	objects := map[string]*metadataDownload{"summary": summary}
 	for _, companion := range []string{"summary.sig", "config"} {
 		item, err := h.fetchMetadata(ctx, upstream, companion, false)
 		if err != nil {
-			return currentMetadata{}, err
+			return currentMetadata{}, false, err
 		}
 		if item != nil {
 			defer item.Close()
 			objects[companion] = item
 		}
 	}
+	fingerprint := metadataFingerprint(objects)
+	current := h.currentSnapshot()
+	if current.Fingerprint != "" && current.Fingerprint == fingerprint {
+		return current, false, nil
+	}
 	for name, item := range objects {
 		if err := h.putMetadata(ctx, generation, name, item); err != nil {
-			return currentMetadata{}, err
+			return currentMetadata{}, false, err
 		}
 	}
-	next := currentMetadata{Generation: generation, Upstream: upstream, Published: time.Now().UTC()}
-	if err := h.putCurrent(ctx, next); err != nil {
-		return currentMetadata{}, err
+	next := currentMetadata{
+		Generation:  generation,
+		Upstream:    upstream,
+		Published:   time.Now().UTC(),
+		Fingerprint: fingerprint,
 	}
-	return next, nil
+	if err := h.putCurrent(ctx, next); err != nil {
+		return currentMetadata{}, false, err
+	}
+	return next, true, nil
 }
 
 func (d *metadataDownload) Close() {
@@ -227,13 +249,55 @@ func (h *Handler) fetchMetadata(ctx context.Context, upstream, cleanPath string,
 		_ = os.Remove(tempPath)
 		return nil, fmt.Errorf("flatpak metadata %s exceeds %d bytes", cleanPath, maxMetadataSize)
 	}
+	digest, err := fileDigest(tempPath)
+	if err != nil {
+		_ = os.Remove(tempPath)
+		return nil, fmt.Errorf("hash flatpak metadata %s: %w", cleanPath, err)
+	}
 	headers := map[string]string{}
 	for key, value := range response.Header {
 		if len(value) > 0 {
 			headers[http.CanonicalHeaderKey(key)] = value[0]
 		}
 	}
-	return &metadataDownload{temp: tempPath, size: size, headers: headers}, nil
+	return &metadataDownload{temp: tempPath, size: size, digest: digest, headers: headers}, nil
+}
+
+func fileDigest(name string) (string, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+func metadataFingerprint(objects map[string]*metadataDownload) string {
+	names := make([]string, 0, len(objects))
+	for name := range objects {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	sum := sha256.New()
+	for _, name := range names {
+		_, _ = io.WriteString(sum, name)
+		_, _ = io.WriteString(sum, "\x00")
+		_, _ = io.WriteString(sum, objects[name].digest)
+		_, _ = io.WriteString(sum, "\x00")
+	}
+	return "sha256:" + hex.EncodeToString(sum.Sum(nil))
+}
+
+func flatpakRefreshOutcome(result, reasonCode, generation, upstream string) scheduler.TaskOutcome {
+	return scheduler.TaskOutcome{
+		Result:     result,
+		ReasonCode: reasonCode,
+		Detail:     fmt.Sprintf("generation=%s upstream=%s", generation, upstream),
+	}
 }
 
 func validateSummary(item *metadataDownload) error {

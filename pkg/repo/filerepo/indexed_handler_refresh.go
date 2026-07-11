@@ -3,8 +3,11 @@ package filerepo
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"path"
@@ -45,11 +48,16 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 }
 
 func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
+	_, err := h.RefreshRootTask(ctx, rootID)
+	return err
+}
+
+func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (scheduler.TaskOutcome, error) {
 	h.mu.RLock()
 	entry, ok := h.roots[rootID]
 	h.mu.RUnlock()
 	if !ok || entry == nil || len(entry.root.Targets) == 0 {
-		return fmt.Errorf("root %s not found or has no targets", rootID)
+		return scheduler.TaskOutcome{}, fmt.Errorf("root %s not found or has no targets", rootID)
 	}
 	targets := append([]MetadataTarget(nil), entry.root.Targets...)
 	var (
@@ -61,18 +69,18 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 		if err != nil {
 			switch {
 			case errors.Is(err, health.ErrRefreshAlreadyRunning):
-				return scheduler.ErrTaskSkipped
+				return scheduler.TaskOutcome{}, scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshBlockedUntil):
 				if blockedUntil, ok := h.sh.RefreshBlockedUntil(rootID); ok && !blockedUntil.IsZero() {
-					return scheduler.RetryAt(blockedUntil)
+					return scheduler.TaskOutcome{}, scheduler.RetryAt(blockedUntil)
 				}
-				return scheduler.ErrTaskSkipped
+				return scheduler.TaskOutcome{}, scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
 				h.removeRoot(rootID)
 				h.saveState(context.Background())
-				return scheduler.ErrTaskSkipped
+				return scheduler.TaskOutcome{}, scheduler.ErrTaskSkipped
 			}
-			return fmt.Errorf("start refresh %s: %w", rootID, err)
+			return scheduler.TaskOutcome{}, fmt.Errorf("start refresh %s: %w", rootID, err)
 		}
 		refreshGen = rh.Generation
 		release = done
@@ -86,7 +94,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	h.reportMetadataState()
 	upstreams := h.weightedUpstreams()
 	if len(upstreams) == 0 {
-		return errors.New("no upstreams available")
+		return scheduler.TaskOutcome{}, errors.New("no upstreams available")
 	}
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
 	var firstErr error
@@ -107,7 +115,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 				h.saveState(context.Background())
 				h.reportMetadataState()
 				slog.Debug("repository refresh skipped unchanged metadata", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
-				return nil
+				return repositoryRefreshOutcome("unchanged", "same_as_current", current.Generation, upstream), nil
 			}
 		}
 		snapshot, cleanupPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
@@ -118,6 +126,23 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 			}
 			slog.Debug("repository refresh failed on upstream", "instance", h.name, "root_id", rootID, "upstream", upstream, "err", err)
 			continue
+		}
+		if current := h.rootSnapshot(rootID); h.canReuseCurrentSnapshot(ctx, current) &&
+			snapshotsMetadataEqual(current, snapshot) {
+			h.cleanupFailedGeneration(rootID, generation)
+			if h.sh != nil {
+				h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToProbe(current.Targets))
+			}
+			h.saveState(context.Background())
+			h.reportMetadataState()
+			slog.Debug(
+				"repository refresh skipped identical metadata",
+				"instance", h.name,
+				"mode", h.mode,
+				"root_id", rootID,
+				"upstream", upstream,
+			)
+			return repositoryRefreshOutcome("unchanged", "same_as_current", current.Generation, upstream), nil
 		}
 		if err := h.publishSnapshot(ctx, snapshot, cleanupPaths); err != nil {
 			h.cleanupFailedGeneration(rootID, generation)
@@ -133,7 +158,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 		h.saveState(context.Background())
 		h.reportMetadataState()
 		slog.Debug("repository refresh succeeded", "instance", h.name, "mode", h.mode, "root_id", rootID, "upstream", upstream)
-		return nil
+		return repositoryRefreshOutcome("updated", "published", snapshot.Generation, upstream), nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataTransient
@@ -145,7 +170,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 		}
 	}
 	h.saveState(context.Background())
-	return firstErr
+	return scheduler.TaskOutcome{}, firstErr
 }
 
 func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
@@ -262,14 +287,68 @@ func (h *IndexedHandler) buildSnapshot(
 			obj.Path = pathKey
 		}
 		obj.StorePath = h.generationMetadataPath(root.ID, generation, obj.Path)
-		snapshot.Metadata[pathKey] = obj
-		if obj.Required {
-			if _, err := h.store.StatObject(ctx, h.name, obj.StorePath); err != nil {
+		if _, err := h.store.StatObject(ctx, h.name, obj.StorePath); err != nil {
+			if obj.Required {
 				return nil, nil, fmt.Errorf("%s: required metadata missing", obj.Path)
 			}
+			snapshot.Metadata[pathKey] = obj
+			continue
 		}
+		digest, err := h.metadataObjectDigest(ctx, obj.StorePath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("hash metadata %s: %w", obj.Path, err)
+		}
+		obj.Digest = digest
+		snapshot.Metadata[pathKey] = obj
 	}
 	return snapshot, cleanupPaths, nil
+}
+
+func (h *IndexedHandler) metadataObjectDigest(ctx context.Context, objectPath string) (string, error) {
+	reader, err := h.store.OpenObject(ctx, h.name, objectPath)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, reader); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+func (h *IndexedHandler) canReuseCurrentSnapshot(ctx context.Context, current *LiveSnapshot) bool {
+	if current == nil || current.RootID == "" || current.Generation == "" {
+		return false
+	}
+	_, err := h.store.StatObject(ctx, h.name, h.cleanupIndexPath(current.RootID, current.Generation))
+	return err == nil
+}
+
+func snapshotsMetadataEqual(current, next *LiveSnapshot) bool {
+	if current == nil || next == nil || len(current.Metadata) == 0 || len(current.Metadata) != len(next.Metadata) {
+		return false
+	}
+	for key, nextObject := range next.Metadata {
+		currentObject, ok := current.Metadata[key]
+		if !ok || currentObject.Digest == "" || nextObject.Digest == "" {
+			return false
+		}
+		if currentObject.Path != nextObject.Path ||
+			currentObject.Required != nextObject.Required ||
+			currentObject.Digest != nextObject.Digest {
+			return false
+		}
+	}
+	return true
+}
+
+func repositoryRefreshOutcome(result, reasonCode, generation, upstream string) scheduler.TaskOutcome {
+	return scheduler.TaskOutcome{
+		Result:     result,
+		ReasonCode: reasonCode,
+		Detail:     fmt.Sprintf("generation=%s upstream=%s", generation, upstream),
+	}
 }
 
 func (h *IndexedHandler) loadCleanupPathSet(ctx context.Context, rootID, generation string) (map[string]struct{}, error) {

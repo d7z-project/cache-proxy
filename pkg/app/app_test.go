@@ -596,7 +596,10 @@ func TestStatusPersistsAndRestoresHistory(t *testing.T) {
 		StartedAt:  time.Unix(1710000000, 0).UTC(),
 		FinishedAt: time.Unix(1710000004, 0).UTC(),
 		Duration:   4 * time.Second,
-		Result:     "success",
+		Result:     "updated",
+		ReasonCode: "published",
+		Detail:     "generation=abc upstream=https://example.test",
+		Message:    "metadata published",
 	})
 	app.status.recordDiskUsage(ctx, app)
 	app.status.persist()
@@ -609,6 +612,10 @@ func TestStatusPersistsAndRestoresHistory(t *testing.T) {
 	require.Len(t, events, 1)
 	require.Equal(t, "files", events[0].Storage)
 	require.Equal(t, "expire_cleanup", events[0].TaskType)
+	require.Equal(t, "updated", events[0].Result)
+	require.Equal(t, "published", events[0].ReasonCode)
+	require.Equal(t, "generation=abc upstream=https://example.test", events[0].Detail)
+	require.Equal(t, "metadata published", events[0].Message)
 }
 
 func TestStatusCapturesUpstreamStateEvents(t *testing.T) {
@@ -819,11 +826,11 @@ func (d startFailingDriver) Plan(_ context.Context, plan *proxyruntime.InstanceP
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: 10 * time.Millisecond,
-		Handler: func(context.Context) error {
+		Handler: func(context.Context) (scheduler.TaskOutcome, error) {
 			if d.runs != nil {
 				d.runs.Add(1)
 			}
-			return nil
+			return scheduler.TaskOutcome{}, nil
 		},
 	})
 	return plan.BindPath("/files", config.Expiration(time.Hour), startContextInstance{

@@ -69,6 +69,7 @@ type MetadataObject struct {
 	Path      string `yaml:"path"`
 	Required  bool   `yaml:"required"`
 	StorePath string `yaml:"store_path,omitempty"`
+	Digest    string `yaml:"digest,omitempty"`
 }
 
 type RepositoryAttribute struct {

@@ -58,8 +58,8 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: cleanupInterval,
-		Handler: func(ctx context.Context) error {
-			return handler.Cleanup(ctx, plan.CleanupConfig())
+		Handler: func(ctx context.Context) (scheduler.TaskOutcome, error) {
+			return scheduler.TaskOutcome{}, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
 
@@ -68,13 +68,13 @@ func PlanRepoMode(plan *proxyruntime.InstancePlan, mode string, defaultFreshFor 
 		RefreshInterval: refreshInterval,
 		GCInterval:      gcInterval,
 		NewRefresh: func(rootID string) scheduler.TaskHandler {
-			return func(ctx context.Context) error {
-				return handler.RefreshRoot(ctx, rootID)
+			return func(ctx context.Context) (scheduler.TaskOutcome, error) {
+				return handler.RefreshRootTask(ctx, rootID)
 			}
 		},
 		NewGC: func(rootID string) scheduler.TaskHandler {
-			return func(ctx context.Context) error {
-				return handler.CleanupRoot(ctx, rootID, plan.CleanupConfig())
+			return func(ctx context.Context) (scheduler.TaskOutcome, error) {
+				return scheduler.TaskOutcome{}, handler.CleanupRoot(ctx, rootID, plan.CleanupConfig())
 			}
 		},
 	})
