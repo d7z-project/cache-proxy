@@ -112,6 +112,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 		}
 		snapshot, cleanupPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
 		if err != nil {
+			h.cleanupFailedGeneration(rootID, generation)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -119,6 +120,7 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 			continue
 		}
 		if err := h.publishSnapshot(ctx, snapshot, cleanupPaths); err != nil {
+			h.cleanupFailedGeneration(rootID, generation)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -144,6 +146,28 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	}
 	h.saveState(context.Background())
 	return firstErr
+}
+
+func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
+	if rootID == "" || generation == "" {
+		return
+	}
+	rootDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID))
+	for _, item := range []string{
+		path.Join(rootDir, "generations", generation),
+		path.Join(rootDir, "snapshots", generation+".yaml"),
+		path.Join(rootDir, "current.yaml.tmp."+generation),
+	} {
+		if err := h.store.RemoveAll(path.Join(h.name, item)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug(
+				"cleanup failed metadata generation failed",
+				"instance", h.name,
+				"root_id", rootID,
+				"path", item,
+				"err", err,
+			)
+		}
+	}
 }
 
 func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts config.CleanupConfig) error {

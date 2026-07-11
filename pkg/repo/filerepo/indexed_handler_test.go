@@ -3,8 +3,10 @@ package filerepo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -653,6 +655,71 @@ func TestRefreshFailureKeepsBootingStateWithoutCurrentGeneration(t *testing.T) {
 	require.Equal(t, "booting", stats.Instances["repo"].MetadataState)
 }
 
+func TestRefreshFailureRemovesUnpublishedGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/meta/index.txt" {
+			_, _ = io.WriteString(w, "index")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
+			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return nil, errors.New("parse index: invalid metadata")
+		},
+	)
+
+	require.Error(t, handler.RefreshRoot(ctx, "root"))
+	requireGenerationDirCount(t, store, "repo", handler.objectRoot, "root", 0)
+}
+
+func TestRefreshFailureKeepsCurrentGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/meta/index.txt" {
+			_, _ = io.WriteString(w, "index")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	refreshes := 0
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
+			refreshes++
+			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			if refreshes == 2 {
+				return nil, errors.New("parse index: invalid metadata")
+			}
+			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
+		},
+	)
+
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	current := handler.rootSnapshot("root")
+	require.NotNil(t, current)
+	require.Error(t, handler.RefreshRoot(ctx, "root"))
+	require.Equal(t, current.Generation, handler.rootSnapshot("root").Generation)
+
+	reader, err := store.OpenObject(ctx, "repo", current.Metadata["meta/index.txt"].StorePath)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	requireGenerationDirCount(t, store, "repo", handler.objectRoot, "root", 1)
+}
+
 func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -705,6 +772,31 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	rh, ok := handler.sh.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, health.RActive, rh.State)
+}
+
+func requireGenerationDirCount(t *testing.T, store *blobfs.Store, tenant, objectRoot, rootID string, expected int) {
+	t.Helper()
+	generationsRoot := path.Join(objectRoot, ".roots", pathEscapeKey(rootID), "generations")
+	count := 0
+	err := fs.WalkDir(
+		store.TenantFS(tenant),
+		generationsRoot,
+		func(objectPath string, entry fs.DirEntry, err error) error {
+			if err != nil || !entry.IsDir() || objectPath == generationsRoot {
+				return nil
+			}
+			rel := strings.TrimPrefix(objectPath, generationsRoot+"/")
+			if strings.Contains(rel, "/") {
+				return fs.SkipDir
+			}
+			count++
+			return nil
+		},
+	)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !strings.Contains(err.Error(), "not exist") {
+		require.NoError(t, err)
+	}
+	require.Equal(t, expected, count)
 }
 
 func TestPathIndexBuilderFinalizesSortedUniquePaths(t *testing.T) {

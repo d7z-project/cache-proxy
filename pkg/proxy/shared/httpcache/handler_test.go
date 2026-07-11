@@ -652,7 +652,7 @@ func TestStreamToPipeRemovesTempFileOnVerifyFailure(t *testing.T) {
 	require.Empty(t, entries)
 }
 
-func Test503WhenAllUpstreamsUnavailable(t *testing.T) {
+func TestAllUpstreamsUnavailableReturns503(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

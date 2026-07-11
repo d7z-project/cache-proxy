@@ -69,61 +69,64 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	artifacts := 0
 	for _, target := range session.Targets() {
-		blob, err := session.Fetch(ctx, target)
+		count, err := buildIndexTarget(ctx, session, snapshot, target, paths)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-		for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
-			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-				return nil, err
-			} else if companion.Path != "" {
-				snapshot.Metadata[companion.Path] = companion
-			}
-		}
-		blobReader, err := blob.Open()
-		if err != nil {
-			session.Release(target)
-			return nil, err
-		}
-		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
-		if err != nil {
-			session.Release(target)
-			return nil, err
-		}
-		tarReader := tar.NewReader(reader)
-		found := false
-		for {
-			header, err := tarReader.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				_ = reader.Close()
-				session.Release(target)
-				return nil, err
-			}
-			if path.Base(header.Name) != "APKINDEX" {
-				continue
-			}
-			found = true
-			n, err := parseIndex(path.Dir(blob.Path), tarReader, paths)
-			if err != nil {
-				_ = reader.Close()
-				session.Release(target)
-				return nil, err
-			}
-			artifacts += n
-			break
-		}
-		_ = reader.Close()
-		session.Release(target)
-		if !found {
-			return nil, fmt.Errorf("%s: APKINDEX entry not found", blob.Path)
-		}
+		artifacts += count
 	}
 	snapshot.ArtifactCount = artifacts
 	return snapshot, nil
+}
+
+func buildIndexTarget(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	paths *filerepo.PathIndexBuilder,
+) (int, error) {
+	blob, err := session.Fetch(ctx, target)
+	if err != nil {
+		return 0, err
+	}
+	defer session.Release(target)
+
+	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
+	for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
+		companion, err := session.FetchDerived(ctx, companionPath)
+		if err != nil {
+			return 0, err
+		}
+		if companion.Path != "" {
+			snapshot.Metadata[companion.Path] = companion
+		}
+	}
+	blobReader, err := blob.Open()
+	if err != nil {
+		return 0, err
+	}
+	reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
+	if err != nil {
+		_ = blobReader.Close()
+		return 0, err
+	}
+	defer reader.Close()
+
+	tarReader := tar.NewReader(reader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return 0, fmt.Errorf("%s: APKINDEX entry not found", blob.Path)
+		}
+		if err != nil {
+			return 0, err
+		}
+		if path.Base(header.Name) != "APKINDEX" {
+			continue
+		}
+		return parseIndex(path.Dir(blob.Path), tarReader, paths)
+	}
 }
 
 func parseIndex(basePath string, input io.Reader, paths *filerepo.PathIndexBuilder) (int, error) {

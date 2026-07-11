@@ -75,75 +75,104 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	artifactCount := 0
 	for _, target := range session.Targets() {
-		repomd, err := session.Fetch(ctx, target)
+		added, err := buildRepomdTarget(ctx, session, snapshot, target, paths)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
-		for _, companionPath := range append(filerepo.DeduceCompanions(repomd.Path), repomd.Path+".key") {
-			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-				return nil, err
-			} else if companion.Path != "" {
-				snapshot.Metadata[companion.Path] = companion
-			}
-		}
-		items, err := parseRepomd(repomd)
-		if err != nil {
-			session.Release(target)
-			return nil, err
-		}
-		session.Release(target)
-		repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
-		foundPrimary := false
-		for _, item := range items {
-			if item.Location == "" {
-				continue
-			}
-			metadataPath := path.Join(repoRoot, item.Location)
-			metaTarget := filerepo.MetadataTarget{URL: metadataPath}
-
-			blob, err := session.Fetch(ctx, metaTarget)
-			if err != nil {
-				if item.Type == "primary" {
-					return nil, err
-				}
-				continue
-			}
-			if err := verifyRepomdChecksum(metadataPath, item.SumType, item.Checksum, blob); err != nil {
-				return nil, err
-			}
-			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
-
-			if item.Type != "primary" {
-				session.Release(metaTarget)
-				continue
-			}
-			foundPrimary = true
-
-			blobReader, err := blob.Open()
-			if err != nil {
-				session.Release(metaTarget)
-				return nil, err
-			}
-			reader, err := filerepo.OpenCompressed(blobReader, metadataPath)
-			if err != nil {
-				session.Release(metaTarget)
-				return nil, err
-			}
-			added, err := parsePrimary(reader, paths, repoRoot)
-			artifactCount += added
-			_ = reader.Close()
-			session.Release(metaTarget)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if !foundPrimary {
-			return nil, fmt.Errorf("%s: primary metadata not found", repomd.Path)
-		}
+		artifactCount += added
 	}
 	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
+}
+
+func buildRepomdTarget(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	paths *filerepo.PathIndexBuilder,
+) (int, error) {
+	repomd, err := session.Fetch(ctx, target)
+	if err != nil {
+		return 0, err
+	}
+	defer session.Release(target)
+
+	snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
+	for _, companionPath := range append(filerepo.DeduceCompanions(repomd.Path), repomd.Path+".key") {
+		companion, err := session.FetchDerived(ctx, companionPath)
+		if err != nil {
+			return 0, err
+		}
+		if companion.Path != "" {
+			snapshot.Metadata[companion.Path] = companion
+		}
+	}
+	items, err := parseRepomd(repomd)
+	if err != nil {
+		return 0, err
+	}
+
+	repoRoot := strings.TrimSuffix(repomd.Path, "/repodata/repomd.xml")
+	foundPrimary := false
+	artifactCount := 0
+	for _, item := range items {
+		if item.Location == "" {
+			continue
+		}
+		added, err := buildRepomdItem(ctx, session, snapshot, item, paths, repoRoot)
+		if err != nil {
+			return 0, err
+		}
+		if item.Type == "primary" {
+			foundPrimary = true
+			artifactCount += added
+		}
+	}
+	if !foundPrimary {
+		return 0, fmt.Errorf("%s: primary metadata not found", repomd.Path)
+	}
+	return artifactCount, nil
+}
+
+func buildRepomdItem(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	item repomdItem,
+	paths *filerepo.PathIndexBuilder,
+	repoRoot string,
+) (int, error) {
+	metadataPath := path.Join(repoRoot, item.Location)
+	metaTarget := filerepo.MetadataTarget{URL: metadataPath}
+	blob, err := session.Fetch(ctx, metaTarget)
+	if err != nil {
+		if item.Type != "primary" {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer session.Release(metaTarget)
+
+	if err := verifyRepomdChecksum(metadataPath, item.SumType, item.Checksum, blob); err != nil {
+		return 0, err
+	}
+	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
+	if item.Type != "primary" {
+		return 0, nil
+	}
+
+	blobReader, err := blob.Open()
+	if err != nil {
+		return 0, err
+	}
+	reader, err := filerepo.OpenCompressed(blobReader, metadataPath)
+	if err != nil {
+		_ = blobReader.Close()
+		return 0, err
+	}
+	defer reader.Close()
+	return parsePrimary(reader, paths, repoRoot)
 }
 
 type repomdItem struct {

@@ -96,81 +96,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	artifactCount := 0
 	for _, target := range session.Targets() {
-		blob, err := session.Fetch(ctx, target)
+		count, found, err := buildDatabaseTarget(ctx, session, snapshot, target, paths)
 		if err != nil {
 			return nil, err
 		}
-		snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-
-		dbPath := pacmanDBBase(blob.Path)
-		for _, suffix := range []string{".files", ".files.sig"} {
-			companionPath := dbPath + suffix
-			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-				return nil, err
-			} else if companion.Path != "" {
-				snapshot.Metadata[companion.Path] = companion
-			}
-		}
-		if archiveExt := pacmanDBArchiveExt(blob.Path); archiveExt != "" {
-			for _, suffix := range []string{".files" + archiveExt, ".files" + archiveExt + ".sig"} {
-				companionPath := dbPath + suffix
-				if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-					return nil, err
-				} else if companion.Path != "" {
-					snapshot.Metadata[companion.Path] = companion
-				}
-			}
-		}
-		for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
-			if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-				return nil, err
-			} else if companion.Path != "" {
-				snapshot.Metadata[companion.Path] = companion
-			}
-		}
-
-		blobReader, err := blob.Open()
-		if err != nil {
-			session.Release(target)
-			return nil, err
-		}
-		reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
-		if err != nil {
-			session.Release(target)
-			return nil, err
-		}
-		tarReader := tar.NewReader(reader)
-		found := false
-		for {
-			header, err := tarReader.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				_ = reader.Close()
-				session.Release(target)
-				return nil, err
-			}
-			if path.Base(header.Name) != "desc" {
-				continue
-			}
-			found = true
-			filename, err := parseDesc(tarReader)
-			if err != nil {
-				_ = reader.Close()
-				session.Release(target)
-				return nil, err
-			}
-			if filename == "" {
-				continue
-			}
-			artifactPath := path.Join(path.Dir(blob.Path), filename)
-			paths.Add(artifactPath)
-			paths.AddAuxiliary(artifactPath)
-			artifactCount++
-		}
-		_ = reader.Close()
-		session.Release(target)
+		artifactCount += count
 		if !found {
 			snapshot.ArtifactCount = artifactCount
 			return snapshot, nil
@@ -178,6 +108,107 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
+}
+
+func buildDatabaseTarget(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	paths *filerepo.PathIndexBuilder,
+) (int, bool, error) {
+	blob, err := session.Fetch(ctx, target)
+	if err != nil {
+		return 0, false, err
+	}
+	defer session.Release(target)
+
+	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
+	if err := addDatabaseCompanions(ctx, session, snapshot, blob.Path); err != nil {
+		return 0, false, err
+	}
+
+	blobReader, err := blob.Open()
+	if err != nil {
+		return 0, false, err
+	}
+	reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
+	if err != nil {
+		_ = blobReader.Close()
+		return 0, false, err
+	}
+	defer reader.Close()
+
+	tarReader := tar.NewReader(reader)
+	var count int
+	found := false
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return count, found, nil
+		}
+		if err != nil {
+			return count, false, err
+		}
+		if path.Base(header.Name) != "desc" {
+			continue
+		}
+		found = true
+		filename, err := parseDesc(tarReader)
+		if err != nil {
+			return count, false, err
+		}
+		if filename == "" {
+			continue
+		}
+		artifactPath := path.Join(path.Dir(blob.Path), filename)
+		paths.Add(artifactPath)
+		paths.AddAuxiliary(artifactPath)
+		count++
+	}
+}
+
+func addDatabaseCompanions(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	blobPath string,
+) error {
+	dbPath := pacmanDBBase(blobPath)
+	for _, suffix := range []string{".files", ".files.sig"} {
+		if err := addDerivedMetadata(ctx, session, snapshot, dbPath+suffix); err != nil {
+			return err
+		}
+	}
+	if archiveExt := pacmanDBArchiveExt(blobPath); archiveExt != "" {
+		for _, suffix := range []string{".files" + archiveExt, ".files" + archiveExt + ".sig"} {
+			if err := addDerivedMetadata(ctx, session, snapshot, dbPath+suffix); err != nil {
+				return err
+			}
+		}
+	}
+	for _, companionPath := range filerepo.DeduceCompanions(blobPath) {
+		if err := addDerivedMetadata(ctx, session, snapshot, companionPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addDerivedMetadata(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	metadataPath string,
+) error {
+	companion, err := session.FetchDerived(ctx, metadataPath)
+	if err != nil {
+		return err
+	}
+	if companion.Path != "" {
+		snapshot.Metadata[companion.Path] = companion
+	}
+	return nil
 }
 
 func parseDesc(input io.Reader) (string, error) {
