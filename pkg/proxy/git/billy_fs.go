@@ -137,10 +137,7 @@ func (f *billyFile) Unlock() error { return nil }
 
 var _ billy.Filesystem = (*billyAdapter)(nil)
 var _ billy.File = (*billyFile)(nil)
-
-func _checkInterfaces() {
-	var _ io.Seeker = (&billyFile{})
-	var _ io.ReaderAt = (&billyFile{})
-	var _ io.WriterAt = (&billyFile{})
-	var _ fs.File = (&billyFile{})
-}
+var _ io.Seeker = (*billyFile)(nil)
+var _ io.ReaderAt = (*billyFile)(nil)
+var _ io.WriterAt = (*billyFile)(nil)
+var _ fs.File = (*billyFile)(nil)

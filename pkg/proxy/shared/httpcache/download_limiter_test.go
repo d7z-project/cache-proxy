@@ -13,7 +13,6 @@ func TestDownloadLimiterEnforcesGlobalAndInstanceLimits(t *testing.T) {
 
 	releaseA, err := limiter.Acquire(ctx, "a")
 	require.NoError(t, err)
-	defer releaseA()
 
 	_, err = limiter.Acquire(ctx, "a")
 	require.ErrorIs(t, err, ErrDownloadLimit)
@@ -26,7 +25,6 @@ func TestDownloadLimiterEnforcesGlobalAndInstanceLimits(t *testing.T) {
 	require.ErrorIs(t, err, ErrDownloadLimit)
 
 	releaseA()
-	releaseA = func() {}
 	releaseC, err := limiter.Acquire(ctx, "c")
 	require.NoError(t, err)
 	releaseC()

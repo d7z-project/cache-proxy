@@ -171,10 +171,6 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	return status, "MISS", bytes, err
 }
 
-func verifyDigestBytes(digest string, body []byte) error {
-	return verifyDigestReader(digest, bytes.NewReader(body))
-}
-
 func verifyDigestReader(digest string, reader io.Reader) error {
 	algo, expected, ok := strings.Cut(digest, ":")
 	if !ok || algo != "sha256" || len(expected) != 64 {

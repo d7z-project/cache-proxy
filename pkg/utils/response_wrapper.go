@@ -12,6 +12,9 @@ const DefaultHTTPTimeout = 30 * time.Minute
 const DefaultHeaderTimeout = 30 * time.Second
 const DefaultIdleBodyTimeout = 5 * time.Minute
 
+// DefaultUserAgent identifies cache-proxy to upstream services.
+const DefaultUserAgent = "cache-proxy/1"
+
 type ResponseWrapper struct {
 	StatusCode int
 	Headers    map[string]string
@@ -36,7 +39,7 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 	if !ok {
 		return &HttpClientWrapper{
 			Client:          &http.Client{Timeout: DefaultHTTPTimeout},
-			UserAgent:       "cache-proxy",
+			UserAgent:       DefaultUserAgent,
 			IdleBodyTimeout: DefaultIdleBodyTimeout,
 		}
 	}
@@ -49,7 +52,7 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 	transport.ResponseHeaderTimeout = DefaultHeaderTimeout
 	return &HttpClientWrapper{
 		Client:          &http.Client{Transport: transport, Timeout: DefaultHTTPTimeout},
-		UserAgent:       "cache-proxy",
+		UserAgent:       DefaultUserAgent,
 		IdleBodyTimeout: DefaultIdleBodyTimeout,
 	}
 }

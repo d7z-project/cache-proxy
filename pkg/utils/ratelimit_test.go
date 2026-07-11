@@ -69,7 +69,7 @@ func TestDefaultHttpClientWrapper(t *testing.T) {
 	require.NotNil(t, wrapper.Client)
 	require.NotNil(t, wrapper.Client.Transport)
 	require.Equal(t, DefaultHTTPTimeout, wrapper.Client.Timeout)
-	require.Equal(t, "cache-proxy", wrapper.UserAgent)
+	require.Equal(t, DefaultUserAgent, wrapper.UserAgent)
 	require.Equal(t, DefaultIdleBodyTimeout, wrapper.IdleBodyTimeout)
 
 	transport, ok := wrapper.Client.Transport.(*http.Transport)

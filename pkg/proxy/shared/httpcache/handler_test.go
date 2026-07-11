@@ -72,7 +72,7 @@ func TestStripInternal(t *testing.T) {
 
 func TestConfigureClientTransportTimeouts(t *testing.T) {
 	client := utils.DefaultHttpClientWrapper()
-	ConfigureClientTransport(client, "test", "test", &config.TransportConfig{
+	ConfigureClientTransport(client, "test", &config.TransportConfig{
 		DialTimeout:        config.Duration(2 * time.Second),
 		HeaderTimeout:      config.Duration(3 * time.Second),
 		IdleBodyTimeout:    config.Duration(4 * time.Second),
@@ -83,12 +83,20 @@ func TestConfigureClientTransportTimeouts(t *testing.T) {
 
 	require.Equal(t, 5*time.Second, client.Timeout)
 	require.Equal(t, 4*time.Second, client.IdleBodyTimeout)
+	require.Equal(t, DefaultUserAgent, client.UserAgent)
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok)
 	require.Equal(t, 3*time.Second, transport.ResponseHeaderTimeout)
 	require.Equal(t, 7, transport.MaxIdleConns)
 	require.Equal(t, 8, transport.MaxConnsPerHost)
 	require.NotNil(t, transport.DialContext)
+}
+
+func TestConfigureClientTransportUserAgentOverride(t *testing.T) {
+	client := utils.DefaultHttpClientWrapper()
+	ConfigureClientTransport(client, "test", &config.TransportConfig{UserAgent: "custom-client/2"})
+
+	require.Equal(t, "custom-client/2", client.UserAgent)
 }
 
 func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
@@ -338,6 +346,14 @@ func (r *staticResolver) Resolve(req *http.Request) (Route, error) {
 	}, nil
 }
 
+type literalResolver struct {
+	route Route
+}
+
+func (r literalResolver) Resolve(*http.Request) (Route, error) {
+	return r.route, nil
+}
+
 func TestTargetURLRejectsForeignHostWithoutFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -460,6 +476,65 @@ func TestTargetURLFallsBackOnRetryableStatus(t *testing.T) {
 	require.Equal(t, "upstream", rec.Body.String())
 }
 
+func TestTargetURLFallsBackOnClientError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, &staticResolver{route: Route{
+		ObjectPath:         "test/object",
+		TargetURL:          target.URL + "/object",
+		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
+		Policy:             config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "upstream", rec.Body.String())
+}
+
+func TestTargetURLFailsWhenRetryableStatusHasNoFallbackPath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, literalResolver{route: Route{
+		ObjectPath:         "test/object",
+		TargetURL:          target.URL + "/object",
+		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
+		Policy:             config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
 func TestFailoverRetriesRetryableStatus(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -492,6 +567,47 @@ func TestFailoverRetriesRetryableStatus(t *testing.T) {
 	require.Equal(t, "ok", rec.Body.String())
 }
 
+func TestFailoverRetriesNonNotFoundClientErrors(t *testing.T) {
+	tests := map[string]int{
+		"bad request": http.StatusBadRequest,
+		"forbidden":   http.StatusForbidden,
+		"gone":        http.StatusGone,
+	}
+	for name, status := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, http.StatusText(status), status)
+			}))
+			defer first.Close()
+			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, "ok")
+			}))
+			defer second.Close()
+
+			store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+			require.NoError(t, err)
+			defer store.Close()
+
+			handler := NewHandler("test", RuntimeConfig{
+				Mode:      "test",
+				Upstreams: []string{first.URL, second.URL},
+			}, store, &staticResolver{route: Route{
+				ObjectPath:   "test/object",
+				UpstreamPath: "object",
+				Policy:       config.PolicyBypass,
+			}}, NewStats(prometheus.NewRegistry()), nil)
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, "ok", rec.Body.String())
+		})
+	}
+}
+
 func TestFailoverDoesNotRetryNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -519,6 +635,51 @@ func TestFailoverDoesNotRetryNotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
 	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestFailoverReturnsUnavailableWhenAllClientErrorsAreRetryable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer second.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{first.URL, second.URL},
+	}, store, &staticResolver{route: Route{
+		ObjectPath:   "test/object",
+		UpstreamPath: "object",
+		Policy:       config.PolicyBypass,
+	}}, NewStats(prometheus.NewRegistry()), nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestRecordUpstreamCountsNonNotFoundClientErrors(t *testing.T) {
+	stats := NewStats(prometheus.NewRegistry())
+	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusBadRequest)
+	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusForbidden)
+	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusNotFound)
+
+	snap := stats.Snapshot()
+	instance := snap.Instances["test"]
+	require.Equal(t, uint64(3), instance.UpstreamRequests)
+	require.Equal(t, uint64(2), instance.UpstreamErrors)
+	require.Equal(t, uint64(2), snap.Total.UpstreamErrors)
+	require.Equal(t, uint64(1), instance.UpstreamStatus["404"])
 }
 
 func TestStaleCacheOnValidationError(t *testing.T) {

@@ -444,6 +444,32 @@ func TestRecordResultUpdatesUpstream(t *testing.T) {
 	require.Equal(t, SOpen, uh.State)
 }
 
+func TestRecordResultCountsNonNotFoundClientErrorsAsFailures(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+
+	for range 20 {
+		h.RecordResult("https://a.example.com", http.StatusOK, 50*time.Millisecond)
+	}
+	for range 10 {
+		h.RecordResult("https://a.example.com", http.StatusBadRequest, 0)
+	}
+
+	uh := h.upstreams["https://a.example.com"]
+	require.Equal(t, SOpen, uh.State)
+}
+
+func TestRecordResultDoesNotCountNotFoundAsFailure(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+
+	for range 20 {
+		h.RecordResult("https://a.example.com", http.StatusNotFound, 50*time.Millisecond)
+	}
+
+	uh := h.upstreams["https://a.example.com"]
+	require.Equal(t, SClosed, uh.State)
+	require.Zero(t, uh.window.errorRate())
+}
+
 func TestRecordFailure(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
 

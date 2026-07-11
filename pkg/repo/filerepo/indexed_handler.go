@@ -75,7 +75,7 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		DownloadLimiter: downloads,
 	}, store, &generationResolver{handler: handler, policy: policy}, stats, svcHealth)
 	handler.client = utils.DefaultHttpClientWrapper()
-	httpcache.ConfigureClientTransport(handler.client, name, mode, transport)
+	httpcache.ConfigureClientTransport(handler.client, name, transport)
 	handler.reportMetadataState()
 	return handler
 }

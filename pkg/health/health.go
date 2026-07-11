@@ -168,7 +168,7 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 		return
 	}
 	var transition *stateTransition
-	if status >= 500 || status == 0 {
+	if upstreamStatusIsFailure(status) {
 		transition = uh.recordFailure(formatStatusError(status), h.config)
 	} else {
 		transition = uh.recordSuccess(latency, h.config)
@@ -178,6 +178,13 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 		h.recordCircuitEvent(url, transition)
 		h.recomputeAggregateLocked()
 	}
+}
+
+func upstreamStatusIsFailure(status int) bool {
+	if status == http.StatusNotFound {
+		return false
+	}
+	return status == 0 || status >= 500 || (status >= 400 && status < 500)
 }
 
 func (h *ServiceHealth) RecordFailure(url string, err error) {

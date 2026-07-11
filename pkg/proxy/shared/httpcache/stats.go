@@ -185,14 +185,14 @@ func (s *Stats) RecordUpstream(instance, mode, method string, status int) {
 	entry.mu.Lock()
 	entry.data.UpstreamRequests++
 	entry.data.UpstreamStatus[statusText]++
-	if status == 0 || status >= 500 {
+	if upstreamStatusIsFailure(status) {
 		entry.data.UpstreamErrors++
 	}
 	entry.mu.Unlock()
 
 	s.totalUpstreamReqs.Add(1)
 	s.incrTotalUpstreamStatus(statusText)
-	if status == 0 || status >= 500 {
+	if upstreamStatusIsFailure(status) {
 		s.totalUpstreamErrs.Add(1)
 	}
 }

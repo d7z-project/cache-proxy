@@ -103,18 +103,7 @@ func (h *gitHandler) Stop(ctx context.Context) error {
 		}
 	}
 
-	doneCh := make(chan struct{})
-	go func() {
-		h.requestMu.Lock()
-		h.requestMu.Unlock()
-		close(doneCh)
-	}()
-	select {
-	case <-doneCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return h.drainRequests(ctx)
 }
 
 func (h *gitHandler) Cleanup(_ context.Context, _ config.CleanupConfig) error {
@@ -135,6 +124,21 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serveGitHTTP(w, r, h.svr, h.name)
+}
+
+func (h *gitHandler) drainRequests(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		h.requestMu.Lock()
+		close(done)
+		h.requestMu.Unlock()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (h *gitHandler) serveRepositoryState(w http.ResponseWriter, state gitState) {

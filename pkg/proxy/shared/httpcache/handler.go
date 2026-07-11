@@ -72,9 +72,12 @@ type remoteOptions struct {
 	PreferredUpstream  string
 }
 
+// DefaultUserAgent identifies cache-proxy to upstream services.
+const DefaultUserAgent = utils.DefaultUserAgent
+
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
 	client := utils.DefaultHttpClientWrapper()
-	ConfigureClientTransport(client, name, runtime.Mode, runtime.Transport)
+	ConfigureClientTransport(client, name, runtime.Transport)
 	hosts := make([]string, 0, len(runtime.Upstreams))
 	for _, u := range runtime.Upstreams {
 		if pu, err := url.Parse(u); err == nil && pu.Host != "" {
@@ -84,8 +87,8 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth, downloadLimiter: runtime.DownloadLimiter, parsedUpstreamHosts: hosts}
 }
 
-func ConfigureClientTransport(client *utils.HttpClientWrapper, name, mode string, transport *config.TransportConfig) {
-	client.UserAgent = ModeUserAgent(mode)
+func ConfigureClientTransport(client *utils.HttpClientWrapper, name string, transport *config.TransportConfig) {
+	client.UserAgent = DefaultUserAgent
 	if transport == nil {
 		return
 	}
@@ -191,33 +194,4 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 		result.Headers["X-Cache"] = "PASSTHROUGH"
 	}
 	h.flushResult(req, resp, result, "flush passthrough response failed")
-}
-
-func ModeUserAgent(mode string) string {
-	switch mode {
-	case config.ModeNPM:
-		return "npm/10.8.0"
-	case config.ModeGo:
-		return "Go-http-client/2.0"
-	case config.ModeMaven:
-		return "Apache-Maven/3.9.6"
-	case config.ModeCargo:
-		return "cargo/1.79.0"
-	case config.ModePyPI:
-		return "pip/24.0"
-	case config.ModeOCI:
-		return "docker/27.0.0"
-	case config.ModeAPK:
-		return "apk-tools/2.14.0"
-	case config.ModeDEB:
-		return "Debian APT-HTTP/1.3"
-	case config.ModeRPM:
-		return "dnf/4.19.0"
-	case config.ModePacman:
-		return "pacman/6.1.0"
-	case config.ModeFlatpak:
-		return "flatpak/1.15.0"
-	default:
-		return "cache-proxy"
-	}
 }

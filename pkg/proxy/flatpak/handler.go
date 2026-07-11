@@ -71,7 +71,7 @@ func NewHandler(
 		verifyObjects:    policy.VerifyObjects != nil && *policy.VerifyObjects,
 	}
 	handler.client = utils.DefaultHttpClientWrapper()
-	httpcache.ConfigureClientTransport(handler.client, name, config.ModeFlatpak, transport)
+	httpcache.ConfigureClientTransport(handler.client, name, transport)
 	runtimeCfg.VerifyFunc = handler.verifyCacheObject
 	runtimeCfg.DownloadLimiter = downloads
 	handler.base = httpcache.NewHandler(name, runtimeCfg, store, resolver{policy: policy}, stats, nil)

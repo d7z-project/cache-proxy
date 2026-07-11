@@ -20,7 +20,7 @@ import (
 
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) *handler {
 	client := utils.DefaultHttpClientWrapper()
-	httpcache.ConfigureClientTransport(client, name, config.ModeOCI, block.Transport)
+	httpcache.ConfigureClientTransport(client, name, block.Transport)
 	return &handler{
 		name:             name,
 		upstream:         strings.TrimRight(block.Upstream, "/"),

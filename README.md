@@ -86,6 +86,7 @@ Notes:
 - Each instance must define exactly one mode block.
 - Most modes use `route.path`; `oci` uses `bind`.
 - `git` has its own block shape and does not use `expire_after` or `transport`.
+- The default upstream `User-Agent` is `cache-proxy/1`; set `transport.ua` only when an instance needs a custom value.
 - `transport.health` exists for upstream health tuning, but most deployments should use defaults.
 - The built-in home page fetches status data from `/-/status/summary`, `/-/status/disk`, and `/-/status/events`.
 - Linux repository modes expose discovered repository roots on the home page, including the root path, primary metadata paths, refresh state, and mode-specific attributes.

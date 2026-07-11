@@ -81,7 +81,7 @@ func publicBaseURL(req *http.Request) string {
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	if options.TargetURL != "" {
-		result, err, fallback := h.doTargetURL(ctx, method, options, headers)
+		result, err, fallback := h.doTargetURL(ctx, method, upstreamPath, options, headers)
 		if err == nil {
 			return result, nil
 		}
@@ -109,7 +109,7 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 	return nil, lastErr
 }
 
-func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error, bool) {
+func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error, bool) {
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
 		return nil, err, false
 	}
@@ -139,9 +139,14 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 			h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 		}
 	}
-	if shouldFailoverStatus(response.StatusCode) {
+	if shouldFailoverUpstreamStatus(response.StatusCode) {
 		_ = response.Body.Close()
-		return nil, fmt.Errorf("%w: target url returned retryable status %d", ErrUpstreamUnavailable, response.StatusCode), true
+		err := fmt.Errorf("%w: target url returned retryable status %d", ErrUpstreamUnavailable, response.StatusCode)
+		h.logUpstreamFailover(method, upstreamPath, options.TargetURL, response.StatusCode, err)
+		if upstreamPath == "" {
+			return nil, err, false
+		}
+		return nil, err, true
 	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
 	return responseFromHTTP(h.client, response), nil, false
@@ -245,10 +250,13 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 	}
-	if options.AcceptErrors && shouldFailoverStatus(response.StatusCode) && idx+1 < total {
+	if options.AcceptErrors && shouldFailoverUpstreamStatus(response.StatusCode) {
 		_ = response.Body.Close()
 		err = fmt.Errorf("%w: upstream %s returned retryable status %d", ErrUpstreamUnavailable, method, response.StatusCode)
-		slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "status", response.StatusCode)
+		h.logUpstreamFailover(method, pathPart, candidate.URL, response.StatusCode, err)
+		if idx+1 < total {
+			slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL), "status", response.StatusCode)
+		}
 		return nil, err
 	}
 	if !options.AcceptErrors && response.StatusCode != http.StatusOK {
@@ -262,8 +270,29 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	return responseFromHTTP(h.client, response), nil
 }
 
-func shouldFailoverStatus(status int) bool {
-	return status == http.StatusTooManyRequests || status >= 500
+func shouldFailoverUpstreamStatus(status int) bool {
+	return upstreamStatusIsFailure(status)
+}
+
+func upstreamStatusIsFailure(status int) bool {
+	if status == http.StatusNotFound {
+		return false
+	}
+	return status == 0 || status >= 500 || (status >= 400 && status < 500)
+}
+
+func upstreamStatusReason(status int) string {
+	if status >= 400 && status < 500 && status != http.StatusNotFound {
+		return "client_error_failover"
+	}
+	return "failure"
+}
+
+func (h *Handler) logUpstreamFailover(method, upstreamPath, upstream string, status int, err error) {
+	reason := upstreamStatusReason(status)
+	slog.Warn("upstream response triggered failover", "instance", h.name, "mode", h.config.Mode,
+		"method", method, "upstream_path", upstreamPath, "upstream", redactedURL(upstream),
+		"status", status, "reason", reason, "err", err)
 }
 
 func (h *Handler) requestHeaders(req *http.Request) map[string]string {
