@@ -316,6 +316,74 @@ instances:
 	require.False(t, *block.ProxyJSON)
 }
 
+func TestDecodeFlatpakConfig(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: flathub
+    enabled: true
+    flatpak:
+      route:
+        path: /flathub
+      upstreams:
+        - https://dl.flathub.org/repo
+      refresh_interval: 5m
+      cleanup_interval: 6h
+      descriptor_rewrite: true
+      verify_objects: true
+      cache_deltas: true
+      delta_expire_after: 240h
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	require.Equal(t, ModeFlatpak, selected.Mode)
+	var block struct {
+		Route struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Upstreams         []string   `yaml:"upstreams"`
+		RefreshInterval   Duration   `yaml:"refresh_interval"`
+		CleanupInterval   Duration   `yaml:"cleanup_interval"`
+		DescriptorRewrite bool       `yaml:"descriptor_rewrite"`
+		VerifyObjects     bool       `yaml:"verify_objects"`
+		CacheDeltas       bool       `yaml:"cache_deltas"`
+		DeltaExpireAfter  Expiration `yaml:"delta_expire_after"`
+	}
+	require.NoError(t, selected.Block.DecodeStrict(&block))
+	require.Equal(t, "/flathub", block.Route.Path)
+	require.Equal(t, []string{"https://dl.flathub.org/repo"}, block.Upstreams)
+	require.True(t, block.DescriptorRewrite)
+	require.True(t, block.VerifyObjects)
+	require.True(t, block.CacheDeltas)
+	require.Equal(t, Expiration(240*time.Hour), block.DeltaExpireAfter)
+}
+
+func TestDecodeFlatpakRejectsLegacyVerifyDeltas(t *testing.T) {
+	doc, err := Decode(strings.NewReader(`
+instances:
+  - name: flathub
+    enabled: true
+    flatpak:
+      route:
+        path: /flathub
+      upstreams:
+        - https://dl.flathub.org/repo
+      verify_deltas: true
+`))
+	require.NoError(t, err)
+	selected, err := doc.Instances[0].SelectMode()
+	require.NoError(t, err)
+	var block struct {
+		Route struct {
+			Path string `yaml:"path"`
+		} `yaml:"route"`
+		Upstreams []string `yaml:"upstreams"`
+	}
+	err = selected.Block.DecodeStrict(&block)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "field verify_deltas not found")
+}
+
 func TestDecodeSimplifiedProxyConfigsRejectLegacyFields(t *testing.T) {
 	tests := []struct {
 		name        string

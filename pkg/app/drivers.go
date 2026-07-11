@@ -6,6 +6,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/cargo"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/deb"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/flatpak"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/git"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/gomod"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/maven"
@@ -19,17 +20,18 @@ import (
 
 func builtinDrivers() map[string]proxyruntime.ModeDriver {
 	return map[string]proxyruntime.ModeDriver{
-		config.ModeAPK:    apk.NewDriver(),
-		config.ModeCargo:  cargo.NewDriver(),
-		config.ModeDEB:    deb.NewDriver(),
-		config.ModeFile:   file.NewDriver(),
-		config.ModeGit:    git.NewDriver(),
-		config.ModeGo:     gomod.NewDriver(),
-		config.ModeMaven:  maven.NewDriver(),
-		config.ModeNPM:    npm.NewDriver(),
-		config.ModeOCI:    oci.NewDriver(),
-		config.ModePacman: pacman.NewDriver(),
-		config.ModePyPI:   pypi.NewDriver(),
-		config.ModeRPM:    rpm.NewDriver(),
+		config.ModeAPK:     apk.NewDriver(),
+		config.ModeCargo:   cargo.NewDriver(),
+		config.ModeDEB:     deb.NewDriver(),
+		config.ModeFile:    file.NewDriver(),
+		config.ModeFlatpak: flatpak.NewDriver(),
+		config.ModeGit:     git.NewDriver(),
+		config.ModeGo:      gomod.NewDriver(),
+		config.ModeMaven:   maven.NewDriver(),
+		config.ModeNPM:     npm.NewDriver(),
+		config.ModeOCI:     oci.NewDriver(),
+		config.ModePacman:  pacman.NewDriver(),
+		config.ModePyPI:    pypi.NewDriver(),
+		config.ModeRPM:     rpm.NewDriver(),
 	}
 }

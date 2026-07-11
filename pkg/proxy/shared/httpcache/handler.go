@@ -215,6 +215,8 @@ func ModeUserAgent(mode string) string {
 		return "dnf/4.19.0"
 	case config.ModePacman:
 		return "pacman/6.1.0"
+	case config.ModeFlatpak:
+		return "flatpak/1.15.0"
 	default:
 		return "cache-proxy"
 	}

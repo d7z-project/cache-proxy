@@ -9,7 +9,8 @@
 3. 在 `pkg/app/drivers.go` 注册 `NewDriver()`
 4. 需要缓存代理时优先复用 `httpcache`
 5. Linux 仓库模式（`apk` / `deb` / `rpm` / `pacman`）必须基于 `filerepo.IndexedHandler`
-6. 修改配置结构后，同步更新 `README.md`
+6. Flatpak/OSTree 模式使用专用 handler，metadata 使用 generation，objects / deltas 不绑定 generation
+7. 修改配置结构后，同步更新 `README.md`
 
 ## YAML 与配置
 
@@ -47,6 +48,8 @@
 - 大文件下载必须流式写入临时文件，禁止全量读入内存
 - `TargetURL` 校验统一由 `httpcache` 负责，不允许各 resolver 自行放行未知 host
 - 已知 SHA256 / digest 的对象必须校验通过后才能写入缓存
+- Flatpak/OSTree objects 必须在写入 immutable 缓存前完成校验
+- Flatpak static deltas 可作为 opaque blob 按路径缓存，不做服务端语义校验；必须使用有限过期时间、路径安全校验，并在文档中说明依赖客户端校验
 - 启动时保留 `utils.CleanStaleTempFiles(24h)`
 
 ## 测试

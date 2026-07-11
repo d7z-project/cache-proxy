@@ -20,18 +20,19 @@ func ValidInstanceName(name string) bool {
 }
 
 const (
-	ModeFile   = "file"
-	ModeGit    = "git"
-	ModeOCI    = "oci"
-	ModeNPM    = "npm"
-	ModeGo     = "go"
-	ModeMaven  = "maven"
-	ModeCargo  = "cargo"
-	ModePyPI   = "pypi"
-	ModeAPK    = "apk"
-	ModeDEB    = "deb"
-	ModeRPM    = "rpm"
-	ModePacman = "pacman"
+	ModeFile    = "file"
+	ModeGit     = "git"
+	ModeOCI     = "oci"
+	ModeNPM     = "npm"
+	ModeGo      = "go"
+	ModeMaven   = "maven"
+	ModeCargo   = "cargo"
+	ModePyPI    = "pypi"
+	ModeFlatpak = "flatpak"
+	ModeAPK     = "apk"
+	ModeDEB     = "deb"
+	ModeRPM     = "rpm"
+	ModePacman  = "pacman"
 
 	PolicyBypass     = "bypass"
 	PolicyImmutable  = "immutable"
@@ -113,6 +114,7 @@ type Instance struct {
 	Maven   *ModeBlock `yaml:"maven,omitempty"`
 	Cargo   *ModeBlock `yaml:"cargo,omitempty"`
 	PyPI    *ModeBlock `yaml:"pypi,omitempty"`
+	Flatpak *ModeBlock `yaml:"flatpak,omitempty"`
 	APK     *ModeBlock `yaml:"apk,omitempty"`
 	DEB     *ModeBlock `yaml:"deb,omitempty"`
 	RPM     *ModeBlock `yaml:"rpm,omitempty"`
@@ -182,6 +184,7 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 		{mode: ModeMaven, block: i.Maven},
 		{mode: ModeCargo, block: i.Cargo},
 		{mode: ModePyPI, block: i.PyPI},
+		{mode: ModeFlatpak, block: i.Flatpak},
 		{mode: ModeAPK, block: i.APK},
 		{mode: ModeDEB, block: i.DEB},
 		{mode: ModeRPM, block: i.RPM},

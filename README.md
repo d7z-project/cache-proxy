@@ -4,11 +4,11 @@ A caching reverse proxy for package registries and artifact repositories. Single
 
 ## Features
 
-- 12 proxy modes in one process: `file`, `git`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `apk`, `deb`, `rpm`, `pacman`
+- 13 proxy modes in one process: `file`, `git`, `oci`, `npm`, `go`, `maven`, `cargo`, `pypi`, `flatpak`, `apk`, `deb`, `rpm`, `pacman`
 - Path-mounted and dedicated-listener instances
 - Per-resource cache policies: `bypass`, `immutable`, `revalidate`
 - Background blob GC and expired-object cleanup
-- Background metadata refresh for Linux repositories (`apk`, `deb`, `rpm`, `pacman`)
+- Background metadata refresh for Flatpak/OSTree and Linux repositories (`flatpak`, `apk`, `deb`, `rpm`, `pacman`)
 - Prometheus metrics and built-in home page
 - Built-in server status modal with persisted disk history and recent scheduler/upstream events
 
@@ -102,6 +102,7 @@ Notes:
 | `maven` | Maven repository cache | `upstream`, `release_policy`, `snapshot_*`, `checksum_*`, `metadata_*` |
 | `cargo` | crates.io sparse index cache | `upstream`, `crate_policy`, `index_*` |
 | `pypi` | PyPI simple index + files | `upstream`, `index_*`, `file_policy`, `companion_*` |
+| `flatpak` | Flatpak / OSTree repository cache | `upstreams`, `refresh_interval`, `descriptor_rewrite`, `verify_*` |
 | `apk` | Alpine repositories | `upstreams`, `refresh_interval`, `cleanup_interval`, `artifact_*`, `auxiliary_*` |
 | `deb` | Debian / Ubuntu repositories | `upstreams`, `refresh_interval`, `cleanup_interval`, `artifact_*`, `auxiliary_*` |
 | `rpm` | RPM repositories | `upstreams`, `refresh_interval`, `cleanup_interval`, `artifact_*`, `auxiliary_*` |
@@ -114,6 +115,7 @@ Client examples:
 - Go: `go env -w GOPROXY=http://cache.lan:8080/go`
 - Cargo: `registry = "sparse+http://cache.lan:8080/cargo/"`
 - PyPI: `pip install --index-url http://cache.lan:8080/pypi/simple <pkg>`
+- Flatpak: `flatpak remote-add --if-not-exists flathub http://cache.lan:8080/flathub/flathub.flatpakrepo`
 - APK: `/etc/apk/repositories` entry `http://cache.lan:8080/apk`
 - Debian distribution repo: `deb http://cache.lan:8080/deb bookworm main`
 - Debian flat repo: `deb [trusted=yes] file:///absolute/path/to/repo ./`
@@ -374,6 +376,40 @@ Use this mode for `/simple/` indexes and package file downloads, with optional s
 </details>
 
 <details>
+<summary><b>flatpak</b> - Flatpak / OSTree repository cache</summary>
+
+```yaml
+flatpak:
+  route: { path: /flathub }
+  upstreams:
+    - https://dl.flathub.org/repo
+  refresh_interval: 5m
+  cleanup_interval: 6h
+  descriptor_rewrite: true
+  verify_objects: true
+  cache_deltas: true
+  delta_expire_after: 720h
+```
+
+Use this mode for Flatpak repositories backed by OSTree. `summary`, `summary.sig`, and `config` are refreshed as metadata generations from one upstream. OSTree objects are cached outside generations and verified before immutable cache writes. Static deltas are cached as opaque immutable files by path and are validated by Flatpak/OSTree clients when applied.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `route.path` | path | required | URL mount path |
+| `expire_after` | expiration | `720h` | Maximum object lifetime |
+| `upstreams` | `[]URL` | required | Upstream OSTree repository URLs |
+| `refresh_interval` | duration | `5m` | Background `summary` refresh interval |
+| `cleanup_interval` | duration | `6h` | Expired-object cleanup interval |
+| `metadata_fresh_for` | freshness | `1m` | Freshness for metadata fallback cache |
+| `metadata_busy_policy` | busy policy | `stale` | Busy policy for metadata fallback cache |
+| `descriptor_rewrite` | bool | `true` | Rewrite `.flatpakrepo` / `.flatpakref` URLs to the proxy |
+| `verify_objects` | bool | `true` | Verify OSTree objects before immutable cache writes |
+| `cache_deltas` | bool | `true` | Cache `deltas/**` as opaque immutable files |
+| `delta_expire_after` | expiration | inherits `expire_after` | Maximum delta object lifetime; `never` is rejected when delta caching is enabled |
+
+</details>
+
+<details>
 <summary><b>apk</b> - Alpine repository cache</summary>
 
 ```yaml
@@ -496,6 +532,16 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 | `force_overwrite` | bool | `true` | Overwrite local refs after upstream force-pushes |
 
 </details>
+
+## Flatpak / OSTree Mode
+
+`flatpak` uses background `summary` refresh and a dedicated cache layout:
+
+- `summary`, `summary.sig`, and `config` are published as a metadata generation from one upstream.
+- OSTree objects under `objects/` are cached outside metadata generations for reuse across updates.
+- Verifiable OSTree objects must pass checksum validation before immutable cache writes.
+- Static deltas under `deltas/` are cached as opaque immutable files by path; cache-proxy does not parse or verify delta contents, and Flatpak/OSTree clients validate them while applying updates.
+- `.flatpakrepo` and `.flatpakref` descriptors are revalidated and can be rewritten to keep clients on the proxy.
 
 ## Linux Repository Modes
 

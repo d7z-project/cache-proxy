@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
@@ -99,8 +100,30 @@ func (h *Handler) lockBusy(ctx context.Context, req *http.Request, route Route) 
 			return h.rewriteResponse(req, route, cached), nil
 		}
 	}
+	if route.Policy == config.PolicyImmutable && req.Header.Get("Range") == "" {
+		cached, err := h.waitForImmutableDownload(ctx, route)
+		if err == nil {
+			cached.Headers["X-Cache"] = "HIT"
+			return h.rewriteResponse(req, route, cached), nil
+		}
+	}
 	slog.Debug("cache lock busy, bypass upstream", "instance", h.name, "object", route.ObjectPath)
 	return h.bypass(ctx, req, route)
+}
+
+func (h *Handler) waitForImmutableDownload(ctx context.Context, route Route) (*utils.ResponseWrapper, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, downloading := h.downloads.Load(route.ObjectPath); !downloading {
+			return h.openCached(ctx, route)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
