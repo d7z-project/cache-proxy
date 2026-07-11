@@ -118,11 +118,11 @@
       </div>
       {{if .HasRepositories}}
       <div class="card-releases">
-        <button class="release-toggle" type="button" onclick="toggleReleases(this)" aria-expanded="false">
+        <button class="release-toggle" type="button" onclick="toggleReleases(this)" aria-expanded="false" aria-controls="{{.ReleaseBodyID}}">
           <span class="release-arrow">&#9654;</span>
           {{t "repositories"}} ({{len .Repositories}})
         </button>
-        <div class="release-body" role="region">
+        <div id="{{.ReleaseBodyID}}" class="release-body" role="region">
           {{range .Repositories}}
           <div class="release-row">
             <div class="release-row-top">

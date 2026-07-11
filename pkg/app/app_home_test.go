@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +243,70 @@ func TestHomePageShowsFlatpakRepositoryLayout(t *testing.T) {
 	require.Contains(t, body, "flatpak remote-add --if-not-exists")
 	require.Contains(t, body, "Flatpak Repository")
 	require.Contains(t, body, "summary")
+}
+
+func TestHomePageRepositoryTogglesUseCardScopedTargets(t *testing.T) {
+	entries := map[string]*proxyruntime.Entry{
+		"packages-a": {
+			Name:    "packages-a",
+			Mode:    "pacman",
+			Enabled: true,
+			Path:    "/packages-a",
+			Runtime: repositoryRuntime{
+				repositories: []proxyruntime.RepositoryStatus{{
+					ID:          "core/os/x86_64",
+					Path:        "core/os/x86_64",
+					DisplayName: "core",
+					Layout:      "pacman",
+					HasCurrent:  true,
+				}},
+			},
+			Home: proxyruntime.HomeEntry{
+				Name: "packages-a",
+				Mode: "pacman",
+			},
+		},
+		"packages-b": {
+			Name:    "packages-b",
+			Mode:    "deb",
+			Enabled: true,
+			Path:    "/packages-b",
+			Runtime: repositoryRuntime{
+				repositories: []proxyruntime.RepositoryStatus{{
+					ID:          "trixie/main",
+					Path:        "trixie/main",
+					DisplayName: "trixie/main",
+					Layout:      "deb",
+					HasCurrent:  true,
+				}},
+			},
+			Home: proxyruntime.HomeEntry{
+				Name: "packages-b",
+				Mode: "deb",
+			},
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      entries,
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+	app.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 1, strings.Count(body, `aria-controls="repositories-0"`))
+	require.Equal(t, 1, strings.Count(body, `id="repositories-0"`))
+	require.Equal(t, 1, strings.Count(body, `aria-controls="repositories-1"`))
+	require.Equal(t, 1, strings.Count(body, `id="repositories-1"`))
 }
 
 func TestHomePageRendersStatusModalControls(t *testing.T) {

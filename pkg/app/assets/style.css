@@ -560,7 +560,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   overflow:hidden;max-height:0;
   transition:max-height .25s ease;
 }
-.release-toggle.open + .release-body{
+.release-body.is-open{
   max-height:600px;
   overflow-y:auto;
 }

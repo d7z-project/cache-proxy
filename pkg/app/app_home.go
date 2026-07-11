@@ -57,6 +57,7 @@ type homeInstance struct {
 	StatusExtra      string
 	StatusExtraTitle string
 	HasRepositories  bool
+	ReleaseBodyID    string
 	Repositories     []homeRepository
 }
 
@@ -106,6 +107,9 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		}
 		s := ss.Instances[entry.Name]
 		hi := buildHomeInstance(entry, baseURL, req, s, usage[entry.Name], i18n)
+		if hi.HasRepositories {
+			hi.ReleaseBodyID = fmt.Sprintf("repositories-%d", len(instances))
+		}
 		if _, ok := seenModes[hi.Mode]; !ok {
 			seenModes[hi.Mode] = struct{}{}
 			modes = append(modes, hi.Mode)

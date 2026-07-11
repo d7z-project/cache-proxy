@@ -60,8 +60,20 @@ function copyToClipboard(btn) {
 }
 
 function toggleReleases(btn) {
+    var body = null;
+    var targetID = btn.getAttribute('aria-controls');
+    if (targetID) {
+        body = document.getElementById(targetID);
+    }
+    if (!body) {
+        var container = btn.closest ? btn.closest('.card-releases') : null;
+        body = container ? container.querySelector('.release-body') : null;
+    }
     var open = btn.classList.toggle('open');
-    btn.setAttribute('aria-expanded', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (body) {
+        body.classList.toggle('is-open', open);
+    }
 }
 
 function sunIcon() {
