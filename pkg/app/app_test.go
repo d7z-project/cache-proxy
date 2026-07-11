@@ -212,6 +212,12 @@ func TestSetupCommandGeneration(t *testing.T) {
 		{"deb", "http://cache/deb", "{distribution}", "deb http://cache/deb {distribution} {component}"},
 		{"rpm", "http://cache/rpm", "repomd.xml", "baseurl=http://cache/rpm"},
 		{"pacman", "http://cache/pacman", "common layouts", "Server = http://cache/pacman"},
+		{
+			"flatpak",
+			"http://cache/flathub",
+			"{remote}",
+			"flatpak remote-add --if-not-exists {remote} http://cache/flathub/{remote}.flatpakrepo",
+		},
 		{"file", "http://cache/files", "Base URL", "http://cache/files"},
 	}
 	for _, tt := range tests {

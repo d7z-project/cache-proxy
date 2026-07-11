@@ -334,6 +334,9 @@ func setupCommand(mode, url string) (note, cmd string) {
 		return "# Repository base URL; DNF/YUM will fetch repodata/repomd.xml below it", "baseurl=" + url
 	case "pacman":
 		return "# Repository base URL; common layouts may still include $repo/os/$arch", "Server = " + url
+	case "flatpak":
+		return "# Replace {remote} with the Flatpak remote name",
+			"flatpak remote-add --if-not-exists {remote} " + url + "/{remote}.flatpakrepo"
 	default:
 		return "# Base URL for file access", url
 	}

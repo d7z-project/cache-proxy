@@ -102,6 +102,41 @@ func TestFailedRefreshKeepsCurrentGeneration(t *testing.T) {
 	require.Equal(t, current.Generation, handler.currentSnapshot().Generation)
 }
 
+func TestRepositoryStatusesReportCurrentMetadataGeneration(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/summary":
+			_, _ = w.Write([]byte("summary-data"))
+		case "/summary.sig":
+			_, _ = w.Write([]byte("signature-data"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := openTestStore(t)
+	handler := newTestHandler(t, store, []string{upstream.URL})
+	before := handler.RepositoryStatuses()
+	require.Len(t, before, 1)
+	require.False(t, before[0].HasCurrent)
+	require.Equal(t, "pending", before[0].State)
+	require.Equal(t, "flatpak", before[0].Layout)
+
+	require.NoError(t, handler.Refresh(context.Background()))
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	status := statuses[0]
+	require.True(t, status.HasCurrent)
+	require.NotEmpty(t, status.Generation)
+	require.Equal(t, "active", status.State)
+	require.Equal(t, upstream.URL, status.Upstream)
+	require.Equal(t, []string{"summary"}, status.PrimaryMetadata)
+	require.Equal(t, 2, status.MetadataCount)
+	require.Equal(t, status.Published, status.LastSuccessAt)
+	require.Equal(t, status.Published, status.LastRefreshAt)
+}
+
 func TestObjectChecksumMismatchIsNotCached(t *testing.T) {
 	const body = "not the expected object"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

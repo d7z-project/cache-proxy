@@ -121,10 +121,10 @@ func Validate(doc *config.Document) error {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	copy := *doc
-	copy.Server.Backend = dir
-	normalizeDocument(&copy)
-	if err := validateServerConfig(&copy); err != nil {
+	docCopy := *doc
+	docCopy.Server.Backend = dir
+	normalizeDocument(&docCopy)
+	if err := validateServerConfig(&docCopy); err != nil {
 		return err
 	}
 	store, err := blobfs.Open(dir, appBlobFSConfig())
@@ -135,12 +135,12 @@ func Validate(doc *config.Document) error {
 
 	registry := prometheus.NewRegistry()
 	stats := httpcache.NewStats(registry)
-	downloads := httpcache.NewDownloadLimiter(copy.Storage.Download.MaxActive, copy.Storage.Download.MaxActivePerInstance)
+	downloads := httpcache.NewDownloadLimiter(docCopy.Storage.Download.MaxActive, docCopy.Storage.Download.MaxActivePerInstance)
 
 	b := bus.NewWithRegisterer(registry)
 	sched := scheduler.New(b, store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
-	_, err = planEntries(context.Background(), &copy, store, stats, downloads, sched, b)
+	_, err = planEntries(context.Background(), &docCopy, store, stats, downloads, sched, b)
 	sched.Start(validateCtx)
 	defer validateCancel()
 	defer func() { _ = sched.Stop(validateCtx) }()

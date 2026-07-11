@@ -237,10 +237,10 @@ func (h *ServiceHealth) TryStartRefresh(path string, now time.Time) (ResourceHea
 	rh.Refreshing = true
 	rh.LastRefreshAt = now
 	rh.Generation++
-	copy := *rh
-	return copy, func() {
+	resourceCopy := *rh
+	return resourceCopy, func() {
 		h.mu.Lock()
-		if cur := h.resources[path]; cur != nil && cur.Generation == copy.Generation {
+		if cur := h.resources[path]; cur != nil && cur.Generation == resourceCopy.Generation {
 			cur.Refreshing = false
 		}
 		h.mu.Unlock()

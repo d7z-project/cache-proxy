@@ -218,142 +218,190 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	artifactCount := 0
 	for _, target := range session.Targets() {
+		var err error
 		switch target.Kind {
 		case "release":
-			blob, err := session.Fetch(ctx, target)
-			if err != nil {
-				return nil, err
-			}
-			snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-			for _, candidate := range append([]string{target.URL}, target.Candidates...) {
-				if candidate != blob.Path {
-					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: blob.Path, Required: false}
-				}
-			}
-			if strings.HasSuffix(blob.Path, "/Release") {
-				for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
-					if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-						return nil, err
-					} else if companion.Path != "" {
-						snapshot.Metadata[companion.Path] = companion
-					}
-				}
-			}
-			releaseSums, err := parseReleaseSHA256(blob)
-			if err != nil {
-				session.Release(target)
-				return nil, err
-			}
-			session.Release(target)
-
-			targets := releaseIndexTargets(blob.Path, releaseSums)
-			if len(targets) == 0 {
-				return nil, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
-			}
-			for _, indexTarget := range targets {
-				indexBlob, err := session.Fetch(ctx, indexTarget)
-				if err != nil {
-					return nil, err
-				}
-				if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
-					return nil, err
-				}
-				snapshot.Metadata[indexBlob.Path] = filerepo.MetadataObject{Path: indexBlob.Path, Required: true}
-				for _, candidate := range append([]string{indexTarget.URL}, indexTarget.Candidates...) {
-					if candidate != indexBlob.Path {
-						snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: indexBlob.Path, Required: false}
-					}
-				}
-				blobReader, err := indexBlob.Open()
-				if err != nil {
-					session.Release(indexTarget)
-					return nil, err
-				}
-				reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
-				if err != nil {
-					session.Release(indexTarget)
-					return nil, err
-				}
-				if indexTarget.Kind == "packages" {
-					artifactCount, err = parsePackages(reader, paths, artifactCount)
-				} else {
-					artifactCount, err = parseSources(reader, paths, artifactCount)
-				}
-				_ = reader.Close()
-				session.Release(indexTarget)
-				if err != nil {
-					return nil, err
-				}
-			}
+			artifactCount, err = buildReleaseTarget(ctx, session, snapshot, target, paths, artifactCount)
 		case "packages", "sources":
-			indexBlob, err := session.Fetch(ctx, target)
-			if err != nil {
-				return nil, err
-			}
-			snapshot.Metadata[indexBlob.Path] = filerepo.MetadataObject{Path: indexBlob.Path, Required: true}
-			for _, candidate := range append([]string{target.URL}, target.Candidates...) {
-				if candidate != indexBlob.Path {
-					snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: indexBlob.Path, Required: false}
-				}
-			}
-			rootPath := strings.Trim(strings.TrimSpace(path.Dir(indexBlob.Path)), "/")
-			if rootPath == "." {
-				rootPath = ""
-			}
-			releaseTarget := debFlatIndexTarget(rootPath, "release")
-			if releaseBlob, err := session.Fetch(ctx, releaseTarget); err == nil {
-				snapshot.Metadata[releaseBlob.Path] = filerepo.MetadataObject{Path: releaseBlob.Path, Required: false}
-				for _, candidate := range append([]string{releaseTarget.URL}, releaseTarget.Candidates...) {
-					if candidate != releaseBlob.Path {
-						snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: releaseBlob.Path, Required: false}
-					}
-				}
-				if strings.HasSuffix(releaseBlob.Path, "Release") {
-					for _, companionPath := range filerepo.DeduceCompanions(releaseBlob.Path) {
-						if companion, err := session.FetchDerived(ctx, companionPath); err != nil {
-							return nil, err
-						} else if companion.Path != "" {
-							snapshot.Metadata[companion.Path] = companion
-						}
-					}
-				}
-				if releaseSums, err := parseReleaseSHA256(releaseBlob); err != nil {
-					session.Release(releaseTarget)
-					return nil, err
-				} else if len(releaseSums) > 0 {
-					if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
-						session.Release(releaseTarget)
-						return nil, err
-					}
-				}
-				session.Release(releaseTarget)
-			}
-			blobReader, err := indexBlob.Open()
-			if err != nil {
-				session.Release(target)
-				return nil, err
-			}
-			reader, err := filerepo.OpenCompressed(blobReader, indexBlob.Path)
-			if err != nil {
-				session.Release(target)
-				return nil, err
-			}
-			if target.Kind == "packages" {
-				artifactCount, err = parsePackages(reader, paths, artifactCount)
-			} else {
-				artifactCount, err = parseSources(reader, paths, artifactCount)
-			}
-			_ = reader.Close()
-			session.Release(target)
-			if err != nil {
-				return nil, err
-			}
+			artifactCount, err = buildFlatIndexTarget(ctx, session, snapshot, target, paths, artifactCount)
 		default:
 			return nil, fmt.Errorf("%s: unsupported seed metadata target kind %q", target.URL, target.Kind)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
+}
+
+func buildReleaseTarget(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	paths *filerepo.PathIndexBuilder,
+	artifactCount int,
+) (int, error) {
+	blob, err := session.Fetch(ctx, target)
+	if err != nil {
+		return artifactCount, err
+	}
+	addMetadataAliases(snapshot, target, blob.Path, true)
+	if err := addReleaseCompanions(ctx, session, snapshot, blob.Path); err != nil {
+		session.Release(target)
+		return artifactCount, err
+	}
+	releaseSums, err := parseReleaseSHA256(blob)
+	session.Release(target)
+	if err != nil {
+		return artifactCount, err
+	}
+
+	targets := releaseIndexTargets(blob.Path, releaseSums)
+	if len(targets) == 0 {
+		return artifactCount, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
+	}
+	for _, indexTarget := range targets {
+		nextCount, err := buildVerifiedIndexTarget(ctx, session, snapshot, indexTarget, releaseSums, paths, artifactCount)
+		if err != nil {
+			return artifactCount, err
+		}
+		artifactCount = nextCount
+	}
+	return artifactCount, nil
+}
+
+func buildFlatIndexTarget(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	paths *filerepo.PathIndexBuilder,
+	artifactCount int,
+) (int, error) {
+	indexBlob, err := session.Fetch(ctx, target)
+	if err != nil {
+		return artifactCount, err
+	}
+	defer session.Release(target)
+
+	addMetadataAliases(snapshot, target, indexBlob.Path, true)
+	if err := verifyFlatIndexRelease(ctx, session, snapshot, indexBlob); err != nil {
+		return artifactCount, err
+	}
+	return parseIndexBlob(indexBlob, target.Kind, paths, artifactCount)
+}
+
+func buildVerifiedIndexTarget(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	releaseSums map[string]string,
+	paths *filerepo.PathIndexBuilder,
+	artifactCount int,
+) (int, error) {
+	indexBlob, err := session.Fetch(ctx, target)
+	if err != nil {
+		return artifactCount, err
+	}
+	defer session.Release(target)
+
+	if err := verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob); err != nil {
+		return artifactCount, err
+	}
+	addMetadataAliases(snapshot, target, indexBlob.Path, true)
+	return parseIndexBlob(indexBlob, target.Kind, paths, artifactCount)
+}
+
+func verifyFlatIndexRelease(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	indexBlob filerepo.MetadataBlob,
+) error {
+	rootPath := strings.Trim(strings.TrimSpace(path.Dir(indexBlob.Path)), "/")
+	if rootPath == "." {
+		rootPath = ""
+	}
+	releaseTarget := debFlatIndexTarget(rootPath, "release")
+	releaseBlob, err := session.Fetch(ctx, releaseTarget)
+	if err != nil {
+		return nil
+	}
+	defer session.Release(releaseTarget)
+
+	addMetadataAliases(snapshot, releaseTarget, releaseBlob.Path, false)
+	if err := addReleaseCompanions(ctx, session, snapshot, releaseBlob.Path); err != nil {
+		return err
+	}
+	releaseSums, err := parseReleaseSHA256(releaseBlob)
+	if err != nil {
+		return err
+	}
+	if len(releaseSums) == 0 {
+		return nil
+	}
+	return verifyReleaseChecksum(releaseSums, indexBlob.Path, indexBlob)
+}
+
+func addReleaseCompanions(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	releasePath string,
+) error {
+	if path.Base(releasePath) != "Release" {
+		return nil
+	}
+	for _, companionPath := range filerepo.DeduceCompanions(releasePath) {
+		companion, err := session.FetchDerived(ctx, companionPath)
+		if err != nil {
+			return err
+		}
+		if companion.Path != "" {
+			snapshot.Metadata[companion.Path] = companion
+		}
+	}
+	return nil
+}
+
+func addMetadataAliases(
+	snapshot *filerepo.LiveSnapshot,
+	target filerepo.MetadataTarget,
+	storePath string,
+	required bool,
+) {
+	snapshot.Metadata[storePath] = filerepo.MetadataObject{Path: storePath, Required: required}
+	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+		if candidate != storePath {
+			snapshot.Metadata[candidate] = filerepo.MetadataObject{Path: storePath, Required: false}
+		}
+	}
+}
+
+func parseIndexBlob(
+	blob filerepo.MetadataBlob,
+	kind string,
+	paths *filerepo.PathIndexBuilder,
+	artifactCount int,
+) (int, error) {
+	blobReader, err := blob.Open()
+	if err != nil {
+		return artifactCount, err
+	}
+	reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
+	if err != nil {
+		_ = blobReader.Close()
+		return artifactCount, err
+	}
+	defer reader.Close()
+
+	if kind == "packages" {
+		return parsePackages(reader, paths, artifactCount)
+	}
+	return parseSources(reader, paths, artifactCount)
 }
 
 func releaseIndexTargets(releasePath string, sums map[string]string) []filerepo.MetadataTarget {

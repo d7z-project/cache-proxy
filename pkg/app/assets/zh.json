@@ -89,6 +89,7 @@
   "repository_layout_apk": "APK 仓库",
   "repository_layout_pacman": "Pacman 仓库",
   "repository_layout_rpm": "RPM 仓库",
+  "repository_layout_flatpak": "Flatpak 仓库",
   "result_success": "成功",
   "result_failed": "失败",
   "result_ok": "正常",

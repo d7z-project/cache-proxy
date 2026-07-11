@@ -89,6 +89,7 @@
   "repository_layout_apk": "APK Repository",
   "repository_layout_pacman": "Pacman Repository",
   "repository_layout_rpm": "RPM Repository",
+  "repository_layout_flatpak": "Flatpak Repository",
   "result_success": "Success",
   "result_failed": "Failed",
   "result_ok": "OK",

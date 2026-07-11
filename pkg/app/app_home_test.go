@@ -197,6 +197,53 @@ func TestHomePageRepositoryGenerationUsesReadableLabel(t *testing.T) {
 	require.Contains(t, body, "Pacman 仓库")
 }
 
+func TestHomePageShowsFlatpakRepositoryLayout(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "flathub",
+		Mode:    config.ModeFlatpak,
+		Enabled: true,
+		Path:    "/flathub",
+		Runtime: repositoryRuntime{
+			repositories: []proxyruntime.RepositoryStatus{{
+				ID:              "/",
+				Path:            "/",
+				DisplayName:     "flathub",
+				Layout:          "flatpak",
+				PrimaryMetadata: []string{"summary"},
+				Generation:      "djmsm2bdzupd",
+				HasCurrent:      true,
+				State:           "active",
+				MetadataCount:   2,
+			}},
+		},
+		Home: proxyruntime.HomeEntry{
+			Name: "flathub",
+			Mode: config.ModeFlatpak,
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      map[string]*proxyruntime.Entry{"flathub": entry},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+	app.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, body, `class="badge badge-flatpak"`)
+	require.Contains(t, body, "flatpak remote-add --if-not-exists")
+	require.Contains(t, body, "Flatpak Repository")
+	require.Contains(t, body, "summary")
+}
+
 func TestHomePageRendersStatusModalControls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

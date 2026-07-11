@@ -655,7 +655,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
 .badge-pypi{background:var(--badge-pypi-bg);color:var(--badge-pypi-text)}
 .badge-git{background:var(--badge-git-bg);color:var(--badge-git-text)}
 .badge-file{background:var(--badge-file-bg);color:var(--badge-file-text)}
-.badge-apk,.badge-deb,.badge-rpm,.badge-pacman{background:var(--badge-pkg-bg);color:var(--badge-pkg-text)}
+.badge-apk,.badge-deb,.badge-rpm,.badge-pacman,.badge-flatpak{background:var(--badge-pkg-bg);color:var(--badge-pkg-text)}
 
 .dot{
   display:inline-block;width:8px;height:8px;border-radius:50%;
