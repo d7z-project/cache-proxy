@@ -240,6 +240,46 @@ func TestOCIBypassesBlobWithoutActiveRef(t *testing.T) {
 	require.False(t, strings.Contains(rec.Body.String(), "Bad Gateway"))
 }
 
+func TestOCIBlobFetchClearsBusyStateOnUpstreamError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	blobDigest := sha256Digest("blob")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream failed", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	state := refState{
+		Repo:           "library/alpine",
+		Ref:            "latest",
+		FetchedAt:      time.Now(),
+		ExpireAfter:    config.Expiration(time.Hour),
+		ManifestDigest: sha256Digest("manifest"),
+		BlobDigests:    []string{blobDigest},
+	}
+	require.NoError(t, handler.writeState(ctx, state))
+	handler.rememberBlob(blobDigest, state)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil)
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+
+	objectPath := handler.refBlobPath("library/alpine", "latest", blobDigest)
+	_, busy := handler.downloads.Load(objectPath)
+	require.False(t, busy)
+}
+
 func TestOCIManifestDigestMismatchFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

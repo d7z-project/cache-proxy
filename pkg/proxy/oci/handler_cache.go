@@ -124,6 +124,14 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 
 func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
 	slog.Debug("oci fetch blob", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest, "upstream", h.upstream)
+	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
+	cleanupDownload := true
+	defer func() {
+		if cleanupDownload {
+			h.downloads.Delete(objectPath)
+		}
+	}()
+
 	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, nil)
 	if err != nil {
 		return 0, "", 0, err
@@ -134,7 +142,6 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		return status, "BYPASS", bytes, copyErr
 	}
 
-	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
 	contentLen := response.ContentLength
 	respHeader := response.Header
 
@@ -157,6 +164,7 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 	if err != nil {
 		return 0, "", 0, err
 	}
+	cleanupDownload = false
 
 	headers := objectHeaders(respHeader, int(contentLen), "MISS")
 	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, pr)

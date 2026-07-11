@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,18 +13,24 @@ import (
 func TempFileFromReader(src io.Reader) (*os.File, int64, error) {
 	tmp, err := os.CreateTemp("", "cache-proxy-*")
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("create temp file: %w", err)
 	}
 	written, err := io.Copy(tmp, src)
 	if err != nil {
-		tmp.Close()
+		operationErr := fmt.Errorf("copy reader to temp file: %w", err)
+		if closeErr := tmp.Close(); closeErr != nil {
+			operationErr = errors.Join(operationErr, fmt.Errorf("close temp file: %w", closeErr))
+		}
 		os.Remove(tmp.Name())
-		return nil, 0, err
+		return nil, 0, operationErr
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
+		operationErr := fmt.Errorf("rewind temp file: %w", err)
+		if closeErr := tmp.Close(); closeErr != nil {
+			operationErr = errors.Join(operationErr, fmt.Errorf("close temp file: %w", closeErr))
+		}
 		os.Remove(tmp.Name())
-		return nil, 0, err
+		return nil, 0, operationErr
 	}
 	return tmp, written, nil
 }

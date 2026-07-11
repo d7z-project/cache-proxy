@@ -64,6 +64,8 @@ type ServiceHealth struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
+	lifecycleMu sync.Mutex
+	running     bool
 }
 
 func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder, userAgent string) *ServiceHealth {
@@ -94,17 +96,24 @@ func (h *ServiceHealth) Start(parent context.Context) {
 	if !h.config.Enabled {
 		return
 	}
-	if parent == nil {
-		parent = context.Background()
+	h.lifecycleMu.Lock()
+	if h.running {
+		h.lifecycleMu.Unlock()
+		return
 	}
 	h.ctx, h.cancel = context.WithCancel(parent)
+	h.running = true
 	h.wg.Add(1)
+	h.lifecycleMu.Unlock()
 	go h.probeLoop()
 }
 
 func (h *ServiceHealth) Stop(ctx context.Context) error {
-	if h.cancel != nil {
-		h.cancel()
+	h.lifecycleMu.Lock()
+	cancel := h.cancel
+	h.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	done := make(chan struct{})
 	go func() {
@@ -113,6 +122,11 @@ func (h *ServiceHealth) Stop(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
+		h.lifecycleMu.Lock()
+		h.ctx = nil
+		h.cancel = nil
+		h.running = false
+		h.lifecycleMu.Unlock()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -184,13 +198,13 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 	}
 }
 
-func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstreams []string) *ResourceHealth {
+func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstreams []string) ResourceHealth {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	existing, ok := h.resources[path]
 	if ok && existing.State != RRemoved {
-		return existing
+		return existing.snapshot()
 	}
 
 	rh := &ResourceHealth{
@@ -205,7 +219,7 @@ func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstream
 	}
 	h.resources[path] = rh
 	h.recomputeAggregateLocked()
-	return rh
+	return rh.snapshot()
 }
 
 func (h *ServiceHealth) RestoreResources(snapshots []ResourceSnapshot) {
@@ -369,13 +383,18 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 			rh.FirstNotFoundAt = time.Now()
 		}
 		now := time.Now()
-		if rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount && now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge {
+		removeResource := rh.ConsecutiveNotFound >= h.config.ResourceRemoveCount &&
+			now.Sub(rh.FirstNotFoundAt) >= h.config.ResourceRemoveAge
+		if removeResource {
 			path := rh.Path
 			rh.State = RRemoved
 			rh.Generation++
 			delete(h.resources, rh.Path)
 			if h.bus != nil {
-				h.bus.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: h.name, RootID: path}})
+				h.bus.Publish(bus.Event{
+					Type:    bus.EventMetadataRemoved,
+					Payload: bus.MetadataRemovedPayload{Instance: h.name, RootID: path},
+				})
 			}
 		} else {
 			rh.State = RSuspect
@@ -404,11 +423,14 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 	h.recomputeAggregateLocked()
 }
 
-func (h *ServiceHealth) ResourceHealth(path string) (*ResourceHealth, bool) {
+func (h *ServiceHealth) ResourceHealth(path string) (ResourceHealth, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	rh, ok := h.resources[path]
-	return rh, ok
+	if !ok {
+		return ResourceHealth{}, false
+	}
+	return rh.snapshot(), true
 }
 
 func (h *ServiceHealth) MarkResourceActive(path string, targets []ProbeTarget) {

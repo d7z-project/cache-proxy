@@ -250,7 +250,6 @@ func TestCanaryCooldownNotElapsed(t *testing.T) {
 func TestResourceStateTransitions(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
 	rh := h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})
-	require.NotNil(t, rh)
 	require.Equal(t, RPending, rh.State)
 
 	copy, cancel, err := h.TryStartRefresh(rh.Path, time.Now())
@@ -258,12 +257,30 @@ func TestResourceStateTransitions(t *testing.T) {
 	require.NotNil(t, cancel)
 	require.Equal(t, copy.Path, rh.Path)
 
-	h.FinishRefresh(rh.Path, rh.Generation, nil, []ProbeTarget{{Path: "dists/bookworm/InRelease"}})
+	h.FinishRefresh(rh.Path, copy.Generation, nil, []ProbeTarget{{Path: "dists/bookworm/InRelease"}})
 	cancel()
 
 	final, ok := h.ResourceHealth(rh.Path)
 	require.True(t, ok)
 	require.Equal(t, RActive, final.State)
+}
+
+func TestResourceHealthReturnsSnapshot(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	rh := h.AddResource(
+		"dists/bookworm",
+		[]ProbeTarget{{Path: "dists/bookworm/InRelease"}},
+		[]string{"https://a.example.com"},
+	)
+	rh.State = RRemoved
+	rh.LastTargets[0].Path = "mutated"
+	rh.UpstreamURLs[0] = "https://mutated.example.com"
+
+	final, ok := h.ResourceHealth("dists/bookworm")
+	require.True(t, ok)
+	require.Equal(t, RPending, final.State)
+	require.Equal(t, "dists/bookworm/InRelease", final.LastTargets[0].Path)
+	require.Equal(t, "https://a.example.com", final.UpstreamURLs[0])
 }
 
 func TestResourceNotFoundRemoval(t *testing.T) {
@@ -484,6 +501,21 @@ func TestStopCleanShutdown(t *testing.T) {
 	defer cancel()
 	err := h.Stop(ctx)
 	require.NoError(t, err)
+}
+
+func TestStartIsIdempotentWhileRunning(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	firstParent := context.Background()
+	secondParent, secondCancel := context.WithCancel(context.Background())
+	defer secondCancel()
+
+	h.Start(firstParent)
+	firstCtx := h.ctx
+	h.Start(secondParent)
+
+	require.True(t, firstCtx == h.ctx)
+	secondCancel()
+	require.NoError(t, h.Stop(context.Background()))
 }
 
 func TestStopWithDisabledProbing(t *testing.T) {

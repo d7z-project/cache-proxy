@@ -66,6 +66,13 @@ type ResourceHealth struct {
 	UpstreamURLs []string
 }
 
+func (rh *ResourceHealth) snapshot() ResourceHealth {
+	copied := *rh
+	copied.LastTargets = append([]ProbeTarget(nil), rh.LastTargets...)
+	copied.UpstreamURLs = append([]string(nil), rh.UpstreamURLs...)
+	return copied
+}
+
 type ResourceSnapshot struct {
 	Path                 string    `yaml:"path"`
 	State                string    `yaml:"state"`

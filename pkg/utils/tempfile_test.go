@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+var errBrokenReader = errors.New("broken reader")
+
+type brokenReader struct{}
+
+func (brokenReader) Read([]byte) (int, error) {
+	return 0, errBrokenReader
+}
 
 func TestTempFileFromReader(t *testing.T) {
 	body := strings.Repeat("data", 1024)
@@ -52,6 +61,15 @@ func TestTempFileFromReaderRewind(t *testing.T) {
 	require.Equal(t, body, string(second))
 }
 
+func TestTempFileFromReaderCleansUpAfterReadError(t *testing.T) {
+	before := cacheProxyTempFiles(t)
+	file, size, err := TempFileFromReader(brokenReader{})
+	require.Nil(t, file)
+	require.Zero(t, size)
+	require.ErrorIs(t, err, errBrokenReader)
+	require.Equal(t, before, cacheProxyTempFiles(t))
+}
+
 func TestCleanStaleTempFiles(t *testing.T) {
 	fakeOldFile, err := os.CreateTemp("", "cache-proxy-old")
 	require.NoError(t, err)
@@ -82,4 +100,17 @@ func TestCleanStaleTempFiles(t *testing.T) {
 		}
 	}
 	t.Fatal("new temp file was accidentally cleaned")
+}
+
+func cacheProxyTempFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(os.TempDir())
+	require.NoError(t, err)
+	var names []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "cache-proxy-") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
 }

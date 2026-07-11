@@ -1010,16 +1010,16 @@ func TestResolveSnapshotMetadataResolvedPath(t *testing.T) {
 
 func TestMarkResourceActiveOnRemovedNoop(t *testing.T) {
 	healthCfg := health.DefaultConfig()
+	healthCfg.ResourceRemoveAge = 0
+	healthCfg.ResourceRemoveCount = 1
 	sh := health.New("test", "test", healthCfg, []string{"https://upstream.example"}, nil, "test")
 	rh := sh.AddResource("root", nil, []string{"https://upstream.example"})
 	require.Equal(t, health.RPending, rh.State)
 
-	rh.State = health.RRemoved
+	sh.FinishRefresh("root", rh.Generation, health.ErrResourceNotFound, nil)
 	sh.MarkResourceActive("root", nil)
 	_, ok := sh.ResourceHealth("root")
-	require.True(t, ok)
-	rh2, _ := sh.ResourceHealth("root")
-	require.Equal(t, health.RRemoved, rh2.State)
+	require.False(t, ok)
 }
 
 func TestRefreshSkipsRebuildWhenMetadataHeadReturns200(t *testing.T) {
