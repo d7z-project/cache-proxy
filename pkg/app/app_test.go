@@ -209,7 +209,7 @@ func TestSetupCommandGeneration(t *testing.T) {
 		{"pypi", "http://cache/pypi", "{package}", "pip install --index-url http://cache/pypi/simple {package}"},
 		{"oci", "http://cache:5000", "must not include http:// or https://", "docker pull cache:5000/{image}:{tag}"},
 		{"apk", "http://cache/apk", "APKINDEX.tar.gz", "http://cache/apk"},
-		{"deb", "http://cache/deb", "{distribution}", "deb http://cache/deb {distribution} {component}"},
+		{"deb", "http://cache/deb", "{distribution}", "deb [trusted=yes] http://cache/deb ./"},
 		{"rpm", "http://cache/rpm", "repomd.xml", "baseurl=http://cache/rpm"},
 		{"pacman", "http://cache/pacman", "common layouts", "Server = http://cache/pacman"},
 		{
@@ -231,6 +231,10 @@ func TestSetupCommandGeneration(t *testing.T) {
 				require.NotContains(t, cmd, "docker pull https://")
 				require.NotContains(t, cmd, "podman pull http://")
 				require.NotContains(t, cmd, "podman pull https://")
+			}
+			if tt.mode == "deb" {
+				require.Contains(t, cmd, "deb http://cache/deb {distribution} {component}")
+				require.NotContains(t, cmd, "file://")
 			}
 		})
 	}

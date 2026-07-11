@@ -118,7 +118,7 @@ Client examples:
 - Flatpak: `flatpak remote-add --if-not-exists flathub http://cache.lan:8080/flathub/flathub.flatpakrepo`
 - APK: `/etc/apk/repositories` entry `http://cache.lan:8080/apk`
 - Debian distribution repo: `deb http://cache.lan:8080/deb bookworm main`
-- Debian flat repo: `deb [trusted=yes] file:///absolute/path/to/repo ./`
+- Debian flat repo: `deb [trusted=yes] http://cache.lan:8080/deb ./`
 - RPM: `baseurl=http://cache.lan:8080/rpm`
 - Pacman: `Server = http://cache.lan:8080/pacman`
 - OCI: `docker pull cache.lan:5000/library/alpine:latest`
@@ -456,7 +456,12 @@ deb:
   auxiliary_policy: revalidate
 ```
 
-Use this mode for Debian-style repositories discovered from `Release`, `InRelease`, `Packages*`, and `Sources*` metadata requests. Both standard `dists/<suite>/...` layouts and flat repositories are supported.
+Use this mode for Debian-style repositories discovered from `Release`, `InRelease`, `Packages*`, and `Sources*`
+metadata requests. Both standard `dists/<suite>/...` layouts and flat repositories are supported.
+
+Standard apt sources use `deb <proxy-url> <suite> <component>`. Flat repositories use
+`deb [trusted=yes] <proxy-url> ./`. In both cases, `<proxy-url>` is the cache-proxy HTTP(S) URL, not a
+local filesystem path.
 
 Same field set as `apk`.
 

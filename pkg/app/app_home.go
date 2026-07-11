@@ -328,8 +328,10 @@ func setupCommand(mode, url string) (note, cmd string) {
 	case "apk":
 		return "# Repository URL; apk fetches APKINDEX.tar.gz from this directory", url
 	case "deb":
-		return "# Standard repo: replace {distribution} and {component}\n# Flat repo: use ./ as suite with an exact path URL", "deb " + url + " {distribution} {component}\n" +
-			"deb [trusted=yes] file:///absolute/path/to/repo ./"
+		note := "# Standard repo: replace {distribution} and {component}\n" +
+			"# Flat repo: keep ./ as the suite and use this proxy URL"
+		return note, "deb " + url + " {distribution} {component}\n" +
+			"deb [trusted=yes] " + url + " ./"
 	case "rpm":
 		return "# Repository base URL; DNF/YUM will fetch repodata/repomd.xml below it", "baseurl=" + url
 	case "pacman":
