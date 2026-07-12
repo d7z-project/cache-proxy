@@ -8,12 +8,10 @@ function renderNetworkMap(target, edges, data) {
     var t = window.I18N;
     if (!edges.length) {
         target.classList.add('network-map', 'empty-state', 'network-empty-state');
+        target.classList.remove('has-focus', 'is-fade-in');
         target.classList.toggle('is-stage', document.body.classList.contains('network-stage-open'));
-        if (isNetworkStageOpen()) {
-            target.classList.remove('is-fade-in');
-        }
         target.removeAttribute('data-focus-id');
-        if (target.textContent !== (t.no_data || 'No data')) {
+        if (target._networkGraph || target.textContent !== (t.no_data || 'No data')) {
             target.textContent = t.no_data || 'No data';
         }
         target._networkGraph = null;
@@ -545,10 +543,8 @@ function renderNetworkTable(target, edges) {
     var t = window.I18N;
     if (!edges.length) {
         target.classList.add('network-table-wrap', 'empty-state', 'network-empty-state');
-        if (isNetworkStageOpen()) {
-            target.classList.remove('is-fade-in');
-        }
-        if (target.textContent !== (t.no_data || 'No data')) {
+        target.classList.remove('is-fade-in');
+        if (target._networkList || target.textContent !== (t.no_data || 'No data')) {
             target.textContent = t.no_data || 'No data';
         }
         target._networkList = null;
@@ -557,8 +553,11 @@ function renderNetworkTable(target, edges) {
     var firstRender = !target._networkList;
     var listState = ensureNetworkList(target);
     var rows = edges.slice().sort(function(a, b) {
-        return networkNumberValue(b.active_upstream_requests) - networkNumberValue(a.active_upstream_requests) ||
-            networkNumberValue(b.requests) - networkNumberValue(a.requests);
+        return networkListIssueScore(b) - networkListIssueScore(a) ||
+            networkNumberValue(b.active_upstream_requests) - networkNumberValue(a.active_upstream_requests) ||
+            networkNumberValue(b.errors) - networkNumberValue(a.errors) ||
+            networkNumberValue(b.requests) - networkNumberValue(a.requests) ||
+            String(a.upstream_host || a.upstream_url || '').localeCompare(String(b.upstream_host || b.upstream_url || ''));
     });
     var seen = {};
     rows.forEach(function(edge) {
@@ -642,6 +641,7 @@ function updateNetworkListItem(item, edge) {
     var fields = item._networkFields;
     var host = edge.upstream_host || edge.upstream_url || '-';
     item.title = edgeTitle(edge).replace(/\n/g, ' · ');
+    item.classList.toggle('is-alert', networkListIssueScore(edge) > 0);
     fields.title.textContent = host;
     fields.badge.className = 'result-badge ' + resultClass(edge.state);
     fields.badge.textContent = translateUpstreamState(edge.state);
@@ -655,13 +655,55 @@ function updateNetworkListItem(item, edge) {
         formatBytes(edge.response_bytes || 0);
     fields.metrics[3].textContent = (window.I18N.network_latency || 'Latency') + ' ' +
         networkNumberValue(edge.latency_ms).toFixed(0) + 'ms';
-    var lastError = String(edge.last_error || '').trim();
-    var errors = networkNumberValue(edge.errors);
-    var issue = lastError || (errors > 0 ?
-        formatNetworkCompactNumber(errors) + ' ' + (window.I18N.errors || 'Errors') + ' · ' +
-        formatPercent(edge.error_rate || 0) : '');
+    var issue = networkListIssueText(edge);
     fields.issue.textContent = issue;
     fields.issue.hidden = !issue;
+}
+
+function networkListIssueScore(edge) {
+    if (!edge) {
+        return 0;
+    }
+    var score = networkNumberValue(edge.errors) * 100 + networkNumberValue(edge.error_rate) * 1000;
+    if (String(edge.last_error || '').trim()) {
+        score += 10000;
+    }
+    if (edge.state === 'open' || edge.state === 'degraded') {
+        score += 8000;
+    } else if (edge.state === 'halfopen') {
+        score += 4000;
+    }
+    if (networkStatusIsIssue(edge.last_status)) {
+        score += 2000;
+    }
+    return score;
+}
+
+function networkListIssueText(edge) {
+    var lastError = String(edge.last_error || '').trim();
+    if (lastError) {
+        return lastError;
+    }
+    var errors = networkNumberValue(edge.errors);
+    if (errors > 0) {
+        return formatNetworkCompactNumber(errors) + ' ' + (window.I18N.errors || 'Errors') + ' · ' +
+            formatPercent(edge.error_rate || 0);
+    }
+    if (networkStatusIsIssue(edge.last_status)) {
+        return 'HTTP ' + String(edge.last_status);
+    }
+    if (edge.state && edge.state !== 'closed' && edge.state !== 'unknown') {
+        return translateUpstreamState(edge.state);
+    }
+    if (networkNumberValue(edge.error_rate) > 0) {
+        return (window.I18N.network_error_rate || 'Error rate') + ' ' + formatPercent(edge.error_rate);
+    }
+    return '';
+}
+
+function networkStatusIsIssue(status) {
+    var code = networkNumberValue(status);
+    return code >= 500 || (code >= 400 && code !== 404);
 }
 
 function networkNumberValue(value) {

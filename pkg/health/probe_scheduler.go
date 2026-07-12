@@ -115,6 +115,7 @@ func (s *ProbeScheduler) unregister(h *ServiceHealth) {
 			delete(s.jobs, key)
 		}
 	}
+	s.pruneHostsLocked()
 	s.mu.Unlock()
 	s.notify()
 }
@@ -246,6 +247,7 @@ func (s *ProbeScheduler) reconcileLocked(now time.Time) {
 			job.nextAt = candidate.dueAt
 		}
 	}
+	s.pruneHostsLocked()
 }
 
 func (c probeCandidate) key() probeJobKey {
@@ -301,6 +303,7 @@ func (s *ProbeScheduler) markFinished(hostKey string) {
 	host := s.hostLocked(hostKey)
 	host.inflight = false
 	host.nextAt = time.Now().Add(s.config.MinHostInterval).Add(s.hostJitter(hostKey))
+	s.pruneHostsLocked()
 	s.mu.Unlock()
 }
 
@@ -311,6 +314,21 @@ func (s *ProbeScheduler) hostLocked(hostKey string) *probeHost {
 		s.hosts[hostKey] = host
 	}
 	return host
+}
+
+func (s *ProbeScheduler) pruneHostsLocked() {
+	used := map[string]struct{}{}
+	for _, job := range s.jobs {
+		used[job.hostKey] = struct{}{}
+	}
+	for hostKey, host := range s.hosts {
+		if host.inflight {
+			continue
+		}
+		if _, ok := used[hostKey]; !ok {
+			delete(s.hosts, hostKey)
+		}
+	}
 }
 
 func (s *ProbeScheduler) hostJitter(hostKey string) time.Duration {

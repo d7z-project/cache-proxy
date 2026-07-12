@@ -414,6 +414,49 @@ func TestTargetURLAllowsRouteHost(t *testing.T) {
 	require.Equal(t, "target", rec.Body.String())
 }
 
+func TestStatsUpstreamKeyUsesTargetOrigin(t *testing.T) {
+	tests := map[string]string{
+		"https://User:Pass@Example.COM:8443/a/b?x=1#frag": "https://example.com:8443",
+		"http://Example.COM/object":                       "http://example.com",
+		"not a url":                                       "not a url",
+	}
+	for input, expected := range tests {
+		require.Equal(t, expected, statsUpstreamKey(input))
+	}
+}
+
+func TestTargetURLStatsAggregateByOrigin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer target.Close()
+
+	stats := NewStats(prometheus.NewRegistry())
+	handler := NewHandler("test", RuntimeConfig{Mode: "test"}, nil, nil, stats, nil)
+	allowedHosts := []string{strings.TrimPrefix(target.URL, "http://")}
+
+	for _, targetPath := range []string{"/files/one.whl?download=1", "/files/two.whl?download=1"} {
+		resp, err := handler.openRemote(ctx, http.MethodGet, "", remoteOptions{
+			AcceptErrors:       true,
+			Record:             true,
+			TargetURL:          target.URL + targetPath,
+			AllowedTargetHosts: allowedHosts,
+		}, nil)
+		require.NoError(t, err)
+		require.NoError(t, resp.Close())
+	}
+
+	snap := stats.Snapshot()
+	upstreams := snap.Instances["test"].Upstreams
+	require.Len(t, upstreams, 1)
+	require.Equal(t, uint64(2), upstreams[target.URL].Requests)
+	require.Equal(t, uint64(4), upstreams[target.URL].ResponseBytes)
+}
+
 func TestTargetURLReturnsClientErrorWithoutFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

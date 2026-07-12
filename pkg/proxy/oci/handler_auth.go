@@ -66,11 +66,7 @@ func (h *handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 	key := challenge.realm + "\x00" + challenge.params["service"] + "\x00" + challenge.params["scope"]
 	now := time.Now()
 	h.auth.tokenMu.Lock()
-	for itemKey, token := range h.auth.tokens {
-		if token.value == "" || !now.Before(token.expire) {
-			delete(h.auth.tokens, itemKey)
-		}
-	}
+	h.trimTokenCacheLocked(now, "")
 	if token := h.auth.tokens[key]; token.value != "" && now.Before(token.expire) {
 		h.auth.tokenMu.Unlock()
 		return token.value, nil
@@ -84,6 +80,7 @@ func (h *handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 		}
 		h.auth.tokenMu.Lock()
 		h.auth.tokens[key] = ociToken{value: token, expire: expire}
+		h.trimTokenCacheLocked(time.Now(), key)
 		h.auth.tokenMu.Unlock()
 		return token, nil
 	})

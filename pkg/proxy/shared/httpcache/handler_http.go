@@ -121,9 +121,10 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	statsUpstream := statsUpstreamKey(options.TargetURL)
 	release := func() {}
 	if options.Record {
-		release = h.stats.BeginUpstreamRequest(h.name, h.config.Mode, options.TargetURL)
+		release = h.stats.BeginUpstreamRequest(h.name, h.config.Mode, statsUpstream)
 	}
 	start := time.Now()
 	response, err := h.client.Do(request)
@@ -131,7 +132,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	if err != nil {
 		release()
 		if options.Record {
-			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, options.TargetURL, method, 0, latency, 0)
+			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, 0, latency, 0)
 			if h.health != nil {
 				h.health.RecordFailure(options.TargetURL, err)
 			}
@@ -142,7 +143,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 		h.stats.RecordUpstreamRequest(
 			h.name,
 			h.config.Mode,
-			options.TargetURL,
+			statsUpstream,
 			method,
 			response.StatusCode,
 			latency,
@@ -308,6 +309,14 @@ func responseContentLength(response *http.Response) uint64 {
 		return 0
 	}
 	return uint64(response.ContentLength)
+}
+
+func statsUpstreamKey(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return rawURL
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
 }
 
 func shouldFailoverUpstreamStatus(status int) bool {

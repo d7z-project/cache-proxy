@@ -1082,6 +1082,49 @@ func TestProbeSchedulerUnregisterStopsFutureProbes(t *testing.T) {
 	}
 }
 
+func TestProbeSchedulerUnregisterReleasesHostState(t *testing.T) {
+	h := New("test", "apk", fastProbeConfig(), []string{"https://example.com/repo"}, nil, "ua")
+	key := probeJobKey{service: h, upstreamURL: "https://example.com/repo"}
+	s := &ProbeScheduler{
+		wake:     make(chan struct{}, 1),
+		services: map[*ServiceHealth]struct{}{h: {}},
+		jobs: map[probeJobKey]*probeJob{
+			key: {key: key, hostKey: "https://example.com"},
+		},
+		hosts: map[string]*probeHost{
+			"https://example.com": {},
+		},
+	}
+
+	s.unregister(h)
+
+	require.Empty(t, s.jobs)
+	require.Empty(t, s.hosts)
+}
+
+func TestProbeSchedulerFinishedProbeReleasesUnregisteredHostState(t *testing.T) {
+	h := New("test", "apk", fastProbeConfig(), []string{"https://example.com/repo"}, nil, "ua")
+	key := probeJobKey{service: h, upstreamURL: "https://example.com/repo"}
+	s := &ProbeScheduler{
+		wake:     make(chan struct{}, 1),
+		services: map[*ServiceHealth]struct{}{h: {}},
+		jobs: map[probeJobKey]*probeJob{
+			key: {key: key, hostKey: "https://example.com"},
+		},
+		hosts: map[string]*probeHost{
+			"https://example.com": {inflight: true},
+		},
+	}
+
+	s.unregister(h)
+	require.Empty(t, s.jobs)
+	require.Contains(t, s.hosts, "https://example.com")
+
+	s.markFinished("https://example.com")
+
+	require.Empty(t, s.hosts)
+}
+
 func TestProbeSchedulerRoundRobinsSharedHost(t *testing.T) {
 	paths := make(chan string, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -363,6 +363,26 @@ func TestOCITokenPurgeExpired(t *testing.T) {
 	require.Len(t, handler.auth.tokens, 1)
 }
 
+func TestOCITokenCacheIsBounded(t *testing.T) {
+	handler := &handler{auth: authHandler{tokens: map[string]ociToken{}}}
+
+	now := time.Now()
+	for i := 0; i < maxTokenCacheEntries+100; i++ {
+		key := "scope-" + strconv.Itoa(i)
+		handler.auth.tokens[key] = ociToken{
+			value:  "tok-" + strconv.Itoa(i),
+			expire: now.Add(time.Duration(i+1) * time.Minute),
+		}
+	}
+
+	handler.purgeExpiredTokens()
+
+	require.LessOrEqual(t, len(handler.auth.tokens), maxTokenCacheEntries)
+	require.Empty(t, handler.auth.tokens["scope-0"].value)
+	latestKey := "scope-" + strconv.Itoa(maxTokenCacheEntries+99)
+	require.Equal(t, "tok-"+strconv.Itoa(maxTokenCacheEntries+99), handler.auth.tokens[latestKey].value)
+}
+
 func sha256Digest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])

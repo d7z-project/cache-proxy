@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,13 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
+
+const maxTokenCacheEntries = 2048
+
+type tokenCacheEntry struct {
+	key    string
+	expire time.Time
+}
 
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) *handler {
 	client := utils.DefaultHttpClientWrapper()
@@ -41,14 +49,40 @@ func (h *handler) Start(ctx context.Context) error {
 
 func (h *handler) purgeExpiredTokens() {
 	h.auth.tokenMu.Lock()
-	defer h.auth.tokenMu.Unlock()
-	now := time.Now()
+	h.trimTokenCacheLocked(time.Now(), "")
+	h.auth.tokenMu.Unlock()
+	h.purgeBlobIndex()
+}
+
+func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 	for key, token := range h.auth.tokens {
-		if !now.Before(token.expire) {
+		if token.value == "" || !now.Before(token.expire) {
 			delete(h.auth.tokens, key)
 		}
 	}
-	h.purgeBlobIndex()
+	if len(h.auth.tokens) <= maxTokenCacheEntries {
+		return
+	}
+
+	entries := make([]tokenCacheEntry, 0, len(h.auth.tokens))
+	for key, token := range h.auth.tokens {
+		if key == keepKey {
+			continue
+		}
+		entries = append(entries, tokenCacheEntry{key: key, expire: token.expire})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].expire.Equal(entries[j].expire) {
+			return entries[i].key < entries[j].key
+		}
+		return entries[i].expire.Before(entries[j].expire)
+	})
+	for _, entry := range entries {
+		if len(h.auth.tokens) <= maxTokenCacheEntries {
+			return
+		}
+		delete(h.auth.tokens, entry.key)
+	}
 }
 
 func (h *handler) Stop(ctx context.Context) error {

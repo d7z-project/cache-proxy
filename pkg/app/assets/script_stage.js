@@ -11,6 +11,7 @@ var networkStageState = {
     network: null,
     networkAt: 0,
     nextNetworkRefreshAt: 0,
+    previousTab: 'disk',
     hotspotIndex: -1,
     hotspot: null
 };
@@ -38,6 +39,7 @@ function requestNetworkStage() {
 
     networkStageState.state = 'requesting';
     networkStageState.openedModal = !statusState.modal.classList.contains('is-open');
+    networkStageState.previousTab = statusState.activeTab === 'network' ? 'disk' : statusState.activeTab;
     statusState.activeTab = 'network';
     openStatusModal();
     switchStatusTab('network');
@@ -104,8 +106,13 @@ function exitNetworkStage(opts) {
     }
     if (opts.closeModal || networkStageState.openedModal) {
         networkStageState.openedModal = false;
-        closeStatusModal(true);
+        if (statusState.modal && statusState.modal.classList.contains('is-open')) {
+            closeStatusModal(true);
+        }
+    } else if (networkStageState.previousTab && networkStageState.previousTab !== 'network') {
+        switchStatusTab(networkStageState.previousTab);
     }
+    networkStageState.previousTab = 'disk';
 }
 
 function setStageARIA(open) {
@@ -165,8 +172,9 @@ function refreshNetworkStageSummary() {
 function refreshNetworkStageNetwork() {
     networkStageState.nextNetworkRefreshAt = Date.now() + 4000;
     fetchNetworkStageJSON('network', '/-/status/network', function(data) {
-        networkStageState.previousNetwork = networkStageState.network || statusState.cache.network || null;
-        networkStageState.previousNetworkAt = networkStageState.networkAt || Date.now();
+        var previous = networkStageState.network || statusState.cache.network || null;
+        networkStageState.previousNetwork = previous;
+        networkStageState.previousNetworkAt = previous && networkStageState.networkAt ? networkStageState.networkAt : 0;
         networkStageState.network = data;
         networkStageState.networkAt = Date.now();
         statusState.cache.network = data;
@@ -366,19 +374,20 @@ function renderNetworkStageTrends(network, disk, events) {
     var summary = network.summary || {};
     var previousSummary = networkStageState.previousNetwork && networkStageState.previousNetwork.summary ?
         networkStageState.previousNetwork.summary : {};
-    var seconds = Math.max(1, (networkStageState.networkAt - networkStageState.previousNetworkAt) / 1000);
+    var hasPreviousNetwork = !!networkStageState.previousNetworkAt && networkStageState.networkAt > networkStageState.previousNetworkAt;
+    var seconds = hasPreviousNetwork ? Math.max(1, (networkStageState.networkAt - networkStageState.previousNetworkAt) / 1000) : 1;
     var diskDelta = diskBytesDelta(disk);
     var latestEvent = latestStageEvent(events);
     renderStageCards(document.getElementById('network-stage-trends'), [
         {
             label: t.stage_request_rate || 'Request rate',
-            value: formatRate(summary.requests, previousSummary.requests, seconds),
+            value: hasPreviousNetwork ? formatRate(summary.requests, previousSummary.requests, seconds) : '0/s',
             sub: t.requests || 'Requests',
             level: 'is-info'
         },
         {
             label: t.stage_traffic_rate || 'Traffic rate',
-            value: formatBytesRate(summary.upstream_bytes, previousSummary.upstream_bytes, seconds),
+            value: hasPreviousNetwork ? formatBytesRate(summary.upstream_bytes, previousSummary.upstream_bytes, seconds) : '0 B/s',
             sub: t.network_traffic || 'Traffic',
             level: 'is-live'
         },
@@ -396,9 +405,9 @@ function renderNetworkStageTrends(network, disk, events) {
         },
         {
             label: t.stage_scheduler || 'Scheduler',
-            value: latestEvent.task_type ? translateTaskType(latestEvent.task_type) : '-',
-            sub: translateEventResult(latestEvent),
-            level: resultClass(latestEvent.result || '')
+            value: latestEvent.task_type ? translateTaskType(latestEvent.task_type) : (t.stage_no_recent_event || 'No recent event'),
+            sub: translateEventResult(latestEvent) || (t.store_healthy || 'Healthy'),
+            level: latestEvent.result ? resultClass(latestEvent.result || '') : 'is-ok'
         }
     ], 'network-stage-trend-card');
 }
@@ -449,12 +458,16 @@ function ensureNetworkStageHotspot(forcePriority) {
     var hotspots = chooseNetworkStageHotspots();
     if (!hotspots.length) {
         networkStageState.hotspot = null;
+        networkStageState.hotspotIndex = -1;
         setNetworkMapFocus('');
         return;
     }
     if (forcePriority && hotspots[0].level === 'is-alert') {
         networkStageState.hotspotIndex = 0;
     } else {
+        if (networkStageState.hotspotIndex < 0 || networkStageState.hotspotIndex >= hotspots.length) {
+            networkStageState.hotspotIndex = -1;
+        }
         networkStageState.hotspotIndex = (networkStageState.hotspotIndex + 1) % hotspots.length;
     }
     networkStageState.hotspot = hotspots[networkStageState.hotspotIndex];
