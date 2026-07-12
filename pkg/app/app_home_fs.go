@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/home.html assets/style.css assets/script_core.js assets/script_network.js assets/script_status.js assets/zh.json assets/en.json
+//go:embed assets/home.html assets/style.css assets/script_core.js assets/script_network.js assets/script_stage.js assets/script_status.js assets/zh.json assets/en.json
 var homeAssets embed.FS
 
 var homeTemplate *template.Template
@@ -52,12 +52,18 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	jsStageData, err := homeAssets.ReadFile("assets/script_stage.js")
+	if err != nil {
+		panic(err)
+	}
 	jsStatusData, err := homeAssets.ReadFile("assets/script_status.js")
 	if err != nil {
 		panic(err)
 	}
 	jsData := append(append([]byte{}, jsCoreData...), '\n')
 	jsData = append(jsData, jsNetworkData...)
+	jsData = append(jsData, '\n')
+	jsData = append(jsData, jsStageData...)
 	jsData = append(jsData, '\n')
 	jsData = append(jsData, jsStatusData...)
 

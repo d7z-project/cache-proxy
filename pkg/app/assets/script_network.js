@@ -74,90 +74,6 @@ function renderNetworkPanelNote(target, data) {
     state.refresh.textContent = (t.last_refreshed || 'Last refreshed') + ': ' + stamp.display;
 }
 
-function renderNetworkStageInsights(target, data, edges) {
-    if (!target) {
-        return;
-    }
-    var cards = networkStageInsightCards(data, edges);
-    var state = target._networkStageInsights;
-    if (!state || state.root !== target) {
-        target.textContent = '';
-        state = { root: target, cards: [] };
-        target._networkStageInsights = state;
-    }
-    for (var i = 0; i < cards.length; i++) {
-        var item = state.cards[i];
-        if (!item) {
-            var root = document.createElement('div');
-            var label = document.createElement('span');
-            var value = document.createElement('strong');
-            var sub = document.createElement('em');
-            root.appendChild(label);
-            root.appendChild(value);
-            root.appendChild(sub);
-            target.appendChild(root);
-            item = { root: root, label: label, value: value, sub: sub };
-            state.cards[i] = item;
-        }
-        item.root.className = 'network-stage-card ' + cards[i].level;
-        item.label.textContent = cards[i].label;
-        item.value.textContent = cards[i].value;
-        item.sub.textContent = cards[i].sub;
-    }
-    while (state.cards.length > cards.length) {
-        var removed = state.cards.pop();
-        if (removed.root.parentNode) {
-            removed.root.parentNode.removeChild(removed.root);
-        }
-    }
-}
-
-function networkStageInsightCards(data, edges) {
-    var t = window.I18N;
-    var summary = data.summary || {};
-    var upstreams = data.upstreams || [];
-    var active = edges.reduce(function(total, edge) {
-        return total + (edge.active_upstream_requests || 0);
-    }, 0);
-    var failed = edges.filter(function(edge) {
-        return (edge.errors || 0) > 0 || edge.last_error || edge.state === 'open';
-    }).length;
-    var degraded = summary.degraded_upstreams || 0;
-    var busiest = edges.slice().sort(function(a, b) {
-        return (b.response_bytes || 0) - (a.response_bytes || 0) ||
-            (b.requests || 0) - (a.requests || 0);
-    })[0] || {};
-    var busiestName = busiest.upstream_host || '-';
-    var activeLevel = active > 0 ? 'is-live' : 'is-muted';
-    var issueLevel = failed > 0 || degraded > 0 ? 'is-alert' : 'is-ok';
-    return [
-        {
-            label: t.network_stage_active || 'Live flows',
-            value: String(active),
-            sub: String(edges.length) + ' ' + (t.network_links || 'links'),
-            level: activeLevel
-        },
-        {
-            label: t.network_stage_traffic || 'Traffic focus',
-            value: formatBytes(summary.upstream_bytes || 0),
-            sub: busiestName,
-            level: busiest.response_bytes > 0 ? 'is-live' : 'is-muted'
-        },
-        {
-            label: t.network_stage_topology || 'Topology',
-            value: String(data.instances ? data.instances.length : 0) + ' / ' + String(upstreams.length),
-            sub: (t.storage_name || 'Storage') + ' / ' + (t.upstream || 'Upstream'),
-            level: 'is-info'
-        },
-        {
-            label: t.network_stage_issues || 'Issues',
-            value: String(failed + degraded),
-            sub: String(degraded) + ' ' + (t.network_degraded || 'degraded'),
-            level: issueLevel
-        }
-    ];
-}
-
 function formatPercent(value) {
     return (value * 100).toFixed(value > 0 && value < 0.1 ? 1 : 0).replace(/\.0$/, '') + '%';
 }
@@ -620,6 +536,9 @@ function wireNetworkMapFocus(target) {
     }
     target._networkFocusBound = true;
     target.addEventListener('click', function(evt) {
+        if (isNetworkStageOpen()) {
+            return;
+        }
         var node = evt.target.closest && evt.target.closest('.network-node');
         if (!node) {
             applyNetworkFocus(target, '');
@@ -629,11 +548,17 @@ function wireNetworkMapFocus(target) {
         applyNetworkFocus(target, target.getAttribute('data-focus-id') === id ? '' : id);
     });
     target.addEventListener('mouseover', function(evt) {
+        if (isNetworkStageOpen()) {
+            return;
+        }
         if (target.getAttribute('data-focus-id')) return;
         var node = evt.target.closest && evt.target.closest('.network-node');
         if (node) applyNetworkFocus(target, node.getAttribute('data-node-id') || '');
     });
     target.addEventListener('mouseout', function(evt) {
+        if (isNetworkStageOpen()) {
+            return;
+        }
         if (target.getAttribute('data-focus-id')) return;
         var node = evt.target.closest && evt.target.closest('.network-node');
         if (node && (!evt.relatedTarget || !node.contains(evt.relatedTarget))) {
@@ -801,7 +726,9 @@ function setBadgeCell(cell, text, className) {
 }
 
 function closeNetworkStage() {
-    setNetworkStageOpen(false);
+    if (typeof exitNetworkStage === 'function') {
+        exitNetworkStage({ closeModal: false });
+    }
 }
 
 function refreshNetworkFromCache() {
@@ -809,58 +736,19 @@ function refreshNetworkFromCache() {
     if (!cached) {
         return;
     }
-    var edges = filterNetworkEdges(cached.edges || [], activeNetworkFilter());
-    renderNetworkStageInsights(document.getElementById('network-stage-insights'), cached, edges);
+    var edges = isNetworkStageOpen() ? (cached.edges || []) : filterNetworkEdges(cached.edges || [], activeNetworkFilter());
     renderNetworkMap(document.getElementById('network-map'), edges, cached);
     renderNetworkTable(document.getElementById('network-table'), edges);
 }
 
-function syncNetworkStageWithViewport() {
-    setNetworkStageOpen(shouldOpenNetworkStage());
+function isNetworkStageOpen() {
+    return document.body.classList.contains('network-stage-open');
 }
 
-function setNetworkStageOpen(open) {
-    var current = document.body.classList.contains('network-stage-open');
-    if (current === open) {
+function setNetworkMapFocus(focusID) {
+    var map = document.getElementById('network-map');
+    if (!map) {
         return;
     }
-    document.body.classList.toggle('network-stage-open', open);
-    if (statusState.modal) {
-        statusState.modal.classList.toggle('network-stage-open', open);
-    }
-    var insights = document.getElementById('network-stage-insights');
-    if (insights) {
-        insights.setAttribute('aria-hidden', open ? 'false' : 'true');
-    }
-    refreshNetworkFromCache();
+    applyNetworkFocus(map, focusID || '');
 }
-
-function shouldOpenNetworkStage() {
-    return !!(statusState.modal &&
-        statusState.modal.classList.contains('is-open') &&
-        statusState.activeTab === 'network' &&
-        browserLooksFullscreen());
-}
-
-function browserLooksFullscreen() {
-    if (document.fullscreenElement) {
-        return true;
-    }
-    if (!window.screen) {
-        return false;
-    }
-    var widthMatch = Math.abs(window.innerWidth - window.screen.width) <= 2 ||
-        Math.abs(window.outerWidth - window.screen.width) <= 2;
-    var heightMatch = Math.abs(window.innerHeight - window.screen.height) <= 2 ||
-        Math.abs(window.outerHeight - window.screen.height) <= 2;
-    return widthMatch && heightMatch && window.innerWidth >= 900 && window.innerHeight >= 560;
-}
-
-function scheduleNetworkStageSync() {
-    window.clearTimeout(scheduleNetworkStageSync._timer);
-    scheduleNetworkStageSync._timer = window.setTimeout(syncNetworkStageWithViewport, 80);
-}
-
-document.addEventListener('fullscreenchange', scheduleNetworkStageSync);
-window.addEventListener('resize', scheduleNetworkStageSync);
-window.addEventListener('orientationchange', scheduleNetworkStageSync);

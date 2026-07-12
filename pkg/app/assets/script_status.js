@@ -250,8 +250,8 @@ function openStatusModal() {
     startAutoRefresh();
 }
 
-function closeStatusModal() {
-    if (statusState.openedAt && Date.now() - statusState.openedAt < 160) {
+function closeStatusModal(force) {
+    if (!force && statusState.openedAt && Date.now() - statusState.openedAt < 160) {
         return;
     }
     stopAutoRefresh();
@@ -265,7 +265,6 @@ function closeStatusModal() {
 
 function switchStatusTab(name) {
     statusState.activeTab = name;
-    syncNetworkStageWithViewport();
     var buttons = document.querySelectorAll('[data-status-tab]');
     for (var i = 0; i < buttons.length; i++) {
         var active = buttons[i].getAttribute('data-status-tab') === name;
@@ -513,12 +512,13 @@ function loadNetworkStatus() {
     }
     fetchStatus('network', '/-/status/network', function(data) {
         var filter = activeNetworkFilter();
-        var edges = filterNetworkEdges(data.edges || [], filter);
-        syncNetworkStageWithViewport();
+        var edges = isNetworkStageOpen() ? (data.edges || []) : filterNetworkEdges(data.edges || [], filter);
         renderNetworkPanelNote(note, data);
-        renderNetworkStageInsights(document.getElementById('network-stage-insights'), data, edges);
         renderNetworkMap(map, edges, data);
         renderNetworkTable(table, edges);
+        if (typeof renderNetworkStageFromCache === 'function') {
+            renderNetworkStageFromCache();
+        }
         restoreScroll('network');
     }, function() {
         note.textContent = t.status_load_failed || 'Failed to load status';

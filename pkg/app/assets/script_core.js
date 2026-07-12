@@ -282,4 +282,7 @@ document.addEventListener('DOMContentLoaded', function() {
     updateThemeBtn(document.documentElement.getAttribute('data-theme') || 'light');
     initSearch();
     initStatusModal();
+    if (typeof initNetworkStage === 'function') {
+        initNetworkStage();
+    }
 });

@@ -50,7 +50,9 @@ func TestNewServiceHealth(t *testing.T) {
 
 func TestServiceHealthStartStopAllowsNilContext(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	h.Start(nil)
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	require.NoError(t, h.Stop(nil))
 }
 
@@ -805,7 +807,9 @@ func TestProbeNotFoundIsNotUpstreamFailure(t *testing.T) {
 }
 
 func TestProbeSchedulerStopAllowsNilContext(t *testing.T) {
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	s := NewProbeScheduler(nil)
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	require.NoError(t, s.Stop(nil))
 }
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
@@ -123,6 +124,15 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, "http://proxy.example.test/files")
 	require.Contains(t, body, `class="badge badge-file"`)
 	require.Contains(t, body, "copyToClipboard")
+}
+
+func TestCloseAllowsNilContextOnPartialApp(t *testing.T) {
+	app := &App{}
+
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
+	require.NoError(t, app.Close(nil))
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
+	require.NoError(t, app.Close(nil))
 }
 
 func TestHomePageUsesPublicURL(t *testing.T) {
@@ -844,6 +854,44 @@ func TestStatusCapturesRecoveryUpstreamStateEvents(t *testing.T) {
 	require.Equal(t, "success", events[0].ReasonCode)
 	require.Contains(t, events[0].Message, "degraded")
 	require.Contains(t, events[0].Message, "closed")
+}
+
+func TestStatusUnsubscribesBusOnStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reg := prometheus.NewRegistry()
+	b := bus.NewWithRegisterer(reg)
+	status := newAppStatus(config.ServerStatusConfig{
+		DiskSampleInterval: config.Duration(time.Minute),
+		DiskHistoryWindow:  config.Duration(time.Hour),
+		EventLimit:         8,
+	}, nil)
+	status.start(ctx, &App{}, b)
+
+	upstreamStateSubscribers := func() float64 {
+		families, err := reg.Gather()
+		require.NoError(t, err)
+		for _, family := range families {
+			if family.GetName() != "cache_proxy_bus_subscribers" {
+				continue
+			}
+			for _, metric := range family.GetMetric() {
+				if len(metric.GetLabel()) == 1 &&
+					metric.GetLabel()[0].GetValue() == string(bus.EventUpstreamState) {
+					return metric.GetGauge().GetValue()
+				}
+			}
+		}
+		return -1
+	}
+
+	require.Eventually(t, func() bool {
+		return upstreamStateSubscribers() == 1
+	}, time.Second, 20*time.Millisecond)
+
+	cancel()
+	require.Eventually(t, func() bool {
+		return upstreamStateSubscribers() == 0
+	}, time.Second, 20*time.Millisecond)
 }
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {

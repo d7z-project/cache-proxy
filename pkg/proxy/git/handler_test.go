@@ -345,7 +345,9 @@ func TestDoubleStartIdempotent(t *testing.T) {
 func TestStartStopAllowsNilContext(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	require.NoError(t, h.Start(nil))
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	require.NoError(t, h.Stop(nil))
 }
 

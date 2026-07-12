@@ -79,19 +79,26 @@ func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int6
 	result := cloneUsage(a.tenantUsageCache)
 	a.tenantUsageMu.Unlock()
 	if time.Since(prev) >= 5*time.Minute {
-		a.refreshTenantUsage(tenants)
+		a.refreshTenantUsage(ctx, tenants)
 	}
 	return result
 }
 
-func (a *App) refreshTenantUsage(tenants []string) {
+func (a *App) refreshTenantUsage(parent context.Context, tenants []string) {
 	if a.store == nil || !a.tenantUsageRefreshing.CompareAndSwap(false, true) {
 		return
 	}
 	names := append([]string(nil), tenants...)
 	go func() {
 		defer a.tenantUsageRefreshing.Store(false)
-		ctx, cancel := context.WithTimeout(a.lifecycleCtx, 30*time.Second)
+		baseCtx := a.lifecycleCtx
+		if baseCtx == nil {
+			baseCtx = parent
+		}
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 		defer cancel()
 		usage := collectTenantUsage(ctx, names, a.store)
 		a.tenantUsageMu.Lock()
@@ -320,13 +327,18 @@ func (a *App) Start() error {
 }
 
 func (a *App) Close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	if a.closed.Swap(true) {
 		return nil
 	}
 	a.ready.Store(false)
-	a.stopRuntime()
+	if a.stopRuntime != nil {
+		a.stopRuntime()
+	}
 
 	var joined error
 	if a.scheduler != nil {

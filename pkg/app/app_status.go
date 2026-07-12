@@ -108,7 +108,11 @@ func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
 	s.restore()
 	go s.persistLoop()
 	if b != nil {
-		go s.busLoop(ctx, b.Subscribe(bus.EventUpstreamState))
+		ch := b.Subscribe(bus.EventUpstreamState)
+		go func() {
+			defer b.Unsubscribe(ch)
+			s.busLoop(ctx, ch)
+		}()
 	}
 	s.recordDiskUsage(ctx, app)
 	go func() {

@@ -224,6 +224,21 @@ header h1{
   transform:translateY(-1px);
   box-shadow:0 10px 22px rgba(24,36,43,.08);
 }
+.stage-launch-btn{
+  gap:7px;
+}
+.stage-launch-icon{
+  width:13px;
+  height:13px;
+  display:inline-block;
+  border:2px solid currentColor;
+  border-radius:3px;
+  box-shadow:inset 0 0 0 2px var(--card-bg);
+}
+.stage-launch-failed{
+  color:var(--dot-degraded);
+  border-color:color-mix(in srgb, var(--dot-degraded) 45%, var(--border));
+}
 .header-btn svg{
   width:18px;height:18px;
   stroke:currentColor;
@@ -734,6 +749,7 @@ main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
   border-radius:0;
   box-shadow:none;
   gap:8px;
+  background:var(--card-bg);
 }
 body.network-stage-open{
   overflow:hidden;
@@ -746,7 +762,7 @@ body.network-stage-open{
   gap:16px;
 }
 .modal-shell.network-stage-open .modal-head{
-  min-height:32px;
+  display:none;
 }
 .modal-head h2{
   font-size:20px;line-height:1.15;letter-spacing:-.03em;
@@ -802,18 +818,7 @@ body.network-stage-open{
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;
 }
 .modal-shell.network-stage-open .tab-bar{
-  gap:6px;
-}
-.modal-shell.network-stage-open .tab-btn:not(.is-active){
   display:none;
-}
-.modal-shell.network-stage-open .tab-btn.is-active{
-  height:28px;
-  padding:0 11px;
-  font-size:11px;
-  background:var(--card-bg-soft);
-  color:var(--text-secondary);
-  border-color:var(--border-light);
 }
 .tab-btn{
   height:34px;
@@ -890,6 +895,13 @@ body.network-stage-open{
 .modal-shell.network-stage-open .tab-panel.is-active{
   gap:8px;
 }
+.modal-shell.network-stage-open #status-tab-network.is-active{
+  display:grid;
+  grid-template-rows:auto auto minmax(0,1fr) auto;
+  gap:8px;
+  flex:1;
+  min-height:0;
+}
 @keyframes panel-in{
   from{opacity:0;transform:translateY(6px)}
   to{opacity:1;transform:translateY(0)}
@@ -917,10 +929,7 @@ body.network-stage-open{
   margin-left:auto;
 }
 .modal-shell.network-stage-open #network-panel-note{
-  display:grid;
-  grid-template-columns:minmax(0,1fr) auto;
-  align-items:center;
-  gap:8px;
+  display:none;
 }
 .modal-shell.network-stage-open #network-panel-note .last-refresh{
   margin-left:0;
@@ -1087,15 +1096,20 @@ body.network-stage-open{
   align-items:center;
 }
 .modal-shell.network-stage-open .network-filter-bar{
-  gap:6px;
+  display:none;
 }
-.modal-shell.network-stage-open .network-filter-bar .filter-chip{
-  height:28px;
-  padding:0 10px;
-  font-size:11px;
-}
+.network-stage-banner,
 .network-stage-insights{
   display:none;
+}
+.network-stage-focus,
+.network-stage-trends{
+  display:none;
+}
+.modal-shell.network-stage-open .network-stage-banner{
+  display:grid;
+  grid-template-columns:1.35fr minmax(13rem,.7fr) minmax(13rem,.7fr);
+  gap:8px;
 }
 .modal-shell.network-stage-open .network-stage-insights{
   display:grid;
@@ -1103,7 +1117,22 @@ body.network-stage-open{
   gap:8px;
   min-height:0;
 }
-.network-stage-card{
+.modal-shell.network-stage-open .network-stage-focus{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:8px;
+  min-height:0;
+}
+.modal-shell.network-stage-open .network-stage-trends{
+  display:grid;
+  grid-template-columns:repeat(5,minmax(0,1fr));
+  gap:8px;
+  min-height:0;
+}
+.network-stage-status-card,
+.network-stage-card,
+.network-stage-focus-card,
+.network-stage-trend-card{
   min-width:0;
   padding:8px 10px;
   border:1px solid var(--border-light);
@@ -1117,7 +1146,16 @@ body.network-stage-open{
   gap:2px 10px;
   align-items:center;
 }
-.network-stage-card span{
+.network-stage-status-card{
+  padding:10px 12px;
+}
+.network-stage-focus-card{
+  min-height:72px;
+}
+.network-stage-status-card span,
+.network-stage-card span,
+.network-stage-focus-card span,
+.network-stage-trend-card span{
   grid-area:label;
   color:var(--text-muted);
   font-size:10px;
@@ -1126,14 +1164,23 @@ body.network-stage-open{
   text-transform:uppercase;
   overflow-wrap:anywhere;
 }
-.network-stage-card strong{
+.network-stage-status-card strong,
+.network-stage-card strong,
+.network-stage-focus-card strong,
+.network-stage-trend-card strong{
   grid-area:value;
   color:var(--text);
   font-size:22px;
   line-height:1;
   white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  max-width:100%;
 }
-.network-stage-card em{
+.network-stage-status-card em,
+.network-stage-card em,
+.network-stage-focus-card em,
+.network-stage-trend-card em{
   grid-area:sub;
   color:var(--text-secondary);
   font-size:11px;
@@ -1142,15 +1189,46 @@ body.network-stage-open{
   text-overflow:ellipsis;
   white-space:nowrap;
 }
-.network-stage-card.is-live{
+.network-stage-focus-card{
+  grid-template-columns:minmax(0,1fr);
+  grid-template-areas:
+    "label"
+    "value"
+    "sub";
+  align-content:center;
+}
+.network-stage-focus-card strong{
+  font-size:16px;
+}
+.network-stage-trend-card strong{
+  font-size:17px;
+}
+.network-stage-status-card.is-live,
+.network-stage-card.is-live,
+.network-stage-focus-card.is-live,
+.network-stage-trend-card.is-live{
   border-color:color-mix(in srgb, var(--link) 42%, var(--border-light));
   box-shadow:0 0 18px color-mix(in srgb, var(--link) 10%, transparent) inset;
 }
-.network-stage-card.is-alert{
+.network-stage-status-card.is-alert,
+.network-stage-card.is-alert,
+.network-stage-focus-card.is-alert,
+.network-stage-trend-card.is-alert,
+.network-stage-focus-card.result-err,
+.network-stage-trend-card.result-err{
   border-color:color-mix(in srgb, var(--dot-degraded) 44%, var(--border-light));
 }
-.network-stage-card.is-ok strong{
+.network-stage-status-card.is-ok strong,
+.network-stage-card.is-ok strong,
+.network-stage-focus-card.is-ok strong,
+.network-stage-trend-card.is-ok strong,
+.network-stage-focus-card.result-ok strong,
+.network-stage-trend-card.result-ok strong{
   color:var(--dot-ok);
+}
+.network-stage-focus-card.result-warn,
+.network-stage-trend-card.result-warn{
+  border-color:color-mix(in srgb, var(--dot-err) 44%, var(--border-light));
 }
 .network-layout{
   display:grid;
@@ -1161,8 +1239,18 @@ body.network-stage-open{
   overflow:hidden;
 }
 body.network-stage-open .network-layout{
-  grid-template-columns:minmax(680px,1fr) minmax(400px,.46fr);
+  grid-template-columns:minmax(680px,1fr) minmax(380px,.46fr);
   grid-template-rows:minmax(0,1fr);
+  gap:8px;
+}
+.network-side{
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+}
+body.network-stage-open .network-side{
+  display:grid;
+  grid-template-rows:auto minmax(0,1fr);
   gap:8px;
 }
 .network-map,.network-table-wrap{
@@ -1172,6 +1260,7 @@ body.network-stage-open .network-layout{
   background:var(--card-bg-soft);
   overflow:auto;
   position:relative;
+  flex:1;
 }
 body.network-stage-open .network-map,
 body.network-stage-open .network-table-wrap{
@@ -1312,6 +1401,10 @@ body.network-stage-open .network-packet.is-active{
   cursor:pointer;
   transition:opacity var(--t),transform var(--t);
 }
+body.network-stage-open .network-node{
+  cursor:default;
+  pointer-events:none;
+}
 .network-node.is-focused circle{
   stroke-width:3.5;
   filter:drop-shadow(0 10px 18px rgba(0,0,0,.18));
@@ -1431,7 +1524,7 @@ body.network-stage-open .network-node .node-sub{
 .col-auto{}
 
 @media (max-width:920px){
-  .modal-shell.network-stage-open #network-panel-note{
+  .modal-shell.network-stage-open .network-stage-banner{
     grid-template-columns:1fr;
   }
   .modal-shell.network-stage-open .network-summary{
@@ -1440,9 +1533,12 @@ body.network-stage-open .network-node .node-sub{
   .modal-shell.network-stage-open .network-stage-insights{
     grid-template-columns:repeat(2,minmax(0,1fr));
   }
+  .modal-shell.network-stage-open .network-stage-trends{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
   body.network-stage-open .network-layout{
     grid-template-columns:1fr;
-    grid-template-rows:minmax(320px,1fr) minmax(210px,.8fr);
+    grid-template-rows:minmax(320px,1fr) minmax(260px,.9fr);
   }
   body.network-stage-open .network-map svg{
     min-width:760px;
@@ -1509,8 +1605,8 @@ body.network-stage-open .network-node .node-sub{
   .modal-shell.network-stage-open .network-stage-insights{
     grid-template-columns:1fr;
   }
-  .modal-shell.network-stage-open #network-panel-note .last-refresh{
-    justify-self:start;
+  .modal-shell.network-stage-open .network-stage-trends{
+    grid-template-columns:1fr;
   }
   .network-metric{
     padding:7px 8px;

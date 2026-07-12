@@ -24,6 +24,10 @@
         <span class="dot{{if .StoreHealthy}} dot-green{{else}} dot-red{{end}}"></span>
         <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
       </button>
+      <button id="stage-btn" class="header-btn stage-launch-btn" type="button" aria-label="{{t "stage_open"}}">
+        <span class="stage-launch-icon" aria-hidden="true"></span>
+        <span>{{t "stage_open"}}</span>
+      </button>
       {{end}}
       <button id="theme-btn" class="header-btn icon-btn" type="button" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}"></button>
       <button class="header-btn lang-btn" type="button" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{t "lang_switch_label"}}</button>
@@ -201,6 +205,7 @@
       </div>
     </div>
     <div class="tab-panel" id="status-tab-network" role="tabpanel" hidden>
+      <div id="network-stage-banner" class="network-stage-banner" aria-hidden="true"></div>
       <div class="panel-note" id="network-panel-note">{{t "loading"}}</div>
       <div class="network-filter-bar">
         <button class="filter-chip is-active" type="button" data-network-filter="all">{{t "all"}}</button>
@@ -211,8 +216,12 @@
       <div id="network-stage-insights" class="network-stage-insights" aria-hidden="true"></div>
       <div class="network-layout">
         <div id="network-map" class="network-map empty-state">{{t "loading"}}</div>
-        <div id="network-table" class="network-table-wrap empty-state">{{t "loading"}}</div>
+        <div class="network-side">
+          <div id="network-stage-focus" class="network-stage-focus" aria-hidden="true"></div>
+          <div id="network-table" class="network-table-wrap empty-state">{{t "loading"}}</div>
+        </div>
       </div>
+      <div id="network-stage-trends" class="network-stage-trends" aria-hidden="true"></div>
     </div>
     <div class="tab-panel" id="status-tab-events" role="tabpanel" hidden>
       <div class="panel-note" id="events-panel-note">{{t "loading"}}</div>

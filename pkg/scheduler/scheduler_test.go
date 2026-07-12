@@ -69,7 +69,9 @@ func TestTaskKey(t *testing.T) {
 
 func TestSchedulerStartStopAllowsNilContext(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	sched.Start(nil)
+	//lint:ignore SA1012 This test verifies nil context fallback behavior.
 	require.NoError(t, sched.Stop(nil))
 }
 

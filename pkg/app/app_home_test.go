@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
@@ -111,6 +112,40 @@ func TestHomePageHandlesNilStatsSource(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, body, "<div class=\"stat-val\">0</div>")
 	require.Contains(t, body, "test")
+}
+
+func TestHomePageIncludesStageEntry(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "test",
+		Mode:    "file",
+		Enabled: true,
+		Path:    "/files",
+		Home: proxyruntime.HomeEntry{
+			Name: "test",
+			Mode: "file",
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      map[string]*proxyruntime.Entry{"test": entry},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		stats:        httpcache.NewStats(prometheus.NewRegistry()),
+	}
+	app.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, body, `id="stage-btn"`)
+	require.Contains(t, body, "function initNetworkStage()")
+	require.Contains(t, body, "function requestNetworkStage()")
 }
 
 func TestBindHomePageShowsSingleInstanceView(t *testing.T) {
@@ -394,6 +429,32 @@ func TestHomePageDefaultsToHealthyStatusWithoutStoreStats(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "healthy")
 	require.NotContains(t, rec.Body.String(), "0 degraded")
+}
+
+func TestTenantUsageRefreshAllowsNilLifecycleContext(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	app := &App{store: store}
+	require.NotPanics(t, func() {
+		_ = app.tenantUsage(context.Background(), []string{"files"})
+	})
+	require.Eventually(t, func() bool {
+		return !app.tenantUsageRefreshing.Load()
+	}, time.Second, 20*time.Millisecond)
+}
+
+func TestCollectTenantUsageHonorsCanceledContext(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	usage := collectTenantUsage(ctx, []string{"files"}, store)
+	require.Equal(t, int64(0), usage["files"])
 }
 
 func TestFormatHitRate(t *testing.T) {
