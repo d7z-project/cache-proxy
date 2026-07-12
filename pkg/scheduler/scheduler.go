@@ -112,6 +112,7 @@ type TaskFactory struct {
 	GCInterval      time.Duration
 	NewRefresh      func(rootID string) TaskHandler
 	NewGC           func(rootID string) TaskHandler
+	CurrentRoots    func() []string
 }
 
 type taskState struct {

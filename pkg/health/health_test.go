@@ -284,6 +284,47 @@ func TestResourceHealthReturnsSnapshot(t *testing.T) {
 	require.Equal(t, "https://a.example.com", final.UpstreamURLs[0])
 }
 
+func TestResourceSnapshotRestoresRetryStateAndClearsRefreshing(t *testing.T) {
+	nextRefreshAt := time.Now().Add(time.Minute).UTC().Round(time.Second)
+	firstNotFoundAt := time.Now().Add(-time.Minute).UTC().Round(time.Second)
+	snapshot := ResourceSnapshot{
+		Path:                "dists/bookworm",
+		State:               "blocked",
+		Refreshing:          true,
+		NextRefreshAt:       nextRefreshAt,
+		FirstNotFoundAt:     firstNotFoundAt,
+		ConsecutiveNotFound: 3,
+		LastTargets:         []ProbeTarget{{Path: "dists/bookworm/InRelease"}},
+		UpstreamURLs:        []string{"https://a.example.com"},
+	}
+
+	rh := ResourceFromSnapshot(snapshot)
+
+	require.Equal(t, RBlocked, rh.State)
+	require.False(t, rh.Refreshing)
+	require.Equal(t, nextRefreshAt, rh.NextRefreshAt)
+	require.Equal(t, firstNotFoundAt, rh.FirstNotFoundAt)
+	require.Equal(t, 3, rh.ConsecutiveNotFound)
+	require.Equal(t, []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, rh.LastTargets)
+	require.Equal(t, []string{"https://a.example.com"}, rh.UpstreamURLs)
+}
+
+func TestAddResourceUpdatesExistingTargetsWithoutResettingState(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com", "https://b.example.com"}, &testStats{}, "ua")
+	rh := h.AddResource("dists/bookworm", nil, nil)
+	h.FinishRefresh(rh.Path, rh.Generation, ErrResourceForbidden, nil)
+
+	updated := h.AddResource(
+		"dists/bookworm",
+		[]ProbeTarget{{Path: "dists/bookworm/InRelease"}},
+		[]string{"https://b.example.com"},
+	)
+
+	require.Equal(t, RBlocked, updated.State)
+	require.Equal(t, []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, updated.LastTargets)
+	require.Equal(t, []string{"https://b.example.com"}, updated.UpstreamURLs)
+}
+
 func TestResourceNotFoundRemoval(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ResourceRemoveCount = 2
@@ -301,6 +342,27 @@ func TestResourceNotFoundRemoval(t *testing.T) {
 	h.FinishRefresh(rh.Path, gen, ErrResourceNotFound, nil)
 	_, ok = h.ResourceState(rh.Path)
 	require.False(t, ok)
+}
+
+func TestResourceSuccessClearsFirstNotFoundWindow(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ResourceRemoveCount = 2
+	cfg.ResourceRemoveAge = time.Hour
+	h := New("test", "apk", cfg, []string{"https://a.example.com"}, &testStats{}, "ua")
+	rh := h.AddResource("dists/bookworm", []ProbeTarget{{Path: "dists/bookworm/InRelease"}}, []string{"https://a.example.com"})
+
+	h.FinishRefresh(rh.Path, rh.Generation, ErrResourceNotFound, nil)
+	suspect, ok := h.ResourceHealth(rh.Path)
+	require.True(t, ok)
+	require.Equal(t, RSuspect, suspect.State)
+	require.NotZero(t, suspect.FirstNotFoundAt)
+
+	h.FinishRefresh(rh.Path, rh.Generation, nil, nil)
+	active, ok := h.ResourceHealth(rh.Path)
+	require.True(t, ok)
+	require.Equal(t, RActive, active.State)
+	require.Zero(t, active.FirstNotFoundAt)
+	require.Zero(t, active.ConsecutiveNotFound)
 }
 
 func TestResourceForbiddenBlocked(t *testing.T) {
@@ -697,12 +759,17 @@ func TestProbeRecoversBlockedResource(t *testing.T) {
 	h.mu.Lock()
 	h.upstreams[server.URL] = newUpstreamHealth(server.URL, time.Minute)
 	h.resources["dists/bookworm"].UpstreamURLs = []string{server.URL}
+	h.resources["dists/bookworm"].FirstNotFoundAt = time.Now().Add(-time.Hour)
+	h.resources["dists/bookworm"].ConsecutiveNotFound = 2
 	h.mu.Unlock()
 
 	h.probeOne(h.upstreams[server.URL])
 
-	state, _ = h.ResourceState(rh.Path)
-	require.Equal(t, RPending, state, "successful probe should recover blocked resource to pending")
+	recovered, ok := h.ResourceHealth(rh.Path)
+	require.True(t, ok)
+	require.Equal(t, RPending, recovered.State, "successful probe should recover blocked resource to pending")
+	require.Zero(t, recovered.FirstNotFoundAt)
+	require.Zero(t, recovered.ConsecutiveNotFound)
 }
 
 func TestProbeNonNotFoundClientErrorIsUpstreamFailure(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
@@ -50,8 +51,41 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 	h.refreshMu.Lock()
 	defer h.refreshMu.Unlock()
 
+	var (
+		refreshGen uint64
+		release    func()
+	)
+	if h.sh != nil {
+		rh, done, err := h.sh.TryStartRefresh("/", time.Now())
+		if err != nil {
+			switch {
+			case errors.Is(err, health.ErrRefreshAlreadyRunning):
+				return nil, scheduler.ErrTaskSkipped
+			case errors.Is(err, health.ErrRefreshBlockedUntil):
+				if blockedUntil, ok := h.sh.RefreshBlockedUntil("/"); ok && !blockedUntil.IsZero() {
+					return nil, scheduler.RetryAt(blockedUntil)
+				}
+				return nil, scheduler.ErrTaskSkipped
+			case errors.Is(err, health.ErrRefreshResourceRemoved):
+				h.sh.AddResource("/", []health.ProbeTarget{{Path: "summary"}}, h.upstreams)
+				rh, done, err = h.sh.TryStartRefresh("/", time.Now())
+				if err != nil {
+					return nil, fmt.Errorf("restart flatpak metadata refresh: %w", err)
+				}
+				refreshGen = rh.Generation
+				release = done
+				defer release()
+			default:
+				return nil, fmt.Errorf("start flatpak metadata refresh: %w", err)
+			}
+		} else {
+			refreshGen = rh.Generation
+			release = done
+			defer release()
+		}
+	}
 	var firstErr error
-	for _, upstream := range h.upstreams {
+	for _, upstream := range h.weightedUpstreams() {
 		next, changed, err := h.refreshFromUpstream(ctx, upstream)
 		if err != nil {
 			if firstErr == nil {
@@ -60,17 +94,38 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 			continue
 		}
 		if !changed {
+			if h.sh != nil && release != nil {
+				h.sh.FinishRefresh("/", refreshGen, nil, []health.ProbeTarget{{Path: "summary"}})
+			}
 			return flatpakRefreshOutcome("unchanged", "same_as_current", next.Generation, upstream), nil
 		}
 		h.mu.Lock()
 		h.current = next
 		h.mu.Unlock()
+		if h.sh != nil && release != nil {
+			h.sh.FinishRefresh("/", refreshGen, nil, []health.ProbeTarget{{Path: "summary"}})
+		}
 		return flatpakRefreshOutcome("updated", "published", next.Generation, upstream), nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
+	if h.sh != nil && release != nil {
+		h.sh.FinishRefresh("/", refreshGen, health.ErrResourceTransient, nil)
+	}
 	return nil, firstErr
+}
+
+func (h *Handler) weightedUpstreams() []string {
+	if h.sh == nil {
+		return append([]string(nil), h.upstreams...)
+	}
+	weighted := h.sh.WeightedUpstreams(h.upstreams)
+	upstreams := make([]string, 0, len(weighted))
+	for _, item := range weighted {
+		upstreams = append(upstreams, item.URL)
+	}
+	return upstreams
 }
 
 func (h *Handler) CleanupMetadata(ctx context.Context) error {
@@ -235,6 +290,9 @@ func (h *Handler) fetchMetadata(
 	latency := time.Since(start)
 	if err != nil {
 		h.stats.RecordUpstreamRequest(h.name, config.ModeFlatpak, upstream, http.MethodGet, 0, latency, 0)
+		if h.sh != nil {
+			h.sh.RecordFailure(upstream, err)
+		}
 		return nil, fmt.Errorf("fetch flatpak metadata %s: %w", cleanPath, err)
 	}
 	defer response.Body.Close()
@@ -247,6 +305,9 @@ func (h *Handler) fetchMetadata(
 		latency,
 		flatpakContentLength(response),
 	)
+	if h.sh != nil {
+		h.sh.RecordResult(upstream, response.StatusCode, latency)
+	}
 	if response.StatusCode != http.StatusOK {
 		if !required && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden) {
 			return nil, nil

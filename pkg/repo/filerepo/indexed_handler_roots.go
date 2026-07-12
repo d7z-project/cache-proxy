@@ -19,6 +19,17 @@ func (h *IndexedHandler) weightedUpstreams() []string {
 	return upstreams
 }
 
+func (h *IndexedHandler) currentRootIDs() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	rootIDs := make([]string, 0, len(h.roots))
+	for rootID := range h.roots {
+		rootIDs = append(rootIDs, rootID)
+	}
+	sort.Strings(rootIDs)
+	return rootIDs
+}
+
 func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool, bool) {
 	if result.Class != ResourceMetadata || result.Role == DiscoveryIgnore || result.Root.ID == "" {
 		return "", false, false

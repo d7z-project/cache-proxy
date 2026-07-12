@@ -21,6 +21,9 @@ func (s *Scheduler) loop() {
 		s.updateHeap(def.Key)
 	}
 	s.restoreFromStore()
+	if s.reconcileFactoriesLocked() {
+		s.saveState()
+	}
 	s.refreshMetrics()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -48,6 +51,9 @@ func (s *Scheduler) handleCmd(c cmd) {
 		c.respCh <- struct{}{}
 	case cmdRegisterFactory:
 		s.factories[c.factory.Instance] = &c.factory
+		s.reconcileFactoryLocked(&c.factory)
+		s.refreshMetrics()
+		s.saveState()
 		c.respCh <- struct{}{}
 	case cmdUnregister:
 		s.unregisterLocked(c.key, "manual")
@@ -95,6 +101,7 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 		}, "discovery", time.Time{})
 		s.triggerLocked(refreshKey)
 		s.updateHeap(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID))
+		s.reconcileFactoryLocked(factory)
 		s.refreshMetrics()
 		s.saveState()
 		slog.Debug("scheduler registered metadata tasks", "instance", p.Instance, "root_id", p.RootID)
@@ -102,6 +109,9 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 		p := evt.Payload.(bus.MetadataRemovedPayload)
 		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID), "removed")
 		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID), "removed")
+		if factory := s.factories[p.Instance]; factory != nil {
+			s.reconcileFactoryLocked(factory)
+		}
 		s.refreshMetrics()
 		s.saveState()
 		slog.Debug("scheduler removed metadata tasks", "instance", p.Instance, "root_id", p.RootID)
@@ -109,6 +119,10 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 }
 
 func (s *Scheduler) processDue() {
+	if s.reconcileFactoriesLocked() {
+		s.refreshMetrics()
+		s.saveState()
+	}
 	now := time.Now()
 	for {
 		if s.stopped.Load() {
@@ -121,6 +135,89 @@ func (s *Scheduler) processDue() {
 		heap.Pop(&s.heap)
 		s.execute(ts)
 	}
+}
+
+func (s *Scheduler) reconcileFactoriesLocked() bool {
+	changed := false
+	for _, factory := range s.factories {
+		if s.reconcileFactoryLocked(factory) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (s *Scheduler) reconcileFactoryLocked(factory *TaskFactory) bool {
+	if factory == nil || factory.CurrentRoots == nil {
+		return false
+	}
+	changed := false
+	roots := map[string]struct{}{}
+	for _, rootID := range factory.CurrentRoots() {
+		if rootID == "" {
+			continue
+		}
+		roots[rootID] = struct{}{}
+		if s.syncMetadataTaskLocked(factory, TypeMetadataRefresh, rootID) {
+			changed = true
+		}
+		if s.syncMetadataTaskLocked(factory, TypeMetadataGC, rootID) {
+			changed = true
+		}
+	}
+	for key := range s.tasks {
+		if key.Instance() != factory.Instance || key.RootID() == "" {
+			continue
+		}
+		if key.Type() != TypeMetadataRefresh && key.Type() != TypeMetadataGC {
+			continue
+		}
+		if _, ok := roots[key.RootID()]; ok {
+			continue
+		}
+		s.unregisterLocked(key, "reconcile")
+		changed = true
+	}
+	return changed
+}
+
+func (s *Scheduler) syncMetadataTaskLocked(factory *TaskFactory, typ TaskType, rootID string) bool {
+	key := NewTaskKey(factory.Instance, typ, rootID)
+	var interval time.Duration
+	var handler TaskHandler
+	switch typ {
+	case TypeMetadataRefresh:
+		interval = factory.RefreshInterval
+		handler = factory.NewRefresh(rootID)
+	case TypeMetadataGC:
+		interval = factory.GCInterval
+		handler = factory.NewGC(rootID)
+	default:
+		return false
+	}
+	if ts, exists := s.tasks[key]; exists {
+		ts.handler = handler
+		if ts.Interval == interval {
+			return false
+		}
+		ts.Interval = interval
+		if ts.NextRun.IsZero() || ts.NextRun.After(time.Now().Add(interval)) {
+			ts.NextRun = time.Now().Add(interval)
+		}
+		s.updateHeap(key)
+		return true
+	}
+	s.registerLocked(TaskDef{
+		Key:      key,
+		Interval: interval,
+		Handler:  handler,
+	}, "reconcile", time.Now())
+	if typ == TypeMetadataRefresh {
+		s.triggerLocked(key)
+		return true
+	}
+	s.updateHeap(key)
+	return true
 }
 
 func (s *Scheduler) execute(ts *taskState) {

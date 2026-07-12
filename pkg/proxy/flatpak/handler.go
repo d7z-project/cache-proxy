@@ -11,6 +11,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
@@ -39,6 +40,7 @@ type Handler struct {
 	expireAfter      config.Expiration
 	deltaExpireAfter config.Expiration
 	refreshInterval  time.Duration
+	sh               *health.ServiceHealth
 
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
@@ -56,6 +58,7 @@ func NewHandler(
 	policy *Policy,
 	store *blobfs.Store,
 	stats *httpcache.Stats,
+	svcHealth *health.ServiceHealth,
 	downloads *httpcache.DownloadLimiter,
 	runtimeCfg httpcache.RuntimeConfig,
 ) *Handler {
@@ -67,6 +70,7 @@ func NewHandler(
 		expireAfter:      expireAfter,
 		deltaExpireAfter: resolveDeltaExpireAfter(policy, expireAfter),
 		refreshInterval:  refreshInterval,
+		sh:               svcHealth,
 		rewriteDesc:      policy.DescriptorRewrite != nil && *policy.DescriptorRewrite,
 		verifyObjects:    policy.VerifyObjects != nil && *policy.VerifyObjects,
 	}
@@ -74,7 +78,7 @@ func NewHandler(
 	httpcache.ConfigureClientTransport(handler.client, name, transport)
 	runtimeCfg.VerifyFunc = handler.verifyCacheObject
 	runtimeCfg.DownloadLimiter = downloads
-	handler.base = httpcache.NewHandler(name, runtimeCfg, store, resolver{policy: policy}, stats, nil)
+	handler.base = httpcache.NewHandler(name, runtimeCfg, store, resolver{policy: policy}, stats, svcHealth)
 	return handler
 }
 
@@ -103,9 +107,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *Handler) Start(ctx context.Context) error {
-	return h.restoreCurrent(ctx)
+	if h.sh != nil {
+		h.sh.Start(ctx)
+		h.sh.AddResource("/", []health.ProbeTarget{{Path: "summary"}}, h.upstreams)
+	}
+	if err := h.restoreCurrent(ctx); err != nil {
+		return err
+	}
+	if h.sh != nil && h.currentSnapshot().Generation != "" {
+		h.sh.MarkResourceActive("/", []health.ProbeTarget{{Path: "summary"}})
+	}
+	return nil
 }
 
 func (h *Handler) Stop(ctx context.Context) error {
+	if h.sh != nil {
+		if err := h.sh.Stop(ctx); err != nil {
+			return err
+		}
+	}
 	return h.base.CloseContext(ctx)
 }

@@ -231,6 +231,105 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
+func TestFactoryReconcileCreatesMetadataTasksWithoutBusEvent(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	executed := make(chan string, 1)
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		CurrentRoots:    func() []string { return []string{"root"} },
+		NewRefresh: func(rootID string) TaskHandler {
+			return func(context.Context) (*TaskOutcome, error) {
+				executed <- rootID
+				return nil, nil
+			}
+		},
+		NewGC: func(string) TaskHandler { return noopTask },
+	})
+
+	select {
+	case rootID := <-executed:
+		require.Equal(t, "root", rootID)
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "reconciled refresh task did not execute")
+	}
+	_, ok := sched.Info(NewTaskKey("repo", TypeMetadataGC, "root"))
+	require.True(t, ok)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestFactoryReconcileRemovesStaleMetadataTasks(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	var roots atomic.Value
+	roots.Store([]string{"root"})
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		CurrentRoots: func() []string {
+			return roots.Load().([]string)
+		},
+		NewRefresh: func(string) TaskHandler { return noopTask },
+		NewGC:      func(string) TaskHandler { return noopTask },
+	})
+
+	require.Eventually(t, func() bool {
+		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	roots.Store([]string{})
+	require.Eventually(t, func() bool {
+		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
+		return !ok
+	}, 2*time.Second, 20*time.Millisecond)
+	_, ok := sched.Info(NewTaskKey("repo", TypeMetadataGC, "root"))
+	require.False(t, ok)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestFactoryReconcileUpdatesExistingTaskInterval(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	factory := TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      2 * time.Hour,
+		CurrentRoots:    func() []string { return []string{"root"} },
+		NewRefresh:      func(string) TaskHandler { return noopTask },
+		NewGC:           func(string) TaskHandler { return noopTask },
+	}
+	sched.RegisterFactory(factory)
+	require.Eventually(t, func() bool {
+		info, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
+		return ok && info.Interval == time.Hour
+	}, time.Second, 10*time.Millisecond)
+
+	factory.RefreshInterval = 30 * time.Minute
+	factory.GCInterval = time.Hour
+	sched.RegisterFactory(factory)
+
+	refreshInfo, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
+	require.True(t, ok)
+	require.Equal(t, 30*time.Minute, refreshInfo.Interval)
+	gcInfo, ok := sched.Info(NewTaskKey("repo", TypeMetadataGC, "root"))
+	require.True(t, ok)
+	require.Equal(t, time.Hour, gcInfo.Interval)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
 func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 	sched, b := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())

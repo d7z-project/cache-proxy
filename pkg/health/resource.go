@@ -42,7 +42,7 @@ var (
 )
 
 type ProbeTarget struct {
-	Path string
+	Path string `yaml:"path"`
 }
 
 type ResourceHealth struct {
@@ -74,16 +74,19 @@ func (rh *ResourceHealth) snapshot() ResourceHealth {
 }
 
 type ResourceSnapshot struct {
-	Path                 string    `yaml:"path"`
-	State                string    `yaml:"state"`
-	Refreshing           bool      `yaml:"refreshing,omitempty"`
-	LastRefreshAt        time.Time `yaml:"last_refresh_at"`
-	LastSuccessAt        time.Time `yaml:"last_success_at"`
-	ConsecutiveNotFound  int       `yaml:"consecutive_not_found"`
-	ConsecutiveInvalid   int       `yaml:"consecutive_invalid"`
-	ConsecutiveTransient int       `yaml:"consecutive_transient"`
-	LastError            string    `yaml:"last_error,omitempty"`
-	UpstreamURLs         []string  `yaml:"upstream_urls,omitempty"`
+	Path                 string        `yaml:"path"`
+	State                string        `yaml:"state"`
+	Refreshing           bool          `yaml:"refreshing,omitempty"`
+	LastRefreshAt        time.Time     `yaml:"last_refresh_at"`
+	LastSuccessAt        time.Time     `yaml:"last_success_at"`
+	NextRefreshAt        time.Time     `yaml:"next_refresh_at"`
+	FirstNotFoundAt      time.Time     `yaml:"first_not_found_at"`
+	ConsecutiveNotFound  int           `yaml:"consecutive_not_found"`
+	ConsecutiveInvalid   int           `yaml:"consecutive_invalid"`
+	ConsecutiveTransient int           `yaml:"consecutive_transient"`
+	LastError            string        `yaml:"last_error,omitempty"`
+	LastTargets          []ProbeTarget `yaml:"last_targets,omitempty"`
+	UpstreamURLs         []string      `yaml:"upstream_urls,omitempty"`
 }
 
 func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
@@ -93,10 +96,13 @@ func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
 		Refreshing:           rh.Refreshing,
 		LastRefreshAt:        rh.LastRefreshAt,
 		LastSuccessAt:        rh.LastSuccessAt,
+		NextRefreshAt:        rh.NextRefreshAt,
+		FirstNotFoundAt:      rh.FirstNotFoundAt,
 		ConsecutiveNotFound:  rh.ConsecutiveNotFound,
 		ConsecutiveInvalid:   rh.ConsecutiveInvalid,
 		ConsecutiveTransient: rh.ConsecutiveTransient,
 		LastError:            rh.LastError,
+		LastTargets:          append([]ProbeTarget(nil), rh.LastTargets...),
 		UpstreamURLs:         append([]string(nil), rh.UpstreamURLs...),
 	}
 }
@@ -104,13 +110,15 @@ func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
 func ResourceFromSnapshot(snapshot ResourceSnapshot) *ResourceHealth {
 	rh := &ResourceHealth{
 		Path:                 snapshot.Path,
-		Refreshing:           snapshot.Refreshing,
 		LastRefreshAt:        snapshot.LastRefreshAt,
 		LastSuccessAt:        snapshot.LastSuccessAt,
+		NextRefreshAt:        snapshot.NextRefreshAt,
+		FirstNotFoundAt:      snapshot.FirstNotFoundAt,
 		ConsecutiveNotFound:  snapshot.ConsecutiveNotFound,
 		ConsecutiveInvalid:   snapshot.ConsecutiveInvalid,
 		ConsecutiveTransient: snapshot.ConsecutiveTransient,
 		LastError:            snapshot.LastError,
+		LastTargets:          append([]ProbeTarget(nil), snapshot.LastTargets...),
 		UpstreamURLs:         append([]string(nil), snapshot.UpstreamURLs...),
 	}
 	switch snapshot.State {

@@ -211,6 +211,7 @@ func (h *ServiceHealth) applyProbeResourceStatusLocked(rh *ResourceHealth, statu
 		rh.ConsecutiveTransient = 0
 		rh.ConsecutiveInvalid = 0
 		rh.ConsecutiveNotFound = 0
+		rh.FirstNotFoundAt = time.Time{}
 		rh.LastError = ""
 	}
 }

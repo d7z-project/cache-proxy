@@ -647,7 +647,7 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	info, ok := restored.sh.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, "root", info.Path)
-	require.Len(t, info.LastTargets, 0)
+	require.Equal(t, []health.ProbeTarget{{Path: "meta/index.txt"}}, info.LastTargets)
 	require.Equal(t, health.RPending, info.State)
 
 	restored.mu.RLock()
@@ -858,21 +858,7 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 		Targets: []MetadataTarget{{URL: "meta/index.txt"}},
 	}
 
-	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.snapshotPath("root", "gen1"))), 0o755))
-	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.currentPath("root"))), 0o755))
-
-	data, err := yaml.Marshal(snapshot)
-	require.NoError(t, err)
-	_, err = store.Put(ctx, "repo", handler.snapshotPath("root", "gen1"), bytes.NewReader(data), nil)
-	require.NoError(t, err)
-
-	refData, err := yaml.Marshal(struct {
-		RootID     string `yaml:"root_id"`
-		Generation string `yaml:"generation"`
-	}{RootID: "root", Generation: "gen1"})
-	require.NoError(t, err)
-	_, err = store.Put(ctx, "repo", handler.currentPath("root"), bytes.NewReader(refData), nil)
-	require.NoError(t, err)
+	writeCurrentSnapshot(t, ctx, store, handler, snapshot)
 
 	handler.restoreGenerations(ctx)
 
@@ -887,6 +873,76 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	rh, ok := handler.sh.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, health.RActive, rh.State)
+}
+
+func TestRestoreGenerationsDoesNotOverwritePersistedBlockedState(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store := newTestStore(t)
+	original := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	rh, done, err := original.sh.TryStartRefresh("root", time.Now())
+	require.NoError(t, err)
+	original.sh.FinishRefresh("root", rh.Generation, health.ErrResourceForbidden, nil)
+	done()
+	original.saveState(ctx)
+
+	snapshot := &LiveSnapshot{
+		RootID:     "root",
+		RootPath:   "root",
+		Generation: "gen1",
+		Upstream:   "https://upstream.example",
+		Published:  time.Now().UTC(),
+		Metadata: map[string]MetadataObject{
+			"meta/index.txt": {
+				Path:      "meta/index.txt",
+				Required:  true,
+				StorePath: original.generationMetadataPath("root", "gen1", "meta/index.txt"),
+			},
+		},
+		Targets: []MetadataTarget{{URL: "meta/index.txt"}},
+	}
+	writeCurrentSnapshot(t, ctx, store, original, snapshot)
+
+	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	restored.restoreRoots(ctx)
+	restored.restoreGenerations(ctx)
+
+	statuses := restored.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.True(t, statuses[0].HasCurrent)
+	require.Equal(t, "blocked", statuses[0].State)
+
+	restoredHealth, ok := restored.sh.ResourceHealth("root")
+	require.True(t, ok)
+	require.Equal(t, health.RBlocked, restoredHealth.State)
+	require.NotZero(t, restoredHealth.NextRefreshAt)
+	require.Equal(t, []health.ProbeTarget{{Path: "meta/index.txt"}}, restoredHealth.LastTargets)
+}
+
+func writeCurrentSnapshot(
+	t *testing.T,
+	ctx context.Context,
+	store *blobfs.Store,
+	handler *IndexedHandler,
+	snapshot *LiveSnapshot,
+) {
+	t.Helper()
+	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.snapshotPath(snapshot.RootID, snapshot.Generation))), 0o755))
+	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.currentPath(snapshot.RootID))), 0o755))
+
+	data, err := yaml.Marshal(snapshot)
+	require.NoError(t, err)
+	_, err = store.Put(ctx, "repo", handler.snapshotPath(snapshot.RootID, snapshot.Generation), bytes.NewReader(data), nil)
+	require.NoError(t, err)
+
+	refData, err := yaml.Marshal(struct {
+		RootID     string `yaml:"root_id"`
+		Generation string `yaml:"generation"`
+	}{RootID: snapshot.RootID, Generation: snapshot.Generation})
+	require.NoError(t, err)
+	_, err = store.Put(ctx, "repo", handler.currentPath(snapshot.RootID), bytes.NewReader(refData), nil)
+	require.NoError(t, err)
 }
 
 func requireGenerationDirCount(t *testing.T, store *blobfs.Store, tenant, objectRoot, rootID string, expected int) {
@@ -991,6 +1047,10 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.Equal(t, 1, headRequests)
 	stats := handler.stats.Snapshot()
 	require.Equal(t, "ready", stats.Instances["repo"].MetadataState)
+	require.Equal(t, uint64(2), stats.Instances["repo"].UpstreamRequests)
+	require.Equal(t, uint64(1), stats.Instances["repo"].UpstreamStatus["304"])
+	require.Equal(t, "304", stats.Instances["repo"].Upstreams[server.URL].LastStatus)
+	require.Equal(t, "closed", stats.Instances["repo"].Upstreams[server.URL].StateText)
 }
 
 func TestRefreshRebuildsWhenCleanupIndexMissing(t *testing.T) {

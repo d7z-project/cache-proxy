@@ -276,8 +276,15 @@ func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstream
 	h.mu.Lock()
 	existing, ok := h.resources[path]
 	if ok && existing.State != RRemoved {
+		if len(targets) > 0 {
+			existing.LastTargets = append([]ProbeTarget(nil), targets...)
+		}
+		if len(upstreams) > 0 {
+			existing.UpstreamURLs = append([]string(nil), upstreams...)
+		}
 		snapshot := existing.snapshot()
 		h.mu.Unlock()
+		h.notifyProbeScheduler()
 		return snapshot
 	}
 
@@ -352,6 +359,7 @@ func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, target
 		rh.ConsecutiveNotFound = 0
 		rh.ConsecutiveInvalid = 0
 		rh.ConsecutiveTransient = 0
+		rh.FirstNotFoundAt = time.Time{}
 		rh.LastSuccessAt = time.Now()
 		rh.LastError = ""
 		if len(targets) > 0 {
@@ -526,6 +534,7 @@ func (h *ServiceHealth) MarkResourceActive(path string, targets []ProbeTarget) {
 	rh.ConsecutiveNotFound = 0
 	rh.ConsecutiveInvalid = 0
 	rh.ConsecutiveTransient = 0
+	rh.FirstNotFoundAt = time.Time{}
 	rh.LastError = ""
 	if rh.LastSuccessAt.IsZero() {
 		rh.LastSuccessAt = time.Now()

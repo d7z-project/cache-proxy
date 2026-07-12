@@ -127,6 +127,9 @@ func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 		if root.State.Path == "" {
 			root.State.Path = root.Root.ID
 		}
+		if len(root.State.LastTargets) == 0 {
+			root.State.LastTargets = targetsToProbe(root.Root.Targets)
+		}
 		if len(root.State.UpstreamURLs) == 0 {
 			root.State.UpstreamURLs = append([]string(nil), h.upstreams...)
 		}
@@ -156,8 +159,10 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		h.setRootSnapshot(snapshot.RootID, snapshot)
 
 		if h.sh != nil {
-			h.sh.AddResource(snapshot.RootID, targetsToProbe(snapshot.Targets), h.upstreams)
-			h.sh.MarkResourceActive(snapshot.RootID, targetsToProbe(snapshot.Targets))
+			restored := h.sh.AddResource(snapshot.RootID, targetsToProbe(snapshot.Targets), h.upstreams)
+			if restored.State == health.RPending && restored.LastSuccessAt.IsZero() {
+				h.sh.MarkResourceActive(snapshot.RootID, targetsToProbe(snapshot.Targets))
+			}
 		}
 		h.reportMetadataState()
 		return nil

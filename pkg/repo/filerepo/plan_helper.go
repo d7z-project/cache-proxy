@@ -106,6 +106,7 @@ func PlanRepoMode(
 				return nil, handler.CleanupRoot(ctx, rootID, plan.CleanupConfig())
 			}
 		},
+		CurrentRoots: handler.currentRootIDs,
 	})
 
 	plan.SetHomeSnippet(plan.RenderSnippet())

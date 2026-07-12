@@ -20,6 +20,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
@@ -132,6 +133,54 @@ func TestFailedRefreshKeepsCurrentGeneration(t *testing.T) {
 	handler.upstreams = []string{bad.URL}
 	require.Error(t, handler.Refresh(context.Background()))
 	require.Equal(t, current.Generation, handler.currentSnapshot().Generation)
+}
+
+func TestRefreshUsesHealthyWeightedUpstreamFirst(t *testing.T) {
+	var firstHits atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstHits.Add(1)
+		http.Error(w, "failed", http.StatusInternalServerError)
+	}))
+	defer first.Close()
+
+	var secondHits atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHits.Add(1)
+		if r.URL.Path == "/summary" {
+			_, _ = w.Write([]byte("summary-data"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer second.Close()
+
+	store := openTestStore(t)
+	handler, _, sh := newTestHandlerWithHealth(t, store, []string{first.URL, second.URL})
+	for range 10 {
+		sh.RecordResult(first.URL, http.StatusInternalServerError, time.Millisecond)
+	}
+
+	require.NoError(t, handler.Refresh(context.Background()))
+	require.Equal(t, int32(0), firstHits.Load())
+	require.Greater(t, secondHits.Load(), int32(0))
+	require.Equal(t, second.URL, handler.currentSnapshot().Upstream)
+}
+
+func TestRefreshFailureUpdatesRepositoryHealthStatus(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "failed", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	store := openTestStore(t)
+	handler, _, _ := newTestHandlerWithHealth(t, store, []string{upstream.URL})
+
+	require.Error(t, handler.Refresh(context.Background()))
+
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.Equal(t, "suspect", statuses[0].State)
+	require.NotEmpty(t, statuses[0].LastError)
 }
 
 func TestRepositoryStatusesReportCurrentMetadataGeneration(t *testing.T) {
@@ -442,9 +491,32 @@ func openTestStore(t *testing.T) *blobfs.Store {
 
 func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string) *Handler {
 	t.Helper()
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	return newTestHandlerWithStatsAndHealth(t, store, upstreams, stats, nil)
+}
+
+func newTestHandlerWithHealth(
+	t *testing.T,
+	store *blobfs.Store,
+	upstreams []string,
+) (*Handler, *httpcache.Stats, *health.ServiceHealth) {
+	t.Helper()
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	sh := health.New("flatpak-test", config.ModeFlatpak, health.DefaultConfig(), upstreams, stats, "cache-proxy-test")
+	handler := newTestHandlerWithStatsAndHealth(t, store, upstreams, stats, sh)
+	return handler, stats, sh
+}
+
+func newTestHandlerWithStatsAndHealth(
+	t *testing.T,
+	store *blobfs.Store,
+	upstreams []string,
+	stats *httpcache.Stats,
+	sh *health.ServiceHealth,
+) *Handler {
+	t.Helper()
 	policy := &Policy{}
 	applyDefaults(policy)
-	stats := httpcache.NewStats(prometheus.NewRegistry())
 	downloads := httpcache.NewDownloadLimiter(8, 4)
 	runtimeCfg := httpcache.RuntimeConfig{
 		Mode:            config.ModeFlatpak,
@@ -463,6 +535,7 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string) *Hand
 		policy,
 		store,
 		stats,
+		sh,
 		downloads,
 		runtimeCfg,
 	)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 
@@ -223,8 +224,14 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 			request.Header.Set("If-Modified-Since", lastModified)
 		}
 
+		start := time.Now()
 		response, err := h.client.Do(request)
+		latency := time.Since(start)
 		if err != nil {
+			h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodHead, 0, latency, 0)
+			if h.sh != nil {
+				h.sh.RecordFailure(upstream, err)
+			}
 			if errors.Is(err, context.Canceled) {
 				return false, err
 			}
@@ -234,7 +241,19 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 			}
 			return false, nil
 		}
-		response.Body.Close()
+		h.stats.RecordUpstreamRequest(
+			h.name,
+			h.mode,
+			upstream,
+			http.MethodHead,
+			response.StatusCode,
+			latency,
+			metadataContentLength(response),
+		)
+		if h.sh != nil {
+			h.sh.RecordResult(upstream, response.StatusCode, latency)
+		}
+		_ = response.Body.Close()
 		switch response.StatusCode {
 		case http.StatusNotModified:
 			continue

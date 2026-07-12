@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
@@ -75,6 +76,20 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.CleanupInterval > 0 {
 		cleanupInterval = block.CleanupInterval.Duration()
 	}
+	healthCfg := health.DefaultConfig()
+	if block.Transport != nil {
+		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
+	}
+	if err := health.ValidateConfig(healthCfg); err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	probeUserAgent := httpcache.DefaultUserAgent
+	if block.Transport != nil && block.Transport.UserAgent != "" {
+		probeUserAgent = block.Transport.UserAgent
+	}
+	sh := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats(), probeUserAgent)
+	sh.SetProbeScheduler(plan.ProbeScheduler())
+	sh.SetBus(plan.Bus())
 
 	runtimeCfg := httpcache.RuntimeConfig{
 		Mode:            config.ModeFlatpak,
@@ -94,6 +109,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		&block.Policy,
 		plan.Store(),
 		plan.Stats(),
+		sh,
 		plan.Downloads(),
 		runtimeCfg,
 	)
