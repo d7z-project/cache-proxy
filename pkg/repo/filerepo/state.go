@@ -3,6 +3,7 @@ package filerepo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"path"
@@ -169,6 +170,30 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 	})
 	if err != nil && !strings.Contains(err.Error(), "not exist") {
 		slog.Warn("indexed generation restore failed", "instance", h.name, "err", err)
+	}
+}
+
+func (h *IndexedHandler) cleanCurrentRefTemps(ctx context.Context) {
+	rootDir := path.Join(h.objectRoot, ".roots")
+	err := fs.WalkDir(h.store.TenantFS(h.name), rootDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if walkErr != nil || entry.IsDir() || !strings.HasPrefix(path.Base(objectPath), "current.yaml.tmp.") {
+			return nil
+		}
+		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Debug(
+				"indexed current temp cleanup failed",
+				"instance", h.name,
+				"path", objectPath,
+				"err", err,
+			)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, context.Canceled) {
+		slog.Debug("indexed current temp scan failed", "instance", h.name, "err", err)
 	}
 }
 

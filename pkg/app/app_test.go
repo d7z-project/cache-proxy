@@ -492,6 +492,22 @@ func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
 	require.Equal(t, first, runs.Load())
 }
 
+func TestOpenRejectsFileModeWithoutUpstreams(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), []config.Instance{{
+		Name:    "files",
+		Enabled: true,
+		File: &config.ModeBlock{Node: yamlNode(t, map[string]any{
+			"route": map[string]any{"path": "/files"},
+		})},
+	}})
+
+	_, err := Open(ctx, doc, "")
+	require.ErrorContains(t, err, "file mode requires at least one upstream")
+}
+
 func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

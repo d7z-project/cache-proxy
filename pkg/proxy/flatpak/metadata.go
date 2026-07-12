@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -443,6 +444,28 @@ func (h *Handler) putCurrent(ctx context.Context, current currentMetadata) error
 		return fmt.Errorf("publish flatpak current metadata: %w", err)
 	}
 	return nil
+}
+
+func (h *Handler) cleanCurrentTemp(ctx context.Context) {
+	err := fs.WalkDir(
+		h.store.TenantFS(h.name),
+		path.Dir(currentMetadataObject),
+		func(objectPath string, entry fs.DirEntry, walkErr error) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if walkErr != nil || entry.IsDir() || !strings.HasPrefix(path.Base(objectPath), "current.yaml.tmp.") {
+				return nil
+			}
+			if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
+				return fmt.Errorf("delete flatpak current temp %s: %w", objectPath, err)
+			}
+			return nil
+		},
+	)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, context.Canceled) {
+		slog.Debug("flatpak current temp cleanup failed", "instance", h.name, "err", err)
+	}
 }
 
 func (h *Handler) restoreCurrent(ctx context.Context) error {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime/debug"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
@@ -325,7 +324,6 @@ func (s *Scheduler) execute(ts *taskState) {
 	}
 	s.refreshMetrics()
 	s.saveState()
-	debug.FreeOSMemory()
 }
 
 func (s *Scheduler) registerLocked(def TaskDef, source string, discoveredAt time.Time) {

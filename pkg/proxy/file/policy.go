@@ -12,6 +12,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -52,6 +53,35 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 
 func (Driver) Mode() string { return config.ModeFile }
 
+type handler struct {
+	base *httpcache.Handler
+	sh   *health.ServiceHealth
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.base.ServeHTTP(w, req)
+}
+
+func (h *handler) Start(ctx context.Context) error {
+	if h.sh != nil {
+		h.sh.Start(ctx)
+	}
+	return nil
+}
+
+func (h *handler) Stop(ctx context.Context) error {
+	if h.sh != nil {
+		if err := h.sh.Stop(ctx); err != nil {
+			return err
+		}
+	}
+	return h.base.CloseContext(ctx)
+}
+
+func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
+	return h.base.Cleanup(ctx, opts)
+}
+
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	var block Block
 	if err := plan.Decode(&block); err != nil {
@@ -70,16 +100,35 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := validatePolicy(&block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+	upstreams := filerepo.CollectUpstreams(block.Upstreams, nil)
+	if len(upstreams) == 0 {
+		return fmt.Errorf("instance %s: file mode requires at least one upstream", plan.Name())
+	}
+	healthCfg := health.DefaultConfig()
+	if block.Transport != nil {
+		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
+	}
+	if err := health.ValidateConfig(healthCfg); err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	probeUserAgent := httpcache.DefaultUserAgent
+	if block.Transport != nil && block.Transport.UserAgent != "" {
+		probeUserAgent = block.Transport.UserAgent
+	}
+	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats(), probeUserAgent)
+	sh.SetProbeScheduler(plan.ProbeScheduler())
+	sh.SetBus(plan.Bus())
+	base := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
 		Mode:            config.ModeFile,
 		ExpireAfter:     expireAfter,
-		Upstreams:       block.Upstreams,
+		Upstreams:       upstreams,
 		Transport:       block.Transport,
 		PassHeaders:     append([]string(nil), block.PassHeaders...),
 		BusyPolicy:      block.BusyPolicy,
 		DefaultFreshFor: block.FreshFor,
 		DownloadLimiter: plan.Downloads(),
-	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), nil)
+	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), sh)
+	handler := &handler{base: base, sh: sh}
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: defaultCleanupInterval,
@@ -88,12 +137,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		},
 	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
-		Handler:      handler,
-		Close:        func() error { handler.Close(); return nil },
-		CloseContext: handler.CloseContext,
-		CleanupFn:    handler.Cleanup,
-	})
+	return plan.BindPath(block.Route.Path, expireAfter, handler)
 }
 
 type fileResolver struct {

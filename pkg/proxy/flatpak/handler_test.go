@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -107,6 +108,21 @@ func TestSummarySigRequestDoesNotCreateGeneration(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Empty(t, handler.currentSnapshot().Generation)
 	_, err := store.StatObject(context.Background(), "flatpak-test", currentMetadataObject)
+	require.Error(t, err)
+}
+
+func TestCleanCurrentTempRemovesStalePublishRef(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"})
+	tmpPath := currentMetadataObject + ".tmp.old"
+	require.NoError(t, store.MkdirAll(path.Join("flatpak-test", path.Dir(tmpPath)), 0o755))
+	_, err := store.Put(ctx, "flatpak-test", tmpPath, strings.NewReader("old"), nil)
+	require.NoError(t, err)
+
+	handler.cleanCurrentTemp(ctx)
+
+	_, err = store.StatObject(ctx, "flatpak-test", tmpPath)
 	require.Error(t, err)
 }
 

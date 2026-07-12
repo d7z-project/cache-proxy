@@ -996,6 +996,50 @@ func TestProbeSchedulerRecomputesNextProbeAfterStateChange(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(cfg.ProbeInterval), nextAt, time.Second)
 }
 
+func TestProbeSchedulerDoesNotAddJitterWhenReconcilingExistingProbe(t *testing.T) {
+	cfg := fastProbeConfig()
+	cfg.ProbeInterval = time.Minute
+	s := &ProbeScheduler{
+		config: probeSchedulerConfig{
+			MinHostInterval: 10 * time.Second,
+			JitterFraction:  0.5,
+		},
+		services: map[*ServiceHealth]struct{}{},
+		jobs:     map[probeJobKey]*probeJob{},
+		hosts:    map[string]*probeHost{},
+	}
+	hostKey := ""
+	for i := 0; i < 100; i++ {
+		candidate := fmt.Sprintf("https://jitter-%d.example.com", i)
+		if s.hostJitter(candidate) > 0 {
+			hostKey = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, hostKey)
+
+	upstreamURL := hostKey + "/repo"
+	h := New("test", "apk", cfg, []string{upstreamURL}, nil, "ua")
+	addActiveProbeResource(h, "repo", "probe", upstreamURL)
+	lastProbeAt := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	h.mu.Lock()
+	h.upstreams[upstreamURL].State = SClosed
+	h.upstreams[upstreamURL].lastProbeAt = lastProbeAt
+	h.mu.Unlock()
+
+	key := probeJobKey{service: h, upstreamURL: upstreamURL}
+	s.services[h] = struct{}{}
+	s.jobs[key] = &probeJob{
+		key:     key,
+		hostKey: hostKey,
+		nextAt:  lastProbeAt,
+	}
+	s.reconcileLocked(lastProbeAt.Add(10 * time.Second))
+
+	require.Equal(t, lastProbeAt.Add(cfg.ProbeInterval), s.jobs[key].nextAt)
+	require.NotZero(t, s.hostJitter(hostKey))
+}
+
 func TestProbeSchedulerUnregisterStopsFutureProbes(t *testing.T) {
 	requests := make(chan time.Time, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

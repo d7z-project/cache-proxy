@@ -236,7 +236,7 @@ func (s *ProbeScheduler) reconcileLocked(now time.Time) {
 		}
 		job.hostKey = candidate.hostKey
 		if !candidate.lastProbeAt.IsZero() {
-			job.nextAt = candidate.dueAt.Add(s.hostJitter(candidate.hostKey))
+			job.nextAt = candidate.dueAt
 			continue
 		}
 		if candidate.dueAt.Before(job.nextAt) {

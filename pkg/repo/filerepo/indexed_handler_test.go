@@ -1053,6 +1053,65 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.Equal(t, "closed", stats.Instances["repo"].Upstreams[server.URL].StateText)
 }
 
+func TestRefreshHeadPrecheckDoesNotUpdateUpstreamHealth(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("ETag", `"meta-v1"`)
+			_, _ = io.WriteString(w, "index")
+		case http.MethodHead:
+			http.Error(w, "head failed", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
+			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
+		},
+	)
+	outcome, err := handler.RefreshRootTask(ctx, "root")
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
+	snapshot := handler.rootSnapshot("root")
+	require.NotNil(t, snapshot)
+
+	for i := 0; i < 10; i++ {
+		skipped, err := handler.canSkipRefresh(ctx, snapshot, server.URL, snapshot.Targets)
+		require.NoError(t, err)
+		require.False(t, skipped)
+	}
+
+	require.Equal(t, health.StateHealthy, handler.sh.AggregateState())
+	stats := handler.stats.Snapshot()
+	require.Equal(t, uint64(11), stats.Instances["repo"].UpstreamRequests)
+	require.Equal(t, uint64(10), stats.Instances["repo"].UpstreamStatus["500"])
+	require.Equal(t, "closed", stats.Instances["repo"].Upstreams[server.URL].StateText)
+}
+
+func TestCleanCurrentRefTempsRemovesStalePublishRefs(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	tmpPath := path.Join("repo", ".roots", pathEscapeKey("root"), "current.yaml.tmp.old")
+	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(tmpPath)), 0o755))
+	_, err := store.Put(ctx, "repo", tmpPath, strings.NewReader("old"), nil)
+	require.NoError(t, err)
+
+	handler.cleanCurrentRefTemps(ctx)
+
+	_, err = store.StatObject(ctx, "repo", tmpPath)
+	require.Error(t, err)
+}
+
 func TestRefreshRebuildsWhenCleanupIndexMissing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

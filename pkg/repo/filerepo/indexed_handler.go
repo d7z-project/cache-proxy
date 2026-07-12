@@ -135,6 +135,7 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 		h.sh.Start(ctx)
 	}
 	h.restoreRoots(ctx)
+	h.cleanCurrentRefTemps(ctx)
 	h.restoreGenerations(ctx)
 	h.reconcileMetadataTasks()
 	return nil
@@ -229,9 +230,6 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 		latency := time.Since(start)
 		if err != nil {
 			h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodHead, 0, latency, 0)
-			if h.sh != nil {
-				h.sh.RecordFailure(upstream, err)
-			}
 			if errors.Is(err, context.Canceled) {
 				return false, err
 			}
@@ -250,9 +248,6 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 			latency,
 			metadataContentLength(response),
 		)
-		if h.sh != nil {
-			h.sh.RecordResult(upstream, response.StatusCode, latency)
-		}
 		_ = response.Body.Close()
 		switch response.StatusCode {
 		case http.StatusNotModified:

@@ -4,7 +4,12 @@ import (
 	"bytes"
 	"container/heap"
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
+	"path"
+	"strings"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
@@ -74,13 +79,25 @@ func (s *Scheduler) saveStateLocked() {
 		}
 		return
 	}
-	if _, err := s.store.Put(context.Background(), s.tenant, "tasks.yaml", bytes.NewReader(buf.Bytes()), nil); err != nil {
+	tmpPath := fmt.Sprintf("tasks.yaml.tmp.%d", time.Now().UnixNano())
+	if _, err := s.store.Put(context.Background(), s.tenant, tmpPath, bytes.NewReader(buf.Bytes()), nil); err != nil {
 		slog.Warn("scheduler state write failed", "err", err)
 		if s.m != nil {
 			s.m.stateSaves.WithLabelValues("failed").Inc()
 		}
 		return
 	}
+	if err := s.store.Rename(path.Join(s.tenant, tmpPath), path.Join(s.tenant, "tasks.yaml")); err != nil {
+		slog.Warn("scheduler state publish failed", "err", err)
+		if cleanupErr := s.store.DeleteObject(context.Background(), s.tenant, tmpPath); cleanupErr != nil {
+			slog.Debug("scheduler state temp cleanup failed", "path", tmpPath, "err", cleanupErr)
+		}
+		if s.m != nil {
+			s.m.stateSaves.WithLabelValues("failed").Inc()
+		}
+		return
+	}
+	s.cleanStateTemps()
 	if s.m != nil {
 		s.m.stateSaves.WithLabelValues("success").Inc()
 	}
@@ -88,6 +105,9 @@ func (s *Scheduler) saveStateLocked() {
 
 func (s *Scheduler) restoreFromStore() {
 	data, err := loadTaskState(s.store, s.tenant)
+	if err != nil {
+		slog.Warn("scheduler state restore failed", "err", err)
+	}
 	if s.m != nil {
 		switch {
 		case err != nil:
@@ -144,6 +164,7 @@ func (s *Scheduler) restoreFromStore() {
 	if len(data) > 0 {
 		slog.Debug("scheduler restored tasks", "count", len(data))
 	}
+	s.cleanStateTemps()
 }
 
 func loadTaskState(store *blobfs.Store, tenant string) ([]persistedTask, error) {
@@ -152,13 +173,34 @@ func loadTaskState(store *blobfs.Store, tenant string) ([]persistedTask, error) 
 	}
 	reader, err := store.OpenObject(context.Background(), tenant, "tasks.yaml")
 	if err != nil {
-		return nil, nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open scheduler state: %w", err)
 	}
 	defer reader.Close()
 
 	var state persistedState
 	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode scheduler state: %w", err)
 	}
 	return state.Tasks, nil
+}
+
+func (s *Scheduler) cleanStateTemps() {
+	if s.store == nil {
+		return
+	}
+	err := fs.WalkDir(s.store.TenantFS(s.tenant), ".", func(objectPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || !strings.HasPrefix(path.Base(objectPath), "tasks.yaml.tmp.") {
+			return nil
+		}
+		if err := s.store.DeleteObject(context.Background(), s.tenant, objectPath); err != nil {
+			slog.Debug("scheduler state temp cleanup failed", "path", objectPath, "err", err)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Debug("scheduler state temp scan failed", "err", err)
+	}
 }

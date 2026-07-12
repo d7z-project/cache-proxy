@@ -111,6 +111,7 @@ func (h *Handler) Start(ctx context.Context) error {
 		h.sh.Start(ctx)
 		h.sh.AddResource("/", []health.ProbeTarget{{Path: "summary"}}, h.upstreams)
 	}
+	h.cleanCurrentTemp(ctx)
 	if err := h.restoreCurrent(ctx); err != nil {
 		return err
 	}
