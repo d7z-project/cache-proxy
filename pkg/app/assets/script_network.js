@@ -160,7 +160,7 @@ function networkLayoutMode(instanceCount, upstreamCount) {
     return 'simple';
 }
 
-function visibleNetworkEdges(edges, upstreams, upstreamByID, layoutMode, topology) {
+function visibleNetworkEdges(edges, upstreams, upstreamByID, layoutMode, topology, edgeStatsByKey) {
     var result = { edges: edges.slice(), upstreams: upstreams.slice() };
     if (layoutMode !== 'clustered') {
         return result;
@@ -234,7 +234,8 @@ function groupedUpstream(hiddenEdges) {
     });
     return {
         id: 'upstream:group:idle',
-        host: '+' + String(Object.keys(count).length) + ' ' + (window.I18N.network_links || 'links'),
+        host: '+' + String(Object.keys(count).length) + ' ' + (window.I18N.network_upstreams || 'upstreams'),
+        hidden_count: Object.keys(count).length,
         state: groupedState(hiddenEdges),
         requests: sumNetworkField(hiddenEdges, 'requests'),
         errors: sumNetworkField(hiddenEdges, 'errors'),
@@ -250,7 +251,8 @@ function groupedNetworkEdge(edge, groupID, stat) {
         to: groupID,
         instance: edge.instance,
         upstream_url: groupID,
-        upstream_host: '+ ' + (window.I18N.network_links || 'links'),
+        upstream_host: '+ ' + (window.I18N.network_upstreams || 'upstreams'),
+        hidden_count: 1,
         state: edge.state || 'unknown',
         requests: networkNumberValue(edge.requests),
         errors: networkNumberValue(edge.errors),
@@ -269,6 +271,7 @@ function mergeGroupedNetworkEdge(grouped, edge, stat) {
     grouped.active_upstream_requests += networkNumberValue(edge.active_upstream_requests);
     grouped.request_delta += stat ? stat.requestDelta : 0;
     grouped.byte_delta += stat ? stat.byteDelta : 0;
+    grouped.hidden_count += 1;
     grouped.state = worseNetworkState(grouped.state, edge.state);
     appendNetworkRelatedID(grouped.related, edge.to);
 }
@@ -446,7 +449,7 @@ function networkLayout(target, edges, data, previousData) {
 
     var stage = document.body.classList.contains('network-stage-open');
     var layoutMode = networkLayoutMode(instances.length, upstreams.length);
-    var visible = visibleNetworkEdges(edges, upstreams, upstreamByID, layoutMode, topology);
+    var visible = visibleNetworkEdges(edges, upstreams, upstreamByID, layoutMode, topology, edgeStatsByKey);
     upstreams = visible.upstreams;
     var visibleEdges = visible.edges;
     var instanceActivity = networkInstanceActivity(instances, visibleEdges, edgeStatsByKey);
@@ -524,9 +527,9 @@ function networkLayout(target, edges, data, previousData) {
             phase: networkAnimationPhase(edgeKey),
             duration: networkAnimationDuration(stat),
             path: curvePath(a, b),
-            label: edgeMetricsText(edge),
+            label: edgeMetricsText(edge, stat),
             quiet: quietLabels && stat.active <= 0 && stat.score <= 0 && !networkEdgeIsDegraded(edge),
-            title: edgeTitle(edge),
+            title: edgeTitle(edge, stat),
             midpoint: midpoint(a, b),
             hash: edgeHash
         });
@@ -553,7 +556,8 @@ function networkLayout(target, edges, data, previousData) {
             kind: 'instance',
             label: instance.name,
             sub: networkInstanceSubtitle(instance),
-            state: instance.active_upstream_requests > 0 ? 'halfopen' : 'closed',
+            active: instance.active_upstream_requests > 0,
+            state: 'closed',
             hash: [
                 instance.mode, instance.requests, instance.upstream_requests,
                 instance.active_upstream_requests, instance.hit_rate
@@ -769,12 +773,16 @@ function flashIfChanged(node, hash) {
     }, 760);
 }
 
-function edgeMetricsText(edge) {
+function edgeMetricsText(edge, stat) {
     var parts = [];
-    if ((edge.active_upstream_requests || 0) > 0) {
-        parts.push(String(edge.active_upstream_requests) + ' ' + (window.I18N.network_active_short || 'active'));
+    stat = stat || networkEdgeStats(edge, {});
+    if (stat.active > 0) {
+        parts.push(String(stat.active) + ' ' + (window.I18N.network_active_short || 'active'));
+    } else if (stat.byteDelta > 0) {
+        parts.push('+' + formatBytes(stat.byteDelta));
+    } else if (stat.requestDelta > 0) {
+        parts.push('+' + String(stat.requestDelta) + ' ' + (window.I18N.requests_short || 'req'));
     }
-    parts.push(String(edge.requests || 0) + ' ' + (window.I18N.requests_short || 'req'));
     if (edge.last_status) {
         parts.push(edge.last_status);
     }
@@ -784,14 +792,24 @@ function edgeMetricsText(edge) {
     return parts.join(' · ');
 }
 
-function edgeTitle(edge) {
+function edgeTitle(edge, stat) {
     var used = formatDisplayTime(edge.last_used_at);
+    stat = stat || networkEdgeStats(edge, {});
+    var hidden = networkNumberValue(edge.hidden_count);
     return edge.instance + ' -> ' + edge.upstream_url +
         '\n' + (window.I18N.status || 'Status') + ': ' + translateUpstreamState(edge.state) +
         '\n' + (window.I18N.requests || 'Requests') + ': ' + String(edge.requests || 0) +
         '\n' + (window.I18N.errors || 'Errors') + ': ' + String(edge.errors || 0) +
         '\n' + (window.I18N.network_error_rate || 'Error rate') + ': ' + formatErrorPercent(edge.error_rate || 0) +
-        '\n' + (window.I18N.network_traffic || 'Traffic') + ': ' + formatBytes(edge.response_bytes || 0) +
+        '\n' + (window.I18N.network_upstream_traffic || window.I18N.network_traffic || 'Upstream traffic') +
+        ': ' + formatBytes(edge.response_bytes || 0) +
+        (hidden > 0 ? '\n' + (window.I18N.network_upstreams || 'Upstreams') + ': ' + String(hidden) : '') +
+        ((edge.active_upstream_requests || 0) > 0 ?
+            '\n' + (window.I18N.network_active || 'Active') + ': ' + String(edge.active_upstream_requests || 0) : '') +
+        (stat.byteDelta > 0 ?
+            '\n' + (window.I18N.stage_traffic_rate || 'Traffic rate') + ': +' + formatBytes(stat.byteDelta) : '') +
+        (stat.requestDelta > 0 ?
+            '\n' + (window.I18N.stage_request_rate || 'Request rate') + ': +' + String(stat.requestDelta) : '') +
         (edge.last_status ? '\n' + (window.I18N.last_status || 'Last status') + ': ' + edge.last_status : '') +
         (used.display ? '\n' + (window.I18N.last_used || 'Last used') + ': ' + used.display : '') +
         (edge.last_error ? '\n' + (window.I18N.last_error || 'Last error') + ': ' + edge.last_error : '');
@@ -814,7 +832,8 @@ function instanceLinkTitle(instance, activity) {
     return (window.I18N.title || 'Cache Proxy') + ' -> ' + instance.name +
         '\n' + (window.I18N.network_active || 'Active') + ': ' + String(activity.active) +
         '\n' + (window.I18N.requests || 'Requests') + ' +' + String(activity.requestDelta) +
-        '\n' + (window.I18N.network_traffic || 'Traffic') + ' +' + formatBytes(activity.byteDelta) +
+        '\n' + (window.I18N.network_upstream_traffic || window.I18N.network_traffic || 'Upstream traffic') +
+        ' +' + formatBytes(activity.byteDelta) +
         '\n' + (window.I18N.status || 'Status') + ': ' + translateUpstreamState(activity.state);
 }
 
@@ -1001,8 +1020,11 @@ function renderNetworkTable(target, edges) {
     }
     var firstRender = !target._networkList;
     var listState = ensureNetworkList(target);
+    var previousEdges = networkPreviousEdges(
+        typeof networkStageState !== 'undefined' ? networkStageState.previousNetwork : null
+    );
     var rows = edges.slice().sort(function(a, b) {
-        return networkListSortScore(b) - networkListSortScore(a) ||
+        return networkListSortScore(b, previousEdges) - networkListSortScore(a, previousEdges) ||
             networkNumberValue(b.active_upstream_requests) - networkNumberValue(a.active_upstream_requests) ||
             networkNumberValue(b.response_bytes) - networkNumberValue(a.response_bytes) ||
             networkNumberValue(b.requests) - networkNumberValue(a.requests) ||
@@ -1018,7 +1040,7 @@ function renderNetworkTable(target, edges) {
             listState.list.appendChild(item);
             listState.rows[key] = item;
         }
-        updateNetworkListItem(item, edge);
+        updateNetworkListItem(item, edge, previousEdges);
         listState.list.appendChild(item);
     });
     Object.keys(listState.rows).forEach(function(key) {
@@ -1085,11 +1107,12 @@ function createNetworkListItem(key) {
     return item;
 }
 
-function updateNetworkListItem(item, edge) {
+function updateNetworkListItem(item, edge, previousEdges) {
     var used = formatDisplayTime(edge.last_used_at);
     var fields = item._networkFields;
     var host = edge.upstream_host || edge.upstream_url || '-';
-    item.title = edgeTitle(edge).replace(/\n/g, ' · ');
+    var stat = networkEdgeStats(edge, previousEdges[networkEdgeKey(edge)]);
+    item.title = edgeTitle(edge, stat).replace(/\n/g, ' · ');
     item.classList.toggle('is-alert', networkEdgeHealthLevel(edge) === 'alert');
     item.classList.toggle('is-notice', networkEdgeHealthLevel(edge) === 'notice');
     fields.title.textContent = host;
@@ -1099,23 +1122,25 @@ function updateNetworkListItem(item, edge) {
         (edge.last_status ? 'HTTP ' + edge.last_status : translateUpstreamState(edge.state)) +
         (used.display ? ' · ' + used.display : '');
     fields.metrics[0].textContent = (window.I18N.network_active || 'Active') + ' ' +
-        String(edge.active_upstream_requests || 0);
-    fields.metrics[1].textContent = (window.I18N.requests || 'Requests') + ' ' + String(edge.requests || 0);
-    fields.metrics[2].textContent = (window.I18N.network_traffic || 'Traffic') + ' ' +
-        formatBytes(edge.response_bytes || 0);
-    fields.metrics[3].textContent = (window.I18N.network_latency || 'Latency') + ' ' +
+        String(stat.active || 0);
+    fields.metrics[1].textContent = (window.I18N.stage_request_rate || 'Request rate') + ' +' +
+        String(stat.requestDelta || 0);
+    fields.metrics[2].textContent = (window.I18N.network_upstream_traffic || window.I18N.network_traffic || 'Traffic') +
+        ' +' + formatBytes(stat.byteDelta || 0);
+    fields.metrics[3].textContent = (window.I18N.network_error_rate || 'Error rate') + ' ' +
+        formatErrorPercent(edge.error_rate || 0) + ' · ' + (window.I18N.network_latency || 'Latency') + ' ' +
         networkNumberValue(edge.latency_ms).toFixed(0) + 'ms';
     var status = networkEdgeStatusText(edge);
     fields.issue.textContent = status;
     fields.issue.hidden = !status;
 }
 
-function networkListSortScore(edge) {
+function networkListSortScore(edge, previousEdges) {
     if (!edge) {
         return 0;
     }
-    var score = networkNumberValue(edge.active_upstream_requests) * 1000 +
-        Math.min(800, networkNumberValue(edge.response_bytes) / 1048576);
+    var stat = networkEdgeStats(edge, previousEdges[networkEdgeKey(edge)]);
+    var score = stat.active * 1000000000 + stat.byteDelta * 10 + stat.requestDelta;
     if (networkEdgeHealthLevel(edge) === 'alert') {
         score += 100000;
     } else if (networkEdgeHealthLevel(edge) === 'notice') {

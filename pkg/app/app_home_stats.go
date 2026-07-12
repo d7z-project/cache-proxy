@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
@@ -13,12 +14,30 @@ import (
 )
 
 func formatHitRate(cache map[string]uint64) string {
-	served := cache["HIT"] + cache["FRESH"] + cache["REFRESH"] + cache["STALE"]
-	total := served + cache["MISS"] + cache["BYPASS"]
-	if total == 0 {
+	rate, ok := cacheHitRate(cache)
+	if !ok {
 		return "\u2014"
 	}
-	return fmt.Sprintf("%.1f%%", float64(served)/float64(total)*100)
+	return fmt.Sprintf("%.1f%%", rate*100)
+}
+
+func cacheHitRate(cache map[string]uint64) (float64, bool) {
+	if len(cache) == 0 {
+		return 0, false
+	}
+	var total uint64
+	var hits uint64
+	for cacheResult, count := range cache {
+		total += count
+		switch strings.ToUpper(cacheResult) {
+		case "HIT", "FRESH", "REFRESH", "STALE", "GENERATION":
+			hits += count
+		}
+	}
+	if total == 0 {
+		return 0, false
+	}
+	return float64(hits) / float64(total), true
 }
 
 const preciseTimeLayout = "2006/01/02 15:04:05"

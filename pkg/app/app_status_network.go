@@ -94,7 +94,7 @@ func (s *appStatus) network(app *App) networkStatus {
 			UpstreamBytes:          snapshot.Total.UpstreamBytes,
 			ActiveDownloads:        snapshot.Total.ActiveDownloads,
 			ActiveUpstreamRequests: snapshot.Total.ActiveUpstreams,
-			HitRate:                hitRate(snapshot.Total.Cache),
+			HitRate:                networkHitRate(snapshot.Total.Cache),
 			UpstreamErrorRate:      errorRate(snapshot.Total.UpstreamRequests, snapshot.Total.UpstreamErrors),
 		},
 	}
@@ -116,7 +116,7 @@ func (s *appStatus) network(app *App) networkStatus {
 			UpstreamErrors:         stats.UpstreamErrors,
 			ActiveDownloads:        stats.ActiveDownloads,
 			ActiveUpstreamRequests: stats.ActiveUpstreams,
-			HitRate:                hitRate(stats.Cache),
+			HitRate:                networkHitRate(stats.Cache),
 		}
 		status.Instances = append(status.Instances, instance)
 		for upstreamURL, upstream := range stats.Upstreams {
@@ -229,23 +229,12 @@ func upstreamHost(rawURL string) string {
 	return strings.ToLower(parsed.Host)
 }
 
-func hitRate(cache map[string]uint64) float64 {
-	if len(cache) == 0 {
+func networkHitRate(cache map[string]uint64) float64 {
+	rate, ok := cacheHitRate(cache)
+	if !ok {
 		return 0
 	}
-	var total uint64
-	var hits uint64
-	for key, value := range cache {
-		total += value
-		switch strings.ToUpper(key) {
-		case "HIT", "STALE", "GENERATION":
-			hits += value
-		}
-	}
-	if total == 0 {
-		return 0
-	}
-	return float64(hits) / float64(total)
+	return rate
 }
 
 func errorRate(requests, errors uint64) float64 {

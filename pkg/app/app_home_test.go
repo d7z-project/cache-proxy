@@ -462,16 +462,23 @@ func TestFormatHitRate(t *testing.T) {
 	require.Equal(t, "\u2014", formatHitRate(map[string]uint64{}))
 
 	cache := map[string]uint64{
-		"HIT": 80, "FRESH": 10, "REFRESH": 5, "STALE": 1,
-		"MISS": 3, "BYPASS": 1,
+		"HIT": 80, "FRESH": 10, "REFRESH": 5, "STALE": 1, "GENERATION": 1,
+		"MISS": 1, "BYPASS": 1, "PASSTHROUGH": 1,
 	}
-	require.Equal(t, "96.0%", formatHitRate(cache))
+	require.Equal(t, "97.0%", formatHitRate(cache))
+
+	rate, ok := cacheHitRate(cache)
+	require.True(t, ok)
+	require.InDelta(t, 0.97, rate, 0.000001)
 
 	cache = map[string]uint64{"HIT": 0, "MISS": 10}
 	require.Equal(t, "0.0%", formatHitRate(cache))
 
 	cache = map[string]uint64{"HIT": 10, "MISS": 0}
 	require.Equal(t, "100.0%", formatHitRate(cache))
+
+	cache = map[string]uint64{"ERROR": 2, "PASSTHROUGH": 3}
+	require.Equal(t, "0.0%", formatHitRate(cache))
 }
 
 func TestInstanceStatusNonIndexed(t *testing.T) {
