@@ -682,6 +682,94 @@ func TestRecordUpstreamCountsNonNotFoundClientErrors(t *testing.T) {
 	require.Equal(t, uint64(1), instance.UpstreamStatus["404"])
 }
 
+func TestRecordUpstreamRequestTracksConcreteUpstream(t *testing.T) {
+	stats := NewStats(prometheus.NewRegistry())
+	release := stats.BeginUpstreamRequest("test", "test", "https://upstream.example")
+
+	snap := stats.Snapshot()
+	require.Equal(t, int64(1), snap.Instances["test"].ActiveUpstreams)
+	require.Equal(t, int64(1), snap.Instances["test"].Upstreams["https://upstream.example"].ActiveRequests)
+
+	stats.RecordUpstreamRequest(
+		"test",
+		"test",
+		"https://upstream.example",
+		http.MethodGet,
+		http.StatusBadGateway,
+		25*time.Millisecond,
+		128,
+	)
+	release()
+	release()
+
+	snap = stats.Snapshot()
+	instance := snap.Instances["test"]
+	upstream := instance.Upstreams["https://upstream.example"]
+	require.Equal(t, uint64(1), instance.UpstreamRequests)
+	require.Equal(t, uint64(1), instance.UpstreamErrors)
+	require.Equal(t, uint64(128), instance.UpstreamBytes)
+	require.Equal(t, int64(0), instance.ActiveUpstreams)
+	require.Equal(t, uint64(1), upstream.Requests)
+	require.Equal(t, uint64(1), upstream.Errors)
+	require.Equal(t, uint64(128), upstream.ResponseBytes)
+	require.Equal(t, int64(0), upstream.ActiveRequests)
+	require.Equal(t, "502", upstream.LastStatus)
+	require.Equal(t, "502", upstream.LastError)
+}
+
+func TestOpenRemoteReleasesActiveUpstreamOnBodyClose(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "5")
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer upstream.Close()
+
+	stats := NewStats(prometheus.NewRegistry())
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{upstream.URL},
+	}, nil, nil, stats, nil)
+
+	resp, err := handler.openRemote(context.Background(), http.MethodGet, "object", remoteOptions{
+		AcceptErrors: true,
+		Record:       true,
+	}, nil)
+	require.NoError(t, err)
+
+	snap := stats.Snapshot()
+	require.Equal(t, int64(1), snap.Instances["test"].Upstreams[upstream.URL].ActiveRequests)
+	require.NoError(t, resp.Close())
+
+	snap = stats.Snapshot()
+	require.Equal(t, int64(0), snap.Instances["test"].Upstreams[upstream.URL].ActiveRequests)
+	require.Equal(t, uint64(5), snap.Instances["test"].Upstreams[upstream.URL].ResponseBytes)
+}
+
+func TestOpenRemoteReleasesActiveUpstreamOnFailoverStatus(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+
+	stats := NewStats(prometheus.NewRegistry())
+	handler := NewHandler("test", RuntimeConfig{
+		Mode:      "test",
+		Upstreams: []string{upstream.URL},
+	}, nil, nil, stats, nil)
+
+	resp, err := handler.openRemote(context.Background(), http.MethodGet, "object", remoteOptions{
+		AcceptErrors: true,
+		Record:       true,
+	}, nil)
+	require.Error(t, err)
+	require.Nil(t, resp)
+
+	snap := stats.Snapshot()
+	require.Equal(t, int64(0), snap.Instances["test"].ActiveUpstreams)
+	require.Equal(t, int64(0), snap.Instances["test"].Upstreams[upstream.URL].ActiveRequests)
+	require.Equal(t, uint64(1), snap.Instances["test"].Upstreams[upstream.URL].Errors)
+}
+
 func TestStaleCacheOnValidationError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

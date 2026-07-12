@@ -185,6 +185,7 @@
     </div>
     <div class="tab-bar" role="tablist" aria-label="{{t "server_status"}}">
       <button class="tab-btn is-active" type="button" role="tab" data-status-tab="disk" aria-selected="true" onclick="switchStatusTab('disk')">{{t "disk_tab"}}</button>
+      <button class="tab-btn" type="button" role="tab" data-status-tab="network" aria-selected="false" onclick="switchStatusTab('network')">{{t "network_tab"}}</button>
       <button class="tab-btn" type="button" role="tab" data-status-tab="events" aria-selected="false" onclick="switchStatusTab('events')">{{t "events_tab"}}</button>
       <span class="tab-spacer"></span>
       <span class="refresh-badge" id="refresh-badge">
@@ -196,6 +197,19 @@
       <div class="panel-note" id="disk-panel-note">{{t "loading"}}</div>
       <div class="chart-card">
         <div id="disk-chart" class="disk-chart empty-state">{{t "loading"}}</div>
+      </div>
+    </div>
+    <div class="tab-panel" id="status-tab-network" role="tabpanel" hidden>
+      <div class="panel-note" id="network-panel-note">{{t "loading"}}</div>
+      <div class="network-filter-bar">
+        <button class="filter-chip is-active" type="button" data-network-filter="all">{{t "all"}}</button>
+        <button class="filter-chip" type="button" data-network-filter="active">{{t "network_active"}}</button>
+        <button class="filter-chip" type="button" data-network-filter="degraded">{{t "degraded"}}</button>
+        <button class="filter-chip" type="button" data-network-filter="failed">{{t "network_failed"}}</button>
+      </div>
+      <div class="network-layout">
+        <div id="network-map" class="network-map empty-state">{{t "loading"}}</div>
+        <div id="network-table" class="network-table-wrap empty-state">{{t "loading"}}</div>
       </div>
     </div>
     <div class="tab-panel" id="status-tab-events" role="tabpanel" hidden>

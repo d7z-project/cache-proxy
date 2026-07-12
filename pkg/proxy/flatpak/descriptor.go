@@ -74,15 +74,17 @@ func (h *Handler) fetchDescriptor(ctx context.Context, route httpcache.Route) ([
 			return nil, nil, fmt.Errorf("create flatpak descriptor request: %w", err)
 		}
 		request.Header.Set("User-Agent", h.client.UserAgent)
+		start := time.Now()
 		response, err := h.client.Do(request)
+		latency := time.Since(start)
 		if err != nil {
-			h.stats.RecordUpstream(h.name, config.ModeFlatpak, http.MethodGet, 0)
+			h.stats.RecordUpstreamRequest(h.name, config.ModeFlatpak, upstream, http.MethodGet, 0, latency, 0)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		body, headers, err := h.readDescriptorResponse(ctx, route.ObjectPath, response)
+		body, headers, err := h.readDescriptorResponse(ctx, route.ObjectPath, upstream, response, latency)
 		response.Body.Close()
 		if err != nil {
 			if firstErr == nil {
@@ -101,9 +103,19 @@ func (h *Handler) fetchDescriptor(ctx context.Context, route httpcache.Route) ([
 func (h *Handler) readDescriptorResponse(
 	ctx context.Context,
 	objectPath string,
+	upstream string,
 	response *http.Response,
+	latency time.Duration,
 ) ([]byte, map[string]string, error) {
-	h.stats.RecordUpstream(h.name, config.ModeFlatpak, http.MethodGet, response.StatusCode)
+	h.stats.RecordUpstreamRequest(
+		h.name,
+		config.ModeFlatpak,
+		upstream,
+		http.MethodGet,
+		response.StatusCode,
+		latency,
+		flatpakContentLength(response),
+	)
 	if response.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("flatpak descriptor upstream returned HTTP %d", response.StatusCode)
 	}

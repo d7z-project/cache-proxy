@@ -31,7 +31,7 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
-		h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, 0)
+		h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodGet, 0, latency, 0)
 		if h.sh != nil {
 			h.sh.RecordFailure(upstream, err)
 		}
@@ -39,7 +39,15 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 	}
 	defer response.Body.Close()
 	response.Body = utils.NewContextReadCloser(ctx, h.client.WrapBody(response.Body))
-	h.stats.RecordUpstream(h.name, h.mode, http.MethodGet, response.StatusCode)
+	h.stats.RecordUpstreamRequest(
+		h.name,
+		h.mode,
+		upstream,
+		http.MethodGet,
+		response.StatusCode,
+		latency,
+		metadataContentLength(response),
+	)
 	if h.sh != nil {
 		h.sh.RecordResult(upstream, response.StatusCode, latency)
 	}
@@ -82,6 +90,13 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 	}
 	cleanupTemp = false
 	return MetadataBlob{Path: cleanPath, temp: tempPath, Headers: headers}, nil
+}
+
+func metadataContentLength(response *http.Response) uint64 {
+	if response == nil || response.ContentLength <= 0 {
+		return 0
+	}
+	return uint64(response.ContentLength)
 }
 
 func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootID, generation, cleanPath string, body io.ReadSeeker, size int64, headers map[string]string) error {

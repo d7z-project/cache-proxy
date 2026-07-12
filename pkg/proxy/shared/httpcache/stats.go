@@ -94,7 +94,9 @@ type Stats struct {
 	totalResponseBytes atomic.Uint64
 	totalUpstreamReqs  atomic.Uint64
 	totalUpstreamErrs  atomic.Uint64
+	totalUpstreamBytes atomic.Uint64
 	totalActiveDown    atomic.Int64
+	totalActiveUp      atomic.Int64
 	totalRefreshes     atomic.Uint64
 	totalRefreshFails  atomic.Uint64
 	totalSnapshotReady atomic.Bool
@@ -113,23 +115,43 @@ type StatsSnapshot struct {
 }
 
 type InstanceStats struct {
-	Mode              string            `json:"mode,omitempty"`
-	Requests          uint64            `json:"requests"`
-	Errors            uint64            `json:"errors"`
-	ResponseBytes     uint64            `json:"responseBytes"`
-	Cache             map[string]uint64 `json:"cache"`
-	UpstreamRequests  uint64            `json:"upstreamRequests"`
-	UpstreamErrors    uint64            `json:"upstreamErrors"`
-	UpstreamStatus    map[string]uint64 `json:"upstreamStatus"`
-	ActiveDownloads   int64             `json:"activeDownloads"`
-	MetadataState     string            `json:"metadataState,omitempty"`
-	SnapshotReady     bool              `json:"snapshotReady"`
-	Refreshes         uint64            `json:"refreshes"`
-	RefreshFailures   uint64            `json:"refreshFailures"`
-	LastRefresh       string            `json:"lastRefresh,omitempty"`
-	LastRefreshAt     time.Time         `json:"lastRefreshAt,omitempty"`
-	LastRefreshOKAt   time.Time         `json:"lastRefreshOkAt,omitempty"`
-	LastStateChangeAt time.Time         `json:"lastStateChangeAt,omitempty"`
+	Mode              string                   `json:"mode,omitempty"`
+	Requests          uint64                   `json:"requests"`
+	Errors            uint64                   `json:"errors"`
+	ResponseBytes     uint64                   `json:"responseBytes"`
+	Cache             map[string]uint64        `json:"cache"`
+	UpstreamRequests  uint64                   `json:"upstreamRequests"`
+	UpstreamErrors    uint64                   `json:"upstreamErrors"`
+	UpstreamBytes     uint64                   `json:"upstreamBytes"`
+	UpstreamStatus    map[string]uint64        `json:"upstreamStatus"`
+	Upstreams         map[string]UpstreamStats `json:"upstreams,omitempty"`
+	ActiveDownloads   int64                    `json:"activeDownloads"`
+	ActiveUpstreams   int64                    `json:"activeUpstreams"`
+	MetadataState     string                   `json:"metadataState,omitempty"`
+	SnapshotReady     bool                     `json:"snapshotReady"`
+	Refreshes         uint64                   `json:"refreshes"`
+	RefreshFailures   uint64                   `json:"refreshFailures"`
+	LastRefresh       string                   `json:"lastRefresh,omitempty"`
+	LastRefreshAt     time.Time                `json:"lastRefreshAt,omitempty"`
+	LastRefreshOKAt   time.Time                `json:"lastRefreshOkAt,omitempty"`
+	LastStateChangeAt time.Time                `json:"lastStateChangeAt,omitempty"`
+}
+
+type UpstreamStats struct {
+	URL            string            `json:"url"`
+	Requests       uint64            `json:"requests"`
+	Errors         uint64            `json:"errors"`
+	ResponseBytes  uint64            `json:"responseBytes"`
+	Status         map[string]uint64 `json:"status"`
+	ActiveRequests int64             `json:"activeRequests"`
+	LastStatus     string            `json:"lastStatus,omitempty"`
+	LastUsedAt     time.Time         `json:"lastUsedAt,omitempty"`
+	LastError      string            `json:"lastError,omitempty"`
+	State          int               `json:"state"`
+	StateText      string            `json:"stateText,omitempty"`
+	Weight         float64           `json:"weight"`
+	ErrorRate      float64           `json:"errorRate"`
+	LatencySeconds float64           `json:"latencySeconds"`
 }
 
 func NewStats(reg prometheus.Registerer) *Stats {
@@ -172,6 +194,18 @@ func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, 
 }
 
 func (s *Stats) RecordUpstream(instance, mode, method string, status int) {
+	s.RecordUpstreamRequest(instance, mode, "", method, status, 0, 0)
+}
+
+func (s *Stats) RecordUpstreamRequest(
+	instance string,
+	mode string,
+	upstream string,
+	method string,
+	status int,
+	latency time.Duration,
+	bytes uint64,
+) {
 	if s == nil {
 		return
 	}
@@ -183,17 +217,83 @@ func (s *Stats) RecordUpstream(instance, mode, method string, status int) {
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
+	ensureStatsMaps(&entry.data)
 	entry.data.UpstreamRequests++
 	entry.data.UpstreamStatus[statusText]++
+	entry.data.UpstreamBytes += bytes
 	if upstreamStatusIsFailure(status) {
 		entry.data.UpstreamErrors++
+	}
+	if upstream != "" {
+		upstreamStats := entry.data.Upstreams[upstream]
+		if upstreamStats.URL == "" {
+			upstreamStats.URL = upstream
+		}
+		if upstreamStats.Status == nil {
+			upstreamStats.Status = map[string]uint64{}
+		}
+		upstreamStats.Requests++
+		upstreamStats.Status[statusText]++
+		upstreamStats.ResponseBytes += bytes
+		upstreamStats.LastStatus = statusText
+		upstreamStats.LastUsedAt = time.Now()
+		upstreamStats.LatencySeconds = latency.Seconds()
+		if upstreamStatusIsFailure(status) {
+			upstreamStats.Errors++
+			upstreamStats.LastError = statusText
+		} else {
+			upstreamStats.LastError = ""
+		}
+		entry.data.Upstreams[upstream] = upstreamStats
 	}
 	entry.mu.Unlock()
 
 	s.totalUpstreamReqs.Add(1)
+	s.totalUpstreamBytes.Add(bytes)
 	s.incrTotalUpstreamStatus(statusText)
 	if upstreamStatusIsFailure(status) {
 		s.totalUpstreamErrs.Add(1)
+	}
+}
+
+func (s *Stats) BeginUpstreamRequest(instance, mode, upstream string) func() {
+	if s == nil || upstream == "" {
+		return func() {}
+	}
+	s.addActiveUpstream(instance, mode, upstream, 1)
+	var released atomic.Bool
+	return func() {
+		if released.CompareAndSwap(false, true) {
+			s.addActiveUpstream(instance, mode, upstream, -1)
+		}
+	}
+}
+
+func (s *Stats) addActiveUpstream(instance, mode, upstream string, delta int64) {
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	ensureStatsMaps(&entry.data)
+	entry.data.ActiveUpstreams += delta
+	if entry.data.ActiveUpstreams < 0 {
+		entry.data.ActiveUpstreams = 0
+	}
+	upstreamStats := entry.data.Upstreams[upstream]
+	if upstreamStats.URL == "" {
+		upstreamStats.URL = upstream
+	}
+	if upstreamStats.Status == nil {
+		upstreamStats.Status = map[string]uint64{}
+	}
+	upstreamStats.ActiveRequests += delta
+	if upstreamStats.ActiveRequests < 0 {
+		upstreamStats.ActiveRequests = 0
+	}
+	entry.data.Upstreams[upstream] = upstreamStats
+	entry.mu.Unlock()
+
+	s.totalActiveUp.Add(delta)
+	if s.totalActiveUp.Load() < 0 {
+		s.totalActiveUp.Store(0)
 	}
 }
 
@@ -286,6 +386,24 @@ func (s *Stats) SetUpstreamHealth(instance, mode, upstream string, state int, we
 	s.mc.upstreamWeight.WithLabelValues(instance, mode, upstream).Set(weight)
 	s.mc.upstreamErrorRate.WithLabelValues(instance, mode, upstream).Set(errorRate)
 	s.mc.upstreamLatency.WithLabelValues(instance, mode, upstream).Set(latencySecs)
+
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	ensureStatsMaps(&entry.data)
+	upstreamStats := entry.data.Upstreams[upstream]
+	if upstreamStats.URL == "" {
+		upstreamStats.URL = upstream
+	}
+	if upstreamStats.Status == nil {
+		upstreamStats.Status = map[string]uint64{}
+	}
+	upstreamStats.State = state
+	upstreamStats.StateText = upstreamStateText(state)
+	upstreamStats.Weight = weight
+	upstreamStats.ErrorRate = errorRate
+	upstreamStats.LatencySeconds = latencySecs
+	entry.data.Upstreams[upstream] = upstreamStats
+	entry.mu.Unlock()
 }
 
 func (s *Stats) RecordCircuitEvent(instance, mode, upstream, event string) {
@@ -305,7 +423,9 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		ResponseBytes:    s.totalResponseBytes.Load(),
 		UpstreamRequests: s.totalUpstreamReqs.Load(),
 		UpstreamErrors:   s.totalUpstreamErrs.Load(),
+		UpstreamBytes:    s.totalUpstreamBytes.Load(),
 		ActiveDownloads:  s.totalActiveDown.Load(),
+		ActiveUpstreams:  s.totalActiveUp.Load(),
 		Refreshes:        s.totalRefreshes.Load(),
 		RefreshFailures:  s.totalRefreshFails.Load(),
 		SnapshotReady:    s.totalSnapshotReady.Load(),
@@ -376,15 +496,45 @@ func (s *Stats) incrTotalUpstreamStatus(status string) {
 	s.totalMu.Unlock()
 }
 
-func emptyInstanceStats(mode string) InstanceStats {
-	return InstanceStats{Mode: mode, Cache: map[string]uint64{}, UpstreamStatus: map[string]uint64{}}
-}
-
 func cloneInstanceStats(item InstanceStats) InstanceStats {
 	clone := item
 	clone.Cache = cloneMap(item.Cache)
 	clone.UpstreamStatus = cloneMap(item.UpstreamStatus)
+	clone.Upstreams = cloneUpstreams(item.Upstreams)
 	return clone
+}
+
+func emptyInstanceStats(mode string) InstanceStats {
+	return InstanceStats{
+		Mode:           mode,
+		Cache:          map[string]uint64{},
+		UpstreamStatus: map[string]uint64{},
+		Upstreams:      map[string]UpstreamStats{},
+	}
+}
+
+func ensureStatsMaps(item *InstanceStats) {
+	if item.Cache == nil {
+		item.Cache = map[string]uint64{}
+	}
+	if item.UpstreamStatus == nil {
+		item.UpstreamStatus = map[string]uint64{}
+	}
+	if item.Upstreams == nil {
+		item.Upstreams = map[string]UpstreamStats{}
+	}
+}
+
+func cloneUpstreams(src map[string]UpstreamStats) map[string]UpstreamStats {
+	if len(src) == 0 {
+		return map[string]UpstreamStats{}
+	}
+	dst := make(map[string]UpstreamStats, len(src))
+	for key, value := range src {
+		value.Status = cloneMap(value.Status)
+		dst[key] = value
+	}
+	return dst
 }
 
 func cloneMap(src map[string]uint64) map[string]uint64 {
@@ -396,4 +546,19 @@ func cloneMap(src map[string]uint64) map[string]uint64 {
 		dst[k] = v
 	}
 	return dst
+}
+
+func upstreamStateText(state int) string {
+	switch state {
+	case 0:
+		return "closed"
+	case 1:
+		return "degraded"
+	case 2:
+		return "open"
+	case 3:
+		return "halfopen"
+	default:
+		return "unknown"
+	}
 }

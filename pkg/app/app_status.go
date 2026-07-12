@@ -287,6 +287,8 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 		writeStatusJSON(w, req, map[string]any{"samples": a.status.diskSamples()})
 	case "/-/status/events":
 		writeStatusJSON(w, req, map[string]any{"events": a.status.taskEvents(parseStatusLimit(req, a.status.eventLimit))})
+	case "/-/status/network":
+		writeStatusJSON(w, req, a.status.network(a))
 	default:
 		http.NotFound(w, req)
 	}

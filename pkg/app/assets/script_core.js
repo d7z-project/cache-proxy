@@ -1,10 +1,10 @@
 var statusState = {
     modal: null,
     activeTab: 'disk',
-    controllers: { summary: null, disk: null, events: null },
-    cache: { summary: null, disk: null, events: null },
+    controllers: { summary: null, disk: null, network: null, events: null },
+    cache: { summary: null, disk: null, network: null, events: null },
     refreshTimer: null,
-    scrollTops: { disk: 0, events: 0 },
+    scrollTops: { disk: 0, network: 0, events: 0 },
     lastRefresh: 0,
     openedAt: 0
 };

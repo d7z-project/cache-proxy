@@ -121,12 +121,17 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	release := func() {}
+	if options.Record {
+		release = h.stats.BeginUpstreamRequest(h.name, h.config.Mode, options.TargetURL)
+	}
 	start := time.Now()
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
+		release()
 		if options.Record {
-			h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
+			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, options.TargetURL, method, 0, latency, 0)
 			if h.health != nil {
 				h.health.RecordFailure(options.TargetURL, err)
 			}
@@ -134,13 +139,22 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err), true
 	}
 	if options.Record {
-		h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
+		h.stats.RecordUpstreamRequest(
+			h.name,
+			h.config.Mode,
+			options.TargetURL,
+			method,
+			response.StatusCode,
+			latency,
+			responseContentLength(response),
+		)
 		if h.health != nil {
 			h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 		}
 	}
 	if shouldFailoverUpstreamStatus(response.StatusCode) {
 		_ = response.Body.Close()
+		release()
 		err := fmt.Errorf("%w: target url returned retryable status %d", ErrUpstreamUnavailable, response.StatusCode)
 		h.logUpstreamFailover(method, upstreamPath, options.TargetURL, response.StatusCode, err)
 		if upstreamPath == "" {
@@ -149,7 +163,9 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 		return nil, err, true
 	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
-	return responseFromHTTP(h.client, response), nil, false
+	result := responseFromHTTP(h.client, response)
+	result.Body = &closeCallbackBody{ReadCloser: result.Body, done: release}
+	return result, nil, false
 }
 
 func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error {
@@ -227,12 +243,17 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	release := func() {}
+	if options.Record {
+		release = h.stats.BeginUpstreamRequest(h.name, h.config.Mode, candidate.URL)
+	}
 	start := time.Now()
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
+		release()
 		if options.Record {
-			h.stats.RecordUpstream(h.name, h.config.Mode, method, 0)
+			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, 0, latency, 0)
 		}
 		if h.health != nil {
 			h.health.RecordFailure(candidate.URL, err)
@@ -245,13 +266,22 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)
 	if options.Record {
-		h.stats.RecordUpstream(h.name, h.config.Mode, method, response.StatusCode)
+		h.stats.RecordUpstreamRequest(
+			h.name,
+			h.config.Mode,
+			candidate.URL,
+			method,
+			response.StatusCode,
+			latency,
+			responseContentLength(response),
+		)
 	}
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 	}
 	if options.AcceptErrors && shouldFailoverUpstreamStatus(response.StatusCode) {
 		_ = response.Body.Close()
+		release()
 		err = fmt.Errorf("%w: upstream %s returned retryable status %d", ErrUpstreamUnavailable, method, response.StatusCode)
 		h.logUpstreamFailover(method, pathPart, candidate.URL, response.StatusCode, err)
 		if idx+1 < total {
@@ -261,13 +291,23 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	}
 	if !options.AcceptErrors && response.StatusCode != http.StatusOK {
 		_ = response.Body.Close()
+		release()
 		err = fmt.Errorf("%w: upstream %s failed with %d", ErrUpstreamUnavailable, method, response.StatusCode)
 		if idx+1 < total {
 			slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL))
 		}
 		return nil, err
 	}
-	return responseFromHTTP(h.client, response), nil
+	result := responseFromHTTP(h.client, response)
+	result.Body = &closeCallbackBody{ReadCloser: result.Body, done: release}
+	return result, nil
+}
+
+func responseContentLength(response *http.Response) uint64 {
+	if response == nil || response.ContentLength <= 0 {
+		return 0
+	}
+	return uint64(response.ContentLength)
 }
 
 func shouldFailoverUpstreamStatus(status int) bool {

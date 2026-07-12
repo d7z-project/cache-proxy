@@ -211,6 +211,13 @@ func (d *metadataDownload) Close() {
 	}
 }
 
+func flatpakContentLength(response *http.Response) uint64 {
+	if response == nil || response.ContentLength <= 0 {
+		return 0
+	}
+	return uint64(response.ContentLength)
+}
+
 func (h *Handler) fetchMetadata(
 	ctx context.Context,
 	upstream, cleanPath string,
@@ -223,13 +230,23 @@ func (h *Handler) fetchMetadata(
 	}
 	request.Header.Set("User-Agent", h.client.UserAgent)
 
+	start := time.Now()
 	response, err := h.client.Do(request)
+	latency := time.Since(start)
 	if err != nil {
-		h.stats.RecordUpstream(h.name, config.ModeFlatpak, http.MethodGet, 0)
+		h.stats.RecordUpstreamRequest(h.name, config.ModeFlatpak, upstream, http.MethodGet, 0, latency, 0)
 		return nil, fmt.Errorf("fetch flatpak metadata %s: %w", cleanPath, err)
 	}
 	defer response.Body.Close()
-	h.stats.RecordUpstream(h.name, config.ModeFlatpak, http.MethodGet, response.StatusCode)
+	h.stats.RecordUpstreamRequest(
+		h.name,
+		config.ModeFlatpak,
+		upstream,
+		http.MethodGet,
+		response.StatusCode,
+		latency,
+		flatpakContentLength(response),
+	)
 	if response.StatusCode != http.StatusOK {
 		if !required && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden) {
 			return nil, nil

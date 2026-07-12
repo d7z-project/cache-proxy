@@ -1,7 +1,7 @@
 // ── Status modal data loading ──
 
 function cancelStatusRequests() {
-    ['summary', 'disk', 'events'].forEach(function(key) {
+    ['summary', 'disk', 'network', 'events'].forEach(function(key) {
         if (statusState.controllers[key]) {
             statusState.controllers[key].abort();
             statusState.controllers[key] = null;
@@ -271,14 +271,22 @@ function switchStatusTab(name) {
         buttons[i].setAttribute('aria-selected', active ? 'true' : 'false');
     }
     var diskPanel = document.getElementById('status-tab-disk');
+    var networkPanel = document.getElementById('status-tab-network');
     var eventsPanel = document.getElementById('status-tab-events');
     var showDisk = name === 'disk';
+    var showNetwork = name === 'network';
     diskPanel.hidden = !showDisk;
-    eventsPanel.hidden = showDisk;
+    networkPanel.hidden = !showNetwork;
+    eventsPanel.hidden = showDisk || showNetwork;
     diskPanel.classList.toggle('is-active', showDisk);
-    eventsPanel.classList.toggle('is-active', !showDisk);
+    networkPanel.classList.toggle('is-active', showNetwork);
+    eventsPanel.classList.toggle('is-active', !showDisk && !showNetwork);
     if (showDisk) {
         loadDiskStatus();
+        return;
+    }
+    if (showNetwork) {
+        loadNetworkStatus();
         return;
     }
     loadEventStatus();
@@ -300,7 +308,8 @@ function stopAutoRefresh() {
 
 function refreshActiveTab() {
     var tab = statusState.activeTab;
-    var scrollEl = tab === 'disk' ? document.querySelector('.chart-card') : document.querySelector('.table-wrap');
+    var scrollEl = tab === 'disk' ? document.querySelector('.chart-card') :
+        (tab === 'network' ? document.querySelector('.network-table-wrap') : document.querySelector('.table-wrap'));
     if (scrollEl) statusState.scrollTops[tab] = scrollEl.scrollTop;
 
     delete statusState.cache.summary;
@@ -317,6 +326,7 @@ function refreshActiveTab() {
     updateRefreshBadge();
     loadStatusSummary();
     if (tab === 'disk') loadDiskStatus();
+    else if (tab === 'network') loadNetworkStatus();
     else loadEventStatus();
 }
 
@@ -485,6 +495,271 @@ function renderDiskChart(target, samples) {
     target.classList.add('is-fade-in');
 }
 
+// ── Network map ──
+
+function loadNetworkStatus() {
+    var note = document.getElementById('network-panel-note');
+    var map = document.getElementById('network-map');
+    var table = document.getElementById('network-table');
+    var t = window.I18N;
+    if (!statusState.cache.network) {
+        note.innerHTML = spinnerHTML() + escapeHTML(t.loading);
+        map.className = 'network-map empty-state';
+        table.className = 'network-table-wrap empty-state';
+        map.textContent = t.loading;
+        table.textContent = t.loading;
+    }
+    fetchStatus('network', '/-/status/network', function(data) {
+        var filter = activeNetworkFilter();
+        note.innerHTML = renderNetworkSummary(data) + lastRefreshNote();
+        renderNetworkMap(map, filterNetworkEdges(data.edges || [], filter), data);
+        renderNetworkTable(table, filterNetworkEdges(data.edges || [], filter));
+        restoreScroll('network');
+    }, function() {
+        note.textContent = t.status_load_failed || 'Failed to load status';
+        map.textContent = t.status_load_failed || 'Failed to load status';
+        table.textContent = t.status_load_failed || 'Failed to load status';
+    });
+}
+
+function activeNetworkFilter() {
+    var active = document.querySelector('[data-network-filter].is-active');
+    return active ? active.getAttribute('data-network-filter') : 'all';
+}
+
+function filterNetworkEdges(edges, filter) {
+    if (filter === 'active') {
+        return edges.filter(function(edge) { return edge.active_upstream_requests > 0; });
+    }
+    if (filter === 'degraded') {
+        return edges.filter(function(edge) {
+            return edge.state && edge.state !== 'closed' && edge.state !== 'unknown';
+        });
+    }
+    if (filter === 'failed') {
+        return edges.filter(function(edge) { return edge.errors > 0 || edge.last_error; });
+    }
+    return edges;
+}
+
+function renderNetworkSummary(data) {
+    var t = window.I18N;
+    var s = data.summary || {};
+    var cards = [
+        [t.network_active || 'Active upstream', String(s.active_upstream_requests || 0)],
+        [t.network_hit_rate || 'Hit rate', formatPercent(s.hit_rate || 0)],
+        [t.network_error_rate || 'Upstream errors', formatPercent(s.upstream_error_rate || 0)],
+        [t.network_traffic || 'Upstream traffic', formatBytes(s.upstream_bytes || 0)],
+        [t.network_degraded || 'Degraded upstreams', String(s.degraded_upstreams || 0)]
+    ];
+    return '<div class="network-summary">' + cards.map(function(card) {
+        return '<div class="network-metric"><span>' + escapeHTML(card[0]) + '</span><strong>' +
+            escapeHTML(card[1]) + '</strong></div>';
+    }).join('') + '</div>';
+}
+
+function formatPercent(value) {
+    return (value * 100).toFixed(value > 0 && value < 0.1 ? 1 : 0).replace(/\.0$/, '') + '%';
+}
+
+function renderNetworkMap(target, edges, data) {
+    var t = window.I18N;
+    if (!edges.length) {
+        target.className = 'network-map empty-state';
+        target.removeAttribute('data-focus-id');
+        target.onclick = null;
+        target.onmouseover = null;
+        target.onmouseout = null;
+        target.textContent = t.no_data || 'No data';
+        return;
+    }
+    var instances = (data.instances || []).filter(function(instance) {
+        return edges.some(function(edge) { return edge.instance === instance.name; });
+    });
+    var upstreamByID = {};
+    (data.upstreams || []).forEach(function(upstream) {
+        upstreamByID[upstream.id] = upstream;
+    });
+    var upstreams = [];
+    edges.forEach(function(edge) {
+        if (upstreamByID[edge.to] && upstreams.indexOf(upstreamByID[edge.to]) === -1) {
+            upstreams.push(upstreamByID[edge.to]);
+        }
+    });
+    var width = 980;
+    var height = Math.max(300, Math.max(instances.length, upstreams.length, 1) * 78 + 70);
+    var proxy = { x: 92, y: height / 2 };
+    var instX = 360;
+    var upX = 800;
+    var instancePos = {};
+    var upstreamPos = {};
+    instances.forEach(function(instance, idx) {
+        instancePos[instance.id] = { x: instX, y: laneY(idx, instances.length, height) };
+    });
+    upstreams.forEach(function(upstream, idx) {
+        upstreamPos[upstream.id] = { x: upX, y: laneY(idx, upstreams.length, height) };
+    });
+    var maxReq = Math.max.apply(Math, edges.map(function(edge) { return edge.requests || 1; }));
+    var edgeSVG = edges.map(function(edge) {
+        var a = instancePos[edge.from];
+        var b = upstreamPos[edge.to];
+        if (!a || !b) return '';
+        var width = 1.4 + Math.min(7, ((edge.requests || 1) / maxReq) * 7);
+        var cls = 'network-edge state-' + escapeHTML(edge.state || 'unknown') +
+            (edge.active_upstream_requests > 0 ? ' is-active' : '');
+        var title = edge.instance + ' -> ' + edge.upstream_url + (edge.last_error ? ' (' + edge.last_error + ')' : '');
+        return '<path class="' + cls + '" data-edge-from="' + escapeHTML(edge.from) +
+            '" data-edge-to="' + escapeHTML(edge.to) + '" d="M' + a.x + ',' + a.y + ' C' + (a.x + 120) + ',' + a.y +
+            ' ' + (b.x - 120) + ',' + b.y + ' ' + b.x + ',' + b.y + '" stroke-width="' +
+            width.toFixed(1) + '"><title>' + escapeHTML(title) + '</title></path>';
+    }).join('');
+    var proxyEdges = instances.map(function(instance) {
+        var p = instancePos[instance.id];
+        return '<path class="network-edge state-closed" data-edge-from="proxy:cache" data-edge-to="' +
+            escapeHTML(instance.id) + '" d="M' + proxy.x + ',' + proxy.y + ' C170,' +
+            proxy.y + ' 230,' + p.y + ' ' + p.x + ',' + p.y + '" stroke-width="2"></path>';
+    }).join('');
+    target.className = 'network-map';
+    target.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet">' +
+        proxyEdges + edgeSVG +
+        networkNode(proxy.x, proxy.y, 'proxy:cache', 'proxy', t.title || 'Cache Proxy', 'closed') +
+        instances.map(function(instance) {
+            var p = instancePos[instance.id];
+            return networkNode(p.x, p.y, instance.id, 'instance', instance.name, 'closed', instance.mode);
+        }).join('') +
+        upstreams.map(function(upstream) {
+            var p = upstreamPos[upstream.id];
+            return networkNode(p.x, p.y, upstream.id, 'upstream', upstream.host, upstream.state || 'unknown',
+                (upstream.active_upstream_requests || 0) + ' active');
+        }).join('') +
+        '</svg>';
+    wireNetworkMapFocus(target);
+    target.classList.add('is-fade-in');
+}
+
+function laneY(index, total, height) {
+    if (total <= 1) return height / 2;
+    var top = 52;
+    var bottom = height - 52;
+    return top + ((bottom - top) * index / (total - 1));
+}
+
+function networkNode(x, y, id, kind, label, state, sub) {
+    return '<g class="network-node node-' + escapeHTML(kind) + ' state-' + escapeHTML(state || 'unknown') +
+        '" data-node-id="' + escapeHTML(id) + '" transform="translate(' + x + ' ' + y + ')">' +
+        '<title>' + escapeHTML(label) + '</title>' +
+        '<circle r="22"></circle>' +
+        '<text class="node-label" x="0" y="-30" text-anchor="middle">' + escapeHTML(label) + '</text>' +
+        (sub ? '<text class="node-sub" x="0" y="40" text-anchor="middle">' + escapeHTML(sub) + '</text>' : '') +
+        '</g>';
+}
+
+function wireNetworkMapFocus(target) {
+    target.onclick = function(evt) {
+        var node = evt.target.closest && evt.target.closest('.network-node');
+        if (!node) {
+            applyNetworkFocus(target, '');
+            return;
+        }
+        var id = node.getAttribute('data-node-id') || '';
+        applyNetworkFocus(target, target.getAttribute('data-focus-id') === id ? '' : id);
+    };
+    target.onmouseover = function(evt) {
+        if (target.getAttribute('data-focus-id')) return;
+        var node = evt.target.closest && evt.target.closest('.network-node');
+        if (node) applyNetworkFocus(target, node.getAttribute('data-node-id') || '');
+    };
+    target.onmouseout = function(evt) {
+        if (target.getAttribute('data-focus-id')) return;
+        var node = evt.target.closest && evt.target.closest('.network-node');
+        if (node && (!evt.relatedTarget || !node.contains(evt.relatedTarget))) {
+            applyNetworkFocus(target, '');
+        }
+    };
+}
+
+function applyNetworkFocus(target, focusID) {
+    target.setAttribute('data-focus-id', focusID || '');
+    var edges = target.querySelectorAll('.network-edge');
+    var nodes = target.querySelectorAll('.network-node');
+    if (!focusID) {
+        target.classList.remove('has-focus');
+        edges.forEach(function(edge) {
+            edge.classList.remove('is-focused', 'is-dimmed');
+        });
+        nodes.forEach(function(node) {
+            node.classList.remove('is-focused', 'is-dimmed');
+        });
+        return;
+    }
+    target.classList.add('has-focus');
+    var connected = {};
+    connected[focusID] = true;
+    edges.forEach(function(edge) {
+        var from = edge.getAttribute('data-edge-from') || '';
+        var to = edge.getAttribute('data-edge-to') || '';
+        var hit = from === focusID || to === focusID;
+        edge.classList.toggle('is-focused', hit);
+        edge.classList.toggle('is-dimmed', !hit);
+        if (hit) {
+            connected[from] = true;
+            connected[to] = true;
+        }
+    });
+    nodes.forEach(function(node) {
+        var id = node.getAttribute('data-node-id') || '';
+        node.classList.toggle('is-focused', !!connected[id]);
+        node.classList.toggle('is-dimmed', !connected[id]);
+    });
+}
+
+function renderNetworkTable(target, edges) {
+    var t = window.I18N;
+    if (!edges.length) {
+        target.className = 'network-table-wrap empty-state';
+        target.textContent = t.no_data || 'No data';
+        return;
+    }
+    var rows = edges.slice().sort(function(a, b) {
+        return (b.active_upstream_requests || 0) - (a.active_upstream_requests || 0) ||
+            (b.requests || 0) - (a.requests || 0);
+    }).map(function(edge) {
+        var used = formatDisplayTime(edge.last_used_at);
+        var title = edge.upstream_url + (edge.last_error ? ' - ' + edge.last_error : '');
+        return '<tr title="' + escapeHTML(title) + '">' +
+            '<td title="' + escapeHTML(edge.instance) + '">' + escapeHTML(edge.instance) + '</td>' +
+            '<td title="' + escapeHTML(edge.upstream_url) + '"><span class="clip-cell">' +
+            escapeHTML(edge.upstream_host) + '</span></td>' +
+            '<td><span class="result-badge ' + resultClass(edge.state) + '">' +
+            escapeHTML(translateUpstreamState(edge.state)) + '</span></td>' +
+            '<td>' + escapeHTML(edge.last_status || '') + '</td>' +
+            '<td>' + escapeHTML(String(edge.active_upstream_requests || 0)) + '</td>' +
+            '<td>' + escapeHTML(String(edge.requests || 0)) + '</td>' +
+            '<td>' + escapeHTML(String(edge.errors || 0)) + '</td>' +
+            '<td>' + escapeHTML(formatPercent(edge.error_rate || 0)) + '</td>' +
+            '<td>' + escapeHTML(formatBytes(edge.response_bytes || 0)) + '</td>' +
+            '<td>' + escapeHTML((edge.latency_ms || 0).toFixed(0)) + 'ms</td>' +
+            '<td title="' + escapeHTML(used.exact) + '">' + escapeHTML(used.display || '') + '</td>' +
+            '</tr>';
+    });
+    target.className = 'network-table-wrap';
+    target.innerHTML = '<table class="status-table">' +
+        '<thead><tr>' +
+        '<th>' + escapeHTML(t.storage_name || 'Storage') + '</th>' +
+        '<th>' + escapeHTML(t.upstream || 'Upstream') + '</th>' +
+        '<th>' + escapeHTML(t.status || 'Status') + '</th>' +
+        '<th>' + escapeHTML(t.last_status || 'Last status') + '</th>' +
+        '<th>' + escapeHTML(t.network_active || 'Active') + '</th>' +
+        '<th>' + escapeHTML(t.requests || 'Requests') + '</th>' +
+        '<th>' + escapeHTML(t.errors || 'Errors') + '</th>' +
+        '<th>' + escapeHTML(t.network_error_rate || 'Error rate') + '</th>' +
+        '<th>' + escapeHTML(t.network_traffic || 'Traffic') + '</th>' +
+        '<th>' + escapeHTML(t.network_latency || 'Latency') + '</th>' +
+        '<th>' + escapeHTML(t.last_used || 'Last used') + '</th>' +
+        '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+    target.classList.add('is-fade-in');
+}
+
 // ── Events table ──
 
 function loadEventStatus() {
@@ -587,7 +862,8 @@ function renderEventsTable(target, events) {
 // ── Scroll preservation ──
 
 function restoreScroll(tab) {
-    var el = tab === 'disk' ? document.querySelector('.chart-card') : document.querySelector('.table-wrap');
+    var el = tab === 'disk' ? document.querySelector('.chart-card') :
+        (tab === 'network' ? document.querySelector('.network-table-wrap') : document.querySelector('.table-wrap'));
     if (el && statusState.scrollTops[tab]) {
         el.scrollTop = statusState.scrollTops[tab];
     }
@@ -638,6 +914,22 @@ function initStatusModal() {
                 return;
             }
             renderEventsTable(table, filterEvents(cached.events || []));
+        });
+    }
+    var networkFilters = document.querySelectorAll('[data-network-filter]');
+    for (var i = 0; i < networkFilters.length; i++) {
+        networkFilters[i].addEventListener('click', function() {
+            for (var j = 0; j < networkFilters.length; j++) {
+                networkFilters[j].classList.remove('is-active');
+            }
+            this.classList.add('is-active');
+            var cached = statusState.cache.network;
+            if (!cached) {
+                return;
+            }
+            var edges = filterNetworkEdges(cached.edges || [], activeNetworkFilter());
+            renderNetworkMap(document.getElementById('network-map'), edges, cached);
+            renderNetworkTable(document.getElementById('network-table'), edges);
         });
     }
 }

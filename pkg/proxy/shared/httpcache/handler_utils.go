@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
@@ -123,6 +124,18 @@ func ErrorResponse(status int, err error) *utils.ResponseWrapper {
 func responseFromHTTP(client *utils.HttpClientWrapper, response *http.Response) *utils.ResponseWrapper {
 	body := client.WrapBody(response.Body)
 	return &utils.ResponseWrapper{StatusCode: response.StatusCode, Headers: copyHeaders(response.Header), Body: utils.NewRateLimitReader(body)}
+}
+
+type closeCallbackBody struct {
+	io.ReadCloser
+	done func()
+	once sync.Once
+}
+
+func (b *closeCallbackBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.done)
+	return err
 }
 
 func copyHeaders(headers http.Header) map[string]string {

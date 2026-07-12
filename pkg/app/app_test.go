@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -541,6 +542,80 @@ func TestStatusEndpointsReturnJSON(t *testing.T) {
 		require.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
 		require.NotEmpty(t, rec.Body.String())
 	}
+}
+
+func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files", "/files", "https://mirror.example.test/repo", file.Policy{}),
+	})
+	app := openApp(t, ctx, doc)
+	defer closeApp(t, app)
+
+	upstream := "https://mirror.example.test/repo"
+	release := app.stats.BeginUpstreamRequest("files", config.ModeFile, upstream)
+	defer release()
+	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "HIT", http.StatusOK, 2048)
+	app.stats.RecordUpstreamRequest("files", config.ModeFile, upstream, http.MethodGet, http.StatusBadGateway, 25*time.Millisecond, 1024)
+	app.stats.SetUpstreamHealth("files", config.ModeFile, upstream, 2, 0.75, 0.5, 0.025)
+
+	req := httptest.NewRequest(http.MethodGet, "/-/status/network", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload networkStatus
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	require.Equal(t, uint64(1), payload.Summary.Requests)
+	require.Equal(t, uint64(1), payload.Summary.UpstreamRequests)
+	require.Equal(t, uint64(1), payload.Summary.UpstreamErrors)
+	require.Equal(t, int64(1), payload.Summary.ActiveUpstreamRequests)
+	require.Equal(t, 1.0, payload.Summary.HitRate)
+	require.Len(t, payload.Instances, 1)
+	require.Equal(t, "/files", payload.Instances[0].Route)
+	require.Equal(t, int64(1), payload.Instances[0].ActiveUpstreamRequests)
+	require.Len(t, payload.Upstreams, 1)
+	require.Equal(t, "mirror.example.test", payload.Upstreams[0].Host)
+	require.Equal(t, "open", payload.Upstreams[0].State)
+	require.Equal(t, int64(1), payload.Upstreams[0].ActiveUpstreamRequests)
+	require.Len(t, payload.Edges, 1)
+	require.Equal(t, "files", payload.Edges[0].Instance)
+	require.Equal(t, upstream, payload.Edges[0].UpstreamURL)
+	require.Equal(t, "502", payload.Edges[0].LastStatus)
+	require.Equal(t, "502", payload.Edges[0].LastError)
+	require.Equal(t, float64(25), payload.Edges[0].LatencyMS)
+}
+
+func TestStatusNetworkEndpointCountsSharedDegradedHostOnce(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	upstream := "https://mirror.example.test/repo"
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files-a", "/files-a", upstream, file.Policy{}),
+		fileInstance(t, "files-b", "/files-b", upstream, file.Policy{}),
+	})
+	app := openApp(t, ctx, doc)
+	defer closeApp(t, app)
+
+	for _, name := range []string{"files-a", "files-b"} {
+		app.stats.RecordUpstreamRequest(name, config.ModeFile, upstream, http.MethodGet, http.StatusBadGateway, 0, 0)
+		app.stats.SetUpstreamHealth(name, config.ModeFile, upstream, 2, 0, 1, 0)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/-/status/network", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload networkStatus
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	require.Equal(t, 1, payload.Summary.DegradedUpstreams)
+	require.Len(t, payload.Upstreams, 1)
+	require.Equal(t, "mirror.example.test", payload.Upstreams[0].Host)
+	require.Len(t, payload.Edges, 2)
 }
 
 func TestStatusEventsEndpointClampsLimit(t *testing.T) {
