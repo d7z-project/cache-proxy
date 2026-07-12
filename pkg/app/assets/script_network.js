@@ -4,6 +4,14 @@ function formatPercent(value) {
     return (value * 100).toFixed(value > 0 && value < 0.1 ? 1 : 0).replace(/\.0$/, '') + '%';
 }
 
+function formatErrorPercent(value) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) {
+        n = 0;
+    }
+    return (n * 100).toFixed(3) + '%';
+}
+
 function renderNetworkMap(target, edges, data) {
     var t = window.I18N;
     if (!edges.length) {
@@ -370,9 +378,6 @@ function edgeMetricsText(edge) {
         parts.push(String(edge.active_upstream_requests) + ' ' + (window.I18N.network_active_short || 'active'));
     }
     parts.push(String(edge.requests || 0) + ' ' + (window.I18N.requests_short || 'req'));
-    if ((edge.errors || 0) > 0) {
-        parts.push(String(edge.errors) + ' ' + (window.I18N.errors || 'Errors'));
-    }
     if (edge.last_status) {
         parts.push(edge.last_status);
     }
@@ -388,7 +393,7 @@ function edgeTitle(edge) {
         '\n' + (window.I18N.status || 'Status') + ': ' + translateUpstreamState(edge.state) +
         '\n' + (window.I18N.requests || 'Requests') + ': ' + String(edge.requests || 0) +
         '\n' + (window.I18N.errors || 'Errors') + ': ' + String(edge.errors || 0) +
-        '\n' + (window.I18N.network_error_rate || 'Error rate') + ': ' + formatPercent(edge.error_rate || 0) +
+        '\n' + (window.I18N.network_error_rate || 'Error rate') + ': ' + formatErrorPercent(edge.error_rate || 0) +
         '\n' + (window.I18N.network_traffic || 'Traffic') + ': ' + formatBytes(edge.response_bytes || 0) +
         (edge.last_status ? '\n' + (window.I18N.last_status || 'Last status') + ': ' + edge.last_status : '') +
         (used.display ? '\n' + (window.I18N.last_used || 'Last used') + ': ' + used.display : '') +
@@ -425,10 +430,12 @@ function networkUpstreamNodeSubtitle(upstream) {
     if (active > 0) {
         return String(active) + ' ' + (window.I18N.network_active_short || 'active');
     }
+    if (networkStateIsDegraded(upstream.state)) {
+        return translateUpstreamState(upstream.state || 'unknown') + ' · ' + formatErrorPercent(upstream.error_rate || 0);
+    }
     var requests = upstream.requests || 0;
     if (requests > 0) {
-        return String(requests) + ' ' + (window.I18N.requests_short || 'req') + ' · ' +
-            formatPercent(upstream.error_rate || 0);
+        return String(requests) + ' ' + (window.I18N.requests_short || 'req');
     }
     if (upstream.latency_ms > 0) {
         return Math.round(upstream.latency_ms) + 'ms';
@@ -553,9 +560,9 @@ function renderNetworkTable(target, edges) {
     var firstRender = !target._networkList;
     var listState = ensureNetworkList(target);
     var rows = edges.slice().sort(function(a, b) {
-        return networkListIssueScore(b) - networkListIssueScore(a) ||
+        return networkListSortScore(b) - networkListSortScore(a) ||
             networkNumberValue(b.active_upstream_requests) - networkNumberValue(a.active_upstream_requests) ||
-            networkNumberValue(b.errors) - networkNumberValue(a.errors) ||
+            networkNumberValue(b.response_bytes) - networkNumberValue(a.response_bytes) ||
             networkNumberValue(b.requests) - networkNumberValue(a.requests) ||
             String(a.upstream_host || a.upstream_url || '').localeCompare(String(b.upstream_host || b.upstream_url || ''));
     });
@@ -641,7 +648,8 @@ function updateNetworkListItem(item, edge) {
     var fields = item._networkFields;
     var host = edge.upstream_host || edge.upstream_url || '-';
     item.title = edgeTitle(edge).replace(/\n/g, ' · ');
-    item.classList.toggle('is-alert', networkListIssueScore(edge) > 0);
+    item.classList.toggle('is-alert', networkEdgeHealthLevel(edge) === 'alert');
+    item.classList.toggle('is-notice', networkEdgeHealthLevel(edge) === 'notice');
     fields.title.textContent = host;
     fields.badge.className = 'result-badge ' + resultClass(edge.state);
     fields.badge.textContent = translateUpstreamState(edge.state);
@@ -655,50 +663,89 @@ function updateNetworkListItem(item, edge) {
         formatBytes(edge.response_bytes || 0);
     fields.metrics[3].textContent = (window.I18N.network_latency || 'Latency') + ' ' +
         networkNumberValue(edge.latency_ms).toFixed(0) + 'ms';
-    var issue = networkListIssueText(edge);
-    fields.issue.textContent = issue;
-    fields.issue.hidden = !issue;
+    var status = networkEdgeStatusText(edge);
+    fields.issue.textContent = status;
+    fields.issue.hidden = !status;
 }
 
-function networkListIssueScore(edge) {
+function networkListSortScore(edge) {
     if (!edge) {
         return 0;
     }
-    var score = networkNumberValue(edge.errors) * 100 + networkNumberValue(edge.error_rate) * 1000;
-    if (String(edge.last_error || '').trim()) {
-        score += 10000;
-    }
-    if (edge.state === 'open' || edge.state === 'degraded') {
-        score += 8000;
-    } else if (edge.state === 'halfopen') {
-        score += 4000;
-    }
-    if (networkStatusIsIssue(edge.last_status)) {
-        score += 2000;
+    var score = networkNumberValue(edge.active_upstream_requests) * 1000 +
+        Math.min(800, networkNumberValue(edge.response_bytes) / 1048576);
+    if (networkEdgeHealthLevel(edge) === 'alert') {
+        score += 100000;
+    } else if (networkEdgeHealthLevel(edge) === 'notice') {
+        score += 100;
     }
     return score;
 }
 
-function networkListIssueText(edge) {
-    var lastError = String(edge.last_error || '').trim();
-    if (lastError) {
-        return lastError;
+function networkEdgeHealthLevel(edge) {
+    if (!edge) {
+        return 'normal';
     }
-    var errors = networkNumberValue(edge.errors);
-    if (errors > 0) {
-        return formatNetworkCompactNumber(errors) + ' ' + (window.I18N.errors || 'Errors') + ' · ' +
-            formatPercent(edge.error_rate || 0);
+    if (networkEdgeIsDegraded(edge)) {
+        return 'alert';
     }
-    if (networkStatusIsIssue(edge.last_status)) {
-        return 'HTTP ' + String(edge.last_status);
+    if (networkEdgeHasRecentNotice(edge)) {
+        return 'notice';
     }
-    if (edge.state && edge.state !== 'closed' && edge.state !== 'unknown') {
-        return translateUpstreamState(edge.state);
+    return 'normal';
+}
+
+function networkEdgeIsDegraded(edge) {
+    return !!edge && networkStateIsDegraded(edge.state);
+}
+
+function networkStateIsDegraded(state) {
+    return state === 'open' || state === 'degraded' || state === 'halfopen';
+}
+
+function networkEdgeHasRecentNotice(edge) {
+    if (!edge || networkEdgeIsDegraded(edge)) {
+        return false;
     }
-    if (networkNumberValue(edge.error_rate) > 0) {
-        return (window.I18N.network_error_rate || 'Error rate') + ' ' + formatPercent(edge.error_rate);
+    if (String(edge.last_error || '').trim()) {
+        return true;
     }
-    return '';
+    return networkStatusIsIssue(edge.last_status);
+}
+
+function networkEdgeStatusText(edge) {
+    if (!edge) {
+        return '';
+    }
+    if (networkEdgeIsDegraded(edge)) {
+        var alertError = String(edge.last_error || '').trim();
+        if (alertError) {
+            return alertError;
+        }
+        if (edge.state && edge.state !== 'closed' && edge.state !== 'unknown') {
+            return translateUpstreamState(edge.state);
+        }
+        return '';
+    }
+    if (networkEdgeHasRecentNotice(edge)) {
+        var noticeError = String(edge.last_error || '').trim();
+        if (noticeError) {
+            return (window.I18N.network_recent_error || 'Recent error') + ': ' + noticeError;
+        }
+        if (networkStatusIsIssue(edge.last_status)) {
+            return (window.I18N.network_recent_error || 'Recent error') + ': HTTP ' + String(edge.last_status);
+        }
+    }
+    return networkEdgeHistoryText(edge);
+}
+
+function networkEdgeHistoryText(edge) {
+    var errors = networkNumberValue(edge && edge.errors);
+    if (errors <= 0) {
+        return '';
+    }
+    return (window.I18N.network_history_errors || 'Historical errors') + ' ' +
+        formatNetworkCompactNumber(errors) + ' · ' + formatErrorPercent(edge.error_rate || 0);
 }
 
 function networkStatusIsIssue(status) {

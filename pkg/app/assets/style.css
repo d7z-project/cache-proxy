@@ -1176,6 +1176,12 @@ body.network-stage-open .is-fade-in{
 .network-stage-trend-card.result-err{
   border-color:color-mix(in srgb, var(--dot-degraded) 44%, var(--border-light));
 }
+.network-stage-status-card.is-warn,
+.network-stage-card.is-warn,
+.network-stage-focus-card.is-warn,
+.network-stage-trend-card.is-warn{
+  border-color:color-mix(in srgb, var(--result-warn-text) 38%, var(--border-light));
+}
 .network-stage-status-card.is-ok strong,
 .network-stage-card.is-ok strong,
 .network-stage-focus-card.is-ok strong,
@@ -1435,6 +1441,12 @@ body.network-stage-open .network-node .node-sub{
     linear-gradient(90deg, color-mix(in srgb, var(--dot-degraded) 9%, transparent), transparent 54%),
     var(--card-bg);
 }
+.network-link-item.is-notice{
+  border-color:color-mix(in srgb, var(--result-warn-text) 34%, var(--border-light));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--result-warn-text) 7%, transparent), transparent 48%),
+    var(--card-bg);
+}
 .network-link-head{
   min-width:0;
   max-width:100%;
@@ -1463,7 +1475,13 @@ body.network-stage-open .network-node .node-sub{
   white-space:nowrap;
 }
 .network-link-issue{
+  color:var(--text-muted);
+}
+.network-link-item.is-alert .network-link-issue{
   color:var(--dot-degraded);
+}
+.network-link-item.is-notice .network-link-issue{
+  color:var(--result-warn-text);
 }
 .network-link-metrics{
   min-width:0;

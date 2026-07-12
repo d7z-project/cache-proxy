@@ -300,8 +300,8 @@ function renderNetworkStageMetrics(network, disk) {
         {
             label: t.network_traffic || 'Traffic',
             value: formatBytes(summary.upstream_bytes || 0),
-            sub: (t.network_error_rate || 'Error rate') + ' ' + formatPercent(summary.upstream_error_rate || 0),
-            level: (summary.upstream_error_rate || 0) > 0 ? 'is-alert' : 'is-live'
+            sub: (t.network_error_rate || 'Error rate') + ' ' + formatErrorPercent(summary.upstream_error_rate || 0),
+            level: (summary.upstream_bytes || 0) > 0 ? 'is-live' : 'is-muted'
         },
         {
             label: t.disk_usage || 'Disk',
@@ -322,10 +322,15 @@ function renderNetworkStageFocus(network, events) {
     );
     var busiestEdge = topBy(edges, function(edge) { return edge.response_bytes || 0; }) || {};
     var busiestInstance = topBy(instances, function(item) { return item.requests || 0; }) || {};
-    var errorEdge = topBy(edges.filter(networkEdgeHasIssue), networkEdgeIssueScore) || {};
+    var alertEdge = topBy(edges.filter(networkEdgeIsDegraded), networkEdgeAttentionScore) || {};
+    var noticeEdge = topBy(edges.filter(networkEdgeHasRecentNotice), networkEdgeAttentionScore) || {};
+    var historyEdge = topBy(edges.filter(function(edge) {
+        return !networkEdgeIsDegraded(edge) && !networkEdgeHasRecentNotice(edge) && numberValue(edge.errors) > 0;
+    }), function(edge) { return numberValue(edge.errors); }) || {};
+    var focusEdge = alertEdge.upstream_url ? alertEdge : noticeEdge;
     var degradedList = degradedUpstreamList(network.upstreams || []);
     var latestEvent = latestStageEvent(events);
-    var noError = !networkEdgeHasIssue(errorEdge);
+    var focusCard = networkStageFocusCard(focusEdge, historyEdge);
     var hasDegraded = degradedList.count > 0;
     renderStageCards(document.getElementById('network-stage-focus'), [
         {
@@ -348,10 +353,9 @@ function renderNetworkStageFocus(network, events) {
         },
         {
             label: t.stage_error_focus || 'Error focus',
-            value: noError ? (t.store_healthy || 'Healthy') :
-                (errorEdge.upstream_host || errorEdge.upstream_url || errorEdge.instance || '-'),
-            sub: noError ? '0 ' + (t.errors || 'Errors') : networkEdgeIssueDetail(errorEdge),
-            level: noError ? 'is-ok' : 'is-alert'
+            value: focusCard.value,
+            sub: focusCard.sub,
+            level: focusCard.level
         },
         {
             label: t.stage_degraded_list || 'Degraded upstreams',
@@ -393,9 +397,10 @@ function renderNetworkStageTrends(network, disk, events) {
         },
         {
             label: t.stage_error_rate_delta || 'Error rate',
-            value: formatRate(summary.upstream_errors, previousSummary.upstream_errors, seconds),
+            value: hasPreviousNetwork ? formatRate(summary.upstream_errors, previousSummary.upstream_errors, seconds) : '0/s',
             sub: t.errors || 'Errors',
-            level: (summary.upstream_errors || 0) > (previousSummary.upstream_errors || 0) ? 'is-alert' : 'is-ok'
+            level: hasPreviousNetwork && (summary.upstream_errors || 0) > (previousSummary.upstream_errors || 0) ?
+                'is-warn' : 'is-ok'
         },
         {
             label: t.stage_disk_delta || 'Disk delta',
@@ -484,14 +489,14 @@ function chooseNetworkStageHotspots() {
         var key = edge.id || edge.upstream_url || '';
         var previous = previousEdges[key] || {};
         var deltaBytes = Math.max(0, numberValue(edge.response_bytes) - numberValue(previous.response_bytes));
-        var score = deltaBytes / 1048576 + numberValue(edge.active_upstream_requests) * 10 + numberValue(edge.errors);
+        var score = networkEdgeAttentionScore(edge) + deltaBytes / 1048576;
         var level = 'is-info';
-        if (networkEdgeHasIssue(edge)) {
-            score += 10000;
+        if (networkEdgeIsDegraded(edge)) {
             level = 'is-alert';
         } else if ((edge.active_upstream_requests || 0) > 0) {
-            score += 2000;
             level = 'is-live';
+        } else if (networkEdgeHasRecentNotice(edge)) {
+            level = 'is-warn';
         }
         return {
             score: score,
@@ -551,55 +556,42 @@ function degradedUpstreamList(upstreams) {
     };
 }
 
-function networkEdgeHasIssue(edge) {
-    return networkEdgeIssueScore(edge) > 0;
-}
-
-function networkEdgeIssueScore(edge) {
+function networkEdgeAttentionScore(edge) {
     if (!edge) {
         return 0;
     }
-    var score = numberValue(edge.errors) * 100 + numberValue(edge.error_rate) * 1000;
-    if (String(edge.last_error || '').trim()) {
-        score += 10000;
-    }
-    if (edge.state === 'open' || edge.state === 'degraded') {
-        score += 8000;
-    } else if (edge.state === 'halfopen') {
-        score += 4000;
-    }
-    if (httpStatusIsIssue(edge.last_status)) {
-        score += 2000;
+    var score = numberValue(edge.active_upstream_requests) * 1000 +
+        Math.min(800, numberValue(edge.response_bytes) / 1048576);
+    if (networkEdgeIsDegraded(edge)) {
+        score += 100000;
+    } else if (networkEdgeHasRecentNotice(edge)) {
+        score += 100;
     }
     return score;
 }
 
-function networkEdgeIssueDetail(edge) {
-    if (!edge) {
-        return '';
+function networkStageFocusCard(focusEdge, historyEdge) {
+    var t = window.I18N;
+    if (focusEdge && focusEdge.upstream_url) {
+        var level = networkEdgeIsDegraded(focusEdge) ? 'is-alert' : 'is-warn';
+        return {
+            value: focusEdge.upstream_host || focusEdge.upstream_url || focusEdge.instance || '-',
+            sub: networkEdgeStatusText(focusEdge),
+            level: level
+        };
     }
-    var lastError = String(edge.last_error || '').trim();
-    if (lastError) {
-        return lastError;
+    if (historyEdge && historyEdge.upstream_url) {
+        return {
+            value: t.store_healthy || 'Healthy',
+            sub: networkEdgeHistoryText(historyEdge),
+            level: 'is-ok'
+        };
     }
-    if (numberValue(edge.errors) > 0) {
-        return formatCompactNumber(edge.errors) + ' ' + (window.I18N.errors || 'Errors');
-    }
-    if (httpStatusIsIssue(edge.last_status)) {
-        return 'HTTP ' + String(edge.last_status);
-    }
-    if (edge.state && edge.state !== 'closed' && edge.state !== 'unknown') {
-        return translateUpstreamState(edge.state);
-    }
-    if (numberValue(edge.error_rate) > 0) {
-        return (window.I18N.network_error_rate || 'Error rate') + ' ' + formatPercent(edge.error_rate);
-    }
-    return '0 ' + (window.I18N.errors || 'Errors');
-}
-
-function httpStatusIsIssue(status) {
-    var code = numberValue(status);
-    return code >= 500 || (code >= 400 && code !== 404);
+    return {
+        value: t.store_healthy || 'Healthy',
+        sub: '0 ' + (t.errors || 'Errors'),
+        level: 'is-ok'
+    };
 }
 
 function latestStageEvent(events) {
