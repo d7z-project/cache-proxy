@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/home.html assets/style.css assets/script_core.js assets/script_status.js assets/zh.json assets/en.json
+//go:embed assets/home.html assets/style.css assets/script_core.js assets/script_network.js assets/script_status.js assets/zh.json assets/en.json
 var homeAssets embed.FS
 
 var homeTemplate *template.Template
@@ -48,11 +48,17 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	jsNetworkData, err := homeAssets.ReadFile("assets/script_network.js")
+	if err != nil {
+		panic(err)
+	}
 	jsStatusData, err := homeAssets.ReadFile("assets/script_status.js")
 	if err != nil {
 		panic(err)
 	}
 	jsData := append(append([]byte{}, jsCoreData...), '\n')
+	jsData = append(jsData, jsNetworkData...)
+	jsData = append(jsData, '\n')
 	jsData = append(jsData, jsStatusData...)
 
 	homeTemplate = template.Must(template.New("home").Funcs(template.FuncMap{

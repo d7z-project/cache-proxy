@@ -6,6 +6,9 @@ import (
 )
 
 func WaitGroupContext(ctx context.Context, wg *sync.WaitGroup) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()

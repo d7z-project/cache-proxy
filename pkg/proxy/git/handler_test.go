@@ -342,6 +342,13 @@ func TestDoubleStartIdempotent(t *testing.T) {
 	h.mu.RUnlock()
 }
 
+func TestStartStopAllowsNilContext(t *testing.T) {
+	source := createTestSourceRepo(t)
+	h := newTestHandler(t, "file://"+source)
+	require.NoError(t, h.Start(nil))
+	require.NoError(t, h.Stop(nil))
+}
+
 func TestEmptyUpstreamRepo(t *testing.T) {
 	emptyDir := t.TempDir()
 	_, err := git.PlainInit(emptyDir, true)
@@ -550,8 +557,9 @@ func TestBillyAdapterSymlinkNotSupported(t *testing.T) {
 func TestBillyAdapterLstatFile(t *testing.T) {
 	afs := afero.NewMemMapFs()
 	bfs := newBillyAdapter(afs, "/root")
-	f, _ := bfs.Create("lstat_test.txt")
-	f.Close()
+	f, err := bfs.Create("lstat_test.txt")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 
 	info, err := bfs.Lstat("lstat_test.txt")
 	require.NoError(t, err)

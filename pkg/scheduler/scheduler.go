@@ -265,6 +265,9 @@ func (s *Scheduler) Snapshot() []TaskInfo {
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.startMu.Lock()
 	if s.started {
 		s.startMu.Unlock()
@@ -284,6 +287,9 @@ func (s *Scheduler) SetRunObserver(fn func(TaskRun)) {
 }
 
 func (s *Scheduler) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}

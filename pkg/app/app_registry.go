@@ -29,9 +29,16 @@ func saveRegistry(ctx context.Context, store *blobfs.Store, doc *config.Document
 		Instances: names,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	_ = store.MkdirAll(registryTenant+"/", 0o755)
-	data, _ := json.Marshal(manifest)
-	_, err := store.Put(ctx, registryTenant, "manifest.json", bytes.NewReader(data), nil)
+	if err := store.MkdirAll(registryTenant+"/", 0o755); err != nil {
+		slog.Warn("failed to prepare registry tenant", "err", err)
+		return
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		slog.Warn("failed to encode registry manifest", "err", err)
+		return
+	}
+	_, err = store.Put(ctx, registryTenant, "manifest.json", bytes.NewReader(data), nil)
 	if err != nil {
 		slog.Warn("failed to save registry manifest", "err", err)
 	}

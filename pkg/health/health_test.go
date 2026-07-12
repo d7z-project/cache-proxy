@@ -48,6 +48,12 @@ func TestNewServiceHealth(t *testing.T) {
 	require.Len(t, h.upstreams, 2)
 }
 
+func TestServiceHealthStartStopAllowsNilContext(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	h.Start(nil)
+	require.NoError(t, h.Stop(nil))
+}
+
 func TestApplyConfigPatchKeepsDefaults(t *testing.T) {
 	enabled := false
 	tripRate := 0.42
@@ -796,6 +802,11 @@ func TestProbeNotFoundIsNotUpstreamFailure(t *testing.T) {
 	h.probeOne(h.upstreams[server.URL])
 
 	require.Empty(t, h.upstreams[server.URL].lastProbeErr)
+}
+
+func TestProbeSchedulerStopAllowsNilContext(t *testing.T) {
+	s := NewProbeScheduler(nil)
+	require.NoError(t, s.Stop(nil))
 }
 
 func TestProbeHeadMethodNotAllowedFallsBackToRangeGet(t *testing.T) {

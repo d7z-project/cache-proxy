@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"path"
 	"sync"
@@ -376,9 +377,11 @@ func (s *appStatus) persist() {
 	if err := s.blobStore.MkdirAll(path.Join(statusTenant, path.Dir(statusStatePath)), 0o755); err != nil {
 		return
 	}
-	_, _ = s.blobStore.Put(ctx, statusTenant, statusStatePath, bytes.NewReader(data), map[string]string{
+	if _, err := s.blobStore.Put(ctx, statusTenant, statusStatePath, bytes.NewReader(data), map[string]string{
 		"content-type": "application/json",
-	})
+	}); err != nil {
+		slog.Warn("failed to persist app status", "err", err)
+	}
 }
 
 func (s *appStatus) restore() {

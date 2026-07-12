@@ -124,6 +124,9 @@ func (s *ProbeScheduler) Stop(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.cancel()
 	done := make(chan struct{})
 	go func() {

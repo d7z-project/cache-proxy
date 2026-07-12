@@ -67,6 +67,12 @@ func TestTaskKey(t *testing.T) {
 	require.Equal(t, "sub/path", key.RootID())
 }
 
+func TestSchedulerStartStopAllowsNilContext(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched.Start(nil)
+	require.NoError(t, sched.Stop(nil))
+}
+
 func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())

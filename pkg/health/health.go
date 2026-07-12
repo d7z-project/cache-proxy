@@ -108,6 +108,9 @@ func (h *ServiceHealth) Start(parent context.Context) {
 	if !h.config.Enabled {
 		return
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
 	h.lifecycleMu.Lock()
 	if h.running {
 		h.lifecycleMu.Unlock()
@@ -125,6 +128,9 @@ func (h *ServiceHealth) Start(parent context.Context) {
 }
 
 func (h *ServiceHealth) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	h.lifecycleMu.Lock()
 	cancel := h.cancel
 	if h.running {

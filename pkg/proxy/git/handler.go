@@ -69,6 +69,9 @@ func newGitHandler(cfg gitConfig) *gitHandler {
 }
 
 func (h *gitHandler) Start(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	h.mu.Lock()
 	if h.syncerCancel != nil {
 		h.mu.Unlock()
@@ -87,6 +90,9 @@ func (h *gitHandler) Start(ctx context.Context) error {
 }
 
 func (h *gitHandler) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	h.mu.Lock()
 	cancel := h.syncerCancel
 	done := h.syncerDone
