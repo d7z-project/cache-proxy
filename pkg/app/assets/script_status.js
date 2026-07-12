@@ -517,6 +517,8 @@ function loadNetworkStatus() {
         restoreScroll('network');
     }, function() {
         note.textContent = t.status_load_failed || 'Failed to load status';
+        map.className = 'network-map empty-state';
+        table.className = 'network-table-wrap empty-state';
         map.textContent = t.status_load_failed || 'Failed to load status';
         table.textContent = t.status_load_failed || 'Failed to load status';
     });
@@ -586,11 +588,11 @@ function renderNetworkMap(target, edges, data) {
             upstreams.push(upstreamByID[edge.to]);
         }
     });
-    var width = 980;
-    var height = Math.max(300, Math.max(instances.length, upstreams.length, 1) * 78 + 70);
-    var proxy = { x: 92, y: height / 2 };
-    var instX = 360;
-    var upX = 800;
+    var width = Math.max(820, target.clientWidth ? target.clientWidth - 28 : 0);
+    var height = Math.max(260, Math.max(instances.length, upstreams.length, 1) * 76 + 64);
+    var proxy = { x: 86, y: height / 2 };
+    var instX = Math.round(width * 0.38);
+    var upX = width - 140;
     var instancePos = {};
     var upstreamPos = {};
     instances.forEach(function(instance, idx) {
@@ -630,11 +632,27 @@ function renderNetworkMap(target, edges, data) {
         upstreams.map(function(upstream) {
             var p = upstreamPos[upstream.id];
             return networkNode(p.x, p.y, upstream.id, 'upstream', upstream.host, upstream.state || 'unknown',
-                (upstream.active_upstream_requests || 0) + ' active');
+                networkUpstreamNodeSubtitle(upstream));
         }).join('') +
         '</svg>';
     wireNetworkMapFocus(target);
     target.classList.add('is-fade-in');
+}
+
+function networkUpstreamNodeSubtitle(upstream) {
+    var t = window.I18N;
+    var active = upstream.active_upstream_requests || 0;
+    if (active > 0) {
+        return String(active) + ' ' + (t.network_active_short || 'active');
+    }
+    var requests = upstream.requests || 0;
+    if (requests > 0) {
+        return String(requests) + ' ' + (t.requests_short || 'req');
+    }
+    if (upstream.latency_ms > 0) {
+        return Math.round(upstream.latency_ms) + 'ms';
+    }
+    return translateUpstreamState(upstream.state || 'unknown');
 }
 
 function laneY(index, total, height) {
@@ -645,13 +663,20 @@ function laneY(index, total, height) {
 }
 
 function networkNode(x, y, id, kind, label, state, sub) {
+    var displayLabel = compactNetworkLabel(label);
     return '<g class="network-node node-' + escapeHTML(kind) + ' state-' + escapeHTML(state || 'unknown') +
         '" data-node-id="' + escapeHTML(id) + '" transform="translate(' + x + ' ' + y + ')">' +
         '<title>' + escapeHTML(label) + '</title>' +
         '<circle r="22"></circle>' +
-        '<text class="node-label" x="0" y="-30" text-anchor="middle">' + escapeHTML(label) + '</text>' +
+        '<text class="node-label" x="0" y="-30" text-anchor="middle">' + escapeHTML(displayLabel) + '</text>' +
         (sub ? '<text class="node-sub" x="0" y="40" text-anchor="middle">' + escapeHTML(sub) + '</text>' : '') +
         '</g>';
+}
+
+function compactNetworkLabel(label) {
+    label = String(label || '');
+    if (label.length <= 28) return label;
+    return label.slice(0, 13) + '...' + label.slice(-12);
 }
 
 function wireNetworkMapFocus(target) {
