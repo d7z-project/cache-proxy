@@ -55,13 +55,14 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 	class := current.Class
 	profile := r.profileFor(class)
 	route := httpcache.Route{
-		ObjectPath:        r.handler.generationContentPath(current.RootID, current.Generation, class, cleanPath),
-		UpstreamPath:      cleanPath,
-		Policy:            profile.Policy,
-		FreshFor:          profile.FreshFor,
-		BusyPolicy:        profile.BusyPolicy,
-		ExpireAfter:       profile.ExpireAfter,
-		PreferredUpstream: current.PreferredUpstream,
+		ObjectPath:             r.handler.generationContentPath(current.RootID, current.Generation, class, cleanPath),
+		UpstreamPath:           cleanPath,
+		Policy:                 profile.Policy,
+		FreshFor:               profile.FreshFor,
+		BusyPolicy:             profile.BusyPolicy,
+		ExpireAfter:            profile.ExpireAfter,
+		PreferredUpstream:      current.PreferredUpstream,
+		ArtifactMirrorFallback: class == ResourceArtifact,
 	}
 	return route, nil
 }

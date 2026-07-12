@@ -10,10 +10,19 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 var ErrUpstreamUnavailable = errors.New("upstream unavailable")
+
+const responseSourceUpstreamHeader = "source-upstream"
+
+type upstreamCandidate struct {
+	URL       string
+	Weight    float64
+	Preferred bool
+}
 
 func RewriteNPMTarballs(value any, upstreams []string, publicBase string) bool {
 	changed := false
@@ -92,7 +101,7 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 	}
 
 	pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
-	upstreams := h.buildUpstreamList(options.PreferredUpstream)
+	upstreams := h.buildUpstreamList(options)
 
 	var lastErr error
 	for i, candidate := range upstreams {
@@ -165,6 +174,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
 	result := responseFromHTTP(h.client, response)
+	result.Headers[responseSourceUpstreamHeader] = statsUpstream
 	result.Body = &closeCallbackBody{ReadCloser: result.Body, done: release}
 	return result, nil, false
 }
@@ -187,33 +197,29 @@ func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error 
 	return fmt.Errorf("target url host %q is not allowed", parsed.Host)
 }
 
-func (h *Handler) buildUpstreamList(preferred string) []struct {
-	URL    string
-	Weight float64
-} {
-	var upstreams []struct {
-		URL    string
-		Weight float64
-	}
+func (h *Handler) buildUpstreamList(options remoteOptions) []upstreamCandidate {
+	var upstreams []upstreamCandidate
 	if h.health != nil {
 		weighted := h.health.WeightedUpstreams(h.config.Upstreams)
 		for _, wu := range weighted {
-			upstreams = append(upstreams, struct {
-				URL    string
-				Weight float64
-			}{wu.URL, wu.Weight})
+			upstreams = append(upstreams, upstreamCandidate{
+				URL:       wu.URL,
+				Weight:    wu.Weight,
+				Preferred: wu.URL == options.PreferredUpstream,
+			})
 		}
 	} else {
 		for _, url := range h.config.Upstreams {
-			upstreams = append(upstreams, struct {
-				URL    string
-				Weight float64
-			}{url, 1.0})
+			upstreams = append(upstreams, upstreamCandidate{
+				URL:       url,
+				Weight:    1.0,
+				Preferred: url == options.PreferredUpstream,
+			})
 		}
 	}
-	if preferred != "" {
+	if h.shouldPromotePreferred(options) {
 		for i := range upstreams {
-			if upstreams[i].URL == preferred {
+			if upstreams[i].URL == options.PreferredUpstream {
 				if upstreams[i].Weight <= 0 {
 					break
 				}
@@ -227,10 +233,25 @@ func (h *Handler) buildUpstreamList(preferred string) []struct {
 	return upstreams
 }
 
-func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery string, candidate struct {
-	URL    string
-	Weight float64
-}, idx, total int, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
+func (h *Handler) shouldPromotePreferred(options remoteOptions) bool {
+	if options.PreferredUpstream == "" {
+		return false
+	}
+	if !options.ArtifactMirrorFallback || h.health == nil {
+		return true
+	}
+	state, ok := h.health.UpstreamState(options.PreferredUpstream)
+	return !ok || state == health.SClosed
+}
+
+func (h *Handler) tryUpstream(
+	ctx context.Context,
+	method, pathPart, rawQuery string,
+	candidate upstreamCandidate,
+	idx, total int,
+	options remoteOptions,
+	headers map[string]string,
+) (*utils.ResponseWrapper, error) {
 	targetURL := strings.TrimRight(candidate.URL, "/") + "/" + EscapePath(pathPart)
 	if rawQuery != "" {
 		targetURL += "?" + rawQuery
@@ -280,7 +301,7 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 	}
-	if options.AcceptErrors && shouldFailoverUpstreamStatus(response.StatusCode) {
+	if options.AcceptErrors && shouldFailoverCandidateStatus(response.StatusCode, candidate, options) {
 		_ = response.Body.Close()
 		release()
 		err = fmt.Errorf("%w: upstream %s returned retryable status %d", ErrUpstreamUnavailable, method, response.StatusCode)
@@ -300,8 +321,20 @@ func (h *Handler) tryUpstream(ctx context.Context, method, pathPart, rawQuery st
 		return nil, err
 	}
 	result := responseFromHTTP(h.client, response)
+	result.Headers[responseSourceUpstreamHeader] = candidate.URL
 	result.Body = &closeCallbackBody{ReadCloser: result.Body, done: release}
 	return result, nil
+}
+
+func shouldFailoverCandidateStatus(
+	status int,
+	candidate upstreamCandidate,
+	options remoteOptions,
+) bool {
+	if shouldFailoverUpstreamStatus(status) {
+		return true
+	}
+	return options.ArtifactMirrorFallback && !candidate.Preferred && status == http.StatusNotFound
 }
 
 func responseContentLength(response *http.Response) uint64 {

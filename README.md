@@ -56,8 +56,8 @@ Top-level fields:
 | `storage.cleanup.dry_run` | bool | `false` | Run scheduled cleanup without deleting files |
 | `storage.cleanup.batch_size` | int | `500` | Maximum deletions per cleanup batch |
 | `storage.orphan_policy` | string | — | Home page orphan cleanup policy (`auto`) |
-| `storage.download.max_active` | int | `64` | Global concurrent cache-fill downloads |
-| `storage.download.max_active_per_instance` | int | `8` | Concurrent cache-fill downloads per instance |
+| `storage.download.max_active` | int | `256` | Global concurrent cache-fill downloads |
+| `storage.download.max_active_per_instance` | int | `64` | Concurrent cache-fill downloads per instance |
 
 Value types:
 

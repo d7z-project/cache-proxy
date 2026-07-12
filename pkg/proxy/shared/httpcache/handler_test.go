@@ -50,6 +50,7 @@ func TestStripInternal(t *testing.T) {
 		"indexed-digest-algorithm":  "sha256",
 		"indexed-digest":            "abc",
 		"indexed-digest-verifiable": "true",
+		"source-upstream":           "https://upstream.example",
 		"X-Cache":                   "HIT",
 	}
 	StripInternal(headers)
@@ -68,6 +69,7 @@ func TestStripInternal(t *testing.T) {
 	require.NotContains(t, headers, "indexed-digest-algorithm")
 	require.NotContains(t, headers, "indexed-digest")
 	require.NotContains(t, headers, "indexed-digest-verifiable")
+	require.NotContains(t, headers, "source-upstream")
 }
 
 func TestConfigureClientTransportTimeouts(t *testing.T) {

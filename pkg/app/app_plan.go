@@ -18,8 +18,8 @@ import (
 )
 
 const DefaultGCInterval = 24 * time.Hour
-const DefaultMaxActiveDownloads = 64
-const DefaultMaxActiveDownloadsPerInstance = 8
+const DefaultMaxActiveDownloads = 256
+const DefaultMaxActiveDownloadsPerInstance = 64
 const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500

@@ -225,6 +225,18 @@ func (h *ServiceHealth) WeightedUpstreams(upstreams []string) []WeightedUpstream
 	return result
 }
 
+// UpstreamState returns the current circuit state for an upstream.
+func (h *ServiceHealth) UpstreamState(url string) (UpstreamState, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	uh, ok := h.upstreams[url]
+	if !ok {
+		return SClosed, false
+	}
+	return uh.State, true
+}
+
 func (h *ServiceHealth) RecordResult(url string, status int, latency time.Duration) {
 	h.mu.Lock()
 	uh, ok := h.upstreams[url]

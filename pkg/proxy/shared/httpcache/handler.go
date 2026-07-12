@@ -17,18 +17,19 @@ import (
 )
 
 type Route struct {
-	ObjectPath         string
-	UpstreamPath       string
-	TargetURL          string
-	AllowedTargetHosts []string
-	Policy             string
-	FreshFor           config.Freshness
-	BusyPolicy         string
-	ExpireAfter        config.Expiration
-	RequestHeaders     map[string]string
-	RewriteKind        string
-	AuthRequired       bool
-	PreferredUpstream  string
+	ObjectPath             string
+	UpstreamPath           string
+	TargetURL              string
+	AllowedTargetHosts     []string
+	Policy                 string
+	FreshFor               config.Freshness
+	BusyPolicy             string
+	ExpireAfter            config.Expiration
+	RequestHeaders         map[string]string
+	RewriteKind            string
+	AuthRequired           bool
+	PreferredUpstream      string
+	ArtifactMirrorFallback bool
 }
 
 type Resolver interface {
@@ -65,11 +66,12 @@ type Handler struct {
 }
 
 type remoteOptions struct {
-	AcceptErrors       bool
-	Record             bool
-	TargetURL          string
-	AllowedTargetHosts []string
-	PreferredUpstream  string
+	AcceptErrors           bool
+	Record                 bool
+	TargetURL              string
+	AllowedTargetHosts     []string
+	PreferredUpstream      string
+	ArtifactMirrorFallback bool
 }
 
 // DefaultUserAgent identifies cache-proxy to upstream services.

@@ -28,6 +28,7 @@ var internalHeaders = map[string]struct{}{
 	"indexed-digest-algorithm":  {},
 	"indexed-digest":            {},
 	"indexed-digest-verifiable": {},
+	"source-upstream":           {},
 }
 
 func StripInternal(headers map[string]string) {

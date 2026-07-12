@@ -127,7 +127,13 @@ func (h *Handler) waitForImmutableDownload(ctx context.Context, route Route) (*u
 }
 
 func (h *Handler) bypass(ctx context.Context, req *http.Request, route Route) (*utils.ResponseWrapper, error) {
-	response, err := h.openRemote(ctx, req.Method, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(req, route, nil))
+	response, err := h.openRemote(
+		ctx,
+		req.Method,
+		route.UpstreamPath,
+		remoteOptionsForRoute(route, true),
+		h.remoteHeaders(req, route, nil),
+	)
 	if response != nil {
 		response.Headers["X-Cache"] = "BYPASS"
 		response = h.rewriteResponse(req, route, response)
@@ -185,7 +191,13 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 	if lastModified := cached["Last-Modified"]; lastModified != "" {
 		headers["If-Modified-Since"] = lastModified
 	}
-	resp, err := h.openRemote(ctx, http.MethodHead, route.UpstreamPath, remoteOptions{AcceptErrors: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(nil, route, headers))
+	resp, err := h.openRemote(
+		ctx,
+		http.MethodHead,
+		route.UpstreamPath,
+		remoteOptionsForRoute(route, false),
+		h.remoteHeaders(nil, route, headers),
+	)
 	if err != nil {
 		return false, err
 	}
@@ -210,7 +222,13 @@ func (h *Handler) validateCached(ctx context.Context, route Route, cached map[st
 }
 
 func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route Route, status string) (*utils.ResponseWrapper, error) {
-	resp, err := h.openRemote(ctx, http.MethodGet, route.UpstreamPath, remoteOptions{AcceptErrors: true, Record: true, TargetURL: route.TargetURL, AllowedTargetHosts: route.AllowedTargetHosts, PreferredUpstream: route.PreferredUpstream}, h.remoteHeaders(req, route, nil))
+	resp, err := h.openRemote(
+		ctx,
+		http.MethodGet,
+		route.UpstreamPath,
+		remoteOptionsForRoute(route, true),
+		h.remoteHeaders(req, route, nil),
+	)
 	if err != nil {
 		h.downloads.Delete(route.ObjectPath)
 		return nil, err
@@ -218,6 +236,14 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 	if resp.StatusCode != http.StatusOK {
 		h.downloads.Delete(route.ObjectPath)
 		resp.Headers["X-Cache"] = "BYPASS"
+		return h.rewriteResponse(req, route, resp), nil
+	}
+	if route.ArtifactMirrorFallback && route.PreferredUpstream != "" &&
+		resp.Headers[responseSourceUpstreamHeader] != "" &&
+		resp.Headers[responseSourceUpstreamHeader] != route.PreferredUpstream {
+		h.downloads.Delete(route.ObjectPath)
+		resp.Headers["X-Cache"] = "RESCUE"
+		setContentType(resp.Headers, route.ObjectPath)
 		return h.rewriteResponse(req, route, resp), nil
 	}
 
@@ -272,6 +298,17 @@ func (h *Handler) streamDownload(ctx context.Context, req *http.Request, route R
 	setContentType(headers, route.ObjectPath)
 	h.addCacheDebugHeaders(headers, route, meta["fetched-at"])
 	return &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: pr}, nil
+}
+
+func remoteOptionsForRoute(route Route, record bool) remoteOptions {
+	return remoteOptions{
+		AcceptErrors:           true,
+		Record:                 record,
+		TargetURL:              route.TargetURL,
+		AllowedTargetHosts:     route.AllowedTargetHosts,
+		PreferredUpstream:      route.PreferredUpstream,
+		ArtifactMirrorFallback: route.ArtifactMirrorFallback,
+	}
 }
 
 func (h *Handler) rewriteResponse(req *http.Request, route Route, response *utils.ResponseWrapper) *utils.ResponseWrapper {
