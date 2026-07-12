@@ -30,7 +30,35 @@
       </button>
       {{end}}
       <button id="theme-btn" class="header-btn icon-btn" type="button" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}"></button>
-      <button class="header-btn lang-btn" type="button" onclick="toggleLang()" aria-label="{{t "lang_switch"}}">{{t "lang_switch_label"}}</button>
+      <div class="lang-select" id="lang-select">
+        <button
+          id="lang-select-btn"
+          class="header-btn lang-select-btn"
+          type="button"
+          onclick="toggleLangMenu()"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          aria-label="{{t "lang_switch"}}"
+        >
+          <span class="lang-current">{{.LocaleLabel}}</span>
+          <span class="lang-chevron" aria-hidden="true"></span>
+        </button>
+        <div class="lang-menu" id="lang-menu" role="listbox" aria-label="{{t "lang_switch"}}" hidden>
+          {{range .Languages}}
+          <button
+            class="lang-option{{if eq $.Locale .Code}} is-active{{end}}"
+            type="button"
+            role="option"
+            data-lang="{{.Code}}"
+            aria-selected="{{if eq $.Locale .Code}}true{{else}}false{{end}}"
+            onclick="selectLang(this)"
+          >
+            <span class="lang-native">{{.Native}}</span>
+            <span class="lang-code">{{.Code}}</span>
+          </button>
+          {{end}}
+        </div>
+      </div>
     </div>
   </div>
 </header>

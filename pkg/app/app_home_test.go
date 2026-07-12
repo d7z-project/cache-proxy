@@ -408,6 +408,8 @@ func TestHomePageRendersStatusModalControls(t *testing.T) {
 	require.Contains(t, body, `id="status-tab-network"`)
 	require.Contains(t, body, `id="refresh-badge"`)
 	require.Contains(t, body, `id="status-modal-backdrop"`)
+	require.Contains(t, body, `id="lang-select-btn"`)
+	require.Contains(t, body, `aria-selected="true"`)
 }
 
 func TestHomePageDefaultsToHealthyStatusWithoutStoreStats(t *testing.T) {
@@ -591,9 +593,29 @@ func TestDetectLocale(t *testing.T) {
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	require.Equal(t, "zh", detectLocale(req))
 
+	req = httptest.NewRequest(http.MethodGet, "/?lang=fr", nil)
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	require.Equal(t, "fr", detectLocale(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/?lang=ja-JP", nil)
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	require.Equal(t, "ja", detectLocale(req))
+
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.8")
 	require.Equal(t, "zh", detectLocale(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.5")
+	require.Equal(t, "ko", detectLocale(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Language", "de-DE,de;q=0.9,en;q=0.5")
+	require.Equal(t, "de", detectLocale(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Language", "ja-JP,ja;q=0.9,en;q=0.5")
+	require.Equal(t, "ja", detectLocale(req))
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	require.Equal(t, "en", detectLocale(req))
@@ -615,17 +637,19 @@ func TestDetectTheme(t *testing.T) {
 
 func TestI18NMapsShareSameKeys(t *testing.T) {
 	en := i18nMaps["en"]
-	zh := i18nMaps["zh"]
 	require.NotEmpty(t, en)
-	require.NotEmpty(t, zh)
 
-	for key := range en {
-		_, ok := zh[key]
-		require.Truef(t, ok, "missing zh key %q", key)
-	}
-	for key := range zh {
-		_, ok := en[key]
-		require.Truef(t, ok, "missing en key %q", key)
+	for _, locale := range supportedLocales {
+		translations := i18nMaps[locale.Code]
+		require.NotEmpty(t, translations, "missing %s translations", locale.Code)
+		for key := range en {
+			_, ok := translations[key]
+			require.Truef(t, ok, "missing %s key %q", locale.Code, key)
+		}
+		for key := range translations {
+			_, ok := en[key]
+			require.Truef(t, ok, "unexpected %s key %q", locale.Code, key)
+		}
 	}
 	for _, key := range []string{
 		"result_updated",
@@ -633,8 +657,9 @@ func TestI18NMapsShareSameKeys(t *testing.T) {
 		"reason_published",
 		"reason_same_as_current",
 	} {
-		require.NotEmpty(t, en[key])
-		require.NotEmpty(t, zh[key])
+		for _, locale := range supportedLocales {
+			require.NotEmpty(t, i18nMaps[locale.Code][key], "empty %s key %q", locale.Code, key)
+		}
 	}
 }
 

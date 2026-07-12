@@ -133,6 +133,8 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		I18NJSON:      template.JS(i18nJSON),
 		StoreHealthy:  healthy,
 		StoreDegraded: degraded,
+		Languages:     supportedLocales,
+		LocaleLabel:   localeLabel(locale),
 	}
 }
 

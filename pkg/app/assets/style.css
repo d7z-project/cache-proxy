@@ -250,8 +250,83 @@ header h1{
 .icon-btn{
   padding:0;
 }
-.lang-btn{
-  min-width:54px;
+.lang-select{
+  position:relative;
+}
+.lang-select-btn{
+  gap:8px;
+  min-width:118px;
+  justify-content:space-between;
+  letter-spacing:0;
+}
+.lang-current{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.lang-chevron{
+  width:7px;
+  height:7px;
+  border-right:1.8px solid currentColor;
+  border-bottom:1.8px solid currentColor;
+  transform:rotate(45deg) translateY(-2px);
+  transition:transform var(--t);
+  flex:0 0 auto;
+}
+.lang-select.is-open .lang-chevron{
+  transform:rotate(225deg) translateY(-1px);
+}
+.lang-menu{
+  position:absolute;
+  top:calc(100% + 8px);
+  right:0;
+  z-index:80;
+  min-width:180px;
+  padding:6px;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  background:var(--card-bg);
+  box-shadow:var(--shadow-hover);
+  backdrop-filter:blur(var(--blur));
+  -webkit-backdrop-filter:blur(var(--blur));
+}
+.lang-option{
+  width:100%;
+  border:0;
+  border-radius:10px;
+  background:transparent;
+  color:var(--text-secondary);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:9px 10px;
+  cursor:pointer;
+  font:inherit;
+  font-size:12px;
+  font-weight:650;
+  text-align:left;
+  transition:background var(--t),color var(--t);
+}
+.lang-option:hover,
+.lang-option.is-active{
+  background:var(--border-light);
+  color:var(--text);
+}
+.lang-option.is-active{
+  box-shadow:inset 0 0 0 1px var(--accent-border);
+}
+.lang-native{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.lang-code{
+  color:var(--text-muted);
+  font-size:10px;
+  text-transform:uppercase;
 }
 
 main{max-width:1160px;margin:0 auto;padding:28px 24px 56px}
@@ -1589,6 +1664,8 @@ body.network-stage-open .network-node .node-sub{
   header .wrap{padding:14px 16px}
   header h1{font-size:22px}
   .header-btn{height:36px;min-width:36px;padding:0 11px;font-size:11px}
+  .lang-select-btn{min-width:96px;max-width:132px}
+  .lang-menu{right:0;min-width:168px}
   main{padding:16px 12px 40px}
   .single-hero{padding:16px}
   .single-hero h2{font-size:22px}

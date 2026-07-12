@@ -124,6 +124,11 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, "http://proxy.example.test/files")
 	require.Contains(t, body, `class="badge badge-file"`)
 	require.Contains(t, body, "copyToClipboard")
+	require.Contains(t, body, `id="lang-select"`)
+	require.Contains(t, body, `data-lang="ja"`)
+	require.Contains(t, body, `data-lang="ko"`)
+	require.Contains(t, body, `data-lang="de"`)
+	require.Contains(t, body, `data-lang="fr"`)
 }
 
 func TestCloseAllowsNilContextOnPartialApp(t *testing.T) {

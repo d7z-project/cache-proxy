@@ -104,11 +104,42 @@ function toggleTheme() {
     }, 260);
 }
 
-function toggleLang() {
+function setLangMenuOpen(open) {
+    var root = document.getElementById('lang-select');
+    var btn = document.getElementById('lang-select-btn');
+    var menu = document.getElementById('lang-menu');
+    if (!root || !btn || !menu) return;
+    root.classList.toggle('is-open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    menu.hidden = !open;
+}
+
+function toggleLangMenu() {
+    var root = document.getElementById('lang-select');
+    setLangMenuOpen(!(root && root.classList.contains('is-open')));
+}
+
+function selectLang(btn) {
+    var lang = btn.getAttribute('data-lang') || '';
+    if (!lang) return;
     var url = new URL(window.location.href);
-    var next = url.searchParams.get('lang') === 'zh' ? 'en' : 'zh';
-    url.searchParams.set('lang', next);
+    url.searchParams.set('lang', lang);
     window.location.search = url.searchParams.toString();
+}
+
+function initLangSelect() {
+    var root = document.getElementById('lang-select');
+    if (!root) return;
+    document.addEventListener('click', function(evt) {
+        if (!root.contains(evt.target)) {
+            setLangMenuOpen(false);
+        }
+    });
+    document.addEventListener('keydown', function(evt) {
+        if (evt.key === 'Escape') {
+            setLangMenuOpen(false);
+        }
+    });
 }
 
 function updateThemeBtn(theme) {
@@ -280,6 +311,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     updateThemeBtn(document.documentElement.getAttribute('data-theme') || 'light');
+    initLangSelect();
     initSearch();
     initStatusModal();
     if (typeof initNetworkStage === 'function') {
