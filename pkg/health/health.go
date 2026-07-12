@@ -60,12 +60,15 @@ type ServiceHealth struct {
 
 	aggregate AggregateState
 
-	probeClient *http.Client
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	lifecycleMu sync.Mutex
-	running     bool
+	probeClient    *http.Client
+	probeScheduler *ProbeScheduler
+	ctx            context.Context
+	cancel         context.CancelFunc
+	lifecycleMu    sync.Mutex
+	running        bool
+	stopping       bool
+	activeProbes   int
+	activeDone     chan struct{}
 }
 
 func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder, userAgent string) *ServiceHealth {
@@ -92,6 +95,15 @@ func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder,
 
 func (h *ServiceHealth) SetBus(b *bus.Bus) { h.bus = b }
 
+// SetProbeScheduler attaches the shared active probe scheduler.
+func (h *ServiceHealth) SetProbeScheduler(s *ProbeScheduler) { h.probeScheduler = s }
+
+func (h *ServiceHealth) notifyProbeScheduler() {
+	if h.probeScheduler != nil {
+		h.probeScheduler.notify()
+	}
+}
+
 func (h *ServiceHealth) Start(parent context.Context) {
 	if !h.config.Enabled {
 		return
@@ -103,21 +115,43 @@ func (h *ServiceHealth) Start(parent context.Context) {
 	}
 	h.ctx, h.cancel = context.WithCancel(parent)
 	h.running = true
-	h.wg.Add(1)
+	h.stopping = false
+	h.activeDone = make(chan struct{})
+	scheduler := h.probeScheduler
 	h.lifecycleMu.Unlock()
-	go h.probeLoop()
+	if scheduler != nil {
+		scheduler.register(h)
+	}
 }
 
 func (h *ServiceHealth) Stop(ctx context.Context) error {
 	h.lifecycleMu.Lock()
 	cancel := h.cancel
+	if h.running {
+		h.stopping = true
+	}
+	scheduler := h.probeScheduler
 	h.lifecycleMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	if scheduler != nil {
+		scheduler.unregister(h)
+	}
 	done := make(chan struct{})
 	go func() {
-		h.wg.Wait()
+		h.lifecycleMu.Lock()
+		if h.activeProbes > 0 && h.activeDone == nil {
+			h.activeDone = make(chan struct{})
+		}
+		activeDone := h.activeDone
+		for h.activeProbes > 0 && activeDone != nil {
+			h.lifecycleMu.Unlock()
+			<-activeDone
+			h.lifecycleMu.Lock()
+			activeDone = h.activeDone
+		}
+		h.lifecycleMu.Unlock()
 		close(done)
 	}()
 	select {
@@ -130,6 +164,31 @@ func (h *ServiceHealth) Stop(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func (h *ServiceHealth) beginActiveProbe() bool {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	if h.stopping {
+		return false
+	}
+	if h.activeProbes == 0 && h.activeDone == nil {
+		h.activeDone = make(chan struct{})
+	}
+	h.activeProbes++
+	return true
+}
+
+func (h *ServiceHealth) finishActiveProbe() {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	if h.activeProbes > 0 {
+		h.activeProbes--
+	}
+	if h.activeProbes == 0 && h.activeDone != nil {
+		close(h.activeDone)
+		h.activeDone = nil
 	}
 }
 
@@ -162,9 +221,9 @@ func (h *ServiceHealth) WeightedUpstreams(upstreams []string) []WeightedUpstream
 
 func (h *ServiceHealth) RecordResult(url string, status int, latency time.Duration) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	uh, ok := h.upstreams[url]
 	if !ok {
+		h.mu.Unlock()
 		return
 	}
 	var transition *stateTransition
@@ -177,6 +236,10 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 	if transition != nil {
 		h.recordCircuitEvent(url, transition)
 		h.recomputeAggregateLocked()
+	}
+	h.mu.Unlock()
+	if transition != nil {
+		h.notifyProbeScheduler()
 	}
 }
 
@@ -192,9 +255,9 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	uh, ok := h.upstreams[url]
 	if !ok {
+		h.mu.Unlock()
 		return
 	}
 	transition := uh.recordFailure(err, h.config)
@@ -203,15 +266,19 @@ func (h *ServiceHealth) RecordFailure(url string, err error) {
 		h.recordCircuitEvent(url, transition)
 		h.recomputeAggregateLocked()
 	}
+	h.mu.Unlock()
+	if transition != nil {
+		h.notifyProbeScheduler()
+	}
 }
 
 func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstreams []string) ResourceHealth {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	existing, ok := h.resources[path]
 	if ok && existing.State != RRemoved {
-		return existing.snapshot()
+		snapshot := existing.snapshot()
+		h.mu.Unlock()
+		return snapshot
 	}
 
 	rh := &ResourceHealth{
@@ -226,12 +293,14 @@ func (h *ServiceHealth) AddResource(path string, targets []ProbeTarget, upstream
 	}
 	h.resources[path] = rh
 	h.recomputeAggregateLocked()
-	return rh.snapshot()
+	snapshot := rh.snapshot()
+	h.mu.Unlock()
+	h.notifyProbeScheduler()
+	return snapshot
 }
 
 func (h *ServiceHealth) RestoreResources(snapshots []ResourceSnapshot) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	for _, snapshot := range snapshots {
 		if snapshot.Path == "" {
 			continue
@@ -239,6 +308,8 @@ func (h *ServiceHealth) RestoreResources(snapshots []ResourceSnapshot) {
 		h.resources[snapshot.Path] = ResourceFromSnapshot(snapshot)
 	}
 	h.recomputeAggregateLocked()
+	h.mu.Unlock()
+	h.notifyProbeScheduler()
 }
 
 func (h *ServiceHealth) TryStartRefresh(path string, now time.Time) (ResourceHealth, func(), error) {
@@ -270,10 +341,9 @@ func (h *ServiceHealth) TryStartRefresh(path string, now time.Time) (ResourceHea
 
 func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, targets []ProbeTarget) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	rh := h.resources[path]
 	if rh == nil || rh.Generation != gen {
+		h.mu.Unlock()
 		return
 	}
 
@@ -289,10 +359,14 @@ func (h *ServiceHealth) FinishRefresh(path string, gen uint64, err error, target
 		}
 		rh.NextRefreshAt = time.Time{}
 		h.recomputeAggregateLocked()
+		h.mu.Unlock()
+		h.notifyProbeScheduler()
 		return
 	}
 
 	h.applyResourceErrorLocked(rh, err)
+	h.mu.Unlock()
+	h.notifyProbeScheduler()
 }
 
 func (h *ServiceHealth) ResourceState(path string) (ResourceState, bool) {
@@ -442,9 +516,9 @@ func (h *ServiceHealth) ResourceHealth(path string) (ResourceHealth, bool) {
 
 func (h *ServiceHealth) MarkResourceActive(path string, targets []ProbeTarget) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	rh := h.resources[path]
 	if rh == nil || rh.State == RRemoved {
+		h.mu.Unlock()
 		return
 	}
 	rh.State = RActive
@@ -461,6 +535,8 @@ func (h *ServiceHealth) MarkResourceActive(path string, targets []ProbeTarget) {
 		rh.LastTargets = append([]ProbeTarget(nil), targets...)
 	}
 	h.recomputeAggregateLocked()
+	h.mu.Unlock()
+	h.notifyProbeScheduler()
 }
 
 func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) {

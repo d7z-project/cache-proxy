@@ -11,6 +11,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
@@ -25,8 +26,27 @@ const DefaultStatusEventLimit = 500
 
 var driverSet = builtinDrivers
 
-func planEntries(ctx context.Context, doc *config.Document, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter, sched *scheduler.Scheduler, b *bus.Bus) (map[string]*proxyruntime.Entry, error) {
-	plan := proxyruntime.NewPlanContext(store, stats, downloads, doc.Storage.Cleanup, doc.Server.Bind, doc.Metrics.Path, sched, b)
+func planEntries(
+	ctx context.Context,
+	doc *config.Document,
+	store *blobfs.Store,
+	stats *httpcache.Stats,
+	downloads *httpcache.DownloadLimiter,
+	sched *scheduler.Scheduler,
+	probes *health.ProbeScheduler,
+	b *bus.Bus,
+) (map[string]*proxyruntime.Entry, error) {
+	plan := proxyruntime.NewPlanContext(
+		store,
+		stats,
+		downloads,
+		doc.Storage.Cleanup,
+		doc.Server.Bind,
+		doc.Metrics.Path,
+		sched,
+		probes,
+		b,
+	)
 	drivers := driverSet()
 	for _, decl := range doc.Instances {
 		selected, err := decl.SelectMode()

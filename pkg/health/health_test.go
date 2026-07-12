@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -559,7 +560,25 @@ func TestStopWithDisabledProbing(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestParentContextStopsProbeLoop(t *testing.T) {
+func TestActiveProbeWaitChannelIsRecreated(t *testing.T) {
+	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
+	require.True(t, h.beginActiveProbe())
+	h.finishActiveProbe()
+
+	h.lifecycleMu.Lock()
+	require.Zero(t, h.activeProbes)
+	require.Nil(t, h.activeDone)
+	h.lifecycleMu.Unlock()
+
+	require.True(t, h.beginActiveProbe())
+	h.lifecycleMu.Lock()
+	require.Equal(t, 1, h.activeProbes)
+	require.NotNil(t, h.activeDone)
+	h.lifecycleMu.Unlock()
+	h.finishActiveProbe()
+}
+
+func TestParentContextStopsActiveProbes(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ProbeInterval = 10 * time.Millisecond
 	h := New("test", "apk", cfg, []string{"https://a.example.com"}, &testStats{}, "ua")
@@ -580,6 +599,8 @@ func TestProbeHeadSuccess(t *testing.T) {
 	defer server.Close()
 
 	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	h.AddResource("repo", []ProbeTarget{{Path: "probe"}}, []string{server.URL})
+	h.MarkResourceActive("repo", []ProbeTarget{{Path: "probe"}})
 	h.probeOne(h.upstreams[server.URL])
 	uh := h.upstreams[server.URL]
 	require.Equal(t, SClosed, uh.State)
@@ -592,6 +613,8 @@ func TestProbeHead404IsSuccess(t *testing.T) {
 	defer server.Close()
 
 	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	h.AddResource("repo", []ProbeTarget{{Path: "probe"}}, []string{server.URL})
+	h.MarkResourceActive("repo", []ProbeTarget{{Path: "probe"}})
 	h.probeOne(h.upstreams[server.URL])
 	uh := h.upstreams[server.URL]
 	require.Equal(t, SClosed, uh.State)
@@ -599,6 +622,8 @@ func TestProbeHead404IsSuccess(t *testing.T) {
 
 func TestProbeDirectConnectionFailure(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"http://127.0.0.1:1"}, &testStats{}, "ua")
+	h.AddResource("repo", []ProbeTarget{{Path: "probe"}}, []string{"http://127.0.0.1:1"})
+	h.MarkResourceActive("repo", []ProbeTarget{{Path: "probe"}})
 	h.probeOne(h.upstreams["http://127.0.0.1:1"])
 	uh := h.upstreams["http://127.0.0.1:1"]
 	require.Equal(t, SClosed, uh.State)
@@ -608,6 +633,8 @@ func TestProbeDirectConnectionFailure(t *testing.T) {
 func TestProbeFailurePublishesOriginalErrorDetail(t *testing.T) {
 	b := bus.New()
 	h := New("test", "apk", DefaultConfig(), []string{"http://127.0.0.1:1"}, &testStats{}, "ua")
+	h.AddResource("repo", []ProbeTarget{{Path: "probe"}}, []string{"http://127.0.0.1:1"})
+	h.MarkResourceActive("repo", []ProbeTarget{{Path: "probe"}})
 	h.SetBus(b)
 	ch := b.Subscribe(bus.EventUpstreamState)
 
@@ -634,6 +661,8 @@ func TestProbeHTTP5xxPublishesStatusDetail(t *testing.T) {
 
 	b := bus.New()
 	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	h.AddResource("repo", []ProbeTarget{{Path: "probe"}}, []string{server.URL})
+	h.MarkResourceActive("repo", []ProbeTarget{{Path: "probe"}})
 	h.SetBus(b)
 	ch := b.Subscribe(bus.EventUpstreamState)
 
@@ -676,6 +705,290 @@ func TestProbeRecoversBlockedResource(t *testing.T) {
 	require.Equal(t, RPending, state, "successful probe should recover blocked resource to pending")
 }
 
+func TestProbeNonNotFoundClientErrorIsUpstreamFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	addActiveProbeResource(h, "repo", "probe", server.URL)
+	h.probeOne(h.upstreams[server.URL])
+
+	require.Equal(t, "HTTP 400", h.upstreams[server.URL].lastProbeErr)
+}
+
+func TestProbeNotFoundIsNotUpstreamFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	addActiveProbeResource(h, "repo", "probe", server.URL)
+	h.probeOne(h.upstreams[server.URL])
+
+	require.Empty(t, h.upstreams[server.URL].lastProbeErr)
+}
+
+func TestProbeHeadMethodNotAllowedFallsBackToRangeGet(t *testing.T) {
+	var methods []string
+	var rangeHeader string
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		rangeHeader = r.Header.Get("Range")
+		mu.Unlock()
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusPartialContent)
+	}))
+	defer server.Close()
+
+	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	addActiveProbeResource(h, "repo", "probe", server.URL)
+	h.probeOne(h.upstreams[server.URL])
+
+	mu.Lock()
+	require.Equal(t, []string{http.MethodHead, http.MethodGet}, methods)
+	require.Equal(t, "bytes=0-0", rangeHeader)
+	mu.Unlock()
+	require.True(t, h.upstreams[server.URL].rangeProbeOnly)
+	require.Empty(t, h.upstreams[server.URL].lastProbeErr)
+}
+
+func TestProbeSchedulerThrottlesSharedHost(t *testing.T) {
+	requests := make(chan time.Time, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 80 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	cfg := fastProbeConfig()
+	h1 := New("one", "apk", cfg, []string{server.URL + "/one"}, nil, "ua")
+	h2 := New("two", "apk", cfg, []string{server.URL + "/two"}, nil, "ua")
+	addActiveProbeResource(h1, "repo-one", "probe", server.URL+"/one")
+	addActiveProbeResource(h2, "repo-two", "probe", server.URL+"/two")
+	h1.SetProbeScheduler(s)
+	h2.SetProbeScheduler(s)
+	h1.Start(ctx)
+	h2.Start(ctx)
+	defer func() { require.NoError(t, h1.Stop(context.Background())) }()
+	defer func() { require.NoError(t, h2.Stop(context.Background())) }()
+
+	times := collectProbeTimes(t, requests, 2, time.Second)
+	require.GreaterOrEqual(t, times[1].Sub(times[0]), 60*time.Millisecond)
+}
+
+func TestProbeSchedulerRunsDifferentHostsIndependently(t *testing.T) {
+	requests := make(chan time.Time, 4)
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer serverB.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 200 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	cfg := fastProbeConfig()
+	h1 := New("one", "apk", cfg, []string{serverA.URL}, nil, "ua")
+	h2 := New("two", "apk", cfg, []string{serverB.URL}, nil, "ua")
+	addActiveProbeResource(h1, "repo-one", "probe", serverA.URL)
+	addActiveProbeResource(h2, "repo-two", "probe", serverB.URL)
+	h1.SetProbeScheduler(s)
+	h2.SetProbeScheduler(s)
+	h1.Start(ctx)
+	h2.Start(ctx)
+	defer func() { require.NoError(t, h1.Stop(context.Background())) }()
+	defer func() { require.NoError(t, h2.Stop(context.Background())) }()
+
+	times := collectProbeTimes(t, requests, 2, time.Second)
+	require.Less(t, times[1].Sub(times[0]), 120*time.Millisecond)
+}
+
+func TestProbeSchedulerSkipsServicesWithoutTargets(t *testing.T) {
+	requests := make(chan time.Time, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 5 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	h := New("test", "apk", fastProbeConfig(), []string{server.URL}, nil, "ua")
+	h.SetProbeScheduler(s)
+	h.Start(ctx)
+	defer func() { require.NoError(t, h.Stop(context.Background())) }()
+
+	select {
+	case <-requests:
+		t.Fatal("unexpected active probe without metadata target")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestProbeSchedulerWakesWhenTargetIsAdded(t *testing.T) {
+	requests := make(chan time.Time, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 5 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	h := New("test", "apk", fastProbeConfig(), []string{server.URL}, nil, "ua")
+	h.SetProbeScheduler(s)
+	h.Start(ctx)
+	defer func() { require.NoError(t, h.Stop(context.Background())) }()
+
+	addActiveProbeResource(h, "repo", "probe", server.URL)
+	collectProbeTimes(t, requests, 1, time.Second)
+}
+
+func TestProbeSchedulerUsesCanaryCooldownForOpenUpstream(t *testing.T) {
+	requests := make(chan time.Time, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 5 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	cfg := fastProbeConfig()
+	cfg.ProbeInterval = 200 * time.Millisecond
+	cfg.CanaryCooldown = 5 * time.Millisecond
+	h := New("test", "apk", cfg, []string{server.URL}, nil, "ua")
+	addActiveProbeResource(h, "repo", "probe", server.URL)
+	h.mu.Lock()
+	h.upstreams[server.URL].State = SOpen
+	h.upstreams[server.URL].lastProbeAt = time.Now()
+	h.mu.Unlock()
+	h.SetProbeScheduler(s)
+	h.Start(ctx)
+	defer func() { require.NoError(t, h.Stop(context.Background())) }()
+
+	collectProbeTimes(t, requests, 1, 100*time.Millisecond)
+}
+
+func TestProbeSchedulerRecomputesNextProbeAfterStateChange(t *testing.T) {
+	cfg := fastProbeConfig()
+	cfg.ProbeInterval = time.Minute
+	cfg.CanaryCooldown = 5 * time.Millisecond
+	h := New("test", "apk", cfg, []string{"https://example.com/repo"}, nil, "ua")
+	addActiveProbeResource(h, "repo", "probe", "https://example.com/repo")
+	h.mu.Lock()
+	h.upstreams["https://example.com/repo"].State = SClosed
+	h.upstreams["https://example.com/repo"].lastProbeAt = time.Now()
+	h.mu.Unlock()
+
+	key := probeJobKey{service: h, upstreamURL: "https://example.com/repo"}
+	s := &ProbeScheduler{
+		config:   probeSchedulerConfig{MinHostInterval: 5 * time.Millisecond},
+		services: map[*ServiceHealth]struct{}{h: struct{}{}},
+		jobs: map[probeJobKey]*probeJob{
+			key: &probeJob{
+				key:     key,
+				hostKey: "https://example.com",
+				nextAt:  time.Now().Add(cfg.CanaryCooldown),
+			},
+		},
+		hosts: map[string]*probeHost{},
+	}
+	s.reconcileLocked(time.Now())
+	nextAt := s.jobs[key].nextAt
+
+	require.WithinDuration(t, time.Now().Add(cfg.ProbeInterval), nextAt, time.Second)
+}
+
+func TestProbeSchedulerUnregisterStopsFutureProbes(t *testing.T) {
+	requests := make(chan time.Time, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- time.Now()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 5 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	h := New("test", "apk", fastProbeConfig(), []string{server.URL}, nil, "ua")
+	addActiveProbeResource(h, "repo", "probe", server.URL)
+	h.SetProbeScheduler(s)
+	h.Start(ctx)
+	collectProbeTimes(t, requests, 1, time.Second)
+	require.NoError(t, h.Stop(context.Background()))
+
+	select {
+	case <-requests:
+		t.Fatal("unexpected probe after service stop")
+	case <-time.After(40 * time.Millisecond):
+	}
+}
+
+func TestProbeSchedulerRoundRobinsSharedHost(t *testing.T) {
+	paths := make(chan string, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newProbeScheduler(ctx, probeSchedulerConfig{MinHostInterval: 20 * time.Millisecond})
+	defer func() { require.NoError(t, s.Stop(context.Background())) }()
+
+	cfg := fastProbeConfig()
+	h1 := New("one", "apk", cfg, []string{server.URL + "/one"}, nil, "ua")
+	h2 := New("two", "apk", cfg, []string{server.URL + "/two"}, nil, "ua")
+	addActiveProbeResource(h1, "repo-one", "probe", server.URL+"/one")
+	addActiveProbeResource(h2, "repo-two", "probe", server.URL+"/two")
+	h1.SetProbeScheduler(s)
+	h2.SetProbeScheduler(s)
+	h1.Start(ctx)
+	h2.Start(ctx)
+	defer func() { require.NoError(t, h1.Stop(context.Background())) }()
+	defer func() { require.NoError(t, h2.Stop(context.Background())) }()
+
+	seen := map[string]bool{}
+	for _, item := range collectProbePaths(t, paths, 4, time.Second) {
+		seen[item] = true
+	}
+	require.True(t, seen["/one/probe"], "expected first service to be probed")
+	require.True(t, seen["/two/probe"], "expected second service to be probed")
+}
+
 func TestResourceSnapshotRoundtrip(t *testing.T) {
 	rh := &ResourceHealth{
 		Path:         "dists/bookworm",
@@ -704,6 +1017,20 @@ func TestConfigDefaults(t *testing.T) {
 	require.Equal(t, 2*time.Minute, cfg.ResourceBlockInterval)
 	require.Equal(t, 5*time.Minute, cfg.ResourceRemoveAge)
 	require.Equal(t, 5, cfg.ResourceRemoveCount)
+}
+
+func TestValidateConfigRejectsUnsafeProbeInterval(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeInterval = time.Second
+
+	require.ErrorContains(t, ValidateConfig(cfg), "probe_interval")
+}
+
+func TestValidateConfigRejectsProbeTimeoutLongerThanInterval(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProbeTimeout = cfg.ProbeInterval
+
+	require.ErrorContains(t, ValidateConfig(cfg), "probe_timeout")
 }
 
 func TestRateWindowBasics(t *testing.T) {
@@ -817,6 +1144,53 @@ func upstreamURLs(t *testing.T, h *ServiceHealth) []string {
 		urls = append(urls, url)
 	}
 	return urls
+}
+
+func fastProbeConfig() Config {
+	cfg := DefaultConfig()
+	cfg.ProbeInterval = 5 * time.Millisecond
+	cfg.ProbeTimeout = 500 * time.Millisecond
+	cfg.CanaryCooldown = 5 * time.Millisecond
+	cfg.EvaluationWindow = time.Second
+	return cfg
+}
+
+func addActiveProbeResource(h *ServiceHealth, rootID, targetPath, upstreamURL string) {
+	targets := []ProbeTarget{{Path: targetPath}}
+	h.AddResource(rootID, targets, []string{upstreamURL})
+	h.MarkResourceActive(rootID, targets)
+}
+
+func collectProbeTimes(t *testing.T, ch <-chan time.Time, count int, timeout time.Duration) []time.Time {
+	t.Helper()
+	deadline := time.After(timeout)
+	result := make([]time.Time, 0, count)
+	for len(result) < count {
+		select {
+		case item := <-ch:
+			result = append(result, item)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d probe requests, got %d", count, len(result))
+		}
+	}
+	return result
+}
+
+func collectProbePaths(t *testing.T, ch <-chan string, count int, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.After(timeout)
+	result := make([]string, 0, count)
+	for len(result) < count {
+		select {
+		case item := <-ch:
+			if strings.HasSuffix(item, "/probe") {
+				result = append(result, item)
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d probe requests, got %d", count, len(result))
+		}
+	}
+	return result
 }
 
 func BenchmarkWeightedUpstreams(b *testing.B) {

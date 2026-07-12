@@ -45,8 +45,9 @@ type UpstreamHealth struct {
 	lastProbeAt   time.Time
 	lastProbeErr  string
 
-	weight   float64
-	probeIdx int32
+	weight         float64
+	probeIdx       int32
+	rangeProbeOnly bool
 }
 
 type stateTransition struct {
@@ -140,14 +141,6 @@ func (uh *UpstreamHealth) recordFailure(err error, cfg Config) *stateTransition 
 		}
 	}
 	return nil
-}
-
-func (uh *UpstreamHealth) recordProbe(success bool, latency time.Duration, cfg Config) *stateTransition {
-	uh.lastProbeAt = time.Now()
-	if success {
-		return uh.recordSuccess(latency, cfg)
-	}
-	return uh.recordFailure(nil, cfg)
 }
 
 func (uh *UpstreamHealth) evaluateRate(cfg Config) {

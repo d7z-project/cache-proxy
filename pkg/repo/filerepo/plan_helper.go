@@ -54,11 +54,15 @@ func PlanRepoMode(
 	if block.Transport != nil {
 		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
 	}
+	if err := health.ValidateConfig(healthCfg); err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
 	probeUserAgent := httpcache.DefaultUserAgent
 	if block.Transport != nil && block.Transport.UserAgent != "" {
 		probeUserAgent = block.Transport.UserAgent
 	}
 	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats(), probeUserAgent)
+	sh.SetProbeScheduler(plan.ProbeScheduler())
 	sh.SetBus(plan.Bus())
 	handler := NewIndexedHandler(
 		plan.Name(),

@@ -1,6 +1,10 @@
 package health
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 type Config struct {
 	Enabled bool `yaml:"enabled"`
@@ -122,4 +126,45 @@ func ApplyConfigPatch(cfg Config, patch *ConfigPatch) Config {
 		cfg.ResourceRemoveCount = *patch.ResourceRemoveCount
 	}
 	return cfg
+}
+
+// ValidateConfig rejects health settings that would make active probing unsafe or ambiguous.
+func ValidateConfig(cfg Config) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.ProbeInterval < defaultMinHostProbeInterval {
+		return fmt.Errorf("health probe_interval must be at least %s", defaultMinHostProbeInterval)
+	}
+	if cfg.ProbeTimeout <= 0 {
+		return errors.New("health probe_timeout must be positive")
+	}
+	if cfg.ProbeTimeout >= cfg.ProbeInterval {
+		return errors.New("health probe_timeout must be shorter than probe_interval")
+	}
+	if cfg.CanaryCooldown < 10*time.Second {
+		return errors.New("health canary_cooldown must be at least 10s")
+	}
+	if cfg.ResourceBlockInterval <= 0 {
+		return errors.New("health resource_block_interval must be positive")
+	}
+	if cfg.EvaluationWindow < cfg.ProbeInterval {
+		return errors.New("health evaluation_window must be greater than or equal to probe_interval")
+	}
+	if cfg.DegradeRate < 0 || cfg.TripRate > 1 || cfg.DegradeRate >= cfg.TripRate {
+		return errors.New("health rates must satisfy 0 <= degrade_rate < trip_rate <= 1")
+	}
+	if cfg.MinWeight <= 0 || cfg.MinWeight > 1 {
+		return errors.New("health min_weight must be greater than 0 and less than or equal to 1")
+	}
+	if cfg.CanaryStep <= 0 || cfg.CanaryStep > 1 {
+		return errors.New("health canary_step must be greater than 0 and less than or equal to 1")
+	}
+	if cfg.ResourceRemoveCount <= 0 {
+		return errors.New("health resource_remove_count must be positive")
+	}
+	if cfg.ResourceRemoveAge < 0 {
+		return errors.New("health resource_remove_age must be non-negative")
+	}
+	return nil
 }

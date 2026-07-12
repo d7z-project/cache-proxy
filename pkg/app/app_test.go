@@ -273,6 +273,29 @@ instances:
 	require.ErrorContains(t, err, "field default_polciy not found")
 }
 
+func TestValidateRejectsUnsafeHealthProbeInterval(t *testing.T) {
+	doc, err := config.Decode(strings.NewReader(`
+server:
+  bind: 127.0.0.1:8080
+  backend: /tmp/cache
+instances:
+  - name: debian
+    enabled: true
+    deb:
+      route:
+        path: /debian
+      upstreams:
+        - https://example.com/debian
+      transport:
+        health:
+          probe_interval: 1s
+`))
+	require.NoError(t, err)
+
+	err = Validate(doc)
+	require.ErrorContains(t, err, "health probe_interval")
+}
+
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	app := &App{
 		stopRuntime: func() {},
