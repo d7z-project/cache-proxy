@@ -144,13 +144,6 @@ func TestHomePageIncludesStageEntry(t *testing.T) {
 	body := rec.Body.String()
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, body, `id="stage-btn"`)
-	require.Contains(t, body, "function initNetworkStage()")
-	require.Contains(t, body, "function requestNetworkStage()")
-	statsIndex := strings.Index(body, "function networkEdgeStats(")
-	hotspotIndex := strings.Index(body, "function chooseNetworkStageHotspots()")
-	require.NotEqual(t, -1, statsIndex)
-	require.NotEqual(t, -1, hotspotIndex)
-	require.Greater(t, hotspotIndex, statsIndex)
 }
 
 func TestBindHomePageShowsSingleInstanceView(t *testing.T) {

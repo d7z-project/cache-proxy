@@ -1380,8 +1380,11 @@ body.network-stage-open .network-edge.is-active{
 @keyframes network-flow{
   to{stroke-dashoffset:-22}
 }
-.network-edge.is-updated{
+.network-edge.is-updated:not(.is-active){
   animation:network-edge-update .7s ease-out;
+}
+.network-edge.is-updated.is-active{
+  filter:drop-shadow(0 0 9px color-mix(in srgb, var(--link) 54%, transparent));
 }
 @keyframes network-edge-update{
   0%{filter:drop-shadow(0 0 0 transparent)}
