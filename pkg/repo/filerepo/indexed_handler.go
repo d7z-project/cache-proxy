@@ -103,11 +103,22 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if class == ResourceMetadata {
+		if analysis.Role != DiscoveryUpdateRoot {
+			rootID, created, changed := h.registerRoot(analysis)
+			if h.bus != nil && rootID != "" && (created || changed || h.rootSnapshot(rootID) == nil) {
+				h.publishDiscovered(rootID)
+			}
+			h.base.ProxyPassthrough(w, req, cleanPath, "")
+			return
+		}
+		status := h.base.ProxyPassthroughStatus(w, req, cleanPath, "")
+		if status < http.StatusOK || (status >= http.StatusMultipleChoices && status != http.StatusNotModified) {
+			return
+		}
 		rootID, created, changed := h.registerRoot(analysis)
-		if h.bus != nil && (created || changed || h.rootSnapshot(rootID) == nil) {
+		if h.bus != nil && rootID != "" && (created || changed) {
 			h.publishDiscovered(rootID)
 		}
-		h.base.ProxyPassthrough(w, req, cleanPath, "")
 		return
 	}
 	if _, ok := h.lookupCurrentContent(cleanPath, class); ok {

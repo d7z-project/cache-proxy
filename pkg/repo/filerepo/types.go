@@ -124,6 +124,7 @@ type LiveSnapshot struct {
 	Metadata      map[string]MetadataObject `yaml:"metadata"`
 	ArtifactCount int                       `yaml:"artifact_count"`
 	Targets       []MetadataTarget          `yaml:"targets,omitempty"`
+	Warning       string                    `yaml:"warning,omitempty"`
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession, *PathIndexBuilder) (*LiveSnapshot, error)
@@ -173,10 +174,29 @@ type RefreshSession struct {
 	generation string
 	blobs      map[string]*MetadataBlob
 	targets    []MetadataTarget
+	warnings   []string
 }
 
 func (s *RefreshSession) Targets() []MetadataTarget {
 	return append([]MetadataTarget(nil), s.targets...)
+}
+
+// AddWarning records a non-fatal metadata refresh condition.
+func (s *RefreshSession) AddWarning(message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	s.warnings = append(s.warnings, message)
+}
+
+// IsMetadataAbsent reports whether err means upstream metadata is missing or forbidden.
+func IsMetadataAbsent(err error) bool {
+	var fetchErr MetadataFetchError
+	if errors.As(err, &fetchErr) {
+		err = fetchErr.Err
+	}
+	return errors.Is(err, errMetadataNotFound) || errors.Is(err, errMetadataForbidden)
 }
 
 func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (MetadataBlob, error) {

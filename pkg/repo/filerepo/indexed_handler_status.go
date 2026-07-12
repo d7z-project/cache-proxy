@@ -62,6 +62,7 @@ func (h *IndexedHandler) RepositoryStatuses() []runtime.RepositoryStatus {
 		status.Upstream = snapshot.Upstream
 		status.ArtifactCount = snapshot.ArtifactCount
 		status.MetadataCount = len(snapshot.Metadata)
+		status.Warning = snapshot.Warning
 		if status.Path == "" {
 			status.Path = snapshot.RootPath
 		}

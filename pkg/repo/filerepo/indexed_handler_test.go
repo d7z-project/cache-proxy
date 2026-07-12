@@ -477,7 +477,12 @@ func TestDiscoverRootMergesExistingRepositoryDetails(t *testing.T) {
 
 func TestExistingRootMetadataUpdatePublishesDiscoveryEvent(t *testing.T) {
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "extra")
+	}))
+	defer server.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, nil)
 	b := bus.New()
 	sub := b.Subscribe(bus.EventMetadataDiscovered)
 	handler.SetBus(b)
@@ -506,6 +511,70 @@ func TestExistingRootMetadataUpdatePublishesDiscoveryEvent(t *testing.T) {
 	case <-time.After(time.Second):
 		require.FailNow(t, "expected discovery event for updated root")
 	}
+}
+
+func TestMetadataUpdateRootDoesNotMergeAfterMissingPassthrough(t *testing.T) {
+	store := newTestStore(t)
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, nil)
+	handler.inspector = staticInspector(func(string) DiscoveryResult {
+		return DiscoveryResult{
+			Class: ResourceMetadata,
+			Role:  DiscoveryUpdateRoot,
+			Root: RepositoryRoot{
+				ID:            "root",
+				Path:          "root",
+				Architectures: []string{"arm64"},
+				Attributes:    []RepositoryAttribute{{LabelKey: "architecture", Value: "arm64"}},
+			},
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/meta/arm64.txt", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	handler.mu.RLock()
+	root := handler.roots["root"].root
+	handler.mu.RUnlock()
+	require.Empty(t, root.Architectures)
+	require.Equal(t, []RepositoryAttribute{{LabelKey: "repo_path", Value: "root"}}, root.Attributes)
+}
+
+func TestMetadataUpdateRootMergesAfterSuccessfulPassthrough(t *testing.T) {
+	store := newTestStore(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "index")
+	}))
+	defer server.Close()
+
+	handler := newTestHandler(t, store, []string{server.URL}, nil)
+	handler.inspector = staticInspector(func(string) DiscoveryResult {
+		return DiscoveryResult{
+			Class: ResourceMetadata,
+			Role:  DiscoveryUpdateRoot,
+			Root: RepositoryRoot{
+				ID:            "root",
+				Path:          "root",
+				Architectures: []string{"amd64"},
+				Attributes:    []RepositoryAttribute{{LabelKey: "architecture", Value: "amd64"}},
+			},
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/meta/amd64.txt", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	handler.mu.RLock()
+	root := handler.roots["root"].root
+	handler.mu.RUnlock()
+	require.Equal(t, []string{"amd64"}, root.Architectures)
+	require.Equal(t, []RepositoryAttribute{{LabelKey: "architecture", Value: "amd64"}}, root.Attributes)
 }
 
 func TestRegisterRootFinalizesMergedRoot(t *testing.T) {
@@ -587,6 +656,42 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	require.NotNil(t, entry)
 	require.Len(t, entry.root.Targets, 1)
 	require.Equal(t, "meta/index.txt", entry.root.Targets[0].URL)
+}
+
+func TestRestoreGenerationPreservesSnapshotWarning(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/meta/index.txt" {
+			_, _ = io.WriteString(w, "index")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
+			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			require.NoError(t, err)
+			session.AddWarning("partial metadata: skipped 1 missing indexes")
+			return &LiveSnapshot{
+				Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}},
+			}, nil
+		},
+	)
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+
+	restored := newTestHandler(t, store, []string{server.URL}, nil)
+	restored.restoreRoots(ctx)
+	restored.restoreGenerations(ctx)
+
+	statuses := restored.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.True(t, statuses[0].HasCurrent)
+	require.Equal(t, "partial metadata: skipped 1 missing indexes", statuses[0].Warning)
 }
 
 func TestRepositoryStatusesIncludePendingAndRefreshingRoots(t *testing.T) {

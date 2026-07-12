@@ -305,6 +305,7 @@ func (h *IndexedHandler) buildSnapshot(
 	snapshot.Upstream = upstream
 	snapshot.Published = time.Now().UTC()
 	snapshot.Targets = append([]MetadataTarget(nil), root.Targets...)
+	snapshot.Warning = strings.Join(session.warnings, "; ")
 	cleanupPaths := indexBuilder.Finalize()
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {

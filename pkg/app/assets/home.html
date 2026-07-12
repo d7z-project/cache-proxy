@@ -141,6 +141,7 @@
               <span>{{t "upstream"}}: {{.Upstream}}</span>
               {{if .LastOK}}<span{{if .LastOKTitle}} title="{{.LastOKTitle}}"{{end}}>{{t "last_ok"}}: {{.LastOK}}</span>{{end}}
               {{if .LastTry}}<span{{if .LastTryTitle}} title="{{.LastTryTitle}}"{{end}}>{{t "last_try"}}: {{.LastTry}}</span>{{end}}
+              {{if .Warning}}<span>{{t "warning"}}: {{.Warning}}</span>{{end}}
               {{if .LastError}}<span>{{t "last_error"}}: {{.LastError}}</span>{{end}}
             </div>
             {{if .Attributes}}

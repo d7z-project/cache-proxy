@@ -262,12 +262,31 @@ func buildReleaseTarget(
 	if len(targets) == 0 {
 		return artifactCount, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
 	}
+	var (
+		successfulIndexes int
+		missingIndexes    int
+		firstMissing      string
+	)
 	for _, indexTarget := range targets {
 		nextCount, err := buildVerifiedIndexTarget(ctx, session, snapshot, indexTarget, releaseSums, paths, artifactCount)
 		if err != nil {
+			if filerepo.IsMetadataAbsent(err) {
+				missingIndexes++
+				if firstMissing == "" {
+					firstMissing = indexTarget.URL
+				}
+				continue
+			}
 			return artifactCount, err
 		}
 		artifactCount = nextCount
+		successfulIndexes++
+	}
+	if successfulIndexes == 0 {
+		return artifactCount, fmt.Errorf("%s: no package indexes available, first missing index %s", blob.Path, firstMissing)
+	}
+	if missingIndexes > 0 {
+		session.AddWarning(fmt.Sprintf("partial metadata: skipped %d missing indexes", missingIndexes))
 	}
 	return artifactCount, nil
 }

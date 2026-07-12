@@ -170,6 +170,11 @@ func (h *Handler) CloseContext(ctx context.Context) error {
 }
 
 func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) {
+	h.ProxyPassthroughStatus(resp, req, upstreamPath, preferredUpstream)
+}
+
+// ProxyPassthroughStatus proxies the request and returns the downstream status code.
+func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) int {
 	h.wait.Add(1)
 	defer h.wait.Done()
 
@@ -188,10 +193,12 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 		}
 		http.Error(resp, http.StatusText(status), status)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
-		return
+		return status
 	}
 	if result.Headers["X-Cache"] == "BYPASS" {
 		result.Headers["X-Cache"] = "PASSTHROUGH"
 	}
+	status := result.StatusCode
 	h.flushResult(req, resp, result, "flush passthrough response failed")
+	return status
 }

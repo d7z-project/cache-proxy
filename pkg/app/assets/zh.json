@@ -74,6 +74,7 @@
   "repository_generation": "代次",
   "last_ok": "最近成功",
   "last_try": "最近尝试",
+  "warning": "警告",
   "last_error": "最近错误",
   "repository_state_active": "活跃",
   "repository_state_suspect": "可疑",

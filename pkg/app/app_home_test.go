@@ -198,6 +198,50 @@ func TestHomePageRepositoryGenerationUsesReadableLabel(t *testing.T) {
 	require.Contains(t, body, "Pacman 仓库")
 }
 
+func TestHomePageShowsRepositoryWarningSeparatelyFromLastError(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:    "packages",
+		Mode:    "deb",
+		Enabled: true,
+		Path:    "/debian",
+		Runtime: repositoryRuntime{
+			repositories: []proxyruntime.RepositoryStatus{{
+				ID:          "deb_distribution:dists/trixie",
+				Path:        "dists/trixie",
+				DisplayName: "trixie",
+				Layout:      "deb_distribution",
+				Generation:  "gen1",
+				HasCurrent:  true,
+				State:       "active",
+				Warning:     "partial metadata: skipped 1 missing indexes",
+			}},
+		},
+		Home: proxyruntime.HomeEntry{
+			Name: "packages",
+			Mode: "deb",
+		},
+	}
+	app := &App{
+		config: &config.Document{
+			Server:  config.ServerConfig{Bind: "127.0.0.1:0"},
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		entries:      map[string]*proxyruntime.Entry{"packages": entry},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+	}
+	app.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, body, "Warning: partial metadata: skipped 1 missing indexes")
+	require.NotContains(t, body, "Last error: partial metadata")
+}
+
 func TestHomePageShowsFlatpakRepositoryLayout(t *testing.T) {
 	entry := &proxyruntime.Entry{
 		Name:    "flathub",
