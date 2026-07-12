@@ -171,6 +171,7 @@ func (s *appStatus) appendEvent(event taskEvent) {
 
 func (s *appStatus) summary(app *App) statusSummary {
 	summary := statusSummary{
+		Healthy:            true,
 		DiskSampleInterval: int64(s.diskSampleInterval / time.Second),
 		DiskHistoryWindow:  int64(s.diskHistoryWindow / time.Second),
 		EventLimit:         s.eventLimit,

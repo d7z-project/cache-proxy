@@ -78,7 +78,11 @@ func (s *Scheduler) handleCmd(c cmd) {
 func (s *Scheduler) handleBusEvent(evt bus.Event) {
 	switch evt.Type {
 	case bus.EventMetadataDiscovered:
-		p := evt.Payload.(bus.MetadataDiscoveredPayload)
+		p, ok := evt.Payload.(bus.MetadataDiscoveredPayload)
+		if !ok {
+			slog.Debug("scheduler ignored metadata discovery event with invalid payload")
+			return
+		}
 		factory := s.factories[p.Instance]
 		if factory == nil {
 			return
@@ -105,7 +109,11 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 		s.saveState()
 		slog.Debug("scheduler registered metadata tasks", "instance", p.Instance, "root_id", p.RootID)
 	case bus.EventMetadataRemoved:
-		p := evt.Payload.(bus.MetadataRemovedPayload)
+		p, ok := evt.Payload.(bus.MetadataRemovedPayload)
+		if !ok {
+			slog.Debug("scheduler ignored metadata removal event with invalid payload")
+			return
+		}
 		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID), "removed")
 		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID), "removed")
 		if factory := s.factories[p.Instance]; factory != nil {

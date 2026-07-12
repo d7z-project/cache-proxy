@@ -186,6 +186,9 @@ func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler 
 }
 
 func (s *Scheduler) Register(def TaskDef) {
+	if s.stopped.Load() {
+		return
+	}
 	if s.withPreStart(func() {
 		s.preStartTasks[def.Key] = def
 	}) {
@@ -198,6 +201,9 @@ func (s *Scheduler) Register(def TaskDef) {
 }
 
 func (s *Scheduler) RegisterFactory(factory TaskFactory) {
+	if s.stopped.Load() {
+		return
+	}
 	if s.withPreStart(func() {
 		s.factories[factory.Instance] = &factory
 	}) {
@@ -210,6 +216,9 @@ func (s *Scheduler) RegisterFactory(factory TaskFactory) {
 }
 
 func (s *Scheduler) Unregister(key TaskKey) {
+	if s.stopped.Load() {
+		return
+	}
 	if s.withPreStart(func() {
 		delete(s.preStartTasks, key)
 	}) {
@@ -222,6 +231,9 @@ func (s *Scheduler) Unregister(key TaskKey) {
 }
 
 func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
+	if s.stopped.Load() {
+		return TaskInfo{}, false
+	}
 	s.startMu.Lock()
 	if !s.started {
 		if def, ok := s.preStartTasks[key]; ok {
@@ -244,6 +256,9 @@ func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
 }
 
 func (s *Scheduler) Snapshot() []TaskInfo {
+	if s.stopped.Load() {
+		return nil
+	}
 	s.startMu.Lock()
 	if !s.started {
 		infos := make([]TaskInfo, 0, len(s.preStartTasks))
@@ -265,6 +280,9 @@ func (s *Scheduler) Snapshot() []TaskInfo {
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
+	if s.stopped.Load() {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -290,6 +308,9 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if s.stopped.Load() {
+		return nil
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -307,6 +328,7 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	}
 	s.bus.Unsubscribe(s.busSub)
 	s.saveState()
+	s.stopped.Store(true)
 	return nil
 }
 

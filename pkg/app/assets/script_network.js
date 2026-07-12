@@ -1,79 +1,5 @@
 var SVG_NS = 'http://www.w3.org/2000/svg';
 
-function activeNetworkFilter() {
-    var active = document.querySelector('[data-network-filter].is-active');
-    return active ? active.getAttribute('data-network-filter') : 'all';
-}
-
-function filterNetworkEdges(edges, filter) {
-    if (filter === 'active') {
-        return edges.filter(function(edge) { return edge.active_upstream_requests > 0; });
-    }
-    if (filter === 'degraded') {
-        return edges.filter(function(edge) {
-            return edge.state && edge.state !== 'closed' && edge.state !== 'unknown';
-        });
-    }
-    if (filter === 'failed') {
-        return edges.filter(function(edge) { return edge.errors > 0 || edge.last_error; });
-    }
-    return edges;
-}
-
-function networkSummaryCards(data) {
-    var t = window.I18N;
-    var s = data.summary || {};
-    return [
-        [t.network_active || 'Active upstream', String(s.active_upstream_requests || 0)],
-        [t.network_hit_rate || 'Hit rate', formatPercent(s.hit_rate || 0)],
-        [t.network_error_rate || 'Upstream errors', formatPercent(s.upstream_error_rate || 0)],
-        [t.network_traffic || 'Upstream traffic', formatBytes(s.upstream_bytes || 0)],
-        [t.network_degraded || 'Degraded upstreams', String(s.degraded_upstreams || 0)]
-    ];
-}
-
-function renderNetworkPanelNote(target, data) {
-    var state = target._networkNote;
-    if (!state || !state.summary || state.summary.parentNode !== target) {
-        target.textContent = '';
-        var summary = document.createElement('div');
-        summary.className = 'network-summary';
-        var refresh = document.createElement('span');
-        refresh.className = 'last-refresh';
-        target.appendChild(summary);
-        target.appendChild(refresh);
-        state = { summary: summary, refresh: refresh, metrics: [] };
-        target._networkNote = state;
-    }
-    var cards = networkSummaryCards(data);
-    for (var i = 0; i < cards.length; i++) {
-        var metric = state.metrics[i];
-        if (!metric) {
-            var root = document.createElement('div');
-            root.className = 'network-metric';
-            var label = document.createElement('span');
-            var value = document.createElement('strong');
-            root.appendChild(label);
-            root.appendChild(value);
-            state.summary.appendChild(root);
-            metric = { root: root, label: label, value: value };
-            state.metrics[i] = metric;
-        }
-        metric.label.textContent = cards[i][0];
-        metric.value.textContent = cards[i][1];
-    }
-    while (state.metrics.length > cards.length) {
-        var removed = state.metrics.pop();
-        if (removed.root.parentNode) {
-            removed.root.parentNode.removeChild(removed.root);
-        }
-    }
-    var t = window.I18N;
-    var stamp = formatDisplayTime(new Date(statusState.lastRefresh).toISOString());
-    state.refresh.title = stamp.exact || '';
-    state.refresh.textContent = (t.last_refreshed || 'Last refreshed') + ': ' + stamp.display;
-}
-
 function formatPercent(value) {
     return (value * 100).toFixed(value > 0 && value < 0.1 ? 1 : 0).replace(/\.0$/, '') + '%';
 }
@@ -81,24 +7,37 @@ function formatPercent(value) {
 function renderNetworkMap(target, edges, data) {
     var t = window.I18N;
     if (!edges.length) {
-        target.className = 'network-map empty-state';
+        target.classList.add('network-map', 'empty-state', 'network-empty-state');
+        target.classList.toggle('is-stage', document.body.classList.contains('network-stage-open'));
+        if (isNetworkStageOpen()) {
+            target.classList.remove('is-fade-in');
+        }
         target.removeAttribute('data-focus-id');
-        target.textContent = t.no_data || 'No data';
+        if (target.textContent !== (t.no_data || 'No data')) {
+            target.textContent = t.no_data || 'No data';
+        }
         target._networkGraph = null;
         return;
     }
 
+    var firstRender = !target._networkGraph;
     var graph = ensureNetworkGraph(target);
     var layout = networkLayout(target, edges, data);
     graph.svg.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + layout.height);
     graph.svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-    target.className = 'network-map';
+    target.classList.add('network-map');
+    target.classList.remove('empty-state', 'network-empty-state');
     target.classList.toggle('is-stage', document.body.classList.contains('network-stage-open'));
+    if (isNetworkStageOpen()) {
+        target.classList.remove('is-fade-in');
+    }
 
     syncNetworkEdges(graph, layout);
     syncNetworkNodes(graph, layout);
     applyNetworkFocus(target, target.getAttribute('data-focus-id') || '');
-    target.classList.add('is-fade-in');
+    if (firstRender && !isNetworkStageOpen()) {
+        target.classList.add('is-fade-in');
+    }
 }
 
 function ensureNetworkGraph(target) {
@@ -107,7 +46,7 @@ function ensureNetworkGraph(target) {
     }
     target.textContent = '';
     var svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('aria-label', (window.I18N.network_tab || 'Network'));
+    svg.setAttribute('aria-label', (window.I18N.stage_title || window.I18N.title || 'Cache Proxy'));
     svg.setAttribute('role', 'img');
     var edgeLayer = document.createElementNS(SVG_NS, 'g');
     edgeLayer.setAttribute('class', 'network-edge-layer');
@@ -605,140 +544,143 @@ function applyNetworkFocus(target, focusID) {
 function renderNetworkTable(target, edges) {
     var t = window.I18N;
     if (!edges.length) {
-        target.className = 'network-table-wrap empty-state';
-        target.textContent = t.no_data || 'No data';
-        target._networkTable = null;
+        target.classList.add('network-table-wrap', 'empty-state', 'network-empty-state');
+        if (isNetworkStageOpen()) {
+            target.classList.remove('is-fade-in');
+        }
+        if (target.textContent !== (t.no_data || 'No data')) {
+            target.textContent = t.no_data || 'No data';
+        }
+        target._networkList = null;
         return;
     }
-    var tableState = ensureNetworkTable(target);
+    var firstRender = !target._networkList;
+    var listState = ensureNetworkList(target);
     var rows = edges.slice().sort(function(a, b) {
-        return (b.active_upstream_requests || 0) - (a.active_upstream_requests || 0) ||
-            (b.requests || 0) - (a.requests || 0);
+        return networkNumberValue(b.active_upstream_requests) - networkNumberValue(a.active_upstream_requests) ||
+            networkNumberValue(b.requests) - networkNumberValue(a.requests);
     });
     var seen = {};
     rows.forEach(function(edge) {
         var key = edge.id || (edge.from + '->' + edge.to + ':' + edge.upstream_url);
         seen[key] = true;
-        var row = tableState.rows[key];
-        if (!row) {
-            row = document.createElement('tr');
-            row.setAttribute('data-network-row', key);
-            for (var i = 0; i < 11; i++) {
-                row.appendChild(document.createElement('td'));
-            }
-            tableState.tbody.appendChild(row);
-            tableState.rows[key] = row;
+        var item = listState.rows[key];
+        if (!item) {
+            item = createNetworkListItem(key);
+            listState.list.appendChild(item);
+            listState.rows[key] = item;
         }
-        updateNetworkTableRow(row, edge);
-        tableState.tbody.appendChild(row);
+        updateNetworkListItem(item, edge);
+        listState.list.appendChild(item);
     });
-    Object.keys(tableState.rows).forEach(function(key) {
+    Object.keys(listState.rows).forEach(function(key) {
         if (seen[key]) return;
-        tableState.rows[key].parentNode.removeChild(tableState.rows[key]);
-        delete tableState.rows[key];
+        listState.rows[key].parentNode.removeChild(listState.rows[key]);
+        delete listState.rows[key];
     });
-    target.className = 'network-table-wrap';
-    target.classList.add('is-fade-in');
+    target.classList.add('network-table-wrap');
+    target.classList.remove('empty-state', 'network-empty-state');
+    if (isNetworkStageOpen()) {
+        target.classList.remove('is-fade-in');
+    }
+    if (firstRender && !isNetworkStageOpen()) {
+        target.classList.add('is-fade-in');
+    }
 }
 
-function ensureNetworkTable(target) {
-    if (target._networkTable && target._networkTable.table.parentNode === target) {
-        return target._networkTable;
+function ensureNetworkList(target) {
+    if (target._networkList && target._networkList.list.parentNode === target) {
+        return target._networkList;
     }
     target.textContent = '';
-    var table = document.createElement('table');
-    table.className = 'status-table';
-    var thead = document.createElement('thead');
-    var tbody = document.createElement('tbody');
-    var tr = document.createElement('tr');
-    [
-        window.I18N.storage_name || 'Storage',
-        window.I18N.upstream || 'Upstream',
-        window.I18N.status || 'Status',
-        window.I18N.last_status || 'Last status',
-        window.I18N.network_active || 'Active',
-        window.I18N.requests || 'Requests',
-        window.I18N.errors || 'Errors',
-        window.I18N.network_error_rate || 'Error rate',
-        window.I18N.network_traffic || 'Traffic',
-        window.I18N.network_latency || 'Latency',
-        window.I18N.last_used || 'Last used'
-    ].forEach(function(label) {
-        var th = document.createElement('th');
-        th.textContent = label;
-        tr.appendChild(th);
-    });
-    thead.appendChild(tr);
-    table.appendChild(thead);
-    table.appendChild(tbody);
-    target.appendChild(table);
-    target._networkTable = { table: table, tbody: tbody, rows: {} };
-    return target._networkTable;
+    var list = document.createElement('div');
+    list.className = 'network-link-list';
+    target.appendChild(list);
+    target._networkList = { list: list, rows: {} };
+    return target._networkList;
 }
 
-function updateNetworkTableRow(row, edge) {
+function createNetworkListItem(key) {
+    var item = document.createElement('article');
+    item.className = 'network-link-item';
+    item.setAttribute('data-network-row', key);
+
+    var head = document.createElement('div');
+    head.className = 'network-link-head';
+    var title = document.createElement('strong');
+    var badge = document.createElement('span');
+    badge.className = 'result-badge';
+    head.appendChild(title);
+    head.appendChild(badge);
+
+    var meta = document.createElement('div');
+    meta.className = 'network-link-meta';
+    var metrics = document.createElement('div');
+    metrics.className = 'network-link-metrics';
+    var issue = document.createElement('div');
+    issue.className = 'network-link-issue';
+
+    for (var i = 0; i < 4; i++) {
+        metrics.appendChild(document.createElement('span'));
+    }
+    item.appendChild(head);
+    item.appendChild(meta);
+    item.appendChild(metrics);
+    item.appendChild(issue);
+    item._networkFields = {
+        title: title,
+        badge: badge,
+        meta: meta,
+        metrics: metrics.children,
+        issue: issue
+    };
+    return item;
+}
+
+function updateNetworkListItem(item, edge) {
     var used = formatDisplayTime(edge.last_used_at);
-    var cells = row.children;
-    row.title = edgeTitle(edge).replace(/\n/g, ' · ');
-    setCellText(cells[0], edge.instance, edge.instance);
-    setCellText(cells[1], edge.upstream_host, edge.upstream_url, true);
-    setBadgeCell(cells[2], translateUpstreamState(edge.state), resultClass(edge.state));
-    setCellText(cells[3], edge.last_status || '');
-    setCellText(cells[4], String(edge.active_upstream_requests || 0));
-    setCellText(cells[5], String(edge.requests || 0));
-    setCellText(cells[6], String(edge.errors || 0));
-    setCellText(cells[7], formatPercent(edge.error_rate || 0));
-    setCellText(cells[8], formatBytes(edge.response_bytes || 0));
-    setCellText(cells[9], (edge.latency_ms || 0).toFixed(0) + 'ms');
-    setCellText(cells[10], used.display || '', used.exact || '');
+    var fields = item._networkFields;
+    var host = edge.upstream_host || edge.upstream_url || '-';
+    item.title = edgeTitle(edge).replace(/\n/g, ' · ');
+    fields.title.textContent = host;
+    fields.badge.className = 'result-badge ' + resultClass(edge.state);
+    fields.badge.textContent = translateUpstreamState(edge.state);
+    fields.meta.textContent = (edge.instance || '-') + ' -> ' +
+        (edge.last_status ? 'HTTP ' + edge.last_status : translateUpstreamState(edge.state)) +
+        (used.display ? ' · ' + used.display : '');
+    fields.metrics[0].textContent = (window.I18N.network_active || 'Active') + ' ' +
+        String(edge.active_upstream_requests || 0);
+    fields.metrics[1].textContent = (window.I18N.requests || 'Requests') + ' ' + String(edge.requests || 0);
+    fields.metrics[2].textContent = (window.I18N.network_traffic || 'Traffic') + ' ' +
+        formatBytes(edge.response_bytes || 0);
+    fields.metrics[3].textContent = (window.I18N.network_latency || 'Latency') + ' ' +
+        networkNumberValue(edge.latency_ms).toFixed(0) + 'ms';
+    var lastError = String(edge.last_error || '').trim();
+    var errors = networkNumberValue(edge.errors);
+    var issue = lastError || (errors > 0 ?
+        formatNetworkCompactNumber(errors) + ' ' + (window.I18N.errors || 'Errors') + ' · ' +
+        formatPercent(edge.error_rate || 0) : '');
+    fields.issue.textContent = issue;
+    fields.issue.hidden = !issue;
 }
 
-function setCellText(cell, text, title, clipped) {
-    title = title === undefined ? text : title;
-    if (clipped) {
-        var clip = cell.firstElementChild;
-        if (!clip || !clip.classList.contains('clip-cell')) {
-            cell.textContent = '';
-            clip = document.createElement('span');
-            clip.className = 'clip-cell';
-            cell.appendChild(clip);
-        }
-        clip.textContent = text || '';
-    } else {
-        cell.textContent = text || '';
-    }
-    if (title) {
-        cell.title = title;
-    } else {
-        cell.removeAttribute('title');
-    }
+function networkNumberValue(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : 0;
 }
 
-function setBadgeCell(cell, text, className) {
-    var badge = cell.firstElementChild;
-    if (!badge || !badge.classList.contains('result-badge')) {
-        cell.textContent = '';
-        badge = document.createElement('span');
-        cell.appendChild(badge);
-    }
-    badge.className = 'result-badge ' + className;
-    badge.textContent = text || '';
+function formatNetworkCompactNumber(value) {
+    var n = networkNumberValue(value);
+    if (n >= 1000000000) return (n / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B';
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(Math.round(n));
 }
 
 function closeNetworkStage() {
     if (typeof exitNetworkStage === 'function') {
         exitNetworkStage({ closeModal: false });
     }
-}
-
-function refreshNetworkFromCache() {
-    var cached = statusState.cache.network;
-    if (!cached) {
-        return;
-    }
-    var edges = isNetworkStageOpen() ? (cached.edges || []) : filterNetworkEdges(cached.edges || [], activeNetworkFilter());
-    renderNetworkMap(document.getElementById('network-map'), edges, cached);
-    renderNetworkTable(document.getElementById('network-table'), edges);
 }
 
 function isNetworkStageOpen() {

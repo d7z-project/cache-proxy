@@ -570,6 +570,19 @@ func TestStatusEndpointsReturnJSON(t *testing.T) {
 	}
 }
 
+func TestStatusSummaryDefaultsHealthyWhenStoreUnavailable(t *testing.T) {
+	status := newAppStatus(config.ServerStatusConfig{
+		DiskSampleInterval: config.Duration(time.Minute),
+		DiskHistoryWindow:  config.Duration(time.Hour),
+		EventLimit:         8,
+	}, nil)
+
+	summary := status.summary(&App{})
+
+	require.True(t, summary.Healthy)
+	require.Zero(t, summary.DegradedObjects)
+}
+
 func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

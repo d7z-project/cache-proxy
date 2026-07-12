@@ -176,6 +176,16 @@ function translateResult(result) {
     return t[key] || result;
 }
 
+function translateEventResult(item) {
+    if (!item || !item.result) {
+        return '';
+    }
+    if (item.task_type === 'upstream_state') {
+        return translateUpstreamState(item.result);
+    }
+    return translateResult(item.result);
+}
+
 function translateReason(reason) {
     var t = window.I18N;
     var key = 'reason_' + String(reason || '').toLowerCase();
@@ -194,12 +204,35 @@ function translateTaskType(taskType) {
     return t[key] || taskType;
 }
 
+function translateDetailKey(key) {
+    var t = window.I18N;
+    var normalized = String(key || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    return t['detail_' + normalized] || key;
+}
+
+function formatEventDetail(detail) {
+    if (!detail) {
+        return '';
+    }
+    var text = String(detail);
+    var pairs = text.match(/[A-Za-z0-9_.-]+=(?:"[^"]*"|'[^']*'|[^ ]+)/g);
+    if (!pairs || pairs.join(' ') !== text) {
+        return text;
+    }
+    return pairs.map(function(pair) {
+        var idx = pair.indexOf('=');
+        var key = pair.slice(0, idx);
+        var value = pair.slice(idx + 1).replace(/^["']|["']$/g, '');
+        return translateDetailKey(key) + ': ' + value;
+    }).join(' · ');
+}
+
 function resultClass(result) {
     var lower = String(result).toLowerCase();
-    var okResults = ['success', 'updated', 'unchanged', 'ok', 'active', 'up', 'healthy', 'closed'];
+    var okResults = ['success', 'updated', 'unchanged', 'ok', 'active', 'up', 'healthy', 'closed', 'skipped'];
     if (okResults.indexOf(lower) !== -1) return 'result-ok';
     if (['failed', 'error', 'failure', 'degraded', 'down', 'err', 'open'].indexOf(lower) !== -1) return 'result-err';
-    if (['aborted', 'timeout', 'cancelled', 'suspect', 'halfopen'].indexOf(lower) !== -1) return 'result-warn';
+    if (['aborted', 'timeout', 'cancelled', 'canceled', 'suspect', 'halfopen', 'unknown'].indexOf(lower) !== -1) return 'result-warn';
     return '';
 }
 
@@ -210,7 +243,7 @@ function formatEventMessage(item) {
             taskParts.push(translateReason(item.reason_code));
         }
         if (item.detail) {
-            taskParts.push(item.detail);
+            taskParts.push(formatEventDetail(item.detail));
         }
         if (item.message) {
             taskParts.push(item.message);
@@ -222,7 +255,7 @@ function formatEventMessage(item) {
         parts.push(translateReason(item.reason_code));
     }
     if (item.detail) {
-        parts.push(item.detail);
+        parts.push(formatEventDetail(item.detail));
     }
     if (item.state_from && item.result) {
         parts.push(translateUpstreamState(item.state_from) + ' -> ' + translateUpstreamState(item.result));
@@ -238,6 +271,10 @@ function formatEventMessage(item) {
 function openStatusModal() {
     if (!statusState.modal || statusState.modal.classList.contains('is-open')) {
         return;
+    }
+    var stageRequesting = typeof networkStageState !== 'undefined' && networkStageState.state === 'requesting';
+    if (statusState.activeTab === 'network' && !stageRequesting) {
+        statusState.activeTab = 'disk';
     }
     statusState.openedAt = Date.now();
     statusState.lastRefresh = Date.now();
@@ -260,6 +297,9 @@ function closeStatusModal(force) {
     document.body.classList.remove('modal-open');
     closeNetworkStage();
     cancelStatusRequests();
+    if (statusState.activeTab === 'network') {
+        statusState.activeTab = 'disk';
+    }
     statusState.openedAt = 0;
 }
 
@@ -275,21 +315,17 @@ function switchStatusTab(name) {
     var networkPanel = document.getElementById('status-tab-network');
     var eventsPanel = document.getElementById('status-tab-events');
     var showDisk = name === 'disk';
-    var showNetwork = name === 'network';
     diskPanel.hidden = !showDisk;
-    networkPanel.hidden = !showNetwork;
-    eventsPanel.hidden = showDisk || showNetwork;
+    networkPanel.hidden = name !== 'network';
+    eventsPanel.hidden = showDisk || name === 'network';
     diskPanel.classList.toggle('is-active', showDisk);
-    networkPanel.classList.toggle('is-active', showNetwork);
-    eventsPanel.classList.toggle('is-active', !showDisk && !showNetwork);
+    networkPanel.classList.toggle('is-active', name === 'network');
+    eventsPanel.classList.toggle('is-active', !showDisk && name !== 'network');
     if (showDisk) {
         loadDiskStatus();
         return;
     }
-    if (showNetwork) {
-        loadNetworkStatus();
-        return;
-    }
+    if (name === 'network') return;
     loadEventStatus();
 }
 
@@ -309,8 +345,7 @@ function stopAutoRefresh() {
 
 function refreshActiveTab() {
     var tab = statusState.activeTab;
-    var scrollEl = tab === 'disk' ? document.querySelector('.chart-card') :
-        (tab === 'network' ? document.querySelector('.network-table-wrap') : document.querySelector('.table-wrap'));
+    var scrollEl = tab === 'disk' ? document.querySelector('.chart-card') : document.querySelector('.table-wrap');
     if (scrollEl) statusState.scrollTops[tab] = scrollEl.scrollTop;
 
     delete statusState.cache.summary;
@@ -327,7 +362,7 @@ function refreshActiveTab() {
     updateRefreshBadge();
     loadStatusSummary();
     if (tab === 'disk') loadDiskStatus();
-    else if (tab === 'network') loadNetworkStatus();
+    else if (tab === 'network') return;
     else loadEventStatus();
 }
 
@@ -496,39 +531,6 @@ function renderDiskChart(target, samples) {
     target.classList.add('is-fade-in');
 }
 
-// ── Network map ──
-
-function loadNetworkStatus() {
-    var note = document.getElementById('network-panel-note');
-    var map = document.getElementById('network-map');
-    var table = document.getElementById('network-table');
-    var t = window.I18N;
-    if (!statusState.cache.network) {
-        note.innerHTML = spinnerHTML() + escapeHTML(t.loading);
-        map.className = 'network-map empty-state';
-        table.className = 'network-table-wrap empty-state';
-        map.textContent = t.loading;
-        table.textContent = t.loading;
-    }
-    fetchStatus('network', '/-/status/network', function(data) {
-        var filter = activeNetworkFilter();
-        var edges = isNetworkStageOpen() ? (data.edges || []) : filterNetworkEdges(data.edges || [], filter);
-        renderNetworkPanelNote(note, data);
-        renderNetworkMap(map, edges, data);
-        renderNetworkTable(table, edges);
-        if (typeof renderNetworkStageFromCache === 'function') {
-            renderNetworkStageFromCache();
-        }
-        restoreScroll('network');
-    }, function() {
-        note.textContent = t.status_load_failed || 'Failed to load status';
-        map.className = 'network-map empty-state';
-        table.className = 'network-table-wrap empty-state';
-        map.textContent = t.status_load_failed || 'Failed to load status';
-        table.textContent = t.status_load_failed || 'Failed to load status';
-    });
-}
-
 // ── Events table ──
 
 function loadEventStatus() {
@@ -594,7 +596,7 @@ function renderEventsTable(target, events) {
     }
     var rows = events.slice().reverse().map(function(item) {
         var rClass = resultClass(item.result);
-        var rText = item.task_type === 'upstream_state' ? translateUpstreamState(item.result) : translateResult(item.result);
+        var rText = translateEventResult(item);
         var started = formatDisplayTime(item.started_at);
         var finished = formatDisplayTime(item.finished_at);
         var message = formatEventMessage(item);
@@ -631,8 +633,7 @@ function renderEventsTable(target, events) {
 // ── Scroll preservation ──
 
 function restoreScroll(tab) {
-    var el = tab === 'disk' ? document.querySelector('.chart-card') :
-        (tab === 'network' ? document.querySelector('.network-table-wrap') : document.querySelector('.table-wrap'));
+    var el = tab === 'disk' ? document.querySelector('.chart-card') : document.querySelector('.table-wrap');
     if (el && statusState.scrollTops[tab]) {
         el.scrollTop = statusState.scrollTops[tab];
     }
@@ -683,20 +684,6 @@ function initStatusModal() {
                 return;
             }
             renderEventsTable(table, filterEvents(cached.events || []));
-        });
-    }
-    var networkFilters = document.querySelectorAll('[data-network-filter]');
-    for (var i = 0; i < networkFilters.length; i++) {
-        networkFilters[i].addEventListener('click', function() {
-            for (var j = 0; j < networkFilters.length; j++) {
-                networkFilters[j].classList.remove('is-active');
-            }
-            this.classList.add('is-active');
-            var cached = statusState.cache.network;
-            if (!cached) {
-                return;
-            }
-            refreshNetworkFromCache();
         });
     }
 }

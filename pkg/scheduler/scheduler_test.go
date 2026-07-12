@@ -371,6 +371,32 @@ func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
+func TestInvalidBusPayloadDoesNotStopScheduler(t *testing.T) {
+	sched, b := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh:      func(string) TaskHandler { return noopTask },
+		NewGC:           func(string) TaskHandler { return noopTask },
+	})
+	sched.Start(ctx)
+
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: "bad-payload"})
+	b.Publish(bus.Event{
+		Type:    bus.EventMetadataDiscovered,
+		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
+	})
+
+	require.Eventually(t, func() bool {
+		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
+		return ok
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
 func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 	sched, b := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -555,6 +581,33 @@ func TestBackoff(t *testing.T) {
 func TestStopBeforeStartIsSafe(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
 	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestAPIsReturnAfterStop(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+	require.NoError(t, sched.Stop(context.Background()))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sched.Register(TaskDef{Key: NewTaskKey("late", TypeBlobGC, ""), Interval: time.Hour, Handler: noopTask})
+		sched.RegisterFactory(TaskFactory{Instance: "repo"})
+		sched.Unregister(NewTaskKey("late", TypeBlobGC, ""))
+		_, ok := sched.Info(NewTaskKey("late", TypeBlobGC, ""))
+		require.False(t, ok)
+		require.Empty(t, sched.Snapshot())
+		sched.Start(context.Background())
+		require.NoError(t, sched.Stop(context.Background()))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.FailNow(t, "scheduler API blocked after stop")
+	}
 }
 
 func TestMetricInstancesCleanupOnRemove(t *testing.T) {

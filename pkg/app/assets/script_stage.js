@@ -240,9 +240,16 @@ function renderNetworkStageBanner(summary) {
         formatDisplayTime(new Date(networkStageState.networkAt).toISOString()).display :
         (t.loading || 'Loading');
     var countdown = Math.max(0, Math.ceil((networkStageState.nextNetworkRefreshAt - Date.now()) / 1000));
-    var healthy = (networkStageState.summary && networkStageState.summary.healthy) &&
-        (summary.degraded_upstreams || 0) === 0 &&
-        (summary.upstream_error_rate || 0) === 0;
+    var degradedUpstreams = summary.degraded_upstreams || 0;
+    var storeSummary = networkStageState.summary || {};
+    var degradedObjects = storeSummary.degraded_objects || 0;
+    var storeHealthy = storeSummary.healthy !== false;
+    var healthy = storeHealthy && degradedUpstreams === 0;
+    var healthDetails = [];
+    if (degradedObjects > 0) {
+        healthDetails.push((t.store_degraded || '%d degraded').replace('%d', String(degradedObjects)));
+    }
+    healthDetails.push(String(degradedUpstreams) + ' ' + (t.network_degraded || 'degraded'));
     renderStageCards(document.getElementById('network-stage-banner'), [
         {
             label: t.stage_title || 'Network stage',
@@ -253,7 +260,7 @@ function renderNetworkStageBanner(summary) {
         {
             label: t.stage_health || 'Health',
             value: healthy ? (t.store_healthy || 'Healthy') : (t.degraded || 'Degraded'),
-            sub: String(summary.degraded_upstreams || 0) + ' ' + (t.network_degraded || 'degraded'),
+            sub: healthDetails.join(' · '),
             level: healthy ? 'is-ok' : 'is-alert'
         },
         {
@@ -301,48 +308,55 @@ function renderNetworkStageFocus(network, events) {
     var t = window.I18N;
     var edges = network.edges || [];
     var instances = network.instances || [];
-    var hotspot = networkStageState.hotspot || chooseNetworkStageHotspots()[0] || {};
+    var hotspot = networkStageState.hotspot || chooseNetworkStageHotspots()[0] || healthyStageCard(
+        t.stage_no_hotspot || 'Stable',
+        t.stage_no_hotspot_detail || 'No active hotspot'
+    );
     var busiestEdge = topBy(edges, function(edge) { return edge.response_bytes || 0; }) || {};
     var busiestInstance = topBy(instances, function(item) { return item.requests || 0; }) || {};
-    var errorEdge = topBy(edges, function(edge) { return (edge.errors || 0) + (edge.last_error ? 1 : 0); }) || {};
+    var errorEdge = topBy(edges.filter(networkEdgeHasIssue), networkEdgeIssueScore) || {};
     var degradedList = degradedUpstreamList(network.upstreams || []);
     var latestEvent = latestStageEvent(events);
+    var noError = !networkEdgeHasIssue(errorEdge);
+    var hasDegraded = degradedList.count > 0;
     renderStageCards(document.getElementById('network-stage-focus'), [
         {
             label: t.stage_hotspot || 'Hotspot',
-            value: hotspot.title || '-',
+            value: hotspot.title,
             sub: hotspot.detail || '',
-            level: hotspot.level || 'is-muted'
+            level: hotspot.level || 'is-ok'
         },
         {
             label: t.stage_busiest_upstream || 'Busiest upstream',
-            value: busiestEdge.upstream_host || '-',
-            sub: formatBytes(busiestEdge.response_bytes || 0),
-            level: busiestEdge.response_bytes > 0 ? 'is-live' : 'is-muted'
+            value: busiestEdge.response_bytes > 0 ? busiestEdge.upstream_host : (t.stage_no_traffic || 'No traffic'),
+            sub: busiestEdge.response_bytes > 0 ? formatBytes(busiestEdge.response_bytes || 0) : (t.store_healthy || 'Healthy'),
+            level: busiestEdge.response_bytes > 0 ? 'is-live' : 'is-ok'
         },
         {
             label: t.stage_busiest_instance || 'Busiest instance',
-            value: busiestInstance.name || '-',
+            value: busiestInstance.requests > 0 ? busiestInstance.name : (t.stage_no_traffic || 'No traffic'),
             sub: formatCompactNumber(busiestInstance.requests || 0) + ' ' + (t.requests_short || 'req'),
-            level: busiestInstance.requests > 0 ? 'is-info' : 'is-muted'
+            level: busiestInstance.requests > 0 ? 'is-info' : 'is-ok'
         },
         {
             label: t.stage_error_focus || 'Error focus',
-            value: errorEdge.upstream_host || '-',
-            sub: errorEdge.last_error || String(errorEdge.errors || 0) + ' ' + (t.errors || 'Errors'),
-            level: errorEdge.errors > 0 || errorEdge.last_error ? 'is-alert' : 'is-ok'
+            value: noError ? (t.store_healthy || 'Healthy') :
+                (errorEdge.upstream_host || errorEdge.upstream_url || errorEdge.instance || '-'),
+            sub: noError ? '0 ' + (t.errors || 'Errors') : networkEdgeIssueDetail(errorEdge),
+            level: noError ? 'is-ok' : 'is-alert'
         },
         {
             label: t.stage_degraded_list || 'Degraded upstreams',
             value: degradedList.value,
             sub: degradedList.sub,
-            level: degradedList.value === '-' ? 'is-ok' : 'is-alert'
+            level: hasDegraded ? 'is-alert' : 'is-ok'
         },
         {
             label: t.stage_latest_event || 'Latest event',
-            value: latestEvent.result || '-',
-            sub: latestEvent.message || latestEvent.detail || latestEvent.task_type || '',
-            level: resultClass(latestEvent.result || '')
+            value: translateEventResult(latestEvent) || (t.stage_no_recent_event || 'No recent event'),
+            sub: formatEventMessage(latestEvent) || translateTaskType(latestEvent.task_type || '') ||
+                (t.store_healthy || 'Healthy'),
+            level: latestEvent.result ? resultClass(latestEvent.result || '') : 'is-ok'
         }
     ], 'network-stage-focus-card');
 }
@@ -383,7 +397,7 @@ function renderNetworkStageTrends(network, disk, events) {
         {
             label: t.stage_scheduler || 'Scheduler',
             value: latestEvent.task_type ? translateTaskType(latestEvent.task_type) : '-',
-            sub: latestEvent.result ? translateResult(latestEvent.result) : '',
+            sub: translateEventResult(latestEvent),
             level: resultClass(latestEvent.result || '')
         }
     ], 'network-stage-trend-card');
@@ -456,21 +470,15 @@ function chooseNetworkStageHotspots() {
     return (network.edges || []).map(function(edge) {
         var key = edge.id || edge.upstream_url || '';
         var previous = previousEdges[key] || {};
-        var deltaBytes = Math.max(0, (edge.response_bytes || 0) - (previous.response_bytes || 0));
-        var score = deltaBytes / 1048576 + (edge.active_upstream_requests || 0) * 10 + (edge.errors || 0);
+        var deltaBytes = Math.max(0, numberValue(edge.response_bytes) - numberValue(previous.response_bytes));
+        var score = deltaBytes / 1048576 + numberValue(edge.active_upstream_requests) * 10 + numberValue(edge.errors);
         var level = 'is-info';
-        if (edge.last_error || edge.state === 'open' || edge.state === 'degraded') {
+        if (networkEdgeHasIssue(edge)) {
             score += 10000;
-            level = 'is-alert';
-        } else if (edge.state === 'halfopen') {
-            score += 5000;
             level = 'is-alert';
         } else if ((edge.active_upstream_requests || 0) > 0) {
             score += 2000;
             level = 'is-live';
-        } else if (edge.last_status && !String(edge.last_status).match(/^([23])/)) {
-            score += 1000;
-            level = 'is-alert';
         }
         return {
             score: score,
@@ -500,6 +508,16 @@ function topBy(items, scoreFn) {
     return best;
 }
 
+function healthyStageCard(title, detail) {
+    return {
+        score: 0,
+        level: 'is-ok',
+        focusID: '',
+        title: title,
+        detail: detail
+    };
+}
+
 function degradedUpstreamList(upstreams) {
     var degraded = (upstreams || []).filter(function(item) {
         return item.state && item.state !== 'closed' && item.state !== 'unknown';
@@ -507,12 +525,68 @@ function degradedUpstreamList(upstreams) {
         return item.host;
     });
     if (!degraded.length) {
-        return { value: '-', sub: window.I18N.store_healthy || 'Healthy' };
+        return {
+            value: window.I18N.store_healthy || 'Healthy',
+            sub: '0 ' + (window.I18N.network_degraded || 'degraded'),
+            count: 0
+        };
     }
     return {
         value: String(degraded.length),
-        sub: degraded.slice(0, 3).join(', ') + (degraded.length > 3 ? ' +' + String(degraded.length - 3) : '')
+        sub: degraded.slice(0, 3).join(', ') + (degraded.length > 3 ? ' +' + String(degraded.length - 3) : ''),
+        count: degraded.length
     };
+}
+
+function networkEdgeHasIssue(edge) {
+    return networkEdgeIssueScore(edge) > 0;
+}
+
+function networkEdgeIssueScore(edge) {
+    if (!edge) {
+        return 0;
+    }
+    var score = numberValue(edge.errors) * 100 + numberValue(edge.error_rate) * 1000;
+    if (String(edge.last_error || '').trim()) {
+        score += 10000;
+    }
+    if (edge.state === 'open' || edge.state === 'degraded') {
+        score += 8000;
+    } else if (edge.state === 'halfopen') {
+        score += 4000;
+    }
+    if (httpStatusIsIssue(edge.last_status)) {
+        score += 2000;
+    }
+    return score;
+}
+
+function networkEdgeIssueDetail(edge) {
+    if (!edge) {
+        return '';
+    }
+    var lastError = String(edge.last_error || '').trim();
+    if (lastError) {
+        return lastError;
+    }
+    if (numberValue(edge.errors) > 0) {
+        return formatCompactNumber(edge.errors) + ' ' + (window.I18N.errors || 'Errors');
+    }
+    if (httpStatusIsIssue(edge.last_status)) {
+        return 'HTTP ' + String(edge.last_status);
+    }
+    if (edge.state && edge.state !== 'closed' && edge.state !== 'unknown') {
+        return translateUpstreamState(edge.state);
+    }
+    if (numberValue(edge.error_rate) > 0) {
+        return (window.I18N.network_error_rate || 'Error rate') + ' ' + formatPercent(edge.error_rate);
+    }
+    return '0 ' + (window.I18N.errors || 'Errors');
+}
+
+function httpStatusIsIssue(status) {
+    var code = numberValue(status);
+    return code >= 500 || (code >= 400 && code !== 404);
 }
 
 function latestStageEvent(events) {
@@ -558,11 +632,16 @@ function formatSignedBytes(value) {
 }
 
 function formatCompactNumber(value) {
-    var n = Number(value) || 0;
+    var n = numberValue(value);
     if (n >= 1000000000) return (n / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B';
     if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
     if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
     return String(Math.round(n));
+}
+
+function numberValue(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : 0;
 }
 
 function showStageLaunchError(message) {

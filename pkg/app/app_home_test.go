@@ -405,6 +405,7 @@ func TestHomePageRendersStatusModalControls(t *testing.T) {
 	require.Contains(t, body, `id="status-modal"`)
 	require.Contains(t, body, `data-status-tab="disk"`)
 	require.Contains(t, body, `data-status-tab="events"`)
+	require.Contains(t, body, `id="status-tab-network"`)
 	require.Contains(t, body, `id="refresh-badge"`)
 	require.Contains(t, body, `id="status-modal-backdrop"`)
 }
