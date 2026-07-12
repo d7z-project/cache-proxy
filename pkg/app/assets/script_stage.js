@@ -483,13 +483,11 @@ function chooseNetworkStageHotspots() {
     var network = networkStageState.network || statusState.cache.network || {};
     var previousEdges = {};
     ((networkStageState.previousNetwork && networkStageState.previousNetwork.edges) || []).forEach(function(edge) {
-        previousEdges[edge.id || edge.upstream_url || ''] = edge;
+        previousEdges[networkEdgeKey(edge)] = edge;
     });
     return (network.edges || []).map(function(edge) {
-        var key = edge.id || edge.upstream_url || '';
-        var previous = previousEdges[key] || {};
-        var deltaBytes = Math.max(0, numberValue(edge.response_bytes) - numberValue(previous.response_bytes));
-        var score = networkEdgeAttentionScore(edge) + deltaBytes / 1048576;
+        var stat = networkEdgeStats(edge, previousEdges[networkEdgeKey(edge)]);
+        var score = networkEdgeAttentionScore(edge, stat);
         var level = 'is-info';
         if (networkEdgeIsDegraded(edge)) {
             level = 'is-alert';
@@ -556,12 +554,12 @@ function degradedUpstreamList(upstreams) {
     };
 }
 
-function networkEdgeAttentionScore(edge) {
+function networkEdgeAttentionScore(edge, stat) {
     if (!edge) {
         return 0;
     }
-    var score = numberValue(edge.active_upstream_requests) * 1000 +
-        Math.min(800, numberValue(edge.response_bytes) / 1048576);
+    stat = stat || networkEdgeStats(edge, null);
+    var score = stat.score + Math.min(800, stat.byteDelta / 1048576);
     if (networkEdgeIsDegraded(edge)) {
         score += 100000;
     } else if (networkEdgeHasRecentNotice(edge)) {

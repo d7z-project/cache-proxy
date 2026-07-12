@@ -1413,6 +1413,16 @@ body.network-stage-open .network-edge-label{
 .network-edge-label.is-dimmed{
   opacity:.12;
 }
+.network-map.is-dense .network-edge-label.is-quiet{
+  opacity:0;
+}
+.network-map.is-clustered .network-edge-label{
+  opacity:0;
+}
+.network-map.is-clustered .network-edge-label.is-active,
+.network-map.is-clustered .network-edge-label.is-focused{
+  opacity:1;
+}
 .network-packet{
   fill:var(--link);
   opacity:0;
@@ -1490,6 +1500,22 @@ body.network-stage-open .network-node .node-label{
 }
 body.network-stage-open .network-node .node-sub{
   font-size:10.5px;
+}
+.network-map.is-dense .network-node .node-label,
+.network-map.is-clustered .network-node .node-label{
+  font-size:11px;
+}
+.network-map.is-dense .network-node .node-sub,
+.network-map.is-clustered .network-node .node-sub{
+  font-size:9.5px;
+}
+body.network-stage-open .network-map.is-dense .network-node .node-label,
+body.network-stage-open .network-map.is-clustered .network-node .node-label{
+  font-size:11.5px;
+}
+body.network-stage-open .network-map.is-dense .network-node .node-sub,
+body.network-stage-open .network-map.is-clustered .network-node .node-sub{
+  font-size:10px;
 }
 .network-link-list{
   display:grid;

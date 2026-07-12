@@ -1,4 +1,5 @@
 var SVG_NS = 'http://www.w3.org/2000/svg';
+var maxNetworkRelatedIDs = 80;
 
 function formatPercent(value) {
     return (value * 100).toFixed(value > 0 && value < 0.1 ? 1 : 0).replace(/\.0$/, '') + '%';
@@ -16,7 +17,7 @@ function renderNetworkMap(target, edges, data) {
     var t = window.I18N;
     if (!edges.length) {
         target.classList.add('network-map', 'empty-state', 'network-empty-state');
-        target.classList.remove('has-focus', 'is-fade-in');
+        target.classList.remove('has-focus', 'is-fade-in', 'is-dense', 'is-clustered');
         target.classList.toggle('is-stage', document.body.classList.contains('network-stage-open'));
         target.removeAttribute('data-focus-id');
         if (target._networkGraph || target.textContent !== (t.no_data || 'No data')) {
@@ -28,12 +29,15 @@ function renderNetworkMap(target, edges, data) {
 
     var firstRender = !target._networkGraph;
     var graph = ensureNetworkGraph(target);
-    var layout = networkLayout(target, edges, data);
+    var previousData = networkPreviousData(target);
+    var layout = networkLayout(target, edges, data, previousData);
     graph.svg.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + layout.height);
     graph.svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     target.classList.add('network-map');
     target.classList.remove('empty-state', 'network-empty-state');
     target.classList.toggle('is-stage', document.body.classList.contains('network-stage-open'));
+    target.classList.toggle('is-dense', layout.mode === 'dense');
+    target.classList.toggle('is-clustered', layout.mode === 'clustered');
     if (isNetworkStageOpen()) {
         target.classList.remove('is-fade-in');
     }
@@ -41,6 +45,7 @@ function renderNetworkMap(target, edges, data) {
     syncNetworkEdges(graph, layout);
     syncNetworkNodes(graph, layout);
     applyNetworkFocus(target, target.getAttribute('data-focus-id') || '');
+    target._networkData = data;
     if (firstRender && !isNetworkStageOpen()) {
         target.classList.add('is-fade-in');
     }
@@ -78,7 +83,321 @@ function ensureNetworkGraph(target) {
     return target._networkGraph;
 }
 
-function networkLayout(target, edges, data) {
+function networkPreviousData(target) {
+    if (typeof networkStageState !== 'undefined' && networkStageState.previousNetwork) {
+        return networkStageState.previousNetwork;
+    }
+    return target._networkData || null;
+}
+
+function networkPreviousEdges(previousData) {
+    var previousEdges = {};
+    ((previousData && previousData.edges) || []).forEach(function(edge) {
+        previousEdges[networkEdgeKey(edge)] = edge;
+    });
+    return previousEdges;
+}
+
+function networkEdgeKey(edge) {
+    if (!edge) {
+        return '';
+    }
+    return edge.id || (edge.from + '->' + edge.to + ':' + edge.upstream_url);
+}
+
+function networkEdgeStats(edge, previous) {
+    var active = networkNumberValue(edge.active_upstream_requests);
+    var hasPrevious = !!previous && (previous.requests !== undefined || previous.response_bytes !== undefined);
+    var requestDelta = hasPrevious ?
+        Math.max(0, networkNumberValue(edge.requests) - networkNumberValue(previous.requests)) :
+        networkNumberValue(edge.request_delta);
+    var byteDelta = hasPrevious ?
+        Math.max(0, networkNumberValue(edge.response_bytes) - networkNumberValue(previous.response_bytes)) :
+        networkNumberValue(edge.byte_delta);
+    var score = active * 1400 + Math.log1p(byteDelta / 65536) * 260 + Math.log1p(requestDelta) * 140;
+    return {
+        edge: edge,
+        active: active,
+        requestDelta: requestDelta,
+        byteDelta: byteDelta,
+        score: score
+    };
+}
+
+function networkLayoutMode(instanceCount, upstreamCount) {
+    var nodes = instanceCount + upstreamCount;
+    if (nodes > 30 || upstreamCount > 24) {
+        return 'clustered';
+    }
+    if (nodes > 12 || upstreamCount > 10) {
+        return 'dense';
+    }
+    return 'simple';
+}
+
+function visibleNetworkEdges(edges, edgeStatsByKey, upstreamByID, layoutMode) {
+    var result = { edges: edges.slice(), upstreams: [] };
+    if (layoutMode !== 'clustered') {
+        return collectVisibleUpstreams(result, upstreamByID, edgeStatsByKey);
+    }
+
+    var sorted = edges.slice().sort(function(a, b) {
+        return networkEdgeLayoutScore(b, edgeStatsByKey[networkEdgeKey(b)]) -
+            networkEdgeLayoutScore(a, edgeStatsByKey[networkEdgeKey(a)]) ||
+            networkEdgeLastUsed(b) - networkEdgeLastUsed(a) ||
+            String(a.upstream_host || a.upstream_url || '').localeCompare(String(b.upstream_host || b.upstream_url || ''));
+    });
+    var keepLimit = 24;
+    var kept = {};
+    var keptCount = 0;
+    var visibleEdges = [];
+    sorted.forEach(function(edge) {
+        if (kept[edge.to] || keptCount < keepLimit || networkEdgeIsDegraded(edge) ||
+            networkNumberValue(edge.active_upstream_requests) > 0) {
+            if (!kept[edge.to]) {
+                keptCount++;
+            }
+            kept[edge.to] = true;
+            visibleEdges.push(edge);
+        }
+    });
+
+    var hidden = edges.filter(function(edge) {
+        return !kept[edge.to];
+    });
+    if (!hidden.length) {
+        result.edges = visibleEdges;
+        return collectVisibleUpstreams(result, upstreamByID, edgeStatsByKey);
+    }
+
+    var group = groupedUpstream(hidden);
+    upstreamByID[group.id] = group;
+    var groupedByInstance = {};
+    hidden.forEach(function(edge) {
+        var hiddenStat = edgeStatsByKey[networkEdgeKey(edge)] || networkEdgeStats(edge, {});
+        var key = edge.from || edge.instance || '';
+        if (!groupedByInstance[key]) {
+            groupedByInstance[key] = groupedNetworkEdge(edge, group.id, hiddenStat);
+        } else {
+            mergeGroupedNetworkEdge(groupedByInstance[key], edge, hiddenStat);
+        }
+    });
+    Object.keys(groupedByInstance).forEach(function(key) {
+        var edge = groupedByInstance[key];
+        var stat = networkEdgeStats(edge, {});
+        stat.requestDelta = edge.request_delta || 0;
+        stat.byteDelta = edge.byte_delta || 0;
+        stat.score = networkNumberValue(edge.active_upstream_requests) * 1400 +
+            Math.log1p(stat.byteDelta / 65536) * 260 + Math.log1p(stat.requestDelta) * 140;
+        edgeStatsByKey[networkEdgeKey(edge)] = stat;
+        visibleEdges.push(edge);
+    });
+    result.edges = visibleEdges;
+    return collectVisibleUpstreams(result, upstreamByID, edgeStatsByKey);
+}
+
+function collectVisibleUpstreams(result, upstreamByID, edgeStatsByKey) {
+    var scores = {};
+    var lastUsed = {};
+    result.edges.forEach(function(edge) {
+        var upstream = upstreamByID[edge.to];
+        if (upstream && result.upstreams.indexOf(upstream) === -1) {
+            result.upstreams.push(upstream);
+        }
+        scores[edge.to] = Math.max(
+            scores[edge.to] || 0,
+            networkEdgeLayoutScore(edge, edgeStatsByKey[networkEdgeKey(edge)])
+        );
+        lastUsed[edge.to] = Math.max(lastUsed[edge.to] || 0, networkEdgeLastUsed(edge));
+    });
+    result.upstreams.sort(function(a, b) {
+        return (scores[b.id] || 0) - (scores[a.id] || 0) ||
+            (lastUsed[b.id] || 0) - (lastUsed[a.id] || 0) ||
+            String(a.host || '').localeCompare(String(b.host || ''));
+    });
+    return result;
+}
+
+function groupedUpstream(hiddenEdges) {
+    var count = {};
+    hiddenEdges.forEach(function(edge) {
+        count[edge.to] = true;
+    });
+    return {
+        id: 'upstream:group:idle',
+        host: '+' + String(Object.keys(count).length) + ' ' + (window.I18N.network_links || 'links'),
+        state: groupedState(hiddenEdges),
+        requests: sumNetworkField(hiddenEdges, 'requests'),
+        errors: sumNetworkField(hiddenEdges, 'errors'),
+        response_bytes: sumNetworkField(hiddenEdges, 'response_bytes'),
+        active_upstream_requests: sumNetworkField(hiddenEdges, 'active_upstream_requests')
+    };
+}
+
+function groupedNetworkEdge(edge, groupID, stat) {
+    return {
+        id: 'group:' + edge.from + '->' + groupID,
+        from: edge.from,
+        to: groupID,
+        instance: edge.instance,
+        upstream_url: groupID,
+        upstream_host: '+ ' + (window.I18N.network_links || 'links'),
+        state: edge.state || 'unknown',
+        requests: networkNumberValue(edge.requests),
+        errors: networkNumberValue(edge.errors),
+        response_bytes: networkNumberValue(edge.response_bytes),
+        active_upstream_requests: networkNumberValue(edge.active_upstream_requests),
+        request_delta: stat ? stat.requestDelta : 0,
+        byte_delta: stat ? stat.byteDelta : 0,
+        related: networkRelatedIDs(edge.to)
+    };
+}
+
+function mergeGroupedNetworkEdge(grouped, edge, stat) {
+    grouped.requests += networkNumberValue(edge.requests);
+    grouped.errors += networkNumberValue(edge.errors);
+    grouped.response_bytes += networkNumberValue(edge.response_bytes);
+    grouped.active_upstream_requests += networkNumberValue(edge.active_upstream_requests);
+    grouped.request_delta += stat ? stat.requestDelta : 0;
+    grouped.byte_delta += stat ? stat.byteDelta : 0;
+    grouped.state = worseNetworkState(grouped.state, edge.state);
+    appendNetworkRelatedID(grouped.related, edge.to);
+}
+
+function networkEdgeLayoutScore(edge, stat) {
+    var score = stat ? stat.score : 0;
+    if (networkEdgeIsDegraded(edge)) {
+        score += 100000;
+    }
+    if (networkEdgeHasRecentNotice(edge)) {
+        score += 1000;
+    }
+    return score;
+}
+
+function networkEdgeLastUsed(edge) {
+    var timestamp = new Date(edge && edge.last_used_at || '').getTime();
+    return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function networkInstanceActivity(instances, edges, edgeStatsByKey) {
+    var byID = {};
+    instances.forEach(function(instance) {
+        byID[instance.id] = emptyNetworkActivity();
+        byID[instance.id].state = 'closed';
+    });
+    edges.forEach(function(edge) {
+        var activity = byID[edge.from];
+        if (!activity) {
+            return;
+        }
+        var stat = edgeStatsByKey[networkEdgeKey(edge)] || networkEdgeStats(edge, {});
+        activity.active += stat.active;
+        activity.requestDelta += stat.requestDelta;
+        activity.byteDelta += stat.byteDelta;
+        activity.score += stat.score;
+        activity.state = worseNetworkState(activity.state, edge.state);
+        appendNetworkRelatedID(activity.related, edge.to);
+        (edge.related || []).forEach(function(id) {
+            appendNetworkRelatedID(activity.related, id);
+        });
+    });
+    return byID;
+}
+
+function networkRelatedIDs(id) {
+    var related = [];
+    appendNetworkRelatedID(related, id);
+    return related;
+}
+
+function appendNetworkRelatedID(related, id) {
+    if (!id || related.length >= maxNetworkRelatedIDs || related.indexOf(id) !== -1) {
+        return;
+    }
+    related.push(id);
+}
+
+function networkInstanceLayoutScore(instance, activity) {
+    var score = activity ? activity.score : 0;
+    if (activity && networkStateIsDegraded(activity.state)) {
+        score += 100000;
+    }
+    score += networkNumberValue(instance.active_upstream_requests) * 1000;
+    return score;
+}
+
+function emptyNetworkActivity() {
+    return { active: 0, requestDelta: 0, byteDelta: 0, score: 0, state: 'closed', related: [] };
+}
+
+function maxNetworkActivity(edgeStats) {
+    return edgeStats.reduce(function(max, stat) {
+        return Math.max(max, stat.score || 0);
+    }, 0);
+}
+
+function maxInstanceActivity(instanceActivity) {
+    return Object.keys(instanceActivity).reduce(function(max, key) {
+        return Math.max(max, instanceActivity[key].score || 0);
+    }, 0);
+}
+
+function networkEdgeWidth(score, maxScore, active) {
+    if (active > 0) {
+        return 4.4 + Math.min(5.6, Math.sqrt(score / Math.max(1, maxScore)) * 5.6);
+    }
+    if (score > 0) {
+        return 2.4 + Math.min(3.2, Math.sqrt(score / Math.max(1, maxScore)) * 3.2);
+    }
+    return 1.7;
+}
+
+function networkNodeSize(layoutMode, kind) {
+    if (kind === 'proxy') {
+        return layoutMode === 'simple' ? 22 : 20;
+    }
+    if (kind === 'group') {
+        return 19;
+    }
+    if (layoutMode === 'clustered') {
+        return 17;
+    }
+    if (layoutMode === 'dense') {
+        return 18.5;
+    }
+    return 22;
+}
+
+function worseNetworkState(a, b) {
+    var ranks = { unknown: 0, closed: 1, halfopen: 2, degraded: 3, open: 4 };
+    a = String(a || 'unknown').toLowerCase();
+    b = String(b || 'unknown').toLowerCase();
+    return (ranks[b] || 0) > (ranks[a] || 0) ? b : a;
+}
+
+function groupedState(edges) {
+    return edges.reduce(function(state, edge) {
+        return worseNetworkState(state, edge.state);
+    }, 'closed');
+}
+
+function sumNetworkField(items, field) {
+    return items.reduce(function(sum, item) {
+        return sum + networkNumberValue(item[field]);
+    }, 0);
+}
+
+function networkLayout(target, edges, data, previousData) {
+    var previousEdges = networkPreviousEdges(previousData);
+    var edgeStats = edges.map(function(edge) {
+        return networkEdgeStats(edge, previousEdges[networkEdgeKey(edge)]);
+    });
+    var edgeStatsByKey = {};
+    edgeStats.forEach(function(stat) {
+        edgeStatsByKey[networkEdgeKey(stat.edge)] = stat;
+    });
+
     var instances = (data.instances || []).filter(function(instance) {
         return edges.some(function(edge) { return edge.instance === instance.name; });
     });
@@ -94,12 +413,23 @@ function networkLayout(target, edges, data) {
     });
 
     var stage = document.body.classList.contains('network-stage-open');
+    var layoutMode = networkLayoutMode(instances.length, upstreams.length);
+    var visible = visibleNetworkEdges(edges, edgeStatsByKey, upstreamByID, layoutMode);
+    upstreams = visible.upstreams;
+    var visibleEdges = visible.edges;
+    var instanceActivity = networkInstanceActivity(instances, visibleEdges, edgeStatsByKey);
+    instances.sort(function(a, b) {
+        return networkInstanceLayoutScore(b, instanceActivity[b.id]) -
+            networkInstanceLayoutScore(a, instanceActivity[a.id]) ||
+            String(a.name || '').localeCompare(String(b.name || ''));
+    });
     var width = Math.max(stage ? 1280 : 860, target.clientWidth ? target.clientWidth - (stage ? 16 : 28) : 0);
+    var rowGap = layoutMode === 'simple' ? (stage ? 104 : 76) : (layoutMode === 'dense' ? (stage ? 74 : 62) : (stage ? 68 : 58));
     var rowCount = Math.max(instances.length, upstreams.length, 1);
     var height = Math.max(
         stage ? 560 : 280,
         target.clientHeight ? target.clientHeight - (stage ? 16 : 0) : 0,
-        rowCount * (stage ? 104 : 76) + 74
+        rowCount * rowGap + 74
     );
     var proxy = { x: stage ? 104 : 86, y: height / 2 };
     var instX = Math.round(width * (stage ? 0.34 : 0.38));
@@ -113,43 +443,59 @@ function networkLayout(target, edges, data) {
         upstreamPos[upstream.id] = { x: upX, y: laneY(idx, upstreams.length, height) };
     });
 
-    var maxReq = Math.max.apply(Math, edges.map(function(edge) { return edge.requests || 1; }));
+    var activityMax = Math.max(1, maxNetworkActivity(edgeStats), maxInstanceActivity(instanceActivity));
+    var quietLabels = layoutMode !== 'simple';
     var edgeModels = instances.map(function(instance) {
         var p = instancePos[instance.id];
+        var activity = instanceActivity[instance.id] || emptyNetworkActivity();
+        var active = activity.active;
+        var width = networkEdgeWidth(activity.score, activityMax, active);
         return {
             key: 'proxy:' + instance.id,
             from: 'proxy:cache',
             to: instance.id,
-            state: 'closed',
-            active: 0,
-            width: 2,
+            related: activity.related,
+            state: activity.state,
+            active: active,
+            moving: active > 0 || activity.score > 0,
+            traffic: trafficLevel(activity),
+            width: width,
             path: curvePath(proxy, p),
-            label: instance.mode || '',
-            title: (window.I18N.title || 'Cache Proxy') + ' -> ' + instance.name,
+            label: instanceLinkLabel(instance, activity),
+            quiet: quietLabels && active <= 0 && activity.score <= 0,
+            title: instanceLinkTitle(instance, activity),
             midpoint: midpoint(proxy, p),
-            hash: instance.mode + ':' + instance.requests
+            hash: [
+                instance.mode, instance.requests, activity.active, activity.requestDelta,
+                activity.byteDelta, activity.state
+            ].join(':')
         };
     });
 
-    edges.forEach(function(edge) {
+    visibleEdges.forEach(function(edge) {
         var a = instancePos[edge.from];
         var b = upstreamPos[edge.to];
         if (!a || !b) return;
-        var strokeWidth = 1.6 + Math.min(8, ((edge.requests || 1) / maxReq) * 7);
+        var stat = edgeStatsByKey[networkEdgeKey(edge)] || networkEdgeStats(edge, {});
+        var strokeWidth = networkEdgeWidth(stat.score, activityMax, stat.active);
         var edgeHash = [
-            edge.state, edge.active_upstream_requests, edge.requests, edge.errors,
-            edge.response_bytes, edge.last_status, edge.last_error, edge.latency_ms
+            edge.state, edge.active_upstream_requests, edge.requests, stat.requestDelta,
+            edge.errors, edge.response_bytes, stat.byteDelta, edge.last_status,
+            edge.last_error, edge.latency_ms
         ].join(':');
         edgeModels.push({
             key: edge.id || (edge.from + '->' + edge.to + ':' + edge.upstream_url),
             from: edge.from,
             to: edge.to,
+            related: edge.related || [],
             state: edge.state || 'unknown',
-            active: edge.active_upstream_requests || 0,
-            traffic: trafficLevel(edge),
+            active: stat.active,
+            moving: stat.active > 0 || stat.score > 0,
+            traffic: trafficLevel(stat),
             width: strokeWidth,
             path: curvePath(a, b),
             label: edgeMetricsText(edge),
+            quiet: quietLabels && stat.active <= 0 && stat.score <= 0 && !networkEdgeIsDegraded(edge),
             title: edgeTitle(edge),
             midpoint: midpoint(a, b),
             hash: edgeHash
@@ -160,11 +506,12 @@ function networkLayout(target, edges, data) {
         key: 'proxy:cache',
         x: proxy.x,
         y: proxy.y,
+        size: networkNodeSize(layoutMode, 'proxy'),
         kind: 'proxy',
         label: window.I18N.title || 'Cache Proxy',
         sub: String(edges.length) + ' ' + (window.I18N.network_links || 'links'),
         state: 'closed',
-        hash: 'proxy:' + edges.length
+        hash: 'proxy:' + edges.length + ':' + layoutMode
     }];
     instances.forEach(function(instance) {
         var p = instancePos[instance.id];
@@ -172,6 +519,7 @@ function networkLayout(target, edges, data) {
             key: instance.id,
             x: p.x,
             y: p.y,
+            size: networkNodeSize(layoutMode, 'instance'),
             kind: 'instance',
             label: instance.name,
             sub: networkInstanceSubtitle(instance),
@@ -188,6 +536,7 @@ function networkLayout(target, edges, data) {
             key: upstream.id,
             x: p.x,
             y: p.y,
+            size: networkNodeSize(layoutMode, upstream.id.indexOf('upstream:group:') === 0 ? 'group' : 'upstream'),
             kind: 'upstream',
             label: upstream.host,
             sub: networkUpstreamNodeSubtitle(upstream),
@@ -199,7 +548,7 @@ function networkLayout(target, edges, data) {
         });
     });
 
-    return { width: width, height: height, edges: edgeModels, nodes: nodeModels };
+    return { width: width, height: height, edges: edgeModels, nodes: nodeModels, mode: layoutMode };
 }
 
 function syncNetworkEdges(graph, layout) {
@@ -239,10 +588,11 @@ function syncNetworkEdges(graph, layout) {
 }
 
 function updateEdgePath(pathNode, model) {
-    var cls = 'network-edge state-' + safeState(model.state) + (model.active > 0 ? ' is-active' : '');
+    var cls = 'network-edge state-' + safeState(model.state) + (model.moving ? ' is-active' : '');
     pathNode.setAttribute('class', cls);
     pathNode.setAttribute('data-edge-from', model.from);
     pathNode.setAttribute('data-edge-to', model.to);
+    pathNode.setAttribute('data-edge-related', (model.related || []).join(' '));
     pathNode.setAttribute('data-edge-hash', model.hash);
     pathNode.setAttribute('d', model.path);
     pathNode.setAttribute('stroke-width', model.width.toFixed(1));
@@ -253,17 +603,20 @@ function updateEdgePath(pathNode, model) {
 function updateEdgeLabel(labelNode, model) {
     labelNode.setAttribute('data-edge-from', model.from);
     labelNode.setAttribute('data-edge-to', model.to);
+    labelNode.setAttribute('data-edge-related', (model.related || []).join(' '));
     labelNode.setAttribute('x', model.midpoint.x);
     labelNode.setAttribute('y', model.midpoint.y - 8);
     labelNode.textContent = model.label;
-    labelNode.classList.toggle('is-active', model.active > 0);
+    labelNode.classList.toggle('is-active', !!model.moving);
+    labelNode.classList.toggle('is-quiet', !!model.quiet);
 }
 
 function updatePacket(packetNode, model) {
     packetNode.setAttribute('data-edge-from', model.from);
     packetNode.setAttribute('data-edge-to', model.to);
+    packetNode.setAttribute('data-edge-related', (model.related || []).join(' '));
     packetNode.setAttribute('class', 'network-packet traffic-' + (model.traffic || 'idle'));
-    packetNode.classList.toggle('is-active', model.active > 0);
+    packetNode.classList.toggle('is-active', !!model.moving);
     var duration = model.active >= 8 ? '1.05s' : (model.active >= 3 ? '1.35s' : '1.7s');
     var motions = packetNode.querySelectorAll('animateMotion');
     motions.forEach(function(motion) {
@@ -334,6 +687,7 @@ function updateNetworkNode(node, model) {
     node.setAttribute('data-node-hash', model.hash);
     node.setAttribute('transform', 'translate(' + model.x + ' ' + model.y + ')');
     node.querySelector('title').textContent = model.label;
+    node.querySelector('circle').setAttribute('r', model.size || 22);
     node.querySelector('.node-label').textContent = compactNetworkLabel(model.label);
     node.querySelector('.node-sub').textContent = model.sub || '';
     flashIfChanged(node, model.hash);
@@ -400,14 +754,35 @@ function edgeTitle(edge) {
         (edge.last_error ? '\n' + (window.I18N.last_error || 'Last error') + ': ' + edge.last_error : '');
 }
 
-function trafficLevel(edge) {
-    var active = edge.active_upstream_requests || 0;
-    var requests = edge.requests || 0;
-    var bytes = edge.response_bytes || 0;
-    if (active >= 8 || bytes >= 1024 * 1024 * 1024 || requests >= 10000) {
+function instanceLinkLabel(instance, activity) {
+    if (activity.active > 0) {
+        return String(activity.active) + ' ' + (window.I18N.network_active_short || 'active');
+    }
+    if (activity.byteDelta > 0) {
+        return '+' + formatBytes(activity.byteDelta);
+    }
+    if (activity.requestDelta > 0) {
+        return '+' + String(activity.requestDelta) + ' ' + (window.I18N.requests_short || 'req');
+    }
+    return instance.mode || '';
+}
+
+function instanceLinkTitle(instance, activity) {
+    return (window.I18N.title || 'Cache Proxy') + ' -> ' + instance.name +
+        '\n' + (window.I18N.network_active || 'Active') + ': ' + String(activity.active) +
+        '\n' + (window.I18N.requests || 'Requests') + ' +' + String(activity.requestDelta) +
+        '\n' + (window.I18N.network_traffic || 'Traffic') + ' +' + formatBytes(activity.byteDelta) +
+        '\n' + (window.I18N.status || 'Status') + ': ' + translateUpstreamState(activity.state);
+}
+
+function trafficLevel(activity) {
+    var active = activity.active || 0;
+    var requests = activity.requestDelta || 0;
+    var bytes = activity.byteDelta || 0;
+    if (active >= 8 || bytes >= 256 * 1024 * 1024 || requests >= 1000) {
         return 'high';
     }
-    if (active >= 3 || bytes >= 100 * 1024 * 1024 || requests >= 1000) {
+    if (active >= 3 || bytes >= 32 * 1024 * 1024 || requests >= 100) {
         return 'medium';
     }
     if (active > 0 || requests > 0 || bytes > 0) {
@@ -528,15 +903,34 @@ function applyNetworkFocus(target, focusID) {
     target.classList.add('has-focus');
     var connected = {};
     connected[focusID] = true;
+    var routeEdges = {};
     edges.forEach(function(edge) {
         var from = edge.getAttribute('data-edge-from') || '';
         var to = edge.getAttribute('data-edge-to') || '';
-        var hit = from === focusID || to === focusID;
+        var related = edgeRelatedIDs(edge);
+        var hit = from === focusID || to === focusID || related.indexOf(focusID) !== -1;
+        if (hit) {
+            routeEdges[from] = true;
+            routeEdges[to] = true;
+            related.forEach(function(id) {
+                routeEdges[id] = true;
+            });
+        }
+    });
+    edges.forEach(function(edge) {
+        var from = edge.getAttribute('data-edge-from') || '';
+        var to = edge.getAttribute('data-edge-to') || '';
+        var related = edgeRelatedIDs(edge);
+        var hit = from === focusID || to === focusID || related.indexOf(focusID) !== -1 ||
+            (from === 'proxy:cache' && routeEdges[to]);
         edge.classList.toggle('is-focused', hit);
         edge.classList.toggle('is-dimmed', !hit);
         if (hit) {
             connected[from] = true;
             connected[to] = true;
+            related.forEach(function(id) {
+                connected[id] = true;
+            });
         }
     });
     nodes.forEach(function(node) {
@@ -544,6 +938,11 @@ function applyNetworkFocus(target, focusID) {
         node.classList.toggle('is-focused', !!connected[id]);
         node.classList.toggle('is-dimmed', !connected[id]);
     });
+}
+
+function edgeRelatedIDs(edge) {
+    var related = edge.getAttribute('data-edge-related') || '';
+    return related ? related.split(/\s+/).filter(Boolean) : [];
 }
 
 function renderNetworkTable(target, edges) {
