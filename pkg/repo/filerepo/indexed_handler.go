@@ -37,7 +37,9 @@ type IndexedHandler struct {
 	upstreams  []string
 	build      SnapshotBuilder
 	sh         *health.ServiceHealth
+	downloads  *httpcache.DownloadLimiter
 	bus        *bus.Bus
+	policy     Policy
 
 	mu            sync.RWMutex
 	roots         map[string]*rootEntry
@@ -59,6 +61,8 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		upstreams:     append([]string(nil), upstreams...),
 		build:         builder,
 		sh:            svcHealth,
+		downloads:     downloads,
+		policy:        *policy,
 		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
 		currentView:   map[string]currentViewEntry{},
@@ -155,7 +159,7 @@ func (h *IndexedHandler) Stop(ctx context.Context) error {
 
 func (h *IndexedHandler) inspect(cleanPath string) DiscoveryResult {
 	if h.inspector == nil {
-		return DiscoveryResult{Class: ResourceAuxiliary}
+		return DiscoveryResult{Class: ResourceSidecar}
 	}
 	return h.inspector.InspectPath(cleanPath)
 }
@@ -225,10 +229,15 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 			request.Header.Set("If-Modified-Since", lastModified)
 		}
 
+		release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, true)
+		if err != nil {
+			return false, err
+		}
 		start := time.Now()
 		response, err := h.client.Do(request)
 		latency := time.Since(start)
 		if err != nil {
+			release()
 			h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodHead, 0, latency, 0)
 			if errors.Is(err, context.Canceled) {
 				return false, err
@@ -249,6 +258,11 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 			metadataContentLength(response),
 		)
 		_ = response.Body.Close()
+		release()
+		if response.StatusCode == http.StatusTooManyRequests {
+			until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
+			return false, &httpcache.RateLimitError{Host: upstream, RetryAfter: until}
+		}
 		switch response.StatusCode {
 		case http.StatusNotModified:
 			continue

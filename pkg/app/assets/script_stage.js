@@ -333,8 +333,11 @@ function renderNetworkStageMetrics(network, disk) {
         {
             label: t.network_active || 'Active',
             value: String(summary.active_upstream_requests || 0),
-            sub: String(summary.active_downloads || 0) + ' ' + (t.stage_active_downloads || 'downloads'),
-            level: (summary.active_upstream_requests || 0) > 0 ? 'is-live' : 'is-muted'
+            sub: String(summary.active_downloads || 0) + ' ' + (t.stage_active_downloads || 'downloads') +
+                ' · ' + String(summary.queued_upstream_requests || 0) + ' ' + (t.network_queued || 'queued') +
+                ' · ' + String(summary.rate_limited_upstreams || 0) + ' ' + (t.network_rate_limited || 'rate limited'),
+            level: (summary.rate_limited_upstreams || 0) > 0 ? 'is-alert' :
+                ((summary.active_upstream_requests || 0) > 0 ? 'is-live' : 'is-muted')
         },
         {
             label: t.requests || 'Requests',

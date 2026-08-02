@@ -67,7 +67,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		ExpireAfter:     expireAfter,
 		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
 		Transport:       block.Transport,
-		BusyPolicy:      config.BusyPolicyBypass,
+		BusyPolicy:      config.BusyPolicyJoin,
 		DownloadLimiter: plan.Downloads(),
 	}, plan.Store(), newResolver(&block.Policy), plan.Stats(), nil)
 	plan.Scheduler().Register(scheduler.TaskDef{
@@ -100,7 +100,7 @@ func applyDefaults(policy *Policy) {
 		policy.ChecksumFreshFor = config.Freshness(30 * time.Second)
 	}
 	if policy.ChecksumBusyPolicy == "" {
-		policy.ChecksumBusyPolicy = config.BusyPolicyBypass
+		policy.ChecksumBusyPolicy = config.BusyPolicyJoin
 	}
 	if policy.SnapshotPolicy == "" {
 		policy.SnapshotPolicy = config.PolicyRevalidate
@@ -159,9 +159,17 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		return route, nil
 	}
 	if isAuxiliaryPath(lookupPath) {
-		route.Policy = r.policy.ChecksumPolicy
-		route.FreshFor = r.policy.ChecksumFreshFor
-		route.BusyPolicy = r.policy.ChecksumBusyPolicy
+		switch {
+		case strings.Contains(lookupPath, "maven-metadata.xml."):
+			route.Policy = r.policy.ChecksumPolicy
+			route.FreshFor = r.policy.ChecksumFreshFor
+		case isSnapshotPath(lookupPath):
+			route.Policy = r.policy.SnapshotPolicy
+			route.FreshFor = r.policy.SnapshotFreshFor
+		default:
+			route.Policy = r.policy.ReleasePolicy
+		}
+		route.BusyPolicy = config.BusyPolicyJoin
 	} else if isSnapshotPath(lookupPath) {
 		route.Policy = r.policy.SnapshotPolicy
 		route.FreshFor = r.policy.SnapshotFreshFor

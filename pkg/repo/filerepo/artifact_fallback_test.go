@@ -53,19 +53,19 @@ func TestArtifactMirrorFallbackKeepsHealthyPreferredUpstreamAndCaches(t *testing
 	require.Equal(t, int64(1), preferredRequests.Load())
 	require.Equal(t, int64(0), fallbackRequests.Load())
 
-	reader, err := store.OpenObject(
-		ctx,
-		"repo",
-		handler.generationContentPath("root", "gen1", ResourceArtifact, artifactPath),
-	)
-	require.NoError(t, err)
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	require.Equal(t, "preferred", string(body))
+	objectPath := handler.contentPath(ResourceArtifact, artifactPath)
+	require.Eventually(t, func() bool {
+		reader, openErr := store.OpenObject(ctx, "repo", objectPath)
+		if openErr != nil {
+			return false
+		}
+		body, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		return readErr == nil && closeErr == nil && string(body) == "preferred"
+	}, time.Second, 5*time.Millisecond)
 }
 
-func TestArtifactMirrorFallbackUsesHealthyUpstreamWithoutCachingWhenPreferredDegraded(t *testing.T) {
+func TestArtifactMirrorFallbackCachesHealthyUpstreamWhenPreferredDegraded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -109,11 +109,16 @@ func TestArtifactMirrorFallbackUsesHealthyUpstreamWithoutCachingWhenPreferredDeg
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "rescue", rec.Body.String())
-	require.Equal(t, "RESCUE", rec.Header().Get("X-Cache"))
+	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
 	require.Equal(t, int64(0), preferredRequests.Load())
 	require.Equal(t, int64(1), fallbackRequests.Load())
-	_, err := store.StatObject(ctx, "repo", handler.generationContentPath("root", "gen1", ResourceArtifact, artifactPath))
-	require.Error(t, err)
+	require.Eventually(t, func() bool {
+		reader, err := store.OpenObject(ctx, "repo", handler.contentPath(ResourceArtifact, artifactPath))
+		if err != nil {
+			return false
+		}
+		return reader.Close() == nil
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestArtifactMirrorFallbackRetriesNonPreferredNotFound(t *testing.T) {

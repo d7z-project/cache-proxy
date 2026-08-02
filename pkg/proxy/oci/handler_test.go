@@ -70,23 +70,46 @@ func TestResolveRequestMatchesRepoPolicy(t *testing.T) {
 	require.Equal(t, config.Expiration(2*time.Hour), resolved.match.expireAfter)
 }
 
-func TestBlobIndexIsBounded(t *testing.T) {
-	h := &handler{
-		expireAfter: config.Expiration(time.Hour),
-		blobIndex:   map[string]blobIndexEntry{},
-	}
-	state := refState{
-		Repo:        "library/alpine",
-		Ref:         "latest",
-		FetchedAt:   time.Now(),
-		ExpireAfter: config.Expiration(time.Hour),
-	}
-	for i := 0; i < maxBlobIndexEntries+100; i++ {
-		h.rememberBlob("sha256:"+strconv.FormatInt(int64(i), 16), state)
-	}
-	h.blobIndexMu.Lock()
-	require.LessOrEqual(t, len(h.blobIndex), maxBlobIndexEntries)
-	h.blobIndexMu.Unlock()
+func TestOCIDigestManifestIsImmutableAndJoined(t *testing.T) {
+	digest := sha256Digest("manifest")
+	resolved, err := resolveRequest(httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/"+digest, nil), &Policy{DefaultPolicy: config.PolicyRevalidate})
+	require.NoError(t, err)
+	require.Equal(t, config.PolicyImmutable, resolved.match.policy)
+	require.Equal(t, config.BusyPolicyJoin, resolved.match.busyPolicy)
+}
+
+func TestOCIRevalidatesTagManifestWithConditionalGet(t *testing.T) {
+	manifest := `{"schemaVersion":2}`
+	digest := sha256Digest(manifest)
+	var requests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		if req.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = io.WriteString(w, manifest)
+	}))
+	defer upstream.Close()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	handler := newHandler("oci", Block{Upstream: upstream.URL, Policy: Policy{
+		DefaultPolicy: config.PolicyRevalidate,
+		FreshFor:      config.Freshness(time.Nanosecond),
+		BusyPolicy:    config.BusyPolicyJoin,
+	}}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, first.Code)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, "REVALIDATED", second.Header().Get("X-Cache"))
+	require.EqualValues(t, 2, requests.Load())
 }
 
 func TestOCIBearerTokenSingleflight(t *testing.T) {
@@ -177,6 +200,43 @@ func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testi
 	require.Equal(t, httpcache.DefaultUserAgent, <-tokenUserAgent)
 }
 
+func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
+	var upstream *httptest.Server
+	var registryRequests atomic.Int32
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/token":
+			_, _ = io.WriteString(w, `{"token":"registry-token","expires_in":60}`)
+		case "/v2", "/v2/":
+			if registryRequests.Add(1) == 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="`+upstream.URL+`/token",service="registry.test",scope="registry:catalog:*"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			require.Equal(t, "Bearer registry-token", req.Header.Get("Authorization"))
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	limiter := httpcache.NewDownloadLimiter(8, 8)
+	limiter.Configure(8, 8, 1, 1)
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyBypass},
+	}, config.DefaultExpireAfter, store, httpcache.NewStats(prometheus.NewRegistry()), limiter)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.EqualValues(t, 2, registryRequests.Load())
+}
+
 func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 	const browserUserAgent = "Mozilla/5.0 Chrome/126.0 Safari/537.36"
 	blobBody := "browser-varying-blob"
@@ -241,12 +301,12 @@ func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 		require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
 	}
-	_, err = store.StatObject(context.Background(), "oci", handler.refBlobPath("library/alpine", "stored", blobDigest))
+	_, err = store.StatObject(context.Background(), "oci", handler.blobPath(blobDigest))
 	require.Error(t, err)
 	require.Equal(t, int32(2), blobRequests.Load())
 }
 
-func TestOCIManifestKeepsBlobUntilRefExpires(t *testing.T) {
+func TestOCIBlobCacheIsIndependentFromRefExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -303,7 +363,7 @@ func TestOCIManifestKeepsBlobUntilRefExpires(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "HIT", rec.Header().Get("X-Cache"))
+	require.Equal(t, "COALESCED", rec.Header().Get("X-Cache"))
 	require.Equal(t, int64(1), blobRequests.Load())
 
 	statePath := handler.refStatePath("library/alpine", "latest")
@@ -314,11 +374,12 @@ func TestOCIManifestKeepsBlobUntilRefExpires(t *testing.T) {
 
 	require.NoError(t, handler.Cleanup(ctx, config.CleanupConfig{}))
 
-	_, err = store.OpenObject(ctx, handler.name, handler.refBlobPath("library/alpine", "latest", blobDigest))
-	require.Error(t, err)
+	reader, err := store.OpenObject(ctx, handler.name, handler.blobPath(blobDigest))
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
 }
 
-func TestOCIBypassesBlobWithoutActiveRef(t *testing.T) {
+func TestOCICachesDigestBlobWithoutActiveRef(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -345,11 +406,16 @@ func TestOCIBypassesBlobWithoutActiveRef(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
 	require.Equal(t, int64(1), blobRequests.Load())
 
-	_, err = store.OpenObject(ctx, handler.name, handler.refBlobPath("library/alpine", "latest", blobDigest))
-	require.Error(t, err)
+	require.Eventually(t, func() bool {
+		reader, openErr := store.OpenObject(ctx, handler.name, handler.blobPath(blobDigest))
+		if openErr != nil {
+			return false
+		}
+		return reader.Close() == nil
+	}, time.Second, 10*time.Millisecond)
 	require.False(t, strings.Contains(rec.Body.String(), "Bad Gateway"))
 }
 
@@ -371,24 +437,13 @@ func TestOCIBlobFetchClearsBusyStateOnUpstreamError(t *testing.T) {
 		Upstream: upstream.URL,
 		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
-	state := refState{
-		Repo:           "library/alpine",
-		Ref:            "latest",
-		FetchedAt:      time.Now(),
-		ExpireAfter:    config.Expiration(time.Hour),
-		ManifestDigest: sha256Digest("manifest"),
-		BlobDigests:    []string{blobDigest},
-	}
-	require.NoError(t, handler.writeState(ctx, state))
-	handler.rememberBlob(blobDigest, state)
-
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil)
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
 
-	objectPath := handler.refBlobPath("library/alpine", "latest", blobDigest)
+	objectPath := handler.blobPath(blobDigest)
 	_, busy := handler.downloads.Load(objectPath)
 	require.False(t, busy)
 }
@@ -455,7 +510,7 @@ func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "wrong", rec.Body.String())
 	require.Eventually(t, func() bool {
-		_, err := store.OpenObject(ctx, handler.name, handler.refBlobPath("library/alpine", "latest", blobDigest))
+		_, err := store.OpenObject(ctx, handler.name, handler.blobPath(blobDigest))
 		return err != nil
 	}, time.Second, 10*time.Millisecond)
 }
@@ -549,6 +604,23 @@ func TestOCICleanupSkipsActiveRef(t *testing.T) {
 
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 	_, err = store.StatObject(ctx, handler.name, statePath)
+	require.Error(t, err)
+}
+
+func TestOCICleanupBlobsWithoutRefDirectory(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	handler := newHandler("oci", Block{Upstream: "https://registry.example"}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	body := "blob"
+	objectPath := handler.blobPath(sha256Digest(body))
+	require.NoError(t, handler.storeObject(ctx, objectPath, strings.NewReader(body), map[string]string{
+		"fetched-at": time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano),
+	}))
+
+	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
+	_, err = store.StatObject(ctx, handler.name, objectPath)
 	require.Error(t, err)
 }
 

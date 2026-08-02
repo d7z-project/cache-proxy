@@ -14,10 +14,10 @@ import (
 type ResourceClass string
 
 const (
-	ResourceMetadata  ResourceClass = "metadata"
-	ResourceArtifact  ResourceClass = "artifact"
-	ResourceAuxiliary ResourceClass = "auxiliary"
-	ResourceUnknown   ResourceClass = "unknown"
+	ResourceMetadata ResourceClass = "metadata"
+	ResourceArtifact ResourceClass = "artifact"
+	ResourceSidecar  ResourceClass = "sidecar"
+	ResourceUnknown  ResourceClass = "unknown"
 )
 
 type CacheProfile struct {
@@ -55,7 +55,7 @@ func (r *generationResolver) Resolve(req *http.Request) (httpcache.Route, error)
 	class := current.Class
 	profile := r.profileFor(class)
 	route := httpcache.Route{
-		ObjectPath:             r.handler.generationContentPath(current.RootID, current.Generation, class, cleanPath),
+		ObjectPath:             r.handler.contentPath(class, cleanPath),
 		UpstreamPath:           cleanPath,
 		Policy:                 profile.Policy,
 		FreshFor:               profile.FreshFor,
@@ -107,7 +107,7 @@ func ValidatePolicy(mode, policy string) error {
 }
 
 func ValidateBusyPolicy(mode, policy string) error {
-	if policy == "" || policy == config.BusyPolicyBypass || policy == config.BusyPolicyStale {
+	if config.ValidBusyPolicy(policy) {
 		return nil
 	}
 	return fmt.Errorf("invalid %s busy policy %q", mode, policy)

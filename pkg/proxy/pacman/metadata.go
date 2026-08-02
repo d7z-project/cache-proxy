@@ -20,6 +20,7 @@ var (
 		".files", ".files.tar", ".files.tar.bz2", ".files.tar.gz", ".files.tar.lrz",
 		".files.tar.lz", ".files.tar.lz4", ".files.tar.lzo", ".files.tar.xz", ".files.tar.zst", ".files.tar.Z",
 	}
+	pacmanPackageSidecarSuffixes = []string{".sig", ".asc", ".sha256", ".sha512"}
 )
 
 type inspector struct{}
@@ -47,12 +48,15 @@ func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
 	case pacmanFilesName(path.Base(cleanPath)) != "", pacmanDBSignatureName(path.Base(cleanPath)) != "", pacmanFilesSignatureName(path.Base(cleanPath)) != "":
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
 	case strings.Contains(cleanPath, ".pkg.tar.") && strings.HasSuffix(cleanPath, ".sig"):
-		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceSidecar, Role: filerepo.DiscoveryIgnore}
 	case strings.Contains(cleanPath, ".pkg.tar."):
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
-	case strings.HasSuffix(cleanPath, ".sig"), strings.HasSuffix(cleanPath, ".asc"), strings.HasSuffix(cleanPath, ".sha256"), strings.HasSuffix(cleanPath, ".sha512"):
-		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
 	default:
+		for _, suffix := range pacmanPackageSidecarSuffixes {
+			if strings.HasSuffix(cleanPath, suffix) {
+				return filerepo.DiscoveryResult{Class: filerepo.ResourceSidecar, Role: filerepo.DiscoveryIgnore}
+			}
+		}
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
 	}
 }
@@ -163,7 +167,9 @@ func buildDatabaseTarget(
 		}
 		artifactPath := path.Join(path.Dir(blob.Path), filename)
 		paths.Add(artifactPath)
-		paths.AddAuxiliary(artifactPath)
+		for _, suffix := range pacmanPackageSidecarSuffixes {
+			paths.Add(artifactPath + suffix)
+		}
 		count++
 	}
 }
@@ -187,10 +193,8 @@ func addDatabaseCompanions(
 			}
 		}
 	}
-	for _, companionPath := range filerepo.DeduceCompanions(blobPath) {
-		if err := addDerivedMetadata(ctx, session, snapshot, companionPath); err != nil {
-			return err
-		}
+	if err := addDerivedMetadata(ctx, session, snapshot, blobPath+".sig"); err != nil {
+		return err
 	}
 	return nil
 }

@@ -58,7 +58,7 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 			TargetURL:          targetURL,
 			AllowedTargetHosts: targetHost(targetURL),
 			Policy:             r.policy.CratePolicy,
-			BusyPolicy:         config.BusyPolicyBypass,
+			BusyPolicy:         config.BusyPolicyJoin,
 		}, nil
 	default:
 		return httpcache.Route{

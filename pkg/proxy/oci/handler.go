@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,7 +43,6 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 		cancel:           cancel,
 		auth:             authHandler{tokens: map[string]ociToken{}},
 		refLocks:         utils.NewRWLockGroup(),
-		blobIndex:        map[string]blobIndexEntry{},
 	}
 }
 
@@ -58,7 +56,6 @@ func (h *handler) purgeExpiredTokens() {
 	h.auth.tokenMu.Lock()
 	h.trimTokenCacheLocked(time.Now(), "")
 	h.auth.tokenMu.Unlock()
-	h.purgeBlobIndex()
 }
 
 func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
@@ -99,7 +96,7 @@ func (h *handler) Stop(ctx context.Context) error {
 
 func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
 	deleted := 0
-	return fs.WalkDir(h.store.TenantFS(h.name), "oci/refs", func(current string, entry fs.DirEntry, err error) error {
+	err := fs.WalkDir(h.store.TenantFS(h.name), "oci/refs", func(current string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -129,6 +126,49 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		}
 		return nil
 	})
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) || h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
+		return err
+	}
+	err = fs.WalkDir(h.store.TenantFS(h.name), "oci/blobs", func(current string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+			return fs.SkipAll
+		}
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		if _, busy := h.downloads.Load(current); busy {
+			return nil
+		}
+		info, statErr := h.store.StatObject(ctx, h.name, current)
+		if statErr != nil {
+			return nil
+		}
+		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
+		if parseErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
+			return nil
+		}
+		if opts.DryRun {
+			deleted++
+			slog.Info("oci cleanup dry-run delete blob", "instance", h.name, "path", current)
+			return nil
+		}
+		if deleteErr := h.store.DeleteObject(ctx, h.name, current); deleteErr != nil && !errors.Is(deleteErr, context.Canceled) {
+			slog.Info("oci cleanup blob failed", "instance", h.name, "path", current, "err", deleteErr)
+		} else {
+			deleted++
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -153,7 +193,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		status := http.StatusBadGateway
 		if errors.Is(err, httpcache.ErrDownloadLimit) {
 			status = http.StatusServiceUnavailable
-			w.Header().Set("Retry-After", "5")
+			retryAfter := 5
+			var limited *httpcache.RateLimitError
+			if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
+				remaining := time.Until(limited.RetryAfter)
+				retryAfter = max(int((remaining+time.Second-1)/time.Second), 1)
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
 		http.Error(w, http.StatusText(status), status)
 		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", status, 0)
@@ -179,7 +225,7 @@ func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Re
 func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
 	statePath := h.refStatePath(resolved.repo, resolved.ref)
 	state, err := h.readState(ctx, statePath)
-	if err == nil && !h.stateExpired(state) {
+	if err == nil && h.manifestFresh(resolved, state) {
 		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "HIT"); cacheErr == nil {
 			slog.Debug("oci manifest cache hit", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 			return status, "HIT", bytes, nil
@@ -194,12 +240,15 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 				return status, "STALE", bytes, nil
 			}
 		}
-		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", map[string]string{"Accept": manifestAccept})
+		if resolved.match.busyPolicy == config.BusyPolicyBypass {
+			return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", map[string]string{"Accept": manifestAccept})
+		}
+		lock.Lock()
 	}
 	defer lock.Unlock()
 
 	state, err = h.readState(ctx, statePath)
-	if err == nil && !h.stateExpired(state) {
+	if err == nil && h.manifestFresh(resolved, state) {
 		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "HIT"); cacheErr == nil {
 			return status, "HIT", bytes, nil
 		}
@@ -221,31 +270,40 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	return 0, "", 0, fetchErr
 }
 
+func (h *handler) manifestFresh(resolved request, state refState) bool {
+	if h.stateExpired(state) {
+		return false
+	}
+	if resolved.match.policy == config.PolicyImmutable || isSHA256Digest(resolved.ref) {
+		return true
+	}
+	if h.policy.FreshFor.IsForever() {
+		return true
+	}
+	return !h.policy.FreshFor.IsUnset() && time.Since(state.FetchedAt) <= h.policy.FreshFor.Duration()
+}
+
 func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
-	state, err := h.findBlobState(ctx, resolved.repo, resolved.digest)
-	if err != nil {
-		slog.Debug("oci blob not found in refs, bypass", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
-		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
-	}
-	statePath := h.refStatePath(state.Repo, state.Ref)
-	lock := h.refLocks.Get(statePath)
-	lock.RLock()
-	defer lock.RUnlock()
-	state, err = h.readState(ctx, statePath)
-	if err != nil || h.stateExpired(state) || !slices.Contains(state.BlobDigests, resolved.digest) {
-		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
-	}
-	if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refBlobPath(state.Repo, state.Ref, resolved.digest), "HIT"); cacheErr == nil {
+	objectPath := h.blobPath(resolved.digest)
+	if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, objectPath, "HIT"); cacheErr == nil {
 		slog.Debug("oci blob cache hit", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 		return status, "HIT", bytes, nil
 	}
-	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
-	if _, downloading := h.downloads.LoadOrStore(objectPath, struct{}{}); downloading {
-		slog.Debug("oci blob already downloading, bypass", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
+	ready := make(chan struct{})
+	if active, downloading := h.downloads.LoadOrStore(objectPath, ready); downloading {
+		slog.Debug("oci blob already downloading, waiting", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
+		select {
+		case <-ctx.Done():
+			return 0, "", 0, ctx.Err()
+		case <-active.(chan struct{}):
+		}
+		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, objectPath, "COALESCED"); cacheErr == nil {
+			return status, "COALESCED", bytes, nil
+		}
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	slog.Debug("oci blob miss, fetching", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
-	return h.fetchBlob(w, req, resolved, state)
+	return h.fetchBlob(w, req, resolved, ready)
 }
 
 func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, req *http.Request, objectPath, cache string) (int, uint64, error) {
@@ -324,8 +382,8 @@ func (h *handler) refManifestPath(repo, ref string) string {
 	return path.Join(h.refDir(repo, ref), "manifest")
 }
 
-func (h *handler) refBlobPath(repo, ref, digest string) string {
-	return path.Join(h.refDir(repo, ref), "blobs", strings.ReplaceAll(digest, ":", "/"))
+func (h *handler) blobPath(digest string) string {
+	return path.Join("oci/blobs", strings.ReplaceAll(digest, ":", "/"))
 }
 
 func (h *handler) refDir(repo, ref string) string {

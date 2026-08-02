@@ -156,21 +156,7 @@ func publicBaseURL(req *http.Request) string {
 }
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
-	release, err := h.downloadLimiter.Acquire(ctx, h.name)
-	if err != nil {
-		return nil, err
-	}
-	result, err := h.openRemoteAdmitted(ctx, method, upstreamPath, options, headers)
-	if err != nil {
-		release()
-		return nil, err
-	}
-	if result.Body == nil {
-		release()
-		return result, nil
-	}
-	result.Body = &closeCallbackBody{ReadCloser: result.Body, done: release}
-	return result, nil
+	return h.openRemoteAdmitted(ctx, method, upstreamPath, options, headers)
 }
 
 func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
@@ -179,7 +165,7 @@ func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath s
 		if err == nil {
 			return result, nil
 		}
-		if !fallback {
+		if !fallback || options.DisableFailover {
 			return nil, err
 		}
 		slog.Debug("target url error, fallback to upstream list", "instance", h.name, "url", redactedURL(options.TargetURL), "err", err)
@@ -195,9 +181,16 @@ func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath s
 			slog.Debug("upstream selected", "instance", h.name, "method", method, "path", upstreamPath, "upstream", redactedURL(candidate.URL), "weight", candidate.Weight)
 			return result, nil
 		}
+		var limited *RateLimitError
+		if errors.As(err, &limited) || options.DisableFailover {
+			return nil, err
+		}
 		lastErr = err
 	}
 	if lastErr == nil {
+		if len(h.config.Upstreams) > 0 {
+			return nil, fmt.Errorf("%w: no healthy upstream is available", ErrUpstreamUnavailable)
+		}
 		return nil, fmt.Errorf("no upstream url configured")
 	}
 	return nil, lastErr
@@ -207,15 +200,20 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
 		return nil, err, false
 	}
+	releaseAdmission, err := h.downloadLimiter.AcquireUpstream(ctx, h.name, options.TargetURL, options.Background)
+	if err != nil {
+		return nil, err, false
+	}
 	request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
 	if err != nil {
+		releaseAdmission()
 		return nil, err, false
 	}
 	userAgent := options.UserAgent
 	if userAgent == "" {
 		userAgent = h.client.UserAgent
 	}
-	for key, value := range headers {
+	for key, value := range headersForOrigin(headers, options.ValidatorOrigin, statsUpstreamKey(options.TargetURL)) {
 		request.Header.Set(key, value)
 	}
 	request.Header.Set("User-Agent", userAgent)
@@ -228,6 +226,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
+		releaseAdmission()
 		release()
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, 0, latency, 0)
@@ -237,6 +236,19 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 		}
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err), true
 	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		if options.Record {
+			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, response.StatusCode, latency, 0)
+			if h.health != nil {
+				h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
+			}
+		}
+		until := h.downloadLimiter.ObserveResponse(options.TargetURL, response.StatusCode, response.Header.Get("Retry-After"))
+		_ = response.Body.Close()
+		releaseAdmission()
+		release()
+		return nil, &RateLimitError{Host: upstreamHost(options.TargetURL), RetryAfter: until}, false
+	}
 	if options.Record && h.health != nil {
 		h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 	}
@@ -245,6 +257,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, response.StatusCode, latency, 0)
 		}
 		_ = response.Body.Close()
+		releaseAdmission()
 		release()
 		err := fmt.Errorf("%w: target url returned retryable status %d", ErrUpstreamUnavailable, response.StatusCode)
 		h.logUpstreamFailover(method, upstreamPath, options.TargetURL, response.StatusCode, err)
@@ -256,7 +269,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
 	result := responseFromHTTP(h.client, response)
 	result.Headers[responseSourceUpstreamHeader] = statsUpstream
-	result.Body = h.recordUpstreamBody(result.Body, release, options.Record, statsUpstream, method, response.StatusCode, latency)
+	result.Body = h.recordUpstreamBody(result.Body, func() { releaseAdmission(); release() }, options.Record, statsUpstream, method, response.StatusCode, latency)
 	return result, nil, false
 }
 
@@ -337,8 +350,13 @@ func (h *Handler) tryUpstream(
 	if rawQuery != "" {
 		targetURL += "?" + rawQuery
 	}
+	releaseAdmission, err := h.downloadLimiter.AcquireUpstream(ctx, h.name, candidate.URL, options.Background)
+	if err != nil {
+		return nil, err
+	}
 	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
 	if err != nil {
+		releaseAdmission()
 		slog.Debug("upstream request build failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
 		return nil, err
 	}
@@ -346,7 +364,7 @@ func (h *Handler) tryUpstream(
 	if userAgent == "" {
 		userAgent = h.client.UserAgent
 	}
-	for key, value := range headers {
+	for key, value := range headersForOrigin(headers, options.ValidatorOrigin, candidate.URL) {
 		request.Header.Set(key, value)
 	}
 	request.Header.Set("User-Agent", userAgent)
@@ -358,6 +376,7 @@ func (h *Handler) tryUpstream(
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
+		releaseAdmission()
 		release()
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, 0, latency, 0)
@@ -371,6 +390,19 @@ func (h *Handler) tryUpstream(
 		}
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		if options.Record {
+			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)
+		}
+		if h.health != nil {
+			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
+		}
+		until := h.downloadLimiter.ObserveResponse(candidate.URL, response.StatusCode, response.Header.Get("Retry-After"))
+		_ = response.Body.Close()
+		releaseAdmission()
+		release()
+		return nil, &RateLimitError{Host: upstreamHost(candidate.URL), RetryAfter: until}
+	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
@@ -380,6 +412,7 @@ func (h *Handler) tryUpstream(
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)
 		}
 		_ = response.Body.Close()
+		releaseAdmission()
 		release()
 		err = fmt.Errorf("%w: upstream %s returned retryable status %d", ErrUpstreamUnavailable, method, response.StatusCode)
 		h.logUpstreamFailover(method, pathPart, candidate.URL, response.StatusCode, err)
@@ -393,6 +426,7 @@ func (h *Handler) tryUpstream(
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)
 		}
 		_ = response.Body.Close()
+		releaseAdmission()
 		release()
 		err = fmt.Errorf("%w: upstream %s failed with %d", ErrUpstreamUnavailable, method, response.StatusCode)
 		if idx+1 < total {
@@ -402,8 +436,22 @@ func (h *Handler) tryUpstream(
 	}
 	result := responseFromHTTP(h.client, response)
 	result.Headers[responseSourceUpstreamHeader] = candidate.URL
-	result.Body = h.recordUpstreamBody(result.Body, release, options.Record, candidate.URL, method, response.StatusCode, latency)
+	result.Body = h.recordUpstreamBody(result.Body, func() { releaseAdmission(); release() }, options.Record, candidate.URL, method, response.StatusCode, latency)
 	return result, nil
+}
+
+func headersForOrigin(headers map[string]string, validatorOrigin, targetOrigin string) map[string]string {
+	if validatorOrigin != "" && validatorOrigin == targetOrigin {
+		return headers
+	}
+	filtered := make(map[string]string, len(headers))
+	for key, value := range headers {
+		if strings.EqualFold(key, "If-None-Match") || strings.EqualFold(key, "If-Modified-Since") {
+			continue
+		}
+		filtered[key] = value
+	}
+	return filtered
 }
 
 func (h *Handler) recordUpstreamBody(body io.ReadCloser, release func(), record bool, upstream, method string, status int, latency time.Duration) io.ReadCloser {
@@ -440,24 +488,13 @@ func shouldFailoverUpstreamStatus(status int) bool {
 }
 
 func upstreamStatusIsFailure(status int) bool {
-	if status == http.StatusNotFound {
-		return false
-	}
-	return status == 0 || status >= 500 || (status >= 400 && status < 500)
-}
-
-func upstreamStatusReason(status int) string {
-	if status >= 400 && status < 500 && status != http.StatusNotFound {
-		return "client_error_failover"
-	}
-	return "failure"
+	return status == 0 || status == http.StatusRequestTimeout || status >= http.StatusInternalServerError
 }
 
 func (h *Handler) logUpstreamFailover(method, upstreamPath, upstream string, status int, err error) {
-	reason := upstreamStatusReason(status)
 	slog.Warn("upstream response triggered failover", "instance", h.name, "mode", h.config.Mode,
 		"method", method, "upstream_path", upstreamPath, "upstream", redactedURL(upstream),
-		"status", status, "reason", reason, "err", err)
+		"status", status, "reason", "retryable_failure", "err", err)
 }
 
 func (h *Handler) requestHeaders(req *http.Request) map[string]string {

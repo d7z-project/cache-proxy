@@ -19,9 +19,14 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
+	keep, err := h.currentCleanupPaths(ctx)
+	if err != nil {
+		return err
+	}
 	deleted := 0
 	return fs.WalkDir(h.store.TenantFS(h.name), h.objectRoot, func(objectPath string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
@@ -32,6 +37,26 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 		}
 		if err != nil || entry.IsDir() || objectPath == h.statePath() || strings.Contains(objectPath, "/.roots/") {
 			return nil
+		}
+		if cleanPath, class, ok := h.contentObject(objectPath); ok {
+			if _, current := keep[cleanPath]; current || h.base.Busy(objectPath) {
+				return nil
+			}
+			expireAfter := h.policy.AuxiliaryExpireAfter
+			if class == ResourceArtifact {
+				expireAfter = h.policy.ArtifactExpireAfter
+			}
+			if expireAfter.IsNever() || expireAfter.IsUnset() {
+				return nil
+			}
+			info, statErr := h.store.StatObject(ctx, h.name, objectPath)
+			if statErr != nil {
+				return nil
+			}
+			fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
+			if parseErr == nil && time.Since(fetchedAt) <= expireAfter.Duration() {
+				return nil
+			}
 		}
 		if opts.DryRun {
 			deleted++
@@ -45,6 +70,49 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 		}
 		return nil
 	})
+}
+
+func (h *IndexedHandler) currentCleanupPaths(ctx context.Context) (map[string]struct{}, error) {
+	h.mu.RLock()
+	snapshots := make([]*LiveSnapshot, 0, len(h.rootSnapshots))
+	for _, snapshot := range h.rootSnapshots {
+		if snapshot != nil {
+			copySnapshot := *snapshot
+			snapshots = append(snapshots, &copySnapshot)
+		}
+	}
+	h.mu.RUnlock()
+	keep := map[string]struct{}{}
+	for _, snapshot := range snapshots {
+		paths, err := h.loadCleanupPathSet(ctx, snapshot.RootID, snapshot.Generation)
+		if err != nil {
+			return nil, err
+		}
+		for cleanPath := range paths {
+			keep[cleanPath] = struct{}{}
+		}
+	}
+	return keep, nil
+}
+
+func (h *IndexedHandler) contentObject(objectPath string) (string, ResourceClass, bool) {
+	prefix := path.Join(h.objectRoot, ".content") + "/"
+	rel := strings.TrimPrefix(objectPath, prefix)
+	if rel == objectPath {
+		return "", ResourceUnknown, false
+	}
+	parts := strings.SplitN(rel, "/", 2)
+	if len(parts) != 2 || !httpcache.SafePath(parts[1]) {
+		return "", ResourceUnknown, false
+	}
+	switch parts[0] {
+	case "artifacts":
+		return parts[1], ResourceArtifact, true
+	case "sidecars":
+		return parts[1], ResourceSidecar, true
+	default:
+		return "", ResourceUnknown, false
+	}
 }
 
 func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
@@ -187,6 +255,10 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 	if firstErr == nil {
 		firstErr = errMetadataTransient
 	}
+	var rateLimit *httpcache.RateLimitError
+	if errors.As(firstErr, &rateLimit) && !rateLimit.RetryAfter.IsZero() {
+		return nil, scheduler.RetryAt(rateLimit.RetryAfter)
+	}
 	if h.sh != nil {
 		h.sh.FinishRefresh(rootID, refreshGen, refreshHealthError(firstErr), nil)
 		if _, ok := h.sh.ResourceHealth(rootID); !ok {
@@ -226,10 +298,6 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 	if currentGen == "" {
 		return nil
 	}
-	keep, err := h.loadCleanupPathSet(ctx, rootID, currentGen)
-	if err != nil {
-		return err
-	}
 	deleted := 0
 	var toDelete []string
 	if err := fs.WalkDir(h.store.TenantFS(h.name), rootDir, func(objectPath string, entry fs.DirEntry, err error) error {
@@ -251,12 +319,6 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 			toDelete = append(toDelete, objectPath)
 			return nil
 		}
-		if len(parts) != 3 || (parts[1] != "artifacts" && parts[1] != "auxiliary") {
-			return nil
-		}
-		if _, ok := keep[parts[2]]; !ok {
-			toDelete = append(toDelete, objectPath)
-		}
 		return nil
 	}); err != nil {
 		return err
@@ -277,7 +339,7 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 		return nil
 	}
 	snapshotDir := path.Join(rootBase, "snapshots")
-	err = fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

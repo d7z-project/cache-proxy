@@ -83,7 +83,7 @@ func (h *ServiceHealth) doHeadProbe(ctx context.Context, reqInfo probeRequest) (
 		return nil, err
 	}
 	req.Header.Set("User-Agent", h.userAgent)
-	return h.probeClient.Do(req)
+	return h.doProbeRequest(ctx, reqInfo.upstreamURL, req)
 }
 
 func (h *ServiceHealth) doRangeProbe(ctx context.Context, reqInfo probeRequest) (*http.Response, error) {
@@ -93,7 +93,42 @@ func (h *ServiceHealth) doRangeProbe(ctx context.Context, reqInfo probeRequest) 
 	}
 	req.Header.Set("User-Agent", h.userAgent)
 	req.Header.Set("Range", "bytes=0-0")
-	return h.probeClient.Do(req)
+	return h.doProbeRequest(ctx, reqInfo.upstreamURL, req)
+}
+
+func (h *ServiceHealth) doProbeRequest(ctx context.Context, upstreamURL string, req *http.Request) (*http.Response, error) {
+	release := func() {}
+	if h.admission != nil {
+		var err error
+		release, err = h.admission.AcquireUpstream(ctx, h.name, upstreamURL, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	response, err := h.probeClient.Do(req)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	if h.admission != nil && response.StatusCode == http.StatusTooManyRequests {
+		h.admission.ObserveResponse(upstreamURL, response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	response.Body = &probeAdmissionBody{ReadCloser: response.Body, release: release}
+	return response, nil
+}
+
+type probeAdmissionBody struct {
+	io.ReadCloser
+	release func()
+	once    atomic.Bool
+}
+
+func (b *probeAdmissionBody) Close() error {
+	err := b.ReadCloser.Close()
+	if b.once.CompareAndSwap(false, true) {
+		b.release()
+	}
+	return err
 }
 
 func (h *ServiceHealth) nextProbeRequest(upstreamURL string) (probeRequest, bool, error) {

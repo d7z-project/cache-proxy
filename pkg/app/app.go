@@ -148,6 +148,17 @@ func Validate(doc *config.Document) error {
 		docCopy.Storage.Download.MaxActive,
 		docCopy.Storage.Download.MaxActivePerInstance,
 	)
+	downloads.Configure(
+		docCopy.Storage.Download.MaxActive,
+		docCopy.Storage.Download.MaxActivePerInstance,
+		docCopy.Storage.Download.MaxActivePerHost,
+		docCopy.Storage.Download.MaxBackground,
+	)
+	downloads.ConfigurePacing(
+		docCopy.Storage.Download.RequestsPerSecondHost,
+		docCopy.Storage.Download.RequestBurstPerHost,
+		docCopy.Storage.Download.ForegroundQueueWait.Duration(),
+	)
 
 	b := bus.NewWithRegisterer(registry)
 	sched := scheduler.New(b, store, registry)
@@ -180,6 +191,17 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	metricsReg.MustRegister(metrics.NewBlobFSCollector(store))
 	stats := httpcache.NewStats(metricsReg)
 	downloads := httpcache.NewDownloadLimiter(doc.Storage.Download.MaxActive, doc.Storage.Download.MaxActivePerInstance)
+	downloads.Configure(
+		doc.Storage.Download.MaxActive,
+		doc.Storage.Download.MaxActivePerInstance,
+		doc.Storage.Download.MaxActivePerHost,
+		doc.Storage.Download.MaxBackground,
+	)
+	downloads.ConfigurePacing(
+		doc.Storage.Download.RequestsPerSecondHost,
+		doc.Storage.Download.RequestBurstPerHost,
+		doc.Storage.Download.ForegroundQueueWait.Duration(),
+	)
 
 	b := bus.NewWithRegisterer(metricsReg)
 	sched := scheduler.New(b, store, metricsReg)

@@ -15,59 +15,73 @@ import (
 )
 
 func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath, userAgent string, headers map[string]string) (*http.Response, error) {
-	releaseAdmission, err := h.downloadsLimiter.Acquire(ctx, h.name)
-	if err != nil {
-		return nil, err
-	}
 	targetURL := h.upstream + "/" + httpcache.EscapePath(strings.TrimLeft(upstreamPath, "/"))
-	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
-	if err != nil {
-		releaseAdmission()
-		return nil, err
-	}
 	if userAgent == "" {
 		userAgent = h.client.UserAgent
 	}
-	for key, value := range headers {
-		request.Header.Set(key, value)
-	}
-	request.Header.Set("User-Agent", userAgent)
-	if auth := h.staticAuthorization(); auth != "" {
-		request.Header.Set("Authorization", auth)
-	}
-	slog.Debug("oci upstream request", "instance", h.name, "method", method, "url", targetURL)
-	release := h.stats.BeginUpstreamRequest(h.name, config.ModeOCI, h.upstream)
-	start := time.Now()
-	response, err := h.client.Do(request)
-	latency := time.Since(start)
-	if err != nil {
-		release()
-		releaseAdmission()
-		h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, 0, latency, 0)
-		return nil, err
-	}
-	if response.StatusCode == http.StatusUnauthorized {
-		retry, retryErr := h.retryChallenge(ctx, method, targetURL, userAgent, headers, response)
-		if retryErr != nil {
-			release()
+	send := func(authorization string) (*http.Response, error) {
+		releaseAdmission, err := h.downloadsLimiter.AcquireUpstream(ctx, h.name, h.upstream, false)
+		if err != nil {
+			return nil, err
+		}
+		request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+		if err != nil {
+			releaseAdmission()
+			return nil, err
+		}
+		for key, value := range headers {
+			request.Header.Set(key, value)
+		}
+		request.Header.Set("User-Agent", userAgent)
+		if authorization == "" {
+			authorization = h.staticAuthorization()
+		}
+		if authorization != "" {
+			request.Header.Set("Authorization", authorization)
+		}
+		slog.Debug("oci upstream request", "instance", h.name, "method", method, "url", targetURL)
+		releaseStats := h.stats.BeginUpstreamRequest(h.name, config.ModeOCI, h.upstream)
+		start := time.Now()
+		response, err := h.client.Do(request)
+		latency := time.Since(start)
+		if err != nil {
+			releaseStats()
 			releaseAdmission()
 			h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, 0, latency, 0)
-			return nil, retryErr
+			return nil, err
 		}
-		if retry != nil {
-			_ = response.Body.Close()
-			response = retry
+		if response.StatusCode == http.StatusTooManyRequests {
+			h.downloadsLimiter.ObserveResponse(h.upstream, response.StatusCode, response.Header.Get("Retry-After"))
 		}
+		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
+		counted := &countingReadCloser{ReadCloser: utils.NewRateLimitReader(h.client.WrapBody(response.Body))}
+		status := response.StatusCode
+		response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
+			releaseStats()
+			releaseAdmission()
+			h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, status, latency, counted.bytes)
+		}}
+		return response, nil
 	}
-	slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
-	counted := &countingReadCloser{ReadCloser: utils.NewRateLimitReader(h.client.WrapBody(response.Body))}
-	status := response.StatusCode
-	response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
-		release()
-		releaseAdmission()
-		h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, status, latency, counted.bytes)
-	}}
-	return response, nil
+
+	response, err := send("")
+	if err != nil || response.StatusCode != http.StatusUnauthorized {
+		return response, err
+	}
+	challenge, ok := parseOCIChallenge(response.Header.Get("WWW-Authenticate"))
+	scheme := strings.ToLower(challenge.scheme)
+	if !ok || (scheme != "bearer" && scheme != "basic") {
+		return response, nil
+	}
+	if scheme == "basic" && h.basicAuthorization() == "" {
+		return response, nil
+	}
+	_ = response.Body.Close()
+	authorization, err := h.authorizationForChallenge(ctx, challenge)
+	if err != nil || authorization == "" {
+		return nil, err
+	}
+	return send(authorization)
 }
 
 type closeCallbackBody struct {

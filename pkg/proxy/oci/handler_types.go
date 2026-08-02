@@ -27,7 +27,6 @@ type refState struct {
 	FetchedAt      time.Time         `yaml:"fetched_at"`
 	ExpireAfter    config.Expiration `yaml:"expire_after"`
 	ManifestDigest string            `yaml:"manifest_digest,omitempty"`
-	BlobDigests    []string          `yaml:"blob_digests,omitempty"`
 }
 
 type ociToken struct {
@@ -39,10 +38,6 @@ type ociChallenge struct {
 	scheme string
 	realm  string
 	params map[string]string
-}
-
-type descriptor struct {
-	Digest string `json:"digest"`
 }
 
 type handler struct {
@@ -60,16 +55,4 @@ type handler struct {
 	auth             authHandler
 	downloads        sync.Map
 	refLocks         *utils.RWLockGroup
-	blobIndexMu      sync.Mutex
-	blobIndex        map[string]blobIndexEntry
-}
-
-type blobRef struct {
-	repo string
-	ref  string
-}
-
-type blobIndexEntry struct {
-	ref     blobRef
-	expires time.Time
 }

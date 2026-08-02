@@ -583,6 +583,7 @@ func newTestHandlerWithStatsAndHealth(
 	policy := &Policy{}
 	applyDefaults(policy)
 	downloads := httpcache.NewDownloadLimiter(8, 4)
+	downloads.ConfigurePacing(10000, 1000, time.Second)
 	runtimeCfg := httpcache.RuntimeConfig{
 		Mode:            config.ModeFlatpak,
 		ExpireAfter:     config.DefaultExpireAfter,

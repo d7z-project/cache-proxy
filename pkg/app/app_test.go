@@ -64,7 +64,7 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", upstream.URL, file.Policy{
 			DefaultPolicy: config.PolicyImmutable,
-			BusyPolicy:    config.BusyPolicyBypass,
+			BusyPolicy:    config.BusyPolicyJoin,
 		}),
 	})
 	app := openApp(t, ctx, doc)
@@ -673,6 +673,30 @@ func TestStatusNetworkEndpointCountsSharedDegradedHostOnce(t *testing.T) {
 	require.Len(t, payload.Upstreams, 1)
 	require.Equal(t, "mirror.example.test", payload.Upstreams[0].Host)
 	require.Len(t, payload.Edges, 2)
+}
+
+func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	upstream := "https://mirror.example.test/repo"
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files", "/files", upstream, file.Policy{}),
+	})
+	app := openApp(t, ctx, doc)
+	defer closeApp(t, app)
+	app.downloads.ObserveResponse(upstream, http.StatusTooManyRequests, "60")
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/-/status/network", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload networkStatus
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	require.Equal(t, 1, payload.Summary.RateLimitedUpstreams)
+	require.Equal(t, 1, payload.Summary.DegradedUpstreams)
+	require.Len(t, payload.Upstreams, 1)
+	require.Equal(t, "rate_limited", payload.Upstreams[0].State)
+	require.NotEmpty(t, payload.Upstreams[0].CooldownUntil)
 }
 
 func TestStatusEventsEndpointClampsLimit(t *testing.T) {

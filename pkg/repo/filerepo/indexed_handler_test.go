@@ -50,7 +50,7 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 			case strings.HasPrefix(cleanPath, "meta/"):
 				return DiscoveryResult{Class: ResourceMetadata}
 			case strings.HasSuffix(cleanPath, ".sig"):
-				return DiscoveryResult{Class: ResourceAuxiliary}
+				return DiscoveryResult{Class: ResourceSidecar}
 			default:
 				return DiscoveryResult{Class: ResourceArtifact}
 			}
@@ -142,7 +142,7 @@ func TestRefreshPersistsCleanupIndexAndCleanupUsesStoredPaths(t *testing.T) {
 			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			paths.Add("pool/pkg.deb")
-			paths.AddAuxiliary("pool/pkg.deb")
+			paths.Add("pool/pkg.deb.sig")
 			return &LiveSnapshot{
 				Metadata:      map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}},
 				ArtifactCount: 1,
@@ -160,12 +160,6 @@ func TestRefreshPersistsCleanupIndexAndCleanupUsesStoredPaths(t *testing.T) {
 	require.NoError(t, indexReader.Close())
 	require.Equal(t, strings.Join([]string{
 		"pool/pkg.deb",
-		"pool/pkg.deb.asc",
-		"pool/pkg.deb.gpg",
-		"pool/pkg.deb.md5",
-		"pool/pkg.deb.md5sum",
-		"pool/pkg.deb.sha256",
-		"pool/pkg.deb.sha512",
 		"pool/pkg.deb.sig",
 	}, "\n")+"\n", string(indexData))
 
@@ -173,34 +167,29 @@ func TestRefreshPersistsCleanupIndexAndCleanupUsesStoredPaths(t *testing.T) {
 	require.Len(t, statuses, 1)
 	require.Equal(t, 1, statuses[0].ArtifactCount)
 
-	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.generationContentPath("root", current.Generation, ResourceArtifact, "pool/pkg.deb"))), 0o755))
-	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.generationContentPath("root", current.Generation, ResourceAuxiliary, "pool/pkg.deb.sig"))), 0o755))
-	_, err = store.Put(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceArtifact, "pool/pkg.deb"), strings.NewReader("keep"), nil)
+	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.contentPath(ResourceArtifact, "pool/pkg.deb"))), 0o755))
+	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.contentPath(ResourceSidecar, "pool/pkg.deb.sig"))), 0o755))
+	old := map[string]string{"fetched-at": time.Now().Add(-1000 * time.Hour).UTC().Format(time.RFC3339Nano)}
+	_, err = store.Put(ctx, "repo", handler.contentPath(ResourceArtifact, "pool/pkg.deb"), strings.NewReader("keep"), old)
 	require.NoError(t, err)
-	_, err = store.Put(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceArtifact, "pool/old.deb"), strings.NewReader("drop"), nil)
+	_, err = store.Put(ctx, "repo", handler.contentPath(ResourceArtifact, "pool/old.deb"), strings.NewReader("drop"), old)
 	require.NoError(t, err)
-	_, err = store.Put(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceAuxiliary, "pool/pkg.deb.sig"), strings.NewReader("keep"), nil)
+	_, err = store.Put(ctx, "repo", handler.contentPath(ResourceSidecar, "pool/pkg.deb.sig"), strings.NewReader("keep"), old)
 	require.NoError(t, err)
-	_, err = store.Put(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceAuxiliary, "pool/old.deb.sig"), strings.NewReader("drop"), nil)
-	require.NoError(t, err)
-	oldPath := handler.generationContentPath("root", "old-generation", ResourceArtifact, "pool/old-generation.deb")
-	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(oldPath)), 0o755))
-	_, err = store.Put(ctx, "repo", oldPath, strings.NewReader("drop"), nil)
+	_, err = store.Put(ctx, "repo", handler.contentPath(ResourceSidecar, "pool/old.deb.sig"), strings.NewReader("drop"), old)
 	require.NoError(t, err)
 
-	require.NoError(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
+	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 
-	reader, err := store.OpenObject(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceArtifact, "pool/pkg.deb"))
+	reader, err := store.OpenObject(ctx, "repo", handler.contentPath(ResourceArtifact, "pool/pkg.deb"))
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
-	_, err = store.OpenObject(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceArtifact, "pool/old.deb"))
+	_, err = store.OpenObject(ctx, "repo", handler.contentPath(ResourceArtifact, "pool/old.deb"))
 	require.Error(t, err)
-	reader, err = store.OpenObject(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceAuxiliary, "pool/pkg.deb.sig"))
+	reader, err = store.OpenObject(ctx, "repo", handler.contentPath(ResourceSidecar, "pool/pkg.deb.sig"))
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
-	_, err = store.OpenObject(ctx, "repo", handler.generationContentPath("root", current.Generation, ResourceAuxiliary, "pool/old.deb.sig"))
-	require.Error(t, err)
-	_, err = store.OpenObject(ctx, "repo", oldPath)
+	_, err = store.OpenObject(ctx, "repo", handler.contentPath(ResourceSidecar, "pool/old.deb.sig"))
 	require.Error(t, err)
 }
 
@@ -252,7 +241,7 @@ func TestRefreshStressDoesNotRetainCleanupPathSet(t *testing.T) {
 	requireHeapGrowthWithin(t, baseline, after, 12<<20)
 }
 
-func TestCleanupRootStressDoesNotRetainLoadedCleanupIndex(t *testing.T) {
+func TestCleanupDoesNotRetainLoadedCleanupIndex(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -274,10 +263,10 @@ func TestCleanupRootStressDoesNotRetainLoadedCleanupIndex(t *testing.T) {
 	_, err := store.Put(ctx, "repo", indexPath, strings.NewReader(index.String()), nil)
 	require.NoError(t, err)
 
-	require.NoError(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
+	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 	baseline := heapAllocAfterGC()
 	for i := 1; i < rounds; i++ {
-		require.NoError(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
+		require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 	}
 	after := heapAllocAfterGC()
 
@@ -335,7 +324,7 @@ func TestServeHTTPPrefersCurrentGenerationMetadataCompanion(t *testing.T) {
 	require.Equal(t, "fresh-signature", rec.Body.String())
 }
 
-func TestGenerationResolverUsesGenerationScopedObjectPath(t *testing.T) {
+func TestGenerationResolverKeepsStableContentPathAcrossRefresh(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -368,8 +357,7 @@ func TestGenerationResolverUsesGenerationScopedObjectPath(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/pool/pkg.deb", nil),
 	)
 	require.NoError(t, err)
-	require.Contains(t, firstRoute.ObjectPath, "/generations/")
-	require.Contains(t, firstRoute.ObjectPath, "/artifacts/pool/pkg.deb")
+	require.Contains(t, firstRoute.ObjectPath, "/.content/artifacts/pool/pkg.deb")
 
 	time.Sleep(time.Nanosecond)
 	indexVersion.Store(2)
@@ -378,7 +366,7 @@ func TestGenerationResolverUsesGenerationScopedObjectPath(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/pool/pkg.deb", nil),
 	)
 	require.NoError(t, err)
-	require.NotEqual(t, firstRoute.ObjectPath, secondRoute.ObjectPath)
+	require.Equal(t, firstRoute.ObjectPath, secondRoute.ObjectPath)
 }
 
 func TestValidatePassHeadersRejectsManagedUserAgent(t *testing.T) {
@@ -980,16 +968,10 @@ func TestPathIndexBuilderFinalizesSortedUniquePaths(t *testing.T) {
 	builder.Add("pool/b.deb")
 	builder.Add("pool/a.deb")
 	builder.Add("pool/b.deb")
-	builder.AddAuxiliary("pool/a.deb")
+	builder.Add("pool/a.deb.sig")
 
 	require.Equal(t, []string{
 		"pool/a.deb",
-		"pool/a.deb.asc",
-		"pool/a.deb.gpg",
-		"pool/a.deb.md5",
-		"pool/a.deb.md5sum",
-		"pool/a.deb.sha256",
-		"pool/a.deb.sha512",
 		"pool/a.deb.sig",
 		"pool/b.deb",
 	}, builder.Finalize())
@@ -1056,6 +1038,41 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.Equal(t, uint64(1), stats.Instances["repo"].UpstreamStatus["304"])
 	require.Equal(t, "304", stats.Instances["repo"].Upstreams[server.URL].LastStatus)
 	require.Equal(t, "closed", stats.Instances["repo"].Upstreams[server.URL].StateText)
+}
+
+func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
+			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			if err != nil {
+				return nil, err
+			}
+			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
+		},
+	)
+	handler.downloads = httpcache.NewDownloadLimiter(8, 4)
+
+	_, err := handler.RefreshRootTask(ctx, "root")
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+	require.True(t, retry.At.After(time.Now().Add(55*time.Second)))
+	require.EqualValues(t, 1, requests.Load())
+
+	_, err = handler.RefreshRootTask(ctx, "root")
+	require.ErrorAs(t, err, &retry)
+	require.EqualValues(t, 1, requests.Load())
 }
 
 func TestRefreshHeadPrecheckDoesNotUpdateUpstreamHealth(t *testing.T) {
@@ -1170,17 +1187,6 @@ func TestRefreshRebuildsWhenCleanupIndexMissing(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestCleanupRootFailsWhenCleanupIndexMissing(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	handler.setRootSnapshot("root", &LiveSnapshot{RootID: "root", Generation: "gen1"})
-
-	require.Error(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
-}
-
 func TestCleanupPreservesPersistedRepositoryRoots(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -1210,7 +1216,7 @@ func TestCleanupRootRemovesSnapshotAfterGenerationIsEmpty(t *testing.T) {
 	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(currentIndex)), 0o755))
 	_, err := store.Put(ctx, handler.name, currentIndex, strings.NewReader("pool/current.pkg\n"), nil)
 	require.NoError(t, err)
-	oldObject := handler.generationContentPath("root", "old", ResourceArtifact, "pool/old.pkg")
+	oldObject := handler.generationMetadataPath("root", "old", "meta/old")
 	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(oldObject)), 0o755))
 	_, err = store.Put(ctx, handler.name, oldObject, strings.NewReader("old"), nil)
 	require.NoError(t, err)

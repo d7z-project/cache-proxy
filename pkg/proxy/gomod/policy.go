@@ -103,7 +103,7 @@ func applyDefaults(cfg *Config) {
 		cfg.SumDBFreshFor = config.Freshness(30 * time.Second)
 	}
 	if cfg.SumDBBusyPolicy == "" {
-		cfg.SumDBBusyPolicy = config.BusyPolicyBypass
+		cfg.SumDBBusyPolicy = config.BusyPolicyJoin
 	}
 	if cfg.SumDB == nil {
 		cfg.SumDB = &SumDBConfig{Enabled: true, Name: "sum.golang.org", URL: "https://sum.golang.org"}
@@ -167,7 +167,7 @@ func validateBlock(proxies []string, cfg *Config) error {
 		}
 	}
 	for _, value := range []string{cfg.ModuleBusyPolicy, cfg.SumDBBusyPolicy} {
-		if value != config.BusyPolicyBypass && value != config.BusyPolicyStale {
+		if !config.ValidBusyPolicy(value) {
 			return fmt.Errorf("invalid go busy policy %q", value)
 		}
 	}

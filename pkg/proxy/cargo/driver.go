@@ -93,7 +93,7 @@ func applyDefaults(policy *Policy) {
 }
 
 func validatePolicy(instance string, policy *Policy) error {
-	if policy.IndexBusyPolicy != config.BusyPolicyBypass && policy.IndexBusyPolicy != config.BusyPolicyStale {
+	if !config.ValidBusyPolicy(policy.IndexBusyPolicy) {
 		return fmt.Errorf("instance %s: invalid cargo index busy policy %q", instance, policy.IndexBusyPolicy)
 	}
 	if policy.CratePolicy != config.PolicyBypass && policy.CratePolicy != config.PolicyImmutable && policy.CratePolicy != config.PolicyRevalidate {

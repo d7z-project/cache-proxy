@@ -111,6 +111,10 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
+	var rateLimit *httpcache.RateLimitError
+	if errors.As(firstErr, &rateLimit) && !rateLimit.RetryAfter.IsZero() {
+		return nil, scheduler.RetryAt(rateLimit.RetryAfter)
+	}
 	if h.sh != nil && release != nil {
 		h.sh.FinishRefresh("/", refreshGen, health.ErrResourceTransient, nil)
 	}
@@ -279,9 +283,14 @@ func (h *Handler) fetchMetadata(
 	upstream, cleanPath string,
 	required bool,
 ) (*metadataDownload, error) {
+	release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, true)
+	if err != nil {
+		return nil, err
+	}
 	targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("create flatpak metadata request %s: %w", cleanPath, err)
 	}
 	request.Header.Set("User-Agent", h.client.UserAgent)
@@ -290,13 +299,14 @@ func (h *Handler) fetchMetadata(
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
+		release()
 		h.stats.RecordUpstreamRequest(h.name, config.ModeFlatpak, upstream, http.MethodGet, 0, latency, 0)
 		if h.sh != nil {
 			h.sh.RecordFailure(upstream, err)
 		}
 		return nil, fmt.Errorf("fetch flatpak metadata %s: %w", cleanPath, err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close(); release() }()
 	h.stats.RecordUpstreamRequest(
 		h.name,
 		config.ModeFlatpak,
@@ -308,6 +318,10 @@ func (h *Handler) fetchMetadata(
 	)
 	if h.sh != nil {
 		h.sh.RecordResult(upstream, response.StatusCode, latency)
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
+		return nil, &httpcache.RateLimitError{Host: upstream, RetryAfter: until}
 	}
 	if response.StatusCode != http.StatusOK {
 		if !required && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden) {

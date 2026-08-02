@@ -100,7 +100,7 @@ func validate(policy *Policy) error {
 	if !config.ValidPolicy(policy.TarballPolicy) {
 		return fmt.Errorf("invalid npm tarball policy %q", policy.TarballPolicy)
 	}
-	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
+	if !config.ValidBusyPolicy(policy.MetadataBusyPolicy) {
 		return fmt.Errorf("invalid npm metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
 	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {

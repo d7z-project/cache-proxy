@@ -62,7 +62,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		block.DefaultPolicy = config.PolicyBypass
 	}
 	if block.BusyPolicy == "" {
-		block.BusyPolicy = config.BusyPolicyBypass
+		block.BusyPolicy = config.BusyPolicyJoin
 	}
 	if err := validate(block.Upstream, &block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)

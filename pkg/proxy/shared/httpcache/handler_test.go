@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -183,6 +185,9 @@ func TestBrowserRequestRefreshesUnreviewedCacheObject(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, expectedCache, rec.Header().Get("X-Cache"))
 		require.Equal(t, "reviewed", rec.Body.String())
+		if expectedCache == "MISS" {
+			requireObjectFlightCompleted(t, handler, "test/browser")
+		}
 	}
 	require.Equal(t, int32(1), upstreamRequests.Load())
 }
@@ -244,6 +249,9 @@ func TestConfiguredUserAgentCachesSingleVaryRepresentation(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, expectedCache, rec.Header().Get("X-Cache"))
 		require.Equal(t, "User-Agent", rec.Header().Get("Vary"))
+		if expectedCache == "MISS" {
+			requireObjectFlightCompleted(t, handler, "test/forced")
+		}
 	}
 	require.Equal(t, int32(1), requests.Load())
 }
@@ -292,6 +300,7 @@ func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
 	require.Empty(t, rec.Header().Get("fetched-at"))
 	require.Empty(t, rec.Header().Get("mode"))
 	require.Empty(t, rec.Header().Get("cache"))
+	requireObjectFlightCompleted(t, handler, "test/object")
 
 	// Second request: cache hit
 	rec = httptest.NewRecorder()
@@ -344,6 +353,7 @@ func TestCacheDebugHeadersOnRevalidateFresh(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
+	requireObjectFlightCompleted(t, handler, "test/revalidate")
 
 	// Second request: within FreshFor, returns FRESH
 	rec = httptest.NewRecorder()
@@ -464,6 +474,7 @@ func TestHeadRequestStripsInternalHeaders(t *testing.T) {
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/head-obj", nil)
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
+	requireObjectFlightCompleted(t, handler, "test/head-obj")
 
 	// Second: HEAD request on cached object
 	rec = httptest.NewRecorder()
@@ -674,7 +685,7 @@ func TestTargetURLFallsBackOnRetryableStatus(t *testing.T) {
 	require.Equal(t, "upstream", rec.Body.String())
 }
 
-func TestTargetURLFallsBackOnClientError(t *testing.T) {
+func TestTargetURLReturnsClientErrorWithoutUpstreamFallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -682,7 +693,9 @@ func TestTargetURLFallsBackOnClientError(t *testing.T) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 	}))
 	defer target.Close()
+	var upstreamRequests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
 		_, _ = io.WriteString(w, "upstream")
 	}))
 	defer upstream.Close()
@@ -700,11 +713,11 @@ func TestTargetURLFallsBackOnClientError(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "upstream", rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Zero(t, upstreamRequests.Load())
 }
 
-func TestTargetURLFailsWhenRetryableStatusHasNoFallbackPath(t *testing.T) {
+func TestTargetURLReturnsClientErrorWithoutFallbackPath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -730,7 +743,7 @@ func TestTargetURLFailsWhenRetryableStatusHasNoFallbackPath(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFailoverRetriesRetryableStatus(t *testing.T) {
@@ -765,11 +778,12 @@ func TestFailoverRetriesRetryableStatus(t *testing.T) {
 	require.Equal(t, "ok", rec.Body.String())
 }
 
-func TestFailoverRetriesNonNotFoundClientErrors(t *testing.T) {
+func TestFailoverDoesNotRetryClientErrors(t *testing.T) {
 	tests := map[string]int{
-		"bad request": http.StatusBadRequest,
-		"forbidden":   http.StatusForbidden,
-		"gone":        http.StatusGone,
+		"bad request":  http.StatusBadRequest,
+		"unauthorized": http.StatusUnauthorized,
+		"forbidden":    http.StatusForbidden,
+		"gone":         http.StatusGone,
 	}
 	for name, status := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -780,7 +794,9 @@ func TestFailoverRetriesNonNotFoundClientErrors(t *testing.T) {
 				http.Error(w, http.StatusText(status), status)
 			}))
 			defer first.Close()
+			var secondRequests atomic.Int64
 			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				secondRequests.Add(1)
 				_, _ = io.WriteString(w, "ok")
 			}))
 			defer second.Close()
@@ -800,8 +816,8 @@ func TestFailoverRetriesNonNotFoundClientErrors(t *testing.T) {
 
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-			require.Equal(t, http.StatusOK, rec.Code)
-			require.Equal(t, "ok", rec.Body.String())
+			require.Equal(t, status, rec.Code)
+			require.Zero(t, secondRequests.Load())
 		})
 	}
 }
@@ -835,7 +851,7 @@ func TestFailoverDoesNotRetryNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestFailoverReturnsUnavailableWhenAllClientErrorsAreRetryable(t *testing.T) {
+func TestFailoverReturnsFirstClientError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -845,7 +861,9 @@ func TestFailoverReturnsUnavailableWhenAllClientErrorsAreRetryable(t *testing.T)
 		http.Error(w, "bad request", http.StatusBadRequest)
 	}))
 	defer first.Close()
+	var secondRequests atomic.Int64
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondRequests.Add(1)
 		require.Equal(t, browserUserAgent, r.UserAgent())
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
@@ -868,10 +886,11 @@ func TestFailoverReturnsUnavailableWhenAllClientErrorsAreRetryable(t *testing.T)
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
 	req.Header.Set("User-Agent", browserUserAgent)
 	handler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Zero(t, secondRequests.Load())
 }
 
-func TestRecordUpstreamCountsNonNotFoundClientErrors(t *testing.T) {
+func TestRecordUpstreamDoesNotCountClientResponsesAsUpstreamFailures(t *testing.T) {
 	stats := NewStats(prometheus.NewRegistry())
 	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusBadRequest)
 	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusForbidden)
@@ -880,8 +899,8 @@ func TestRecordUpstreamCountsNonNotFoundClientErrors(t *testing.T) {
 	snap := stats.Snapshot()
 	instance := snap.Instances["test"]
 	require.Equal(t, uint64(3), instance.UpstreamRequests)
-	require.Equal(t, uint64(2), instance.UpstreamErrors)
-	require.Equal(t, uint64(2), snap.Total.UpstreamErrors)
+	require.Zero(t, instance.UpstreamErrors)
+	require.Zero(t, snap.Total.UpstreamErrors)
 	require.Equal(t, uint64(1), instance.UpstreamStatus["404"])
 }
 
@@ -981,7 +1000,7 @@ func TestStaleCacheOnValidationError(t *testing.T) {
 	defer cancel()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
+		if r.Header.Get("If-None-Match") != "" {
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -1013,12 +1032,223 @@ func TestStaleCacheOnValidationError(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
 	require.Equal(t, "hello", rec.Body.String())
+	requireObjectFlightCompleted(t, handler, "test/stale-obj")
 
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/stale-obj", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "STALE", rec.Header().Get("X-Cache"))
 	require.Equal(t, "hello", rec.Body.String())
+}
+
+func TestConditionalGet304AdvancesFreshness(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	_, err = store.Put(ctx, "test", "object", strings.NewReader("cached"), map[string]string{
+		"etag":                       `"v1"`,
+		"content-length":             "6",
+		"fetched-at":                 time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+		responseSourceUpstreamHeader: "https://mirror.example",
+		UserAgentReviewedOption:      "true",
+	})
+	require.NoError(t, err)
+
+	var requests atomic.Int64
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
+		ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
+	}}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		require.Equal(t, http.MethodGet, req.Method)
+		require.Equal(t, `"v1"`, req.Header.Get("If-None-Match"))
+		return &http.Response{StatusCode: http.StatusNotModified, Header: http.Header{"ETag": []string{`"v1"`}}, Body: http.NoBody, Request: req}, nil
+	})
+
+	for _, cache := range []string{"REVALIDATED", "FRESH"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.Equal(t, cache, recorder.Header().Get("X-Cache"))
+		require.Equal(t, "cached", recorder.Body.String())
+	}
+	require.EqualValues(t, 1, requests.Load())
+}
+
+func TestConditionalGetReplacesStaleContentWithOneRequest(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	_, err = store.Put(ctx, "test", "object", strings.NewReader("old"), map[string]string{
+		"etag":                       `"v1"`,
+		"content-length":             "3",
+		"fetched-at":                 time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+		responseSourceUpstreamHeader: "https://mirror.example",
+		UserAgentReviewedOption:      "true",
+	})
+	require.NoError(t, err)
+
+	var requests atomic.Int64
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
+		ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
+	}}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		require.Equal(t, http.MethodGet, req.Method)
+		require.Equal(t, `"v1"`, req.Header.Get("If-None-Match"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Length": []string{"3"}, "ETag": []string{`"v2"`}},
+			Body:       io.NopCloser(strings.NewReader("new")),
+			Request:    req,
+		}, nil
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "REFRESH", recorder.Header().Get("X-Cache"))
+	require.Equal(t, "new", recorder.Body.String())
+	require.EqualValues(t, 1, requests.Load())
+	require.Eventually(t, func() bool {
+		reader, openErr := store.OpenObject(ctx, "test", "object")
+		if openErr != nil {
+			return false
+		}
+		stored, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		return readErr == nil && closeErr == nil && string(stored) == "new"
+	}, time.Second, 5*time.Millisecond)
+	require.NoError(t, handler.CloseContext(context.Background()))
+}
+
+func TestRateLimitDoesNotFailOverToAnotherUpstream(t *testing.T) {
+	var firstRequests, secondRequests atomic.Int64
+	handler := NewHandler("test", RuntimeConfig{
+		Mode: "test", Upstreams: []string{"https://first.example", "https://second.example"},
+	}, nil, literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "first.example":
+			firstRequests.Add(1)
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"60"}}, Body: http.NoBody, Request: req}, nil
+		case "second.example":
+			secondRequests.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+		default:
+			return nil, fmt.Errorf("unexpected host %q", req.URL.Host)
+		}
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.NotEmpty(t, recorder.Header().Get("Retry-After"))
+	require.EqualValues(t, 1, firstRequests.Load())
+	require.Zero(t, secondRequests.Load())
+}
+
+func TestRateLimitCooldownIsSharedAndServesStale(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	for _, instance := range []string{"arch", "alpine"} {
+		_, err = store.Put(ctx, instance, "object", strings.NewReader(instance), map[string]string{
+			"content-length":        strconv.Itoa(len(instance)),
+			"fetched-at":            time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+			UserAgentReviewedOption: "true",
+		})
+		require.NoError(t, err)
+	}
+
+	limiter := NewDownloadLimiter(8, 4)
+	var requests atomic.Int64
+	newHandler := func(instance string) *Handler {
+		handler := NewHandler(instance, RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}, DownloadLimiter: limiter}, store, literalResolver{route: Route{
+			ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
+		}}, NewStats(prometheus.NewRegistry()), nil)
+		handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"60"}}, Body: http.NoBody, Request: req}, nil
+		})
+		return handler
+	}
+	for _, instance := range []string{"arch", "alpine"} {
+		recorder := httptest.NewRecorder()
+		newHandler(instance).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.Equal(t, "STALE", recorder.Header().Get("X-Cache"))
+		require.Equal(t, instance, recorder.Body.String())
+	}
+	require.EqualValues(t, 1, requests.Load())
+}
+
+func TestStaleValidationFailureDoesNotFailOver(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	_, err = store.Put(ctx, "test", "object", strings.NewReader("stale"), map[string]string{
+		"content-length":        "5",
+		"fetched-at":            time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+		UserAgentReviewedOption: "true",
+	})
+	require.NoError(t, err)
+
+	var firstRequests, secondRequests atomic.Int64
+	handler := NewHandler("test", RuntimeConfig{
+		Mode: "test", Upstreams: []string{"https://first.example", "https://second.example"},
+	}, store, literalResolver{route: Route{
+		ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
+	}}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "first.example" {
+			firstRequests.Add(1)
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
+		}
+		secondRequests.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("new")), Request: req}, nil
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "STALE", recorder.Header().Get("X-Cache"))
+	require.Equal(t, "stale", recorder.Body.String())
+	require.EqualValues(t, 1, firstRequests.Load())
+	require.Zero(t, secondRequests.Load())
+}
+
+func TestStreamToCacheClientCompletesBeforeStore(t *testing.T) {
+	var wait sync.WaitGroup
+	storeStarted := make(chan struct{})
+	releaseStore := make(chan struct{})
+	upstreamClosed := make(chan struct{})
+	reader, err := StreamToCache(context.Background(), StreamConfig{
+		Body:       &closeCallbackBody{ReadCloser: io.NopCloser(strings.NewReader("signature")), done: func() { close(upstreamClosed) }},
+		ObjectPath: "pkg.sig", Wait: &wait,
+		StoreFn: func(context.Context, io.Reader) error {
+			close(storeStarted)
+			<-releaseStore
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	<-storeStarted
+	select {
+	case <-upstreamClosed:
+	default:
+		t.Fatal("upstream body remained open while cache storage was running")
+	}
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "signature", string(body))
+	require.NoError(t, reader.Close())
+	close(releaseStore)
+	wait.Wait()
 }
 
 func TestErrorResponseHidesInternalDetails(t *testing.T) {
@@ -1149,6 +1379,82 @@ func TestStreamToCacheContinuesAfterClientReaderCloses(t *testing.T) {
 	wait.Wait()
 }
 
+func TestRetryJoinsDetachedFillAfterFirstClientCloses(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	verifyStarted := make(chan struct{})
+	releaseVerify := make(chan struct{})
+	var requests atomic.Int64
+	handler := NewHandler("test", RuntimeConfig{
+		Mode: "test", Upstreams: []string{"https://upstream.example"},
+		VerifyFunc: func(*http.Request, Route, io.ReadSeeker) error {
+			close(verifyStarted)
+			<-releaseVerify
+			return nil
+		},
+	}, store, literalResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Length": []string{"7"}},
+			Body:       io.NopCloser(strings.NewReader("payload")),
+			Request:    req,
+		}, nil
+	})
+	route := Route{ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyImmutable}
+	flight, leader := handler.flights.begin(route.ObjectPath)
+	require.True(t, leader)
+	first, err := handler.streamDownload(httptest.NewRequest(http.MethodGet, "/object", nil), route, "MISS", flight)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+	<-verifyStarted
+
+	retry, err := handler.followFlight(context.Background(), httptest.NewRequest(http.MethodGet, "/object", nil), route, flight)
+	require.NoError(t, err)
+	retryBody, err := io.ReadAll(retry.Body)
+	require.NoError(t, err)
+	require.NoError(t, retry.Close())
+	require.Equal(t, "COALESCED", retry.Headers["X-Cache"])
+	require.Equal(t, "payload", string(retryBody))
+	require.EqualValues(t, 1, requests.Load())
+
+	close(releaseVerify)
+	requireObjectFlightCompleted(t, handler, route.ObjectPath)
+}
+
+func TestBusyBypassStartsIndependentRequest(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	var requests atomic.Int64
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://upstream.example"}}, store, literalResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("payload")), Request: req}, nil
+	})
+	route := Route{ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyImmutable, BusyPolicy: config.BusyPolicyBypass}
+	flight, leader := handler.flights.begin(route.ObjectPath)
+	require.True(t, leader)
+
+	response, err := handler.followFlight(context.Background(), httptest.NewRequest(http.MethodGet, "/object", nil), route, flight)
+	require.NoError(t, err)
+	require.Equal(t, "BYPASS", response.Headers["X-Cache"])
+	require.NoError(t, response.Close())
+	require.EqualValues(t, 1, requests.Load())
+	handler.flights.finish(route.ObjectPath, flight, nil)
+}
+
+func TestConditionalHeadersAreBoundToValidatorOrigin(t *testing.T) {
+	headers := map[string]string{"If-None-Match": `"etag"`, "If-Modified-Since": "yesterday", "Accept": "application/json"}
+	require.Equal(t, headers, headersForOrigin(headers, "https://one.example", "https://one.example"))
+	filtered := headersForOrigin(headers, "https://one.example", "https://two.example")
+	require.Equal(t, map[string]string{"Accept": "application/json"}, filtered)
+	require.Equal(t, map[string]string{"Accept": "application/json"}, headersForOrigin(headers, "", "https://two.example"))
+	require.Equal(t, `"etag"`, headers["If-None-Match"])
+}
+
 func TestAllUpstreamsUnavailableReturns503(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1169,6 +1475,26 @@ func TestAllUpstreamsUnavailableReturns503(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/downstream", nil))
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestOpenCircuitUpstreamReturns503WithoutRequest(t *testing.T) {
+	const upstream = "https://mirror.example"
+	stats := NewStats(prometheus.NewRegistry())
+	svcHealth := health.New("test", "test", health.DefaultConfig(), []string{upstream}, stats, DefaultUserAgent)
+	for range 10 {
+		svcHealth.RecordResult(upstream, http.StatusServiceUnavailable, time.Millisecond)
+	}
+	require.Empty(t, svcHealth.WeightedUpstreams([]string{upstream}))
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream}}, nil,
+		literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, stats, svcHealth)
+	handler.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("open-circuit upstream must not be requested")
+		return nil, nil
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 }
 
 func TestConcurrentNPMMetadataMissIsFetchedOnceAndRewritten(t *testing.T) {
@@ -1231,6 +1557,7 @@ func TestConcurrentNPMMetadataMissIsFetchedOnceAndRewritten(t *testing.T) {
 		require.Contains(t, recorder.Body.String(), "http://cache.example/npm/pkg/-/pkg-1.0.0.tgz")
 	}
 	require.EqualValues(t, 1, requests.Load())
+	requireObjectFlightCompleted(t, handler, "npm/metadata/pkg")
 	entries, err := os.ReadDir(tempDir)
 	require.NoError(t, err)
 	require.Empty(t, entries)
@@ -1333,6 +1660,13 @@ func TestSafePath(t *testing.T) {
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func requireObjectFlightCompleted(t *testing.T, handler *Handler, objectPath string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return !handler.flights.active(objectPath)
+	}, time.Second, 5*time.Millisecond)
+}
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)

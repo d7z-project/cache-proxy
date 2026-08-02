@@ -23,10 +23,18 @@ type StreamConfig struct {
 	Done       func(error)
 }
 
-// StreamToCache downloads independently of the client while exposing a reader
-// over the growing temporary file. A slow or disconnected client therefore
-// cannot stall cache publication.
+// StreamToCache downloads independently of clients. Download completion is
+// published before verification and storage so local cache work cannot stall
+// downstream EOF or retain an upstream admission slot.
 func StreamToCache(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
+	spool, err := startCacheStream(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return spool.Reader()
+}
+
+func startCacheStream(ctx context.Context, cfg StreamConfig) (*growingFile, error) {
 	spool, err := newGrowingFile()
 	if err != nil {
 		_ = cfg.Body.Close()
@@ -40,14 +48,20 @@ func StreamToCache(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error)
 	slog.Debug("download started", "path", cfg.ObjectPath, "temp", spool.path)
 	go func() {
 		defer cfg.Wait.Done()
-		defer cfg.Body.Close()
 		if cfg.StatsDone != nil {
 			defer cfg.StatsDone()
 		}
+		defer spool.releaseProducer()
 
 		copyErr := spool.copyFrom(cfg.Body)
-		fillErr := copyErr
+		closeErr := cfg.Body.Close()
 		if copyErr == nil {
+			copyErr = closeErr
+		}
+		spool.finish(copyErr)
+
+		fillErr := copyErr
+		if fillErr == nil {
 			fillErr = verifyAndStore(ctx, spool.path, cfg)
 		}
 		if fillErr != nil {
@@ -55,7 +69,6 @@ func StreamToCache(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error)
 		} else {
 			slog.Debug("download completed", "path", cfg.ObjectPath)
 		}
-		spool.finish(copyErr)
 		if cfg.Done != nil {
 			cfg.Done(fillErr)
 		}
@@ -93,14 +106,20 @@ type growingFile struct {
 	mu          sync.Mutex
 	changed     *sync.Cond
 	path        string
-	reader      *os.File
 	writer      *os.File
 	size        int64
-	offset      int64
 	done        bool
-	closed      bool
 	readErr     error
+	readers     int
+	producer    bool
 	cleanupOnce sync.Once
+}
+
+type growingFileReader struct {
+	spool  *growingFile
+	file   *os.File
+	offset int64
+	once   sync.Once
 }
 
 func newGrowingFile() (*growingFile, error) {
@@ -108,15 +127,20 @@ func newGrowingFile() (*growingFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	reader, err := os.Open(writer.Name())
+	spool := &growingFile{path: writer.Name(), writer: writer, producer: true}
+	spool.changed = sync.NewCond(&spool.mu)
+	return spool, nil
+}
+
+func (f *growingFile) Reader() (io.ReadCloser, error) {
+	reader, err := os.Open(f.path)
 	if err != nil {
-		_ = writer.Close()
-		_ = os.Remove(writer.Name())
 		return nil, err
 	}
-	file := &growingFile{path: writer.Name(), reader: reader, writer: writer}
-	file.changed = sync.NewCond(&file.mu)
-	return file, nil
+	f.mu.Lock()
+	f.readers++
+	f.mu.Unlock()
+	return &growingFileReader{spool: f, file: reader}, nil
 }
 
 func (f *growingFile) copyFrom(src io.Reader) error {
@@ -148,23 +172,21 @@ func (f *growingFile) copyFrom(src io.Reader) error {
 	}
 }
 
-func (f *growingFile) Read(p []byte) (int, error) {
+func (r *growingFileReader) Read(p []byte) (int, error) {
+	f := r.spool
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for {
-		if f.closed {
-			return 0, os.ErrClosed
-		}
-		if f.offset < f.size {
-			available := f.size - f.offset
+		if r.offset < f.size {
+			available := f.size - r.offset
 			if int64(len(p)) > available {
 				p = p[:available]
 			}
-			offset := f.offset
+			offset := r.offset
 			f.mu.Unlock()
-			n, err := f.reader.ReadAt(p, offset)
+			n, err := r.file.ReadAt(p, offset)
 			f.mu.Lock()
-			f.offset += int64(n)
+			r.offset += int64(n)
 			if n > 0 && errors.Is(err, io.EOF) {
 				err = nil
 			}
@@ -180,20 +202,19 @@ func (f *growingFile) Read(p []byte) (int, error) {
 	}
 }
 
-func (f *growingFile) Close() error {
-	f.mu.Lock()
-	if f.closed {
+func (r *growingFileReader) Close() error {
+	var err error
+	r.once.Do(func() {
+		err = r.file.Close()
+		f := r.spool
+		f.mu.Lock()
+		f.readers--
+		cleanup := !f.producer && f.readers == 0
 		f.mu.Unlock()
-		return nil
-	}
-	f.closed = true
-	done := f.done
-	f.changed.Broadcast()
-	f.mu.Unlock()
-	err := f.reader.Close()
-	if done {
-		f.cleanup()
-	}
+		if cleanup {
+			f.cleanup()
+		}
+	})
 	return err
 }
 
@@ -201,16 +222,20 @@ func (f *growingFile) finish(readErr error) {
 	f.mu.Lock()
 	f.done = true
 	f.readErr = readErr
-	closed := f.closed
 	f.changed.Broadcast()
 	f.mu.Unlock()
-	if closed {
+}
+
+func (f *growingFile) releaseProducer() {
+	f.mu.Lock()
+	f.producer = false
+	cleanup := f.readers == 0
+	f.mu.Unlock()
+	if cleanup {
 		f.cleanup()
 	}
 }
 
 func (f *growingFile) cleanup() {
-	f.cleanupOnce.Do(func() {
-		_ = os.Remove(f.path)
-	})
+	f.cleanupOnce.Do(func() { _ = os.Remove(f.path) })
 }

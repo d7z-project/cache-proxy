@@ -116,6 +116,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		probeUserAgent = block.Transport.UserAgent
 	}
 	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats(), probeUserAgent)
+	sh.SetUpstreamAdmission(plan.Downloads())
 	sh.SetProbeScheduler(plan.ProbeScheduler())
 	sh.SetBus(plan.Bus())
 	base := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{

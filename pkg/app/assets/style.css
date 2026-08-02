@@ -1609,11 +1609,13 @@ body.network-stage-open .network-map.is-clustered .network-node .node-sub{
 .state-degraded{stroke:var(--dot-err)}
 .state-open{stroke:var(--dot-degraded)}
 .state-halfopen{stroke:var(--dot-refreshing)}
+.state-rate_limited{stroke:var(--dot-degraded)}
 .state-unknown{stroke:var(--text-muted)}
 .network-node.state-closed circle{stroke:var(--dot-ok)}
 .network-node.state-degraded circle{stroke:var(--dot-err)}
 .network-node.state-open circle{stroke:var(--dot-degraded)}
 .network-node.state-halfopen circle{stroke:var(--dot-refreshing)}
+.network-node.state-rate_limited circle{stroke:var(--dot-degraded)}
 .network-node.state-unknown circle{stroke:var(--text-muted)}
 
 /* ── Status events table ── */

@@ -106,13 +106,13 @@ func applyDefaults(policy *Policy) {
 		policy.FilePolicy = config.PolicyImmutable
 	}
 	if policy.CompanionPolicy == "" {
-		policy.CompanionPolicy = config.PolicyRevalidate
+		policy.CompanionPolicy = config.PolicyImmutable
 	}
 	if policy.CompanionFreshFor == 0 {
 		policy.CompanionFreshFor = config.Freshness(30 * time.Second)
 	}
 	if policy.CompanionBusyPolicy == "" {
-		policy.CompanionBusyPolicy = config.BusyPolicyBypass
+		policy.CompanionBusyPolicy = config.BusyPolicyJoin
 	}
 	if policy.ProxyJSON == nil {
 		enabled := true
@@ -127,7 +127,7 @@ func validate(policy *Policy) error {
 		}
 	}
 	for _, value := range []string{policy.IndexBusyPolicy, policy.CompanionBusyPolicy} {
-		if value != config.BusyPolicyBypass && value != config.BusyPolicyStale {
+		if !config.ValidBusyPolicy(value) {
 			return fmt.Errorf("invalid pypi busy policy %q", value)
 		}
 	}
@@ -211,6 +211,7 @@ func fileRoute(policy *Policy, _ []string, lookupPath, rawURL string) httpcache.
 	route := httpcache.Route{
 		ObjectPath: objectPath,
 		Policy:     policy.FilePolicy,
+		BusyPolicy: config.BusyPolicyJoin,
 	}
 	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		route.TargetURL = rawURL

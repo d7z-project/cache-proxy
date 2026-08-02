@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -131,8 +132,28 @@ func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.Respons
 	if req.Method == http.MethodHead {
 		return nil
 	}
-	_, err := io.Copy(resp, receiver.Body)
-	return err
+	buffer := make([]byte, 32<<10)
+	flushed := false
+	for {
+		n, readErr := receiver.Body.Read(buffer)
+		if n > 0 {
+			if _, err := resp.Write(buffer[:n]); err != nil {
+				return err
+			}
+			if !flushed {
+				flushed = true
+				if err := http.NewResponseController(resp).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+					return err
+				}
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
 }
 
 func (receiver *ResponseWrapper) Close() error {

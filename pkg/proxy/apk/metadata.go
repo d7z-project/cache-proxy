@@ -12,6 +12,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
+var apkPackageSidecarSuffixes = []string{".sig", ".asc", ".sha256", ".sha512"}
+
 type inspector struct{}
 
 func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
@@ -27,11 +29,16 @@ func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
 	switch {
 	case strings.HasSuffix(cleanPath, "/APKINDEX.tar.gz"), cleanPath == "APKINDEX.tar.gz":
 		return analyzeMetadataPath(cleanPath)
-	case strings.HasSuffix(cleanPath, "/APKINDEX.tar.gz.sig"), cleanPath == "APKINDEX.tar.gz.sig", strings.HasSuffix(cleanPath, ".apk.sig"), strings.HasSuffix(cleanPath, ".apk.asc"), strings.HasSuffix(cleanPath, ".apk.sha256"), strings.HasSuffix(cleanPath, ".apk.sha512"):
-		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+	case strings.HasSuffix(cleanPath, "/APKINDEX.tar.gz.sig"), cleanPath == "APKINDEX.tar.gz.sig":
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}
 	case strings.HasSuffix(cleanPath, ".apk"):
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
 	default:
+		for _, suffix := range apkPackageSidecarSuffixes {
+			if strings.HasSuffix(cleanPath, ".apk"+suffix) {
+				return filerepo.DiscoveryResult{Class: filerepo.ResourceSidecar, Role: filerepo.DiscoveryIgnore}
+			}
+		}
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
 	}
 }
@@ -93,14 +100,12 @@ func buildIndexTarget(
 	defer session.Release(target)
 
 	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-	for _, companionPath := range filerepo.DeduceCompanions(blob.Path) {
-		companion, err := session.FetchDerived(ctx, companionPath)
-		if err != nil {
-			return 0, err
-		}
-		if companion.Path != "" {
-			snapshot.Metadata[companion.Path] = companion
-		}
+	companion, err := session.FetchDerived(ctx, blob.Path+".sig")
+	if err != nil {
+		return 0, err
+	}
+	if companion.Path != "" {
+		snapshot.Metadata[companion.Path] = companion
 	}
 	blobReader, err := blob.Open()
 	if err != nil {
@@ -139,7 +144,9 @@ func parseIndex(basePath string, input io.Reader, paths *filerepo.PathIndexBuild
 		}
 		artifactPath := path.Join(basePath, name+"-"+version+".apk")
 		paths.Add(artifactPath)
-		paths.AddAuxiliary(artifactPath)
+		for _, suffix := range apkPackageSidecarSuffixes {
+			paths.Add(artifactPath + suffix)
+		}
 		count++
 	}
 	scanner := bufio.NewScanner(input)

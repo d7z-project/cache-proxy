@@ -88,6 +88,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		probeUserAgent = block.Transport.UserAgent
 	}
 	sh := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats(), probeUserAgent)
+	sh.SetUpstreamAdmission(plan.Downloads())
 	sh.SetProbeScheduler(plan.ProbeScheduler())
 	sh.SetBus(plan.Bus())
 
@@ -182,7 +183,7 @@ func resolveDeltaExpireAfter(policy *Policy, expireAfter config.Expiration) conf
 }
 
 func validatePolicy(policy *Policy, expireAfter config.Expiration) error {
-	if policy.MetadataBusyPolicy != config.BusyPolicyBypass && policy.MetadataBusyPolicy != config.BusyPolicyStale {
+	if !config.ValidBusyPolicy(policy.MetadataBusyPolicy) {
 		return fmt.Errorf("invalid flatpak metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
 	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {

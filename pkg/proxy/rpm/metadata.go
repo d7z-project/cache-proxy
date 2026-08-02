@@ -13,6 +13,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
+var rpmPackageSidecarSuffixes = []string{".sig", ".asc", ".sha256", ".sha512", ".md5"}
+
 type inspector struct{}
 
 func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
@@ -34,9 +36,12 @@ func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
 		return analyzeMetadataPath(cleanPath)
 	case strings.HasSuffix(cleanPath, ".rpm"), strings.HasSuffix(cleanPath, ".drpm"):
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
-	case strings.HasSuffix(cleanPath, ".sig"), strings.HasSuffix(cleanPath, ".asc"), strings.HasSuffix(cleanPath, ".sha256"), strings.HasSuffix(cleanPath, ".sha512"), strings.HasSuffix(cleanPath, ".md5"):
-		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
 	default:
+		for _, suffix := range rpmPackageSidecarSuffixes {
+			if strings.HasSuffix(cleanPath, suffix) {
+				return filerepo.DiscoveryResult{Class: filerepo.ResourceSidecar, Role: filerepo.DiscoveryIgnore}
+			}
+		}
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
 	}
 }
@@ -99,7 +104,8 @@ func buildRepomdTarget(
 	defer session.Release(target)
 
 	snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
-	for _, companionPath := range append(filerepo.DeduceCompanions(repomd.Path), repomd.Path+".key") {
+	for _, suffix := range []string{".asc", ".sig", ".key"} {
+		companionPath := repomd.Path + suffix
 		companion, err := session.FetchDerived(ctx, companionPath)
 		if err != nil {
 			return 0, err
@@ -250,7 +256,9 @@ func parsePrimary(input io.Reader, paths *filerepo.PathIndexBuilder, repoRoot st
 		artifactPath := path.Join(repoRoot, href)
 		_ = checksum
 		paths.Add(artifactPath)
-		paths.AddAuxiliary(artifactPath)
+		for _, suffix := range rpmPackageSidecarSuffixes {
+			paths.Add(artifactPath + suffix)
+		}
 		count++
 	}
 }

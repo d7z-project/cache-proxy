@@ -141,16 +141,6 @@ func (b *PathIndexBuilder) Add(rawPath string) {
 	b.paths = append(b.paths, cleanPath)
 }
 
-func (b *PathIndexBuilder) AddAuxiliary(basePath string) {
-	basePath = strings.Trim(strings.TrimSpace(basePath), "/")
-	if basePath == "" {
-		return
-	}
-	for _, suffix := range []string{".sig", ".asc", ".gpg", ".sha256", ".sha512", ".md5", ".md5sum"} {
-		b.Add(basePath + suffix)
-	}
-}
-
 func (b *PathIndexBuilder) Finalize() []string {
 	if len(b.paths) == 0 {
 		return nil
@@ -269,14 +259,6 @@ func (s *RefreshSession) Close() {
 			_ = os.Remove(blob.temp)
 		}
 	}
-}
-
-func DeduceCompanions(basePath string) []string {
-	var companions []string
-	for _, s := range []string{".sig", ".asc", ".gpg"} {
-		companions = append(companions, basePath+s)
-	}
-	return companions
 }
 
 type DiscoveryRole string

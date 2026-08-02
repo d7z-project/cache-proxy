@@ -40,6 +40,7 @@ func routeForPath(policy *Policy, cleanPath string) (httpcache.Route, error) {
 			ObjectPath:   "flatpak/" + cleanPath,
 			UpstreamPath: cleanPath,
 			Policy:       config.PolicyImmutable,
+			BusyPolicy:   config.BusyPolicyJoin,
 		}, nil
 	case isDeltaPath(cleanPath):
 		if policy.CacheDeltas == nil || !*policy.CacheDeltas {
@@ -54,6 +55,7 @@ func routeForPath(policy *Policy, cleanPath string) (httpcache.Route, error) {
 			UpstreamPath: cleanPath,
 			Policy:       config.PolicyImmutable,
 			ExpireAfter:  policy.DeltaExpireAfter,
+			BusyPolicy:   config.BusyPolicyJoin,
 		}, nil
 	case isDescriptorPath(cleanPath):
 		route := httpcache.Route{
@@ -78,7 +80,7 @@ func routeForPath(policy *Policy, cleanPath string) (httpcache.Route, error) {
 			UpstreamPath: cleanPath,
 			Policy:       config.PolicyRevalidate,
 			FreshFor:     config.Freshness(defaultDescriptorFreshFor),
-			BusyPolicy:   config.BusyPolicyBypass,
+			BusyPolicy:   config.BusyPolicyJoin,
 		}, nil
 	}
 }

@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 
@@ -76,6 +78,9 @@ type remoteOptions struct {
 	AllowedTargetHosts     []string
 	PreferredUpstream      string
 	ArtifactMirrorFallback bool
+	Background             bool
+	DisableFailover        bool
+	ValidatorOrigin        string
 }
 
 // DefaultUserAgent identifies cache-proxy to upstream services.
@@ -158,7 +163,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	result, err := h.handle(req.Context(), req)
 	if err != nil {
 		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
-		resp.Header().Set("Retry-After", "5")
+		resp.Header().Set("Retry-After", retryAfterValue(err))
 		status := http.StatusBadGateway
 		if errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, ErrDownloadLimit) {
 			status = http.StatusServiceUnavailable
@@ -191,6 +196,10 @@ func (h *Handler) CloseContext(ctx context.Context) error {
 	return utils.WaitGroupContext(ctx, &h.wait)
 }
 
+func (h *Handler) Busy(objectPath string) bool {
+	return h.flights.active(objectPath)
+}
+
 func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) {
 	h.ProxyPassthroughStatus(resp, req, upstreamPath, preferredUpstream)
 }
@@ -208,9 +217,9 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 	result, err := h.bypass(req.Context(), req, route)
 	if err != nil {
 		slog.Info("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
-		resp.Header().Set("Retry-After", "5")
+		resp.Header().Set("Retry-After", retryAfterValue(err))
 		status := http.StatusBadGateway
-		if errors.Is(err, ErrUpstreamUnavailable) {
+		if errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, ErrDownloadLimit) {
 			status = http.StatusServiceUnavailable
 		}
 		http.Error(resp, http.StatusText(status), status)
@@ -223,4 +232,14 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 	status := result.StatusCode
 	h.flushResult(req, resp, result, "flush passthrough response failed")
 	return status
+}
+
+func retryAfterValue(err error) string {
+	var limited *RateLimitError
+	if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
+		remaining := time.Until(limited.RetryAfter)
+		seconds := int((remaining + time.Second - 1) / time.Second)
+		return strconv.Itoa(max(seconds, 1))
+	}
+	return "5"
 }

@@ -39,6 +39,7 @@ const (
 	PolicyRevalidate = "revalidate"
 
 	BusyPolicyBypass = "bypass"
+	BusyPolicyJoin   = "join"
 	BusyPolicyStale  = "stale"
 )
 
@@ -46,7 +47,9 @@ func ValidPolicy(v string) bool {
 	return v == PolicyBypass || v == PolicyImmutable || v == PolicyRevalidate
 }
 
-func ValidBusyPolicy(v string) bool { return v == "" || v == BusyPolicyBypass || v == BusyPolicyStale }
+func ValidBusyPolicy(v string) bool {
+	return v == "" || v == BusyPolicyBypass || v == BusyPolicyJoin || v == BusyPolicyStale
+}
 
 const DefaultExpireAfter Expiration = Expiration(720 * time.Hour)
 
@@ -92,8 +95,13 @@ type CleanupConfig struct {
 }
 
 type DownloadConfig struct {
-	MaxActive            int `yaml:"max_active"`
-	MaxActivePerInstance int `yaml:"max_active_per_instance"`
+	MaxActive             int      `yaml:"max_active"`
+	MaxActivePerInstance  int      `yaml:"max_active_per_instance"`
+	MaxActivePerHost      int      `yaml:"max_active_per_host"`
+	MaxBackground         int      `yaml:"max_background"`
+	RequestsPerSecondHost float64  `yaml:"requests_per_second_per_host"`
+	RequestBurstPerHost   int      `yaml:"request_burst_per_host"`
+	ForegroundQueueWait   Duration `yaml:"foreground_queue_wait"`
 }
 
 func DefaultCleanupConfig() CleanupConfig {

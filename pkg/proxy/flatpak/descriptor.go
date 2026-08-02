@@ -77,9 +77,17 @@ func (h *Handler) fetchDescriptor(
 ) ([]byte, map[string]string, string, error) {
 	var firstErr error
 	for _, upstream := range h.upstreams {
+		release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, false)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
 		targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(route.UpstreamPath)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
+			release()
 			return nil, nil, "", fmt.Errorf("create flatpak descriptor request: %w", err)
 		}
 		request.Header.Set("User-Agent", userAgent)
@@ -87,6 +95,7 @@ func (h *Handler) fetchDescriptor(
 		response, err := h.client.Do(request)
 		latency := time.Since(start)
 		if err != nil {
+			release()
 			h.stats.RecordUpstreamRequest(h.name, config.ModeFlatpak, upstream, http.MethodGet, 0, latency, 0)
 			if firstErr == nil {
 				firstErr = err
@@ -96,6 +105,11 @@ func (h *Handler) fetchDescriptor(
 		storeResponse := !rejectUserAgentVariants || !utils.VariesByUserAgent(response.Header.Values("Vary")...)
 		body, headers, err := h.readDescriptorResponse(ctx, route.ObjectPath, upstream, response, latency, storeResponse)
 		response.Body.Close()
+		release()
+		if response.StatusCode == http.StatusTooManyRequests {
+			until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
+			return nil, nil, "", &httpcache.RateLimitError{Host: upstream, RetryAfter: until}
+		}
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

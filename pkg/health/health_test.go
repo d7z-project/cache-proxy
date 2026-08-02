@@ -92,7 +92,7 @@ func TestWeightedUpstreamsByWeight(t *testing.T) {
 	require.Equal(t, "https://b.example.com", result[1].URL)
 }
 
-func TestWeightedUpstreamsBypassWhenAllDead(t *testing.T) {
+func TestWeightedUpstreamsShedsTrafficWhenAllUnavailable(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com", "https://b.example.com"}, &testStats{}, "ua")
 	h.mu.Lock()
 	h.upstreams["https://a.example.com"].weight = 0
@@ -100,10 +100,7 @@ func TestWeightedUpstreamsBypassWhenAllDead(t *testing.T) {
 	h.mu.Unlock()
 
 	result := h.WeightedUpstreams(upstreamURLs(t, h))
-	require.Len(t, result, 2)
-	for _, wu := range result {
-		require.Equal(t, 1.0, wu.Weight)
-	}
+	require.Empty(t, result)
 }
 
 func TestDegradeByErrorRate(t *testing.T) {
@@ -515,7 +512,7 @@ func TestRecordResultUpdatesUpstream(t *testing.T) {
 	require.Equal(t, SOpen, uh.State)
 }
 
-func TestRecordResultCountsNonNotFoundClientErrorsAsFailures(t *testing.T) {
+func TestRecordResultDoesNotTripCircuitForOrdinaryClientErrors(t *testing.T) {
 	h := New("test", "apk", DefaultConfig(), []string{"https://a.example.com"}, &testStats{}, "ua")
 
 	for range 20 {
@@ -526,7 +523,7 @@ func TestRecordResultCountsNonNotFoundClientErrorsAsFailures(t *testing.T) {
 	}
 
 	uh := h.upstreams["https://a.example.com"]
-	require.Equal(t, SOpen, uh.State)
+	require.Equal(t, SClosed, uh.State)
 }
 
 func TestRecordResultDoesNotCountNotFoundAsFailure(t *testing.T) {
@@ -780,7 +777,7 @@ func TestProbeRecoversBlockedResource(t *testing.T) {
 	require.Zero(t, recovered.ConsecutiveNotFound)
 }
 
-func TestProbeNonNotFoundClientErrorIsUpstreamFailure(t *testing.T) {
+func TestProbeClientErrorDoesNotTripUpstream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
@@ -790,7 +787,7 @@ func TestProbeNonNotFoundClientErrorIsUpstreamFailure(t *testing.T) {
 	addActiveProbeResource(h, "repo", "probe", server.URL)
 	h.probeOne(h.upstreams[server.URL])
 
-	require.Equal(t, "HTTP 400", h.upstreams[server.URL].lastProbeErr)
+	require.Empty(t, h.upstreams[server.URL].lastProbeErr)
 }
 
 func TestProbeNotFoundIsNotUpstreamFailure(t *testing.T) {

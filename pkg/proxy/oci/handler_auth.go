@@ -11,41 +11,25 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const maxTokenResponseSize = 1 << 20 // 1MB
 
-func (h *handler) retryChallenge(ctx context.Context, method, targetURL, userAgent string, headers map[string]string, response *http.Response) (*http.Response, error) {
-	challenge, ok := parseOCIChallenge(response.Header.Get("WWW-Authenticate"))
-	if !ok {
-		return nil, nil
-	}
-	_ = response.Body.Close()
-	var auth string
+func (h *handler) authorizationForChallenge(ctx context.Context, challenge ociChallenge) (string, error) {
 	switch strings.ToLower(challenge.scheme) {
 	case "bearer":
 		token, err := h.ociBearerToken(ctx, challenge)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		auth = "Bearer " + token
+		return "Bearer " + token, nil
 	case "basic":
-		auth = h.basicAuthorization()
+		return h.basicAuthorization(), nil
+	default:
+		return "", nil
 	}
-	if auth == "" {
-		return nil, nil
-	}
-	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	for key, value := range headers {
-		request.Header.Set(key, value)
-	}
-	request.Header.Set("User-Agent", userAgent)
-	request.Header.Set("Authorization", auth)
-	return h.client.Do(request)
 }
 
 func (h *handler) staticAuthorization() string {
@@ -114,11 +98,20 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if basic := h.basicAuthorization(); basic != "" {
 		request.Header.Set("Authorization", basic)
 	}
-	response, err := h.client.Do(request)
+	release, err := h.downloadsLimiter.AcquireUpstream(ctx, h.name, tokenURL.String(), false)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	defer response.Body.Close()
+	response, err := h.client.Do(request)
+	if err != nil {
+		release()
+		return "", time.Time{}, err
+	}
+	defer func() { _ = response.Body.Close(); release() }()
+	if response.StatusCode == http.StatusTooManyRequests {
+		until := h.downloadsLimiter.ObserveResponse(tokenURL.String(), response.StatusCode, response.Header.Get("Retry-After"))
+		return "", time.Time{}, &httpcache.RateLimitError{Host: tokenURL.Host, RetryAfter: until}
+	}
 	response.Body = utils.NewRateLimitReader(response.Body)
 	if response.StatusCode != http.StatusOK {
 		return "", time.Time{}, errors.New("OCI token request failed")

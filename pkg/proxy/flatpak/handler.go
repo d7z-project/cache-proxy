@@ -47,6 +47,7 @@ type Handler struct {
 	current       currentMetadata
 	rewriteDesc   bool
 	verifyObjects bool
+	downloads     *httpcache.DownloadLimiter
 }
 
 func NewHandler(
@@ -73,6 +74,7 @@ func NewHandler(
 		sh:               svcHealth,
 		rewriteDesc:      policy.DescriptorRewrite != nil && *policy.DescriptorRewrite,
 		verifyObjects:    policy.VerifyObjects != nil && *policy.VerifyObjects,
+		downloads:        downloads,
 	}
 	handler.client = utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, transport)

@@ -29,6 +29,9 @@ type networkSummary struct {
 	HitRate                float64 `json:"hit_rate"`
 	UpstreamErrorRate      float64 `json:"upstream_error_rate"`
 	DegradedUpstreams      int     `json:"degraded_upstreams"`
+	QueuedUpstreamRequests int     `json:"queued_upstream_requests"`
+	BackgroundRequests     int     `json:"background_upstream_requests"`
+	RateLimitedUpstreams   int     `json:"rate_limited_upstreams"`
 }
 
 type networkInstance struct {
@@ -56,6 +59,8 @@ type networkUpstream struct {
 	Weight                 float64 `json:"weight"`
 	ErrorRate              float64 `json:"error_rate"`
 	LatencyMS              float64 `json:"latency_ms"`
+	AdmissionActive        int     `json:"admission_active"`
+	CooldownUntil          string  `json:"cooldown_until,omitempty"`
 }
 
 type networkEdge struct {
@@ -121,6 +126,23 @@ func (s *appStatus) network(app *App) networkStatus {
 		status.Instances = append(status.Instances, instance)
 		for upstreamURL, upstream := range stats.Upstreams {
 			status.addNetworkEdge(instance, entry, upstreamNodes, upstreamURL, upstream)
+		}
+	}
+	admission := app.downloads.Snapshot()
+	status.Summary.QueuedUpstreamRequests = admission.Queued
+	status.Summary.BackgroundRequests = admission.Background
+	for host, hostAdmission := range admission.Hosts {
+		key := "upstream:" + host
+		node := upstreamNodes[key]
+		if node == nil {
+			node = &networkUpstream{ID: key, Host: host, State: "unknown"}
+			upstreamNodes[key] = node
+		}
+		node.AdmissionActive = hostAdmission.Active
+		if !hostAdmission.CooldownUntil.IsZero() {
+			node.State = "rate_limited"
+			node.CooldownUntil = hostAdmission.CooldownUntil.Format(time.RFC3339)
+			status.Summary.RateLimitedUpstreams++
 		}
 	}
 	for _, key := range sortedNetworkKeys(upstreamNodes) {

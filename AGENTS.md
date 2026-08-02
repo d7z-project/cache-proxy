@@ -27,7 +27,9 @@
 - refresh 先写 staging，全部必需文件校验通过后才能发布 current generation
 - 客户端 metadata 请求只读取 current generation；没有 current 时才允许直连上游并触发后台刷新
 - 自动发现只允许由主元数据请求触发；伴生文件请求不能创建或识别新仓库
-- artifact / auxiliary 下载不能依赖包索引命中，也不能因为 refresh 失败被阻断
+- artifact / package sidecar 下载不能依赖包索引命中，也不能因为 refresh 失败被阻断
+- 协议资源语义必须由各 mode inspector / resolver 分类；`httpcache` 和 `filerepo` 通用 resolver 禁止识别 Pacman、RPM 等协议文件名
+- metadata 及其伴生文件绑定 generation；artifact 和 package sidecar 使用不含 generation 的稳定 content cache key
 - 包索引只用于清理旧缓存：refresh 阶段生成完整相对路径集合，并随 generation 持久化为本地 cleanup index，供后续清理工具直接读取
 - cleanup index 不进入运行时长期内存，不作为下载校验或准入条件；metadata GC 删除旧 generation 时同步删除对应 cleanup index
 - metadata 下载、解压、解析必须走流式 reader 或临时文件，禁止对大 metadata 整体 `io.ReadAll`
@@ -40,12 +42,19 @@
 - Linux 仓库模式额外注册 metadata refresh / metadata GC factory
 - 运行时清理参数统一来自 `plan.CleanupConfig()`
 - 静态清理与 blob GC 不持久化；metadata refresh / GC 持久化到调度状态
+- 客户端下载、metadata refresh、健康探测和 OCI token 请求必须共用按 upstream host 归一化的 admission / cooldown；`429` 必须遵守 `Retry-After`
+- admission 同时限制 active body 和每 host 请求速率；前台排队必须有界，后台任务无法立即取得预算时交回调度器
 
 ## 安全与资源使用
 
 - 路径处理先 `path.Clean`，再通过 `httpcache.SafePath`
 - 5xx 对外响应统一用 `httpcache.ErrorResponse`
 - 大文件下载必须流式写入临时文件，禁止全量读入内存
+- revalidate 使用单次 conditional GET；`304` 必须推进 `fetched-at`，瞬时失败有 stale 时不得追加第二次上游请求
+- ETag / Last-Modified 必须记录来源 upstream，禁止跨 origin 发送条件校验器
+- 上游 body 读取完成后立即释放传输 admission；校验和 blob 落盘不得继续占用上游并发槽
+- 同一缓存对象的并发 miss / refresh 必须合并为一次上游传输，客户端断开不能取消已开始的后台缓存填充
+- busy policy 语义固定为：`join` 合并传输，`stale` 优先旧对象且无旧对象时 join，`bypass` 独立回源
 - `TargetURL` 校验统一由 `httpcache` 负责，不允许各 resolver 自行放行未知 host
 - 已知 SHA256 / digest 的对象必须校验通过后才能写入缓存
 - Flatpak/OSTree objects 必须在写入 immutable 缓存前完成校验

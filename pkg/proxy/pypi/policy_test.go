@@ -19,6 +19,14 @@ func TestFileRouteLeavesForeignHostForHttpcacheValidation(t *testing.T) {
 	require.Empty(t, route.UpstreamPath)
 }
 
+func TestPyPICompanionDefaultsToImmutableJoin(t *testing.T) {
+	policy := &Policy{ProxySignatures: true}
+	applyDefaults(policy)
+	route := fileRoute(policy, nil, "packages/example.whl.asc", "https://files.pythonhosted.org/packages/example.whl.asc")
+	require.Equal(t, config.PolicyImmutable, route.Policy)
+	require.Equal(t, config.BusyPolicyJoin, route.BusyPolicy)
+}
+
 func TestFileRouteAcceptsUpstreamHost(t *testing.T) {
 	policy := &Policy{FilePolicy: config.PolicyImmutable}
 	upstreams := []string{"https://files.pythonhosted.org"}

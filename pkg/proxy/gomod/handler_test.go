@@ -26,6 +26,16 @@ import (
 const testModulePath = "example.com/cacheproxy/gomod"
 const testModuleVersion = "v1.0.0"
 
+func TestVersionedModuleFilesAreImmutableAndJoined(t *testing.T) {
+	policy := &Policy{ModulePolicy: config.PolicyRevalidate, ZipPolicy: config.PolicyImmutable, ModuleBusyPolicy: config.BusyPolicyStale}
+	for _, suffix := range []string{".info", ".mod", ".zip"} {
+		route, err := (&resolver{policy: policy}).Resolve(httptest.NewRequest(http.MethodGet, "/example.com/mod/@v/v1.0.0"+suffix, nil))
+		require.NoError(t, err)
+		require.Equal(t, config.PolicyImmutable, route.Policy, suffix)
+		require.Equal(t, config.BusyPolicyJoin, route.BusyPolicy, suffix)
+	}
+}
+
 func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -41,9 +51,13 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	require.Contains(t, first.Body.String(), "module "+testModulePath)
 	require.Equal(t, int64(1), upstreamRequests.Load())
 
-	reader, err := store.OpenObject(ctx, "gomod", "go/"+testModulePath+"/@v/"+testModuleVersion+".mod")
-	require.NoError(t, err)
-	_ = reader.Close()
+	require.Eventually(t, func() bool {
+		reader, openErr := store.OpenObject(ctx, "gomod", "go/"+testModulePath+"/@v/"+testModuleVersion+".mod")
+		if openErr != nil {
+			return false
+		}
+		return reader.Close() == nil
+	}, time.Second, 5*time.Millisecond)
 
 	second := requestGoProxy(t, handler, target, false)
 	require.Equal(t, http.StatusOK, second.Code)

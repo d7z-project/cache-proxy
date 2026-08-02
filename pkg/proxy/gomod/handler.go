@@ -132,9 +132,9 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		FreshFor:     r.policy.ModuleFreshFor,
 		BusyPolicy:   r.policy.ModuleBusyPolicy,
 	}
-	if moduleReq.kind == moduleRequestZip {
+	if moduleReq.kind == moduleRequestInfo || moduleReq.kind == moduleRequestMod || moduleReq.kind == moduleRequestZip {
 		route.Policy = r.policy.ZipPolicy
-		route.BusyPolicy = config.BusyPolicyBypass
+		route.BusyPolicy = config.BusyPolicyJoin
 	}
 	return route, nil
 }

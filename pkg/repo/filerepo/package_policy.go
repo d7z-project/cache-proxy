@@ -50,19 +50,19 @@ func ApplyDefaults(policy *Policy) {
 		policy.ArtifactPolicy = config.PolicyImmutable
 	}
 	if policy.ArtifactBusyPolicy == "" {
-		policy.ArtifactBusyPolicy = config.BusyPolicyBypass
+		policy.ArtifactBusyPolicy = config.BusyPolicyJoin
 	}
 	if policy.ArtifactExpireAfter.IsUnset() {
 		policy.ArtifactExpireAfter = config.DefaultExpireAfter
 	}
 	if policy.AuxiliaryPolicy == "" {
-		policy.AuxiliaryPolicy = config.PolicyRevalidate
+		policy.AuxiliaryPolicy = config.PolicyImmutable
 	}
 	if policy.AuxiliaryFreshFor == 0 {
 		policy.AuxiliaryFreshFor = config.Freshness(30 * time.Second)
 	}
 	if policy.AuxiliaryBusyPolicy == "" {
-		policy.AuxiliaryBusyPolicy = config.BusyPolicyBypass
+		policy.AuxiliaryBusyPolicy = config.BusyPolicyJoin
 	}
 	if policy.AuxiliaryExpireAfter.IsUnset() {
 		policy.AuxiliaryExpireAfter = config.DefaultExpireAfter

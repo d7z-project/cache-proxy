@@ -20,6 +20,11 @@ import (
 const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 256
 const DefaultMaxActiveDownloadsPerInstance = 64
+const DefaultMaxActiveDownloadsPerHost = 4
+const DefaultMaxBackgroundDownloads = 1
+const DefaultRequestsPerSecondPerHost = 8
+const DefaultRequestBurstPerHost = 4
+const DefaultForegroundQueueWait = 3 * time.Second
 const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500
@@ -111,6 +116,21 @@ func normalizeDocument(doc *config.Document) {
 	if doc.Storage.Download.MaxActivePerInstance <= 0 {
 		doc.Storage.Download.MaxActivePerInstance = DefaultMaxActiveDownloadsPerInstance
 	}
+	if doc.Storage.Download.MaxActivePerHost <= 0 {
+		doc.Storage.Download.MaxActivePerHost = DefaultMaxActiveDownloadsPerHost
+	}
+	if doc.Storage.Download.MaxBackground <= 0 {
+		doc.Storage.Download.MaxBackground = DefaultMaxBackgroundDownloads
+	}
+	if doc.Storage.Download.RequestsPerSecondHost <= 0 {
+		doc.Storage.Download.RequestsPerSecondHost = DefaultRequestsPerSecondPerHost
+	}
+	if doc.Storage.Download.RequestBurstPerHost <= 0 {
+		doc.Storage.Download.RequestBurstPerHost = DefaultRequestBurstPerHost
+	}
+	if doc.Storage.Download.ForegroundQueueWait <= 0 {
+		doc.Storage.Download.ForegroundQueueWait = config.Duration(DefaultForegroundQueueWait)
+	}
 }
 
 func validateServerConfig(doc *config.Document) error {
@@ -125,6 +145,21 @@ func validateServerConfig(doc *config.Document) error {
 	}
 	if doc.Storage.Download.MaxActivePerInstance <= 0 {
 		return errors.New("download max_active_per_instance must be positive")
+	}
+	if doc.Storage.Download.MaxActivePerHost <= 0 {
+		return errors.New("download max_active_per_host must be positive")
+	}
+	if doc.Storage.Download.MaxBackground <= 0 {
+		return errors.New("download max_background must be positive")
+	}
+	if doc.Storage.Download.RequestsPerSecondHost <= 0 {
+		return errors.New("download requests_per_second_per_host must be positive")
+	}
+	if doc.Storage.Download.RequestBurstPerHost <= 0 {
+		return errors.New("download request_burst_per_host must be positive")
+	}
+	if doc.Storage.Download.ForegroundQueueWait <= 0 {
+		return errors.New("download foreground_queue_wait must be positive")
 	}
 	if doc.Server.Status.DiskSampleInterval <= 0 {
 		return errors.New("server status disk_sample_interval must be positive")

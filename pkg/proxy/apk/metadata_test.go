@@ -17,9 +17,6 @@ func TestParseIndexBuildsCleanupPaths(t *testing.T) {
 	require.Equal(t, []string{
 		"v3.20/main/x86_64/busybox-1.36.1-r2.apk",
 		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.asc",
-		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.gpg",
-		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.md5",
-		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.md5sum",
 		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.sha256",
 		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.sha512",
 		"v3.20/main/x86_64/busybox-1.36.1-r2.apk.sig",
@@ -47,6 +44,6 @@ func TestAnalyzerDetectsRootLevelAPKRepository(t *testing.T) {
 
 func TestAnalyzerClassifiesAPKSignatureAsAuxiliary(t *testing.T) {
 	result := (inspector{}).InspectPath("mirror/alpine/v3.20/main/x86_64/APKINDEX.tar.gz.sig")
-	require.Equal(t, filerepo.ResourceAuxiliary, result.Class)
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
 	require.Equal(t, filerepo.DiscoveryIgnore, result.Role)
 }

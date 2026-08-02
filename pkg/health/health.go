@@ -61,6 +61,7 @@ type ServiceHealth struct {
 	aggregate AggregateState
 
 	probeClient    *http.Client
+	admission      UpstreamAdmission
 	probeScheduler *ProbeScheduler
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -69,6 +70,11 @@ type ServiceHealth struct {
 	stopping       bool
 	activeProbes   int
 	activeDone     chan struct{}
+}
+
+type UpstreamAdmission interface {
+	AcquireUpstream(context.Context, string, string, bool) (func(), error)
+	ObserveResponse(string, int, string) time.Time
 }
 
 func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder, userAgent string) *ServiceHealth {
@@ -97,6 +103,8 @@ func (h *ServiceHealth) SetBus(b *bus.Bus) { h.bus = b }
 
 // SetProbeScheduler attaches the shared active probe scheduler.
 func (h *ServiceHealth) SetProbeScheduler(s *ProbeScheduler) { h.probeScheduler = s }
+
+func (h *ServiceHealth) SetUpstreamAdmission(admission UpstreamAdmission) { h.admission = admission }
 
 func (h *ServiceHealth) notifyProbeScheduler() {
 	if h.probeScheduler != nil {
@@ -203,20 +211,13 @@ func (h *ServiceHealth) WeightedUpstreams(upstreams []string) []WeightedUpstream
 	defer h.mu.RUnlock()
 
 	result := make([]WeightedUpstream, 0, len(upstreams))
-	usable := false
 	for _, url := range upstreams {
 		w := 1.0
 		if uh, ok := h.upstreams[url]; ok {
 			w = uh.weight
 		}
 		if w > 0 {
-			usable = true
 			result = append(result, WeightedUpstream{URL: url, Weight: w})
-		}
-	}
-	if !usable {
-		for _, url := range upstreams {
-			result = append(result, WeightedUpstream{URL: url, Weight: 1.0})
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -262,10 +263,7 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 }
 
 func upstreamStatusIsFailure(status int) bool {
-	if status == http.StatusNotFound {
-		return false
-	}
-	return status == 0 || status >= 500 || (status >= 400 && status < 500)
+	return status == 0 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 }
 
 func (h *ServiceHealth) RecordFailure(url string, err error) {

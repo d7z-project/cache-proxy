@@ -57,12 +57,17 @@ func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
 			if repo == "" || ref == "" {
 				return request{}, errors.New("invalid OCI manifest path")
 			}
+			match := matchRepo(cfg, repo)
+			if isSHA256Digest(ref) {
+				match.policy = config.PolicyImmutable
+				match.busyPolicy = config.BusyPolicyJoin
+			}
 			return request{
 				kind:         requestManifest,
 				repo:         repo,
 				ref:          ref,
 				upstreamPath: cleanPath,
-				match:        matchRepo(cfg, repo),
+				match:        match,
 			}, nil
 		}
 		if part == "blobs" && i+1 < len(parts) {
@@ -71,12 +76,15 @@ func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
 			if repo == "" || !isSHA256Digest(digest) {
 				return request{}, errors.New("invalid OCI blob path")
 			}
+			match := matchRepo(cfg, repo)
+			match.policy = config.PolicyImmutable
+			match.busyPolicy = config.BusyPolicyJoin
 			return request{
 				kind:         requestBlob,
 				repo:         repo,
 				digest:       digest,
 				upstreamPath: cleanPath,
-				match:        matchRepo(cfg, repo),
+				match:        match,
 			}, nil
 		}
 		if part == "tags" && i+1 < len(parts) && parts[i+1] == "list" {
@@ -119,7 +127,7 @@ func matchRepo(cfg *Policy, repoName string) repoMatch {
 		match.policy = config.PolicyBypass
 	}
 	if match.busyPolicy == "" {
-		match.busyPolicy = config.BusyPolicyBypass
+		match.busyPolicy = config.BusyPolicyJoin
 	}
 	return match
 }

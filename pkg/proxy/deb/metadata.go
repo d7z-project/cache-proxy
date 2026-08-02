@@ -14,6 +14,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 )
 
+var debPackageSidecarSuffixes = []string{".gpg", ".sig", ".asc", ".sha256", ".sha512", ".md5sum"}
+
 type inspector struct{}
 
 func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
@@ -59,7 +61,7 @@ func (inspector) InspectPath(cleanPath string) filerepo.DiscoveryResult {
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceArtifact, Role: filerepo.DiscoveryIgnore}
 	}
 	if isDebAuxiliaryPath(cleanPath) {
-		return filerepo.DiscoveryResult{Class: filerepo.ResourceAuxiliary, Role: filerepo.DiscoveryIgnore}
+		return filerepo.DiscoveryResult{Class: filerepo.ResourceSidecar, Role: filerepo.DiscoveryIgnore}
 	}
 	return filerepo.DiscoveryResult{Class: filerepo.ResourceUnknown, Role: filerepo.DiscoveryIgnore}
 }
@@ -136,7 +138,12 @@ func isDebArtifactPath(cleanPath string) bool {
 }
 
 func isDebAuxiliaryPath(cleanPath string) bool {
-	return strings.HasSuffix(cleanPath, ".gpg") || strings.HasSuffix(cleanPath, ".sig") || strings.HasSuffix(cleanPath, ".asc") || strings.HasSuffix(cleanPath, ".sha256") || strings.HasSuffix(cleanPath, ".sha512") || strings.HasSuffix(cleanPath, ".md5sum")
+	for _, suffix := range debPackageSidecarSuffixes {
+		if strings.HasSuffix(cleanPath, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func debDistributionRoot(rootPath, suite string, components, arches []string, source bool) filerepo.RepositoryRoot {
@@ -374,8 +381,8 @@ func addReleaseCompanions(
 	if path.Base(releasePath) != "Release" {
 		return nil
 	}
-	for _, companionPath := range filerepo.DeduceCompanions(releasePath) {
-		companion, err := session.FetchDerived(ctx, companionPath)
+	for _, suffix := range []string{".gpg", ".sig", ".asc"} {
+		companion, err := session.FetchDerived(ctx, releasePath+suffix)
 		if err != nil {
 			return err
 		}
@@ -503,7 +510,9 @@ func parsePackages(input io.Reader, paths *filerepo.PathIndexBuilder, count int)
 			return 0
 		}
 		paths.Add(filename)
-		paths.AddAuxiliary(filename)
+		for _, suffix := range debPackageSidecarSuffixes {
+			paths.Add(filename + suffix)
+		}
 		return 1
 	})
 }
@@ -522,7 +531,9 @@ func parseSources(input io.Reader, paths *filerepo.PathIndexBuilder, count int) 
 			}
 			artifactPath := path.Join(directory, parts[2])
 			paths.Add(artifactPath)
-			paths.AddAuxiliary(artifactPath)
+			for _, suffix := range debPackageSidecarSuffixes {
+				paths.Add(artifactPath + suffix)
+			}
 			added++
 		}
 		return added

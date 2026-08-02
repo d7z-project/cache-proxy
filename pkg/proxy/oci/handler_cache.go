@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,11 +31,44 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 
 	slog.Debug("oci fetch manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "upstream", h.upstream)
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, userAgent, map[string]string{"Accept": manifestAccept})
+	requestHeaders := map[string]string{"Accept": manifestAccept}
+	statePath := h.refStatePath(resolved.repo, resolved.ref)
+	manifestPath := h.refManifestPath(resolved.repo, resolved.ref)
+	if info, statErr := h.store.StatObject(ctx, h.name, manifestPath); statErr == nil && info.Options["source-upstream"] == h.upstream {
+		if etag := info.Options["etag"]; etag != "" {
+			requestHeaders["If-None-Match"] = etag
+		}
+		if modified := info.Options["last-modified"]; modified != "" {
+			requestHeaders["If-Modified-Since"] = modified
+		}
+	}
+	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, userAgent, requestHeaders)
 	if err != nil {
 		return 0, "", 0, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotModified {
+		state, stateErr := h.readState(ctx, statePath)
+		if stateErr != nil {
+			return 0, "", 0, stateErr
+		}
+		state.FetchedAt = time.Now().UTC()
+		if stateErr = h.writeState(ctx, state); stateErr != nil {
+			return 0, "", 0, stateErr
+		}
+		if info, statErr := h.store.StatObject(ctx, h.name, manifestPath); statErr == nil {
+			options := make(map[string]string, len(info.Options))
+			for key, value := range info.Options {
+				options[key] = value
+			}
+			options["fetched-at"] = state.FetchedAt.Format(time.RFC3339Nano)
+			if _, updateErr := h.store.UpdateMetadata(ctx, h.name, manifestPath, options); updateErr != nil {
+				return 0, "", 0, updateErr
+			}
+		}
+		status, bytes, serveErr := h.serveCachedObject(ctx, w, req, manifestPath, "REVALIDATED")
+		return status, "REVALIDATED", bytes, serveErr
+	}
 	if response.StatusCode != http.StatusOK {
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
@@ -77,18 +108,16 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		}
 	}
 
-	blobDigests := collectBlobDigests(tempFile)
-	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-		return 0, "", 0, err
+	expireAfter := effectiveExpire(resolved.match.expireAfter, h.expireAfter)
+	if isSHA256Digest(resolved.ref) {
+		expireAfter = config.ExpirationNever
 	}
-
 	state := refState{
 		Repo:           resolved.repo,
 		Ref:            resolved.ref,
 		FetchedAt:      time.Now().UTC(),
-		ExpireAfter:    effectiveExpire(resolved.match.expireAfter, h.expireAfter),
+		ExpireAfter:    expireAfter,
 		ManifestDigest: manifestDigest,
-		BlobDigests:    blobDigests,
 	}
 
 	meta := map[string]string{
@@ -96,6 +125,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		"content-length":                  strconv.FormatInt(size, 10),
 		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
 		"docker-content-digest":           manifestDigest,
+		"source-upstream":                 h.upstream,
 		httpcache.UserAgentReviewedOption: "true",
 	}
 	if v := response.Header.Get("ETag"); v != "" {
@@ -118,10 +148,6 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		return 0, "", 0, err
 	}
 
-	for _, d := range blobDigests {
-		h.rememberBlob(d, state)
-	}
-
 	headers := map[string]string{
 		"Content-Type":          response.Header.Get("Content-Type"),
 		"Content-Length":        strconv.FormatInt(size, 10),
@@ -134,12 +160,13 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	return status, "MISS", bytes, err
 }
 
-func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
+func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, ready chan struct{}) (int, string, uint64, error) {
 	slog.Debug("oci fetch blob", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest, "upstream", h.upstream)
-	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
+	objectPath := h.blobPath(resolved.digest)
 	cleanupDownload := true
 	defer func() {
 		if cleanupDownload {
+			close(ready)
 			h.downloads.Delete(objectPath)
 		}
 	}()
@@ -170,6 +197,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
 		Done: func(error) {
+			close(ready)
 			h.downloads.Delete(objectPath)
 		},
 		VerifyFn: func(r io.ReadSeeker) error {
@@ -235,42 +263,6 @@ func (h *handler) writeState(ctx context.Context, state refState) error {
 	return h.storeObject(ctx, h.refStatePath(state.Repo, state.Ref), bytes.NewReader(data), map[string]string{"content-type": "application/yaml"})
 }
 
-func (h *handler) findBlobState(ctx context.Context, repo, digest string) (refState, error) {
-	if ref, ok := h.lookupBlob(digest); ok {
-		state, err := h.readState(ctx, h.refStatePath(ref.repo, ref.ref))
-		if err == nil && !h.stateExpired(state) {
-			return state, nil
-		}
-		h.forgetBlob(digest)
-	}
-	base := path.Join("oci/refs", repo)
-	var matched refState
-	err := fs.WalkDir(h.store.TenantFS(h.name), base, func(current string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || path.Base(current) != "state.yaml" {
-			return nil
-		}
-		state, readErr := h.readState(ctx, current)
-		if readErr != nil || h.stateExpired(state) {
-			return nil
-		}
-		for _, item := range state.BlobDigests {
-			if item == digest {
-				matched = state
-				h.rememberBlob(digest, state)
-				return fs.SkipAll
-			}
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, fs.SkipAll) {
-		return refState{}, err
-	}
-	if matched.Repo == "" {
-		return refState{}, fs.ErrNotExist
-	}
-	return matched, nil
-}
-
 func (h *handler) stateExpired(state refState) bool {
 	expireAfter := effectiveExpire(state.ExpireAfter, h.expireAfter)
 	return !expireAfter.IsNever() && !expireAfter.IsUnset() && time.Now().After(state.FetchedAt.Add(expireAfter.Duration()))
@@ -293,91 +285,6 @@ func (h *handler) deleteTree(ctx context.Context, prefix string) error {
 		}
 	}
 	return nil
-}
-
-func (h *handler) purgeBlobIndex() {
-	h.blobIndexMu.Lock()
-	defer h.blobIndexMu.Unlock()
-	now := time.Now()
-	for digest, entry := range h.blobIndex {
-		if !entry.expires.IsZero() && now.After(entry.expires) {
-			delete(h.blobIndex, digest)
-		}
-	}
-	for len(h.blobIndex) > maxBlobIndexEntries {
-		for digest := range h.blobIndex {
-			delete(h.blobIndex, digest)
-			break
-		}
-	}
-}
-
-const maxBlobIndexEntries = 8192
-
-func (h *handler) rememberBlob(digest string, state refState) {
-	if digest == "" {
-		return
-	}
-	expireAfter := effectiveExpire(state.ExpireAfter, h.expireAfter)
-	var expires time.Time
-	if !expireAfter.IsNever() && !expireAfter.IsUnset() {
-		expires = state.FetchedAt.Add(expireAfter.Duration())
-	}
-	h.blobIndexMu.Lock()
-	h.blobIndex[digest] = blobIndexEntry{ref: blobRef{repo: state.Repo, ref: state.Ref}, expires: expires}
-	over := len(h.blobIndex) - maxBlobIndexEntries
-	for digest := range h.blobIndex {
-		if over <= 0 {
-			break
-		}
-		delete(h.blobIndex, digest)
-		over--
-	}
-	h.blobIndexMu.Unlock()
-}
-
-func (h *handler) lookupBlob(digest string) (blobRef, bool) {
-	h.blobIndexMu.Lock()
-	defer h.blobIndexMu.Unlock()
-	entry, ok := h.blobIndex[digest]
-	if !ok {
-		return blobRef{}, false
-	}
-	if !entry.expires.IsZero() && time.Now().After(entry.expires) {
-		delete(h.blobIndex, digest)
-		return blobRef{}, false
-	}
-	return entry.ref, true
-}
-
-func (h *handler) forgetBlob(digest string) {
-	h.blobIndexMu.Lock()
-	delete(h.blobIndex, digest)
-	h.blobIndexMu.Unlock()
-}
-
-func collectBlobDigests(r io.Reader) []string {
-	var doc struct {
-		Config descriptor   `json:"config"`
-		Layers []descriptor `json:"layers"`
-		Blobs  []descriptor `json:"blobs"`
-	}
-	if err := json.NewDecoder(r).Decode(&doc); err != nil {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	var digests []string
-	for _, item := range append(append([]descriptor{doc.Config}, doc.Layers...), doc.Blobs...) {
-		if !isSHA256Digest(item.Digest) {
-			continue
-		}
-		if _, ok := seen[item.Digest]; ok {
-			continue
-		}
-		seen[item.Digest] = struct{}{}
-		digests = append(digests, item.Digest)
-	}
-	return digests
 }
 
 func effectiveExpire(current, fallback config.Expiration) config.Expiration {

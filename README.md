@@ -58,8 +58,13 @@ Top-level fields:
 | `storage.orphan_policy` | string | — | Home page orphan cleanup policy (`auto`) |
 | `storage.download.max_active` | int | `256` | Global concurrent upstream requests; up to the same number may wait in the bounded queue |
 | `storage.download.max_active_per_instance` | int | `64` | Concurrent upstream requests per instance; up to the same number may wait per instance |
+| `storage.download.max_active_per_host` | int | `4` | Concurrent upstream transfers to one normalized host across all instances |
+| `storage.download.max_background` | int | `1` | Concurrent metadata refreshes and active probes across the process |
+| `storage.download.requests_per_second_per_host` | number | `8` | Sustained request admission rate for one upstream host across all instances |
+| `storage.download.request_burst_per_host` | int | `4` | Maximum short request burst allowed by the per-host token bucket |
+| `storage.download.foreground_queue_wait` | duration | `3s` | Maximum time a foreground request waits for upstream admission; background work fails fast |
 
-The upstream admission budget is shared by metadata, artifacts, refreshes, and bypass requests. Requests wait in arrival order while allowing instances with available per-instance capacity to proceed; tune both limits against upstream capacity, file descriptors, and temporary-disk bandwidth.
+The upstream admission budget is shared by metadata, artifacts, refreshes, health probes, OCI token requests, and bypass requests. Concurrency limits bound active bodies while a per-host token bucket smooths npm/Maven-style bursts of small files. Foreground queue waits are bounded so package clients receive `503` plus `Retry-After` before their low-speed timeout; background work yields immediately. A `429` activates a host-wide cooldown, reduces that host's effective request rate, and honors `Retry-After`; recovery is gradual.
 
 Value types:
 
@@ -68,6 +73,8 @@ Value types:
 | `duration` | `30s`, `5m`, `24h` | — |
 | `expiration` | `720h` | `never` |
 | `freshness` | `30s`, `5m` | `forever` |
+
+Busy policies are `join` (subscribe to the active cache fill), `stale` (serve a cached object immediately, otherwise join), and `bypass` (open an independent upstream request). Package artifacts default to `join`.
 
 Shared instance shape:
 
@@ -155,6 +162,8 @@ file:
 
 Use this mode for ordinary HTTP content where different path groups may need different cache policies.
 
+Revalidation uses one conditional `GET`. A `304` advances the cached object's freshness without rewriting its body; a changed response is streamed once to all concurrent callers. During a cacheable fill, same-object followers join the active stream instead of opening duplicate upstream requests. When stale content exists, upstream rate limiting and transient validation failures serve that stale object.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `route.path` | path | required | URL mount path |
@@ -193,7 +202,7 @@ oci:
       expire_after: 168h
 ```
 
-Use this mode for a dedicated registry listener. Clients point Docker or other OCI tooling at the bound address. Cache publication is serialized per repository reference so a manifest and its persisted state are updated together. Blob cache admission accepts canonical SHA256 digests only and verifies the complete response before publishing the immutable object.
+Use this mode for a dedicated registry listener. Clients point Docker or other OCI tooling at the bound address. Cache publication is serialized per repository reference so a manifest and its persisted state are updated together. Canonical SHA256 blobs are verified and stored by digest independently from mutable tag state, so the same blob is reused across tags and repositories.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -203,7 +212,7 @@ Use this mode for a dedicated registry listener. Clients point Docker or other O
 | `expire_after` | expiration | `720h` | Maximum object lifetime |
 | `default_policy` | policy | `bypass` | Default cache policy |
 | `fresh_for` | freshness | — | Freshness for cached manifests |
-| `busy_policy` | busy policy | `bypass` | Busy policy while downloading |
+| `busy_policy` | busy policy | `join` | Busy policy while downloading |
 | `auth.type` | enum | — | `none`, `basic`, `bearer` |
 | `auth.username` | string | — | Required for `basic` |
 | `auth.password` | string | — | Required for `basic` |
@@ -258,7 +267,7 @@ go:
     name: sum.golang.org
     url: https://sum.golang.org
   sumdb_fresh_for: 30s
-  sumdb_busy_policy: bypass
+  sumdb_busy_policy: join
   goprivate:
     - "*.corp.example.com"
 ```
@@ -270,15 +279,15 @@ Use this mode to proxy public module traffic while allowing selected private mod
 | `route.path` | path | required | URL mount path |
 | `expire_after` | expiration | `720h` | Maximum object lifetime |
 | `proxies` | `[]URL` | required | GOPROXY chain |
-| `module_policy` | policy | `revalidate` | Policy for module metadata endpoints |
+| `module_policy` | policy | `revalidate` | Policy for mutable `@latest` and `@v/list` endpoints |
 | `module_fresh_for` | freshness | `1m` | Freshness for module metadata |
 | `module_busy_policy` | busy policy | `stale` | Busy policy for module metadata |
-| `zip_policy` | policy | `immutable` | Policy for module zip files |
+| `zip_policy` | policy | `immutable` | Policy for versioned `.info`, `.mod`, and `.zip` files |
 | `sumdb.enabled` | bool | `true` | Enable SumDB proxying |
 | `sumdb.name` | string | `sum.golang.org` | SumDB name in request path |
 | `sumdb.url` | URL | `https://sum.golang.org` | Upstream SumDB |
 | `sumdb_fresh_for` | freshness | `30s` | Freshness for SumDB responses |
-| `sumdb_busy_policy` | busy policy | `bypass` | Busy policy for SumDB |
+| `sumdb_busy_policy` | busy policy | `join` | Busy policy for SumDB |
 | `goprivate` | `[]glob` | — | Private module patterns that bypass proxying |
 | `disable_module_fetch_header` | bool | `false` | Honor `Disable-Module-Fetch` request header |
 
@@ -296,12 +305,12 @@ maven:
   snapshot_fresh_for: 5m
   checksum_policy: revalidate
   checksum_fresh_for: 30s
-  checksum_busy_policy: bypass
+  checksum_busy_policy: join
   metadata_fresh_for: 2m
   metadata_busy_policy: stale
 ```
 
-Use this mode for Maven Central or an internal Maven repository with different behavior for releases, snapshots, metadata, and checksums.
+Use this mode for Maven Central or an internal Maven repository. Release artifacts and their checksum/signature sidecars follow `release_policy`; snapshot sidecars follow `snapshot_policy`; only `maven-metadata.xml` sidecars use `checksum_policy`.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -313,9 +322,9 @@ Use this mode for Maven Central or an internal Maven repository with different b
 | `snapshot_fresh_for` | freshness | — | Freshness for snapshot artifacts |
 | `metadata_fresh_for` | freshness | — | Freshness for `maven-metadata.xml` |
 | `metadata_busy_policy` | busy policy | `stale` | Busy policy for metadata |
-| `checksum_policy` | policy | `revalidate` | Policy for checksum and signature sidecars |
+| `checksum_policy` | policy | `revalidate` | Policy for `maven-metadata.xml` checksum/signature sidecars |
 | `checksum_fresh_for` | freshness | `30s` | Freshness for checksum sidecars |
-| `checksum_busy_policy` | busy policy | `bypass` | Busy policy for checksum sidecars |
+| `checksum_busy_policy` | busy policy | `join` | Busy policy for checksum sidecars |
 
 </details>
 
@@ -357,9 +366,9 @@ pypi:
   index_fresh_for: 1m
   index_busy_policy: stale
   file_policy: immutable
-  companion_policy: revalidate
+  companion_policy: immutable
   companion_fresh_for: 30s
-  companion_busy_policy: bypass
+  companion_busy_policy: join
   proxy_json: true
   proxy_core_metadata: false
   proxy_signatures: false
@@ -376,9 +385,9 @@ Use this mode for `/simple/` indexes and package file downloads, with optional s
 | `index_fresh_for` | freshness | `1m` | Freshness for simple index pages |
 | `index_busy_policy` | busy policy | `stale` | Busy policy for index pages |
 | `file_policy` | policy | `immutable` | Policy for package files |
-| `companion_policy` | policy | `revalidate` | Policy for sidecar files |
+| `companion_policy` | policy | `immutable` | Policy for versioned sidecar files |
 | `companion_fresh_for` | freshness | `30s` | Freshness for sidecars |
-| `companion_busy_policy` | busy policy | `bypass` | Busy policy for sidecars |
+| `companion_busy_policy` | busy policy | `join` | Busy policy for sidecars |
 | `proxy_json` | bool | `true` | Enable `/simple/<pkg>/json` |
 | `proxy_core_metadata` | bool | `false` | Proxy metadata sidecars |
 | `proxy_signatures` | bool | `false` | Proxy signature sidecars |
@@ -430,7 +439,7 @@ apk:
   refresh_interval: 1h
   cleanup_interval: 6h
   artifact_policy: immutable
-  auxiliary_policy: revalidate
+  auxiliary_policy: immutable
 ```
 
 Use this mode for Alpine repositories discovered from `APKINDEX.tar.gz` requests. The repository root is the directory that contains `APKINDEX.tar.gz`.
@@ -441,13 +450,13 @@ Use this mode for Alpine repositories discovered from `APKINDEX.tar.gz` requests
 | `upstreams` | `[]URL` | required | Upstream mirrors |
 | `refresh_interval` | duration | `1h` | Background metadata refresh interval |
 | `cleanup_interval` | duration | `6h` | Indexed cleanup interval |
-| `artifact_policy` | policy | `immutable` | Policy for package files inside the current published generation |
+| `artifact_policy` | policy | `immutable` | Policy for package files in the stable content namespace |
 | `artifact_fresh_for` | freshness | — | Freshness for package files |
-| `artifact_busy_policy` | busy policy | `bypass` | Busy policy for package files |
+| `artifact_busy_policy` | busy policy | `join` | Busy policy for package files |
 | `artifact_expire_after` | expiration | — | Expiration override for package files |
-| `auxiliary_policy` | policy | `revalidate` | Policy for auxiliary files inside the current published generation |
+| `auxiliary_policy` | policy | `immutable` | Policy for versioned package sidecars in the stable content namespace |
 | `auxiliary_fresh_for` | freshness | `30s` | Freshness for auxiliary files |
-| `auxiliary_busy_policy` | busy policy | `bypass` | Busy policy for auxiliary files |
+| `auxiliary_busy_policy` | busy policy | `join` | Busy policy for auxiliary files |
 | `auxiliary_expire_after` | expiration | — | Expiration override for auxiliary files |
 
 </details>
@@ -463,7 +472,7 @@ deb:
   refresh_interval: 1h
   cleanup_interval: 6h
   artifact_policy: immutable
-  auxiliary_policy: revalidate
+  auxiliary_policy: immutable
 ```
 
 Use this mode for Debian-style repositories discovered from `Release`, `InRelease`, `Packages*`, and `Sources*`
@@ -488,7 +497,7 @@ rpm:
   refresh_interval: 1h
   cleanup_interval: 6h
   artifact_policy: immutable
-  auxiliary_policy: revalidate
+  auxiliary_policy: immutable
 ```
 
 Use this mode for RPM repositories discovered from `repodata/repomd.xml`.
@@ -508,7 +517,7 @@ pacman:
   refresh_interval: 2m
   cleanup_interval: 6h
   artifact_policy: immutable
-  auxiliary_policy: revalidate
+  auxiliary_policy: immutable
 ```
 
 Use this mode for Arch repositories discovered from repository database requests such as `.db` and `.db.tar.*`.
@@ -567,9 +576,11 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 - Metadata is published only after a full generation is fetched and validated.
 - The current generation is the authoritative serving view for repository metadata, including companion files such as signatures and checksums.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
-- Artifact and auxiliary cache objects are generation-scoped. Switching current generation changes visible repository content immediately without in-place overwrites.
-- Artifact and auxiliary downloads are still independent requests; they are not blocked by index misses or refresh failure.
-- Cleanup removes obsolete non-generation repository objects while preserving discovered-root state. Metadata GC removes superseded generation objects, cleanup indexes, and snapshot descriptors together. No package index is persisted for runtime validation.
+- Metadata and its signatures/checksums are generation-scoped and fixed to one upstream. Package artifacts and package sidecars use an instance-wide stable content namespace, so a metadata refresh does not change their cache keys.
+- Artifact and sidecar downloads are independent requests; they are not blocked by index misses or refresh failure. Protocol inspectors classify these resources before the generic cache executes their policy.
+- The current cleanup indexes are loaded only during cleanup and combined to retain shared content such as Debian `pool/` files. They are never runtime download allowlists.
+- Metadata refreshes and probes share the same per-host admission and `429` cooldown as client downloads; a rate-limited refresh is rescheduled for the advertised retry time.
+- Cleanup expires stable content absent from all current cleanup indexes while preserving discovered-root state. Metadata GC removes superseded generation objects, cleanup indexes, and snapshot descriptors together.
 
 ## Operations
 

@@ -37,6 +37,7 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 			ObjectPath:   "npm/tarballs/" + objectPath,
 			UpstreamPath: upstreamPath,
 			Policy:       match.policy,
+			BusyPolicy:   config.BusyPolicyJoin,
 			FreshFor:     match.freshFor,
 			ExpireAfter:  match.expireAfter,
 		}, nil
@@ -52,6 +53,7 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		UpstreamPath:   upstreamPath,
 		RequestHeaders: requestHeaders,
 		Policy:         match.policy,
+		BusyPolicy:     r.cfg.MetadataBusyPolicy,
 		FreshFor:       match.freshFor,
 		ExpireAfter:    match.expireAfter,
 		RewriteKind:    "npm-metadata",

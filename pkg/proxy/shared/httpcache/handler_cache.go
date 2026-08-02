@@ -11,6 +11,8 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
@@ -58,7 +60,7 @@ func (h *Handler) handleFlightLeader(ctx context.Context, req *http.Request, rou
 		cached.Headers["X-Cache"] = "FRESH"
 		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, cached), nil)
 	}
-	valid, err := h.validateCached(ctx, req, route, cached.Headers)
+	response, err := h.revalidateCached(ctx, req, route, flight, cached)
 	if err != nil {
 		_ = cached.Close()
 		slog.Debug("cache validation error, serving stale", "instance", h.name, "object", route.ObjectPath, "err", err)
@@ -69,17 +71,15 @@ func (h *Handler) handleFlightLeader(ctx context.Context, req *http.Request, rou
 		}
 		return h.finishFlight(route.ObjectPath, flight, ErrorResponse(http.StatusServiceUnavailable, err), nil)
 	}
-	if valid {
-		cached.Headers["X-Cache"] = "HIT"
-		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, cached), nil)
-	}
-	_ = cached.Close()
-	slog.Debug("cache stale", "instance", h.name, "object", route.ObjectPath)
-	return h.streamDownload(req, route, "REFRESH", flight)
+	return response, nil
 }
 
 func (h *Handler) followFlight(ctx context.Context, req *http.Request, route Route, flight *objectFlight) (*utils.ResponseWrapper, error) {
-	if h.busyPolicy(route) == config.BusyPolicyStale && req.Header.Get("Range") == "" {
+	busyPolicy := h.busyPolicy(route)
+	if busyPolicy == config.BusyPolicyBypass {
+		return h.bypass(ctx, req, route)
+	}
+	if busyPolicy == config.BusyPolicyStale && req.Header.Get("Range") == "" {
 		cached, err := h.openCached(ctx, req, route)
 		if err == nil {
 			cached.Headers["X-Cache"] = "STALE"
@@ -92,16 +92,20 @@ func (h *Handler) followFlight(ctx context.Context, req *http.Request, route Rou
 			return h.rewriteResponse(req, route, cached), nil
 		}
 	}
-	if h.busyPolicy(route) == config.BusyPolicyBypass && route.Policy != config.PolicyImmutable {
-		return h.bypass(ctx, req, route)
+	if response, streamed, err := flight.subscribe(ctx); streamed || err != nil {
+		if response != nil {
+			response.Headers["X-Cache"] = "COALESCED"
+			response = h.rewriteResponse(req, route, response)
+		}
+		return response, err
 	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-flight.done:
 	}
-	if flight.err != nil {
-		return nil, flight.err
+	if err := flight.resultError(); err != nil {
+		return nil, err
 	}
 	cached, err := h.openCached(ctx, req, route)
 	if err != nil {
@@ -167,62 +171,77 @@ func (h *Handler) openValidCached(ctx context.Context, req *http.Request, route 
 	if h.fresh(route, cached.Headers) {
 		return cached, nil
 	}
-	valid, err := h.validateCached(ctx, req, route, cached.Headers)
-	if err != nil || !valid {
-		_ = cached.Close()
-		if err != nil {
-			return nil, err
-		}
-		return nil, errors.New("cached object is invalid")
-	}
-	return cached, nil
+	_ = cached.Close()
+	return nil, errors.New("cached object requires revalidation")
 }
 
-func (h *Handler) validateCached(ctx context.Context, req *http.Request, route Route, cached map[string]string) (bool, error) {
+func (h *Handler) revalidateCached(ctx context.Context, req *http.Request, route Route, flight *objectFlight, cached *utils.ResponseWrapper) (*utils.ResponseWrapper, error) {
 	headers := map[string]string{}
-	if etag := cached["ETag"]; etag != "" {
+	if etag := cached.Headers["ETag"]; etag != "" {
 		headers["If-None-Match"] = etag
 	}
-	if lastModified := cached["Last-Modified"]; lastModified != "" {
+	if lastModified := cached.Headers["Last-Modified"]; lastModified != "" {
 		headers["If-Modified-Since"] = lastModified
 	}
+	options := h.remoteOptionsForRoute(route, true, req)
+	options.DisableFailover = true
+	options.ValidatorOrigin = cached.Headers[responseSourceUpstreamHeader]
 	resp, err := h.openRemote(
-		ctx,
-		http.MethodHead,
+		h.lifecycleCtx,
+		http.MethodGet,
 		route.UpstreamPath,
-		h.remoteOptionsForRoute(route, false, req),
-		h.remoteHeaders(nil, route, headers),
+		options,
+		h.remoteHeaders(req, route, headers),
 	)
 	if err != nil {
-		return false, err
-	}
-	defer resp.Close()
-	if !h.client.UserAgentConfigured && utils.VariesByUserAgent(resp.Headers["Vary"]) {
-		return false, nil
+		return nil, err
 	}
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		return true, nil
+		_ = resp.Close()
+		if err := h.markRevalidated(ctx, route, resp.Headers); err != nil {
+			return nil, err
+		}
+		cached.Headers["X-Cache"] = "REVALIDATED"
+		h.addCacheDebugHeaders(cached.Headers, route, time.Now().UTC().Format(time.RFC3339Nano))
+		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, cached), nil)
 	case http.StatusOK:
-		if cached["ETag"] != "" && resp.Headers["ETag"] == cached["ETag"] {
-			return true, nil
+		_ = cached.Close()
+		if !h.client.UserAgentConfigured && utils.VariesByUserAgent(resp.Headers["Vary"]) {
+			resp.Headers["X-Cache"] = "BYPASS"
+			return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 		}
-		return cached["ETag"] == "" && resp.Headers["Last-Modified"] == cached["Last-Modified"] && resp.Headers["Content-Length"] == cached["Content-Length"], nil
+		return h.streamResponse(req, route, "REFRESH", flight, resp)
 	case http.StatusNotFound, http.StatusGone:
+		_ = cached.Close()
 		_ = h.store.DeleteObject(ctx, h.name, route.ObjectPath)
-		return false, nil
+		resp.Headers["X-Cache"] = "BYPASS"
+		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 	default:
-		if resp.StatusCode >= 500 {
-			return false, fmt.Errorf("%w: upstream HEAD failed with %d", ErrUpstreamUnavailable, resp.StatusCode)
-		}
-		return false, nil
+		_ = resp.Close()
+		return nil, fmt.Errorf("%w: conditional GET failed with %d", ErrUpstreamUnavailable, resp.StatusCode)
 	}
 }
 
+func (h *Handler) markRevalidated(ctx context.Context, route Route, responseHeaders map[string]string) error {
+	info, err := h.store.StatObject(ctx, h.name, route.ObjectPath)
+	if err != nil {
+		return err
+	}
+	options := copyHeadersMap(info.Options)
+	options["fetched-at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	for _, key := range []string{"ETag", "Last-Modified", "Vary"} {
+		if value := responseHeaders[key]; value != "" {
+			options[strings.ToLower(key)] = value
+		}
+	}
+	_, err = h.store.UpdateMetadata(ctx, h.name, route.ObjectPath, options)
+	return err
+}
+
 func (h *Handler) streamDownload(req *http.Request, route Route, status string, flight *objectFlight) (*utils.ResponseWrapper, error) {
-	fillCtx := h.lifecycleCtx
 	resp, err := h.openRemote(
-		fillCtx,
+		h.lifecycleCtx,
 		http.MethodGet,
 		route.UpstreamPath,
 		h.remoteOptionsForRoute(route, true, req),
@@ -231,6 +250,11 @@ func (h *Handler) streamDownload(req *http.Request, route Route, status string, 
 	if err != nil {
 		return h.finishFlight(route.ObjectPath, flight, nil, err)
 	}
+	return h.streamResponse(req, route, status, flight, resp)
+}
+
+func (h *Handler) streamResponse(req *http.Request, route Route, status string, flight *objectFlight, resp *utils.ResponseWrapper) (*utils.ResponseWrapper, error) {
+	fillCtx := h.lifecycleCtx
 	if resp.StatusCode != http.StatusOK {
 		resp.Headers["X-Cache"] = "BYPASS"
 		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
@@ -239,18 +263,10 @@ func (h *Handler) streamDownload(req *http.Request, route Route, status string, 
 		resp.Headers["X-Cache"] = "BYPASS"
 		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 	}
-	if route.ArtifactMirrorFallback && route.PreferredUpstream != "" &&
-		resp.Headers[responseSourceUpstreamHeader] != "" &&
-		resp.Headers[responseSourceUpstreamHeader] != route.PreferredUpstream {
-		resp.Headers["X-Cache"] = "RESCUE"
-		setContentType(resp.Headers, route.ObjectPath)
-		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
-	}
-
 	slog.Debug("downloading from upstream", "instance", h.name, "mode", h.config.Mode, "object", route.ObjectPath, "status", status)
 
 	if parent := path.Dir(route.ObjectPath); parent != "." {
-		if err = h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
+		if err := h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
 			resp.Close()
 			return h.finishFlight(route.ObjectPath, flight, nil, err)
 		}
@@ -265,7 +281,7 @@ func (h *Handler) streamDownload(req *http.Request, route Route, status string, 
 		}
 	}
 
-	reader, err := StreamToCache(fillCtx, StreamConfig{
+	spool, err := startCacheStream(fillCtx, StreamConfig{
 		Body:       resp.Body,
 		ObjectPath: route.ObjectPath,
 		Wait:       &h.wait,
@@ -288,6 +304,10 @@ func (h *Handler) streamDownload(req *http.Request, route Route, status string, 
 	if err != nil {
 		return h.finishFlight(route.ObjectPath, flight, nil, err)
 	}
+	reader, err := spool.Reader()
+	if err != nil {
+		return h.finishFlight(route.ObjectPath, flight, nil, err)
+	}
 
 	headers := map[string]string{"X-Cache": status}
 	for key, value := range meta {
@@ -296,6 +316,9 @@ func (h *Handler) streamDownload(req *http.Request, route Route, status string, 
 	setContentType(headers, route.ObjectPath)
 	h.addCacheDebugHeaders(headers, route, meta["fetched-at"])
 	response := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}
+	if flight != nil {
+		flight.publish(spool, response)
+	}
 	return h.rewriteResponse(req, route, response), nil
 }
 

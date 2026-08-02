@@ -218,7 +218,7 @@ func metadata(headers map[string]string, mode, status string) map[string]string 
 		"fetched-at":            time.Now().UTC().Format(time.RFC3339Nano),
 		UserAgentReviewedOption: "true",
 	}
-	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "ETag", "Vary", "Docker-Content-Digest"} {
+	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "ETag", "Vary", "Docker-Content-Digest", responseSourceUpstreamHeader} {
 		if value := headers[key]; value != "" {
 			result[strings.ToLower(key)] = value
 		}

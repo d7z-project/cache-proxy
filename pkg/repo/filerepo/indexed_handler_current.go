@@ -34,7 +34,7 @@ func (h *IndexedHandler) lookupCurrent(cleanPath string) (currentViewEntry, bool
 }
 
 func (h *IndexedHandler) lookupCurrentContent(cleanPath string, class ResourceClass) (currentViewEntry, bool) {
-	if class != ResourceArtifact && class != ResourceAuxiliary {
+	if class != ResourceArtifact && class != ResourceSidecar {
 		return currentViewEntry{}, false
 	}
 	h.mu.RLock()
@@ -195,12 +195,12 @@ func (h *IndexedHandler) generationMetadataPath(rootID, generation, cleanPath st
 	return metadataStorePath(h.objectRoot, rootID, generation, cleanPath)
 }
 
-func (h *IndexedHandler) generationContentPath(rootID, generation string, class ResourceClass, cleanPath string) string {
-	kind := "auxiliary"
+func (h *IndexedHandler) contentPath(class ResourceClass, cleanPath string) string {
+	kind := "sidecars"
 	if class == ResourceArtifact {
 		kind = "artifacts"
 	}
-	return path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "generations", generation, kind, cleanPath)
+	return path.Join(h.objectRoot, ".content", kind, cleanPath)
 }
 
 func (h *IndexedHandler) cleanupIndexPath(rootID, generation string) string {

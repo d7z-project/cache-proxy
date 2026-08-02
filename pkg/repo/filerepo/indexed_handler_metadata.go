@@ -27,17 +27,22 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 	}
 	request.Header.Set("User-Agent", h.client.UserAgent)
 
+	release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, true)
+	if err != nil {
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: err}
+	}
 	start := time.Now()
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
+		release()
 		h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodGet, 0, latency, 0)
 		if h.sh != nil {
 			h.sh.RecordFailure(upstream, err)
 		}
 		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("fetch %s: %w", targetURL, err)}
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close(); release() }()
 	response.Body = utils.NewContextReadCloser(ctx, h.client.WrapBody(response.Body))
 	h.stats.RecordUpstreamRequest(
 		h.name,
@@ -50,6 +55,10 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 	)
 	if h.sh != nil {
 		h.sh.RecordResult(upstream, response.StatusCode, latency)
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: &httpcache.RateLimitError{Host: upstream, RetryAfter: until}}
 	}
 	if response.StatusCode != http.StatusOK {
 		switch response.StatusCode {
