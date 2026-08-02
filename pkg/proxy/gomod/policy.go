@@ -66,7 +66,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	handler, err := NewHandler(plan.Name(), expireAfter, block.Proxies, block.Transport, &block.Config, plan.Store(), plan.Stats(), plan.Downloads())
+	handler, err := NewHandler(plan.Name(), expireAfter, block.Proxies, block.Transport, &block.Config, plan.Store(), plan.Stats(), plan.UpstreamGate())
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}

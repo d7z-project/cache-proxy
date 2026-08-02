@@ -75,7 +75,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Transport:       block.Transport,
 		BusyPolicy:      block.MetadataBusyPolicy,
 		DefaultFreshFor: block.MetadataFreshFor,
-		DownloadLimiter: plan.Downloads(),
+		UpstreamGate:    plan.UpstreamGate(),
 	}, plan.Store(), New(&block.Policy), plan.Stats(), nil)
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),

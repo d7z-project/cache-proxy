@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
-	"time"
 
 	"gopkg.d7z.net/blobfs"
 
@@ -49,7 +48,7 @@ type RuntimeConfig struct {
 	AllowedTargetHosts []string
 	MetadataFunc       func(*http.Request, Route, map[string]string, string) map[string]string
 	VerifyFunc         func(*http.Request, Route, io.ReadSeeker) error
-	DownloadLimiter    *DownloadLimiter
+	UpstreamGate       *UpstreamGate
 }
 
 type Handler struct {
@@ -66,7 +65,7 @@ type Handler struct {
 	flights             objectFlights
 	cleanupMu           sync.Mutex
 	cleanupAfter        string
-	downloadLimiter     *DownloadLimiter
+	upstreamGate        *UpstreamGate
 	parsedUpstreamHosts []string
 }
 
@@ -78,7 +77,6 @@ type remoteOptions struct {
 	AllowedTargetHosts     []string
 	PreferredUpstream      string
 	ArtifactMirrorFallback bool
-	Background             bool
 	DisableFailover        bool
 	ValidatorOrigin        string
 }
@@ -107,7 +105,7 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 			hosts = append(hosts, pu.Host)
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, resolver: resolver, stats: stats, health: svcHealth, lifecycleCtx: lifecycleCtx, cancel: cancel, downloadLimiter: runtime.DownloadLimiter, parsedUpstreamHosts: hosts}
+	return &Handler{name: name, config: runtime, store: store, client: client, resolver: resolver, stats: stats, health: svcHealth, lifecycleCtx: lifecycleCtx, cancel: cancel, upstreamGate: runtime.UpstreamGate, parsedUpstreamHosts: hosts}
 }
 
 func ConfigureClientTransport(client *utils.HttpClientWrapper, name string, transport *config.TransportConfig) {
@@ -164,10 +162,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
 		resp.Header().Set("Retry-After", retryAfterValue(err))
-		status := http.StatusBadGateway
-		if errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, ErrDownloadLimit) {
-			status = http.StatusServiceUnavailable
-		}
+		status := proxyErrorStatus(err)
 		http.Error(resp, http.StatusText(status), status)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
 		return
@@ -218,10 +213,7 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 	if err != nil {
 		slog.Info("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
 		resp.Header().Set("Retry-After", retryAfterValue(err))
-		status := http.StatusBadGateway
-		if errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, ErrDownloadLimit) {
-			status = http.StatusServiceUnavailable
-		}
+		status := proxyErrorStatus(err)
 		http.Error(resp, http.StatusText(status), status)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
 		return status
@@ -235,11 +227,16 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 }
 
 func retryAfterValue(err error) string {
-	var limited *RateLimitError
-	if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
-		remaining := time.Until(limited.RetryAfter)
-		seconds := int((remaining + time.Second - 1) / time.Second)
-		return strconv.Itoa(max(seconds, 1))
+	if seconds, ok := AdmissionRetryAfterSeconds(err); ok {
+		return strconv.Itoa(seconds)
 	}
 	return "5"
+}
+
+func proxyErrorStatus(err error) int {
+	_, admissionError := AdmissionRetryAfterSeconds(err)
+	if errors.Is(err, ErrUpstreamUnavailable) || admissionError {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadGateway
 }

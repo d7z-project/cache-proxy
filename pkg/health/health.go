@@ -73,8 +73,8 @@ type ServiceHealth struct {
 }
 
 type UpstreamAdmission interface {
-	AcquireUpstream(context.Context, string, string, bool) (func(), error)
-	ObserveResponse(string, int, string) time.Time
+	TryAcquireProbe(string) (func(), bool)
+	ObserveRateLimit(string, string)
 }
 
 func New(name, mode string, cfg Config, upstreams []string, stats StatsRecorder, userAgent string) *ServiceHealth {

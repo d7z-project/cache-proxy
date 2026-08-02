@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-var errNoProbeTarget = errors.New("active probe has no target")
+var (
+	errNoProbeTarget      = errors.New("active probe has no target")
+	errProbeAdmissionBusy = errors.New("active probe admission unavailable")
+)
 
 type probeRequest struct {
 	upstreamURL string
@@ -36,7 +39,7 @@ func (h *ServiceHealth) probeOneContext(parent context.Context, upstreamURL stri
 	resp, targetPath, err := h.probeDo(ctx, upstreamURL)
 	latency := time.Since(start)
 	if err != nil {
-		if errors.Is(err, errNoProbeTarget) || errors.Is(err, context.Canceled) {
+		if errors.Is(err, errNoProbeTarget) || errors.Is(err, errProbeAdmissionBusy) || errors.Is(err, context.Canceled) {
 			return
 		}
 		h.recordActiveProbeFailure(upstreamURL, err)
@@ -99,10 +102,10 @@ func (h *ServiceHealth) doRangeProbe(ctx context.Context, reqInfo probeRequest) 
 func (h *ServiceHealth) doProbeRequest(ctx context.Context, upstreamURL string, req *http.Request) (*http.Response, error) {
 	release := func() {}
 	if h.admission != nil {
-		var err error
-		release, err = h.admission.AcquireUpstream(ctx, h.name, upstreamURL, true)
-		if err != nil {
-			return nil, err
+		var acquired bool
+		release, acquired = h.admission.TryAcquireProbe(upstreamURL)
+		if !acquired {
+			return nil, errProbeAdmissionBusy
 		}
 	}
 	response, err := h.probeClient.Do(req)
@@ -111,7 +114,7 @@ func (h *ServiceHealth) doProbeRequest(ctx context.Context, upstreamURL string, 
 		return nil, err
 	}
 	if h.admission != nil && response.StatusCode == http.StatusTooManyRequests {
-		h.admission.ObserveResponse(upstreamURL, response.StatusCode, response.Header.Get("Retry-After"))
+		h.admission.ObserveRateLimit(upstreamURL, response.Header.Get("Retry-After"))
 	}
 	response.Body = &probeAdmissionBody{ReadCloser: response.Body, release: release}
 	return response, nil

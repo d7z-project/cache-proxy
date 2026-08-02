@@ -224,8 +224,9 @@ func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	defer store.Close()
-	limiter := httpcache.NewDownloadLimiter(8, 8)
-	limiter.Configure(8, 8, 1, 1)
+	limiter := httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
+		MaxActive: 8, MaxActivePerHost: 8, ForegroundQueueWait: time.Second,
+	})
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
 		Policy:   Policy{DefaultPolicy: config.PolicyBypass},

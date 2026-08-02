@@ -1045,15 +1045,21 @@ func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
 	defer cancel()
 
 	var requests atomic.Int64
+	var fallbackRequests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 	}))
 	defer server.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackRequests.Add(1)
+		_, _ = io.WriteString(w, "fallback")
+	}))
+	defer fallback.Close()
 
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{server.URL},
+	handler := newTestHandler(t, store, []string{server.URL, fallback.URL},
 		func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
 			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
 			if err != nil {
@@ -1062,17 +1068,56 @@ func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
 			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
 		},
 	)
-	handler.downloads = httpcache.NewDownloadLimiter(8, 4)
+	handler.upstreamGate = httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
+		MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second,
+	})
 
 	_, err := handler.RefreshRootTask(ctx, "root")
 	var retry scheduler.RetryAtError
 	require.ErrorAs(t, err, &retry)
 	require.True(t, retry.At.After(time.Now().Add(55*time.Second)))
 	require.EqualValues(t, 1, requests.Load())
+	require.Zero(t, fallbackRequests.Load())
 
 	_, err = handler.RefreshRootTask(ctx, "root")
 	require.ErrorAs(t, err, &retry)
 	require.EqualValues(t, 1, requests.Load())
+	require.Zero(t, fallbackRequests.Load())
+}
+
+func TestRefreshWaitsThroughMoreRequestsThanLegacyBurst(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, "metadata")
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
+			metadata := make(map[string]MetadataObject, 9)
+			for i := range 9 {
+				blob, err := session.Fetch(ctx, MetadataTarget{URL: fmt.Sprintf("meta/index-%d", i)})
+				if err != nil {
+					return nil, err
+				}
+				metadata[blob.Path] = MetadataObject{Path: blob.Path, Required: true}
+			}
+			return &LiveSnapshot{Metadata: metadata}, nil
+		},
+	)
+	handler.upstreamGate = httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
+		MaxActive: 2, MaxActivePerHost: 1, RequestInterval: 2 * time.Millisecond,
+	})
+
+	outcome, err := handler.RefreshRootTask(ctx, "root")
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
+	require.EqualValues(t, 9, requests.Load())
 }
 
 func TestRefreshHeadPrecheckDoesNotUpdateUpstreamHealth(t *testing.T) {

@@ -332,7 +332,7 @@ function renderNetworkStageMetrics(network, disk) {
     renderStageCards(document.getElementById('network-stage-insights'), [
         {
             label: t.network_active || 'Active',
-            value: String(summary.active_upstream_requests || 0),
+            value: String(summary.admission_active || 0) + '/' + String(summary.admission_max_active || 0),
             sub: String(summary.active_downloads || 0) + ' ' + (t.stage_active_downloads || 'downloads') +
                 ' · ' + String(summary.queued_upstream_requests || 0) + ' ' + (t.network_queued || 'queued') +
                 ' · ' + String(summary.rate_limited_upstreams || 0) + ' ' + (t.network_rate_limited || 'rate limited'),

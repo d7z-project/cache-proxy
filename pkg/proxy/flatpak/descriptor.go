@@ -3,6 +3,7 @@ package flatpak
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,8 +38,13 @@ func (h *Handler) serveDescriptor(w http.ResponseWriter, req *http.Request, clea
 	userAgent, _ := h.client.RequestUserAgent(req)
 	body, headers, cacheStatus, err := h.fetchDescriptor(req.Context(), route, userAgent, !h.client.UserAgentConfigured)
 	if err != nil {
-		httpcache.ErrorResponse(http.StatusBadGateway, err).FlushClose(req, w)
-		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", http.StatusBadGateway, 0)
+		status := http.StatusBadGateway
+		if retryAfter, admissionError := httpcache.AdmissionRetryAfterSeconds(err); admissionError {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		}
+		httpcache.ErrorResponse(status, err).FlushClose(req, w)
+		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", status, 0)
 		return
 	}
 	h.flushDescriptor(w, req, rewriteDescriptor(req, body), headers, cacheStatus)
@@ -77,8 +83,11 @@ func (h *Handler) fetchDescriptor(
 ) ([]byte, map[string]string, string, error) {
 	var firstErr error
 	for _, upstream := range h.upstreams {
-		release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, false)
+		release, err := h.upstreamGate.Acquire(ctx, upstream, httpcache.AdmissionForeground)
 		if err != nil {
+			if errors.Is(err, httpcache.ErrAdmissionWaitTimeout) || ctx.Err() != nil {
+				return nil, nil, "", err
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -103,12 +112,38 @@ func (h *Handler) fetchDescriptor(
 			continue
 		}
 		storeResponse := !rejectUserAgentVariants || !utils.VariesByUserAgent(response.Header.Values("Vary")...)
-		body, headers, err := h.readDescriptorResponse(ctx, route.ObjectPath, upstream, response, latency, storeResponse)
-		response.Body.Close()
+		h.stats.RecordUpstreamRequest(
+			h.name,
+			config.ModeFlatpak,
+			upstream,
+			http.MethodGet,
+			response.StatusCode,
+			latency,
+			flatpakContentLength(response),
+		)
+		var body []byte
+		headers := map[string]string{}
+		if response.StatusCode != http.StatusOK {
+			err = fmt.Errorf("flatpak descriptor upstream returned HTTP %d", response.StatusCode)
+		} else {
+			body, err = io.ReadAll(io.LimitReader(utils.NewRateLimitReader(h.client.WrapBody(response.Body)), maxDescriptorSize+1))
+			switch {
+			case err != nil:
+				err = fmt.Errorf("read flatpak descriptor: %w", err)
+			case len(body) > maxDescriptorSize:
+				err = fmt.Errorf("flatpak descriptor exceeds %d bytes", maxDescriptorSize)
+			default:
+				for key, value := range response.Header {
+					if len(value) > 0 {
+						headers[http.CanonicalHeaderKey(key)] = strings.Join(value, ", ")
+					}
+				}
+			}
+		}
+		_ = response.Body.Close()
 		release()
 		if response.StatusCode == http.StatusTooManyRequests {
-			until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
-			return nil, nil, "", &httpcache.RateLimitError{Host: upstream, RetryAfter: until}
+			return nil, nil, "", h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
 		}
 		if err != nil {
 			if firstErr == nil {
@@ -119,68 +154,29 @@ func (h *Handler) fetchDescriptor(
 		if !storeResponse {
 			return body, headers, "BYPASS", nil
 		}
+		meta := map[string]string{
+			"content-type":                    headers["Content-Type"],
+			"content-length":                  strconv.Itoa(len(body)),
+			"last-modified":                   headers["Last-Modified"],
+			"etag":                            headers["Etag"],
+			"vary":                            headers["Vary"],
+			"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
+			"mode":                            config.ModeFlatpak,
+			"cache":                           "MISS",
+			httpcache.UserAgentReviewedOption: "true",
+		}
+		if err := h.store.MkdirAll(path.Join(h.name, path.Dir(route.ObjectPath)), 0o755); err != nil {
+			return nil, nil, "", fmt.Errorf("create flatpak descriptor directory: %w", err)
+		}
+		if _, err := h.store.Put(ctx, h.name, route.ObjectPath, bytes.NewReader(body), meta); err != nil {
+			return nil, nil, "", fmt.Errorf("store flatpak descriptor: %w", err)
+		}
 		return body, headers, "MISS", nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
 	return nil, nil, "", firstErr
-}
-
-func (h *Handler) readDescriptorResponse(
-	ctx context.Context,
-	objectPath string,
-	upstream string,
-	response *http.Response,
-	latency time.Duration,
-	storeResponse bool,
-) ([]byte, map[string]string, error) {
-	h.stats.RecordUpstreamRequest(
-		h.name,
-		config.ModeFlatpak,
-		upstream,
-		http.MethodGet,
-		response.StatusCode,
-		latency,
-		flatpakContentLength(response),
-	)
-	if response.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("flatpak descriptor upstream returned HTTP %d", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(utils.NewRateLimitReader(h.client.WrapBody(response.Body)), maxDescriptorSize+1))
-	if err != nil {
-		return nil, nil, fmt.Errorf("read flatpak descriptor: %w", err)
-	}
-	if len(body) > maxDescriptorSize {
-		return nil, nil, fmt.Errorf("flatpak descriptor exceeds %d bytes", maxDescriptorSize)
-	}
-	headers := map[string]string{}
-	for key, value := range response.Header {
-		if len(value) > 0 {
-			headers[http.CanonicalHeaderKey(key)] = strings.Join(value, ", ")
-		}
-	}
-	if !storeResponse {
-		return body, headers, nil
-	}
-	meta := map[string]string{
-		"content-type":                    headers["Content-Type"],
-		"content-length":                  strconv.Itoa(len(body)),
-		"last-modified":                   headers["Last-Modified"],
-		"etag":                            headers["Etag"],
-		"vary":                            headers["Vary"],
-		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
-		"mode":                            config.ModeFlatpak,
-		"cache":                           "MISS",
-		httpcache.UserAgentReviewedOption: "true",
-	}
-	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(objectPath)), 0o755); err != nil {
-		return nil, nil, fmt.Errorf("create flatpak descriptor directory: %w", err)
-	}
-	if _, err := h.store.Put(ctx, h.name, objectPath, bytes.NewReader(body), meta); err != nil {
-		return nil, nil, fmt.Errorf("store flatpak descriptor: %w", err)
-	}
-	return body, headers, nil
 }
 
 func (h *Handler) flushDescriptor(

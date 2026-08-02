@@ -47,7 +47,7 @@ type Handler struct {
 	current       currentMetadata
 	rewriteDesc   bool
 	verifyObjects bool
-	downloads     *httpcache.DownloadLimiter
+	upstreamGate  *httpcache.UpstreamGate
 }
 
 func NewHandler(
@@ -60,7 +60,7 @@ func NewHandler(
 	store *blobfs.Store,
 	stats *httpcache.Stats,
 	svcHealth *health.ServiceHealth,
-	downloads *httpcache.DownloadLimiter,
+	upstreamGate *httpcache.UpstreamGate,
 	runtimeCfg httpcache.RuntimeConfig,
 ) *Handler {
 	handler := &Handler{
@@ -74,12 +74,12 @@ func NewHandler(
 		sh:               svcHealth,
 		rewriteDesc:      policy.DescriptorRewrite != nil && *policy.DescriptorRewrite,
 		verifyObjects:    policy.VerifyObjects != nil && *policy.VerifyObjects,
-		downloads:        downloads,
+		upstreamGate:     upstreamGate,
 	}
 	handler.client = utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, transport)
 	runtimeCfg.VerifyFunc = handler.verifyCacheObject
-	runtimeCfg.DownloadLimiter = downloads
+	runtimeCfg.UpstreamGate = upstreamGate
 	handler.base = httpcache.NewHandler(name, runtimeCfg, store, resolver{policy: policy}, stats, svcHealth)
 	return handler
 }

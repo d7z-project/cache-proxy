@@ -63,12 +63,12 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		expireAfter = config.DefaultExpireAfter
 	}
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
-		Mode:            config.ModeMaven,
-		ExpireAfter:     expireAfter,
-		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
-		Transport:       block.Transport,
-		BusyPolicy:      config.BusyPolicyJoin,
-		DownloadLimiter: plan.Downloads(),
+		Mode:         config.ModeMaven,
+		ExpireAfter:  expireAfter,
+		Upstreams:    []string{strings.TrimSpace(block.Upstream)},
+		Transport:    block.Transport,
+		BusyPolicy:   config.BusyPolicyJoin,
+		UpstreamGate: plan.UpstreamGate(),
 	}, plan.Store(), newResolver(&block.Policy), plan.Stats(), nil)
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),

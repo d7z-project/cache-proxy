@@ -685,7 +685,7 @@ func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
 	})
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
-	app.downloads.ObserveResponse(upstream, http.StatusTooManyRequests, "60")
+	app.upstreamGate.RateLimited(upstream, "60")
 
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/-/status/network", nil))
@@ -696,6 +696,8 @@ func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
 	require.Equal(t, 1, payload.Summary.DegradedUpstreams)
 	require.Len(t, payload.Upstreams, 1)
 	require.Equal(t, "rate_limited", payload.Upstreams[0].State)
+	require.Equal(t, DefaultMaxActiveDownloadsPerHost, payload.Upstreams[0].AdmissionMaxActive)
+	require.EqualValues(t, DefaultRequestIntervalPerHost.Milliseconds(), payload.Upstreams[0].RequestIntervalMS)
 	require.NotEmpty(t, payload.Upstreams[0].CooldownUntil)
 }
 

@@ -181,8 +181,8 @@ func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath s
 			slog.Debug("upstream selected", "instance", h.name, "method", method, "path", upstreamPath, "upstream", redactedURL(candidate.URL), "weight", candidate.Weight)
 			return result, nil
 		}
-		var limited *RateLimitError
-		if errors.As(err, &limited) || options.DisableFailover {
+		var limited *UpstreamRateLimitError
+		if errors.As(err, &limited) || errors.Is(err, ErrAdmissionWaitTimeout) || ctx.Err() != nil || options.DisableFailover {
 			return nil, err
 		}
 		lastErr = err
@@ -200,7 +200,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
 		return nil, err, false
 	}
-	releaseAdmission, err := h.downloadLimiter.AcquireUpstream(ctx, h.name, options.TargetURL, options.Background)
+	releaseAdmission, err := h.upstreamGate.Acquire(ctx, options.TargetURL, AdmissionForeground)
 	if err != nil {
 		return nil, err, false
 	}
@@ -243,11 +243,11 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 				h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 			}
 		}
-		until := h.downloadLimiter.ObserveResponse(options.TargetURL, response.StatusCode, response.Header.Get("Retry-After"))
+		limited := h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
 		_ = response.Body.Close()
 		releaseAdmission()
 		release()
-		return nil, &RateLimitError{Host: upstreamHost(options.TargetURL), RetryAfter: until}, false
+		return nil, limited, false
 	}
 	if options.Record && h.health != nil {
 		h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
@@ -350,7 +350,7 @@ func (h *Handler) tryUpstream(
 	if rawQuery != "" {
 		targetURL += "?" + rawQuery
 	}
-	releaseAdmission, err := h.downloadLimiter.AcquireUpstream(ctx, h.name, candidate.URL, options.Background)
+	releaseAdmission, err := h.upstreamGate.Acquire(ctx, candidate.URL, AdmissionForeground)
 	if err != nil {
 		return nil, err
 	}
@@ -397,11 +397,11 @@ func (h *Handler) tryUpstream(
 		if h.health != nil {
 			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 		}
-		until := h.downloadLimiter.ObserveResponse(candidate.URL, response.StatusCode, response.Header.Get("Retry-After"))
+		limited := h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
 		_ = response.Body.Close()
 		releaseAdmission()
 		release()
-		return nil, &RateLimitError{Host: upstreamHost(candidate.URL), RetryAfter: until}
+		return nil, limited
 	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)
 	if h.health != nil {

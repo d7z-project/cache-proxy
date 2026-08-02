@@ -98,7 +98,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if basic := h.basicAuthorization(); basic != "" {
 		request.Header.Set("Authorization", basic)
 	}
-	release, err := h.downloadsLimiter.AcquireUpstream(ctx, h.name, tokenURL.String(), false)
+	release, err := h.upstreamGate.Acquire(ctx, tokenURL.String(), httpcache.AdmissionForeground)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -109,8 +109,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	}
 	defer func() { _ = response.Body.Close(); release() }()
 	if response.StatusCode == http.StatusTooManyRequests {
-		until := h.downloadsLimiter.ObserveResponse(tokenURL.String(), response.StatusCode, response.Header.Get("Retry-After"))
-		return "", time.Time{}, &httpcache.RateLimitError{Host: tokenURL.Host, RetryAfter: until}
+		return "", time.Time{}, h.upstreamGate.RateLimited(tokenURL.String(), response.Header.Get("Retry-After"))
 	}
 	response.Body = utils.NewRateLimitReader(response.Body)
 	if response.StatusCode != http.StatusOK {
@@ -125,6 +124,8 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxTokenResponseSize)).Decode(&payload); err != nil {
 		return "", time.Time{}, err
 	}
+	_ = response.Body.Close()
+	release()
 	token := payload.Token
 	if token == "" {
 		token = payload.AccessToken

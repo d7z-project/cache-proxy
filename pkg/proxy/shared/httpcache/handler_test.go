@@ -1164,10 +1164,10 @@ func TestRateLimitCooldownIsSharedAndServesStale(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	limiter := NewDownloadLimiter(8, 4)
+	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second})
 	var requests atomic.Int64
 	newHandler := func(instance string) *Handler {
-		handler := NewHandler(instance, RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}, DownloadLimiter: limiter}, store, literalResolver{route: Route{
+		handler := NewHandler(instance, RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}, UpstreamGate: limiter}, store, literalResolver{route: Route{
 			ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
 		}}, NewStats(prometheus.NewRegistry()), nil)
 		handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -1601,13 +1601,13 @@ func TestUpstreamAdmissionIsAcquiredBeforeRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	limiter := NewDownloadLimiter(1, 1)
-	release, err := limiter.Acquire(context.Background(), "test")
+	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1, ForegroundQueueWait: time.Second})
+	release, err := limiter.Acquire(context.Background(), upstream.URL, AdmissionForeground)
 	require.NoError(t, err)
 	handler := NewHandler("test", RuntimeConfig{
-		Mode:            "test",
-		Upstreams:       []string{upstream.URL},
-		DownloadLimiter: limiter,
+		Mode:         "test",
+		Upstreams:    []string{upstream.URL},
+		UpstreamGate: limiter,
 	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
 
 	done := make(chan *httptest.ResponseRecorder, 1)
@@ -1623,6 +1623,37 @@ func TestUpstreamAdmissionIsAcquiredBeforeRequest(t *testing.T) {
 	recorder := <-done
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.EqualValues(t, 1, requests.Load())
+}
+
+func TestAdmissionWaitTimeoutDoesNotFanOutToAnotherUpstream(t *testing.T) {
+	var firstRequests atomic.Int64
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstRequests.Add(1)
+		_, _ = io.WriteString(w, "first")
+	}))
+	defer first.Close()
+	var secondRequests atomic.Int64
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondRequests.Add(1)
+		_, _ = io.WriteString(w, "second")
+	}))
+	defer second.Close()
+
+	gate := NewUpstreamGate(UpstreamGateConfig{
+		MaxActive: 2, MaxActivePerHost: 1, ForegroundQueueWait: 25 * time.Millisecond,
+	})
+	release, err := gate.Acquire(context.Background(), first.URL, AdmissionForeground)
+	require.NoError(t, err)
+	defer release()
+	handler := NewHandler("test", RuntimeConfig{
+		Mode: "test", Upstreams: []string{first.URL, second.URL}, UpstreamGate: gate,
+	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Zero(t, firstRequests.Load())
+	require.Zero(t, secondRequests.Load())
 }
 
 func TestHandlerCountsInterruptedResponseBytes(t *testing.T) {

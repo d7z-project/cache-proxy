@@ -44,7 +44,7 @@ type moduleRequest struct {
 	cacheKey   string
 }
 
-func NewHandler(name string, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) (*Handler, error) {
+func NewHandler(name string, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) (*Handler, error) {
 	if policy == nil {
 		policy = &Policy{}
 	}
@@ -57,7 +57,7 @@ func NewHandler(name string, expireAfter config.Expiration, upstreams []string, 
 		BusyPolicy:         policy.ModuleBusyPolicy,
 		DefaultFreshFor:    policy.ModuleFreshFor,
 		AllowedTargetHosts: sumDBTargetHosts(policy),
-		DownloadLimiter:    downloads,
+		UpstreamGate:       upstreamGate,
 	}, store, &resolver{policy: policy}, stats, nil)
 	return &Handler{name: name, policy: policy, store: store, base: base}, nil
 }

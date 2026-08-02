@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,11 @@ type testStats struct {
 	events []string
 	mu     sync.Mutex
 }
+
+type busyProbeAdmission struct{}
+
+func (busyProbeAdmission) TryAcquireProbe(string) (func(), bool) { return nil, false }
+func (busyProbeAdmission) ObserveRateLimit(string, string)       {}
 
 func (s *testStats) RecordUpstream(instance, mode, method string, status int) {}
 func (s *testStats) RecordMetadataRefresh(instance, mode, result string, duration time.Duration, ready bool) {
@@ -671,6 +677,24 @@ func TestProbeHeadSuccess(t *testing.T) {
 	h.probeOne(h.upstreams[server.URL])
 	uh := h.upstreams[server.URL]
 	require.Equal(t, SClosed, uh.State)
+}
+
+func TestProbeSkipsBusyAdmissionWithoutHealthFailure(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	h := New("test", "apk", DefaultConfig(), []string{server.URL}, &testStats{}, "ua")
+	h.AddResource("repo", []ProbeTarget{{Path: "probe"}}, []string{server.URL})
+	h.MarkResourceActive("repo", []ProbeTarget{{Path: "probe"}})
+	h.SetUpstreamAdmission(busyProbeAdmission{})
+	h.probeOne(h.upstreams[server.URL])
+
+	require.Zero(t, requests.Load())
+	require.Empty(t, h.upstreams[server.URL].lastProbeErr)
 }
 
 func TestProbeHead404IsSuccess(t *testing.T) {

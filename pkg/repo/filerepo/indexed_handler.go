@@ -25,21 +25,21 @@ type rootEntry struct {
 }
 
 type IndexedHandler struct {
-	name       string
-	mode       string
-	objectRoot string
-	store      *blobfs.Store
-	stats      *httpcache.Stats
-	inspector  PathInspector
-	finalizer  RootFinalizer
-	base       *httpcache.Handler
-	client     *utils.HttpClientWrapper
-	upstreams  []string
-	build      SnapshotBuilder
-	sh         *health.ServiceHealth
-	downloads  *httpcache.DownloadLimiter
-	bus        *bus.Bus
-	policy     Policy
+	name         string
+	mode         string
+	objectRoot   string
+	store        *blobfs.Store
+	stats        *httpcache.Stats
+	inspector    PathInspector
+	finalizer    RootFinalizer
+	base         *httpcache.Handler
+	client       *utils.HttpClientWrapper
+	upstreams    []string
+	build        SnapshotBuilder
+	sh           *health.ServiceHealth
+	upstreamGate *httpcache.UpstreamGate
+	bus          *bus.Bus
+	policy       Policy
 
 	mu            sync.RWMutex
 	roots         map[string]*rootEntry
@@ -49,7 +49,7 @@ type IndexedHandler struct {
 	wait          sync.WaitGroup
 }
 
-func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, downloads *httpcache.DownloadLimiter) *IndexedHandler {
+func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, upstreamGate *httpcache.UpstreamGate) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
 		name:          name,
@@ -61,7 +61,7 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		upstreams:     append([]string(nil), upstreams...),
 		build:         builder,
 		sh:            svcHealth,
-		downloads:     downloads,
+		upstreamGate:  upstreamGate,
 		policy:        *policy,
 		roots:         map[string]*rootEntry{},
 		rootSnapshots: map[string]*LiveSnapshot{},
@@ -71,13 +71,13 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		handler.finalizer = finalizer
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
-		Mode:            mode,
-		ExpireAfter:     expireAfter,
-		Upstreams:       append([]string(nil), upstreams...),
-		Transport:       transport,
-		PassHeaders:     append([]string(nil), policy.PassHeaders...),
-		BusyPolicy:      policy.AuxiliaryBusyPolicy,
-		DownloadLimiter: downloads,
+		Mode:         mode,
+		ExpireAfter:  expireAfter,
+		Upstreams:    append([]string(nil), upstreams...),
+		Transport:    transport,
+		PassHeaders:  append([]string(nil), policy.PassHeaders...),
+		BusyPolicy:   policy.AuxiliaryBusyPolicy,
+		UpstreamGate: upstreamGate,
 	}, store, &generationResolver{handler: handler, policy: policy}, stats, svcHealth)
 	handler.client = utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, transport)
@@ -229,7 +229,7 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 			request.Header.Set("If-Modified-Since", lastModified)
 		}
 
-		release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, true)
+		release, err := h.upstreamGate.Acquire(ctx, upstream, httpcache.AdmissionRefresh)
 		if err != nil {
 			return false, err
 		}
@@ -260,8 +260,7 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 		_ = response.Body.Close()
 		release()
 		if response.StatusCode == http.StatusTooManyRequests {
-			until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
-			return false, &httpcache.RateLimitError{Host: upstream, RetryAfter: until}
+			return false, h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
 		}
 		switch response.StatusCode {
 		case http.StatusNotModified:

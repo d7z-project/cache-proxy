@@ -38,12 +38,12 @@ const (
 )
 
 type App struct {
-	config     *config.Document
-	configPath string
-	store      *blobfs.Store
-	stats      *httpcache.Stats
-	downloads  *httpcache.DownloadLimiter
-	metricsReg *prometheus.Registry
+	config       *config.Document
+	configPath   string
+	store        *blobfs.Store
+	stats        *httpcache.Stats
+	upstreamGate *httpcache.UpstreamGate
+	metricsReg   *prometheus.Registry
 
 	scheduler *scheduler.Scheduler
 	probes    *health.ProbeScheduler
@@ -144,26 +144,12 @@ func Validate(doc *config.Document) error {
 
 	registry := prometheus.NewRegistry()
 	stats := httpcache.NewStats(registry)
-	downloads := httpcache.NewDownloadLimiter(
-		docCopy.Storage.Download.MaxActive,
-		docCopy.Storage.Download.MaxActivePerInstance,
-	)
-	downloads.Configure(
-		docCopy.Storage.Download.MaxActive,
-		docCopy.Storage.Download.MaxActivePerInstance,
-		docCopy.Storage.Download.MaxActivePerHost,
-		docCopy.Storage.Download.MaxBackground,
-	)
-	downloads.ConfigurePacing(
-		docCopy.Storage.Download.RequestsPerSecondHost,
-		docCopy.Storage.Download.RequestBurstPerHost,
-		docCopy.Storage.Download.ForegroundQueueWait.Duration(),
-	)
+	upstreamGate := httpcache.NewUpstreamGate(upstreamGateConfig(docCopy.Storage.Download))
 
 	b := bus.NewWithRegisterer(registry)
 	sched := scheduler.New(b, store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
-	_, err = planEntries(context.Background(), &docCopy, store, stats, downloads, sched, nil, b)
+	_, err = planEntries(context.Background(), &docCopy, store, stats, upstreamGate, sched, nil, b)
 	sched.Start(validateCtx)
 	defer validateCancel()
 	defer func() { _ = sched.Stop(validateCtx) }()
@@ -190,18 +176,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	metricsReg := prometheus.NewRegistry()
 	metricsReg.MustRegister(metrics.NewBlobFSCollector(store))
 	stats := httpcache.NewStats(metricsReg)
-	downloads := httpcache.NewDownloadLimiter(doc.Storage.Download.MaxActive, doc.Storage.Download.MaxActivePerInstance)
-	downloads.Configure(
-		doc.Storage.Download.MaxActive,
-		doc.Storage.Download.MaxActivePerInstance,
-		doc.Storage.Download.MaxActivePerHost,
-		doc.Storage.Download.MaxBackground,
-	)
-	downloads.ConfigurePacing(
-		doc.Storage.Download.RequestsPerSecondHost,
-		doc.Storage.Download.RequestBurstPerHost,
-		doc.Storage.Download.ForegroundQueueWait.Duration(),
-	)
+	upstreamGate := httpcache.NewUpstreamGate(upstreamGateConfig(doc.Storage.Download))
 
 	b := bus.NewWithRegisterer(metricsReg)
 	sched := scheduler.New(b, store, metricsReg)
@@ -219,7 +194,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		_ = store.Close()
 	}
 
-	entries, err := planEntries(ctx, doc, store, stats, downloads, sched, probes, b)
+	entries, err := planEntries(ctx, doc, store, stats, upstreamGate, sched, probes, b)
 	if err != nil {
 		cleanupOpenFailure()
 		return nil, err
@@ -230,7 +205,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		configPath:    configPath,
 		store:         store,
 		stats:         stats,
-		downloads:     downloads,
+		upstreamGate:  upstreamGate,
 		metricsReg:    metricsReg,
 		scheduler:     sched,
 		probes:        probes,

@@ -116,7 +116,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		probeUserAgent = block.Transport.UserAgent
 	}
 	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats(), probeUserAgent)
-	sh.SetUpstreamAdmission(plan.Downloads())
+	sh.SetUpstreamAdmission(plan.UpstreamGate())
 	sh.SetProbeScheduler(plan.ProbeScheduler())
 	sh.SetBus(plan.Bus())
 	base := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
@@ -127,7 +127,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		PassHeaders:     append([]string(nil), block.PassHeaders...),
 		BusyPolicy:      block.BusyPolicy,
 		DefaultFreshFor: block.FreshFor,
-		DownloadLimiter: plan.Downloads(),
+		UpstreamGate:    plan.UpstreamGate(),
 	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), sh)
 	handler := &handler{base: base, sh: sh}
 	plan.Scheduler().Register(scheduler.TaskDef{

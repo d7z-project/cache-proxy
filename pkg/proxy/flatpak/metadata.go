@@ -89,6 +89,13 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 	for _, upstream := range h.weightedUpstreams() {
 		next, changed, err := h.refreshFromUpstream(ctx, upstream)
 		if err != nil {
+			var limited *httpcache.UpstreamRateLimitError
+			if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
+				return nil, scheduler.RetryAt(limited.RetryAfter)
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -110,10 +117,6 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
-	}
-	var rateLimit *httpcache.RateLimitError
-	if errors.As(firstErr, &rateLimit) && !rateLimit.RetryAfter.IsZero() {
-		return nil, scheduler.RetryAt(rateLimit.RetryAfter)
 	}
 	if h.sh != nil && release != nil {
 		h.sh.FinishRefresh("/", refreshGen, health.ErrResourceTransient, nil)
@@ -283,7 +286,7 @@ func (h *Handler) fetchMetadata(
 	upstream, cleanPath string,
 	required bool,
 ) (*metadataDownload, error) {
-	release, err := h.downloads.AcquireUpstream(ctx, h.name, upstream, true)
+	release, err := h.upstreamGate.Acquire(ctx, upstream, httpcache.AdmissionRefresh)
 	if err != nil {
 		return nil, err
 	}
@@ -320,8 +323,7 @@ func (h *Handler) fetchMetadata(
 		h.sh.RecordResult(upstream, response.StatusCode, latency)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		until := h.downloads.ObserveResponse(upstream, response.StatusCode, response.Header.Get("Retry-After"))
-		return nil, &httpcache.RateLimitError{Host: upstream, RetryAfter: until}
+		return nil, h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
 	}
 	if response.StatusCode != http.StatusOK {
 		if !required && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden) {
@@ -337,6 +339,8 @@ func (h *Handler) fetchMetadata(
 	if err != nil {
 		return nil, fmt.Errorf("download flatpak metadata %s: %w", cleanPath, err)
 	}
+	_ = response.Body.Close()
+	release()
 	tempPath := tempFile.Name()
 	if err := tempFile.Close(); err != nil {
 		_ = os.Remove(tempPath)

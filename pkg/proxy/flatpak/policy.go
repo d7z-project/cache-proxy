@@ -88,7 +88,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		probeUserAgent = block.Transport.UserAgent
 	}
 	sh := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats(), probeUserAgent)
-	sh.SetUpstreamAdmission(plan.Downloads())
+	sh.SetUpstreamAdmission(plan.UpstreamGate())
 	sh.SetProbeScheduler(plan.ProbeScheduler())
 	sh.SetBus(plan.Bus())
 
@@ -99,7 +99,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Transport:       block.Transport,
 		BusyPolicy:      block.MetadataBusyPolicy,
 		DefaultFreshFor: block.MetadataFreshFor,
-		DownloadLimiter: plan.Downloads(),
+		UpstreamGate:    plan.UpstreamGate(),
 	}
 	handler := NewHandler(
 		plan.Name(),
@@ -111,7 +111,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		plan.Store(),
 		plan.Stats(),
 		sh,
-		plan.Downloads(),
+		plan.UpstreamGate(),
 		runtimeCfg,
 	)
 	plan.Scheduler().Register(scheduler.TaskDef{

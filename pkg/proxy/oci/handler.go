@@ -26,23 +26,23 @@ type tokenCacheEntry struct {
 	expire time.Time
 }
 
-func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) *handler {
+func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) *handler {
 	client := utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(client, name, block.Transport)
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	return &handler{
-		name:             name,
-		upstream:         strings.TrimRight(block.Upstream, "/"),
-		expireAfter:      expireAfter,
-		policy:           &block.Policy,
-		store:            store,
-		stats:            stats,
-		client:           client,
-		downloadsLimiter: downloads,
-		lifecycleCtx:     lifecycleCtx,
-		cancel:           cancel,
-		auth:             authHandler{tokens: map[string]ociToken{}},
-		refLocks:         utils.NewRWLockGroup(),
+		name:         name,
+		upstream:     strings.TrimRight(block.Upstream, "/"),
+		expireAfter:  expireAfter,
+		policy:       &block.Policy,
+		store:        store,
+		stats:        stats,
+		client:       client,
+		upstreamGate: upstreamGate,
+		lifecycleCtx: lifecycleCtx,
+		cancel:       cancel,
+		auth:         authHandler{tokens: map[string]ociToken{}},
+		refLocks:     utils.NewRWLockGroup(),
 	}
 }
 
@@ -191,14 +191,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		slog.Info("oci proxy failed", "instance", h.name, "method", req.Method, "path", req.URL.Path, "err", err)
 		status := http.StatusBadGateway
-		if errors.Is(err, httpcache.ErrDownloadLimit) {
+		if retryAfter, admissionError := httpcache.AdmissionRetryAfterSeconds(err); admissionError {
 			status = http.StatusServiceUnavailable
-			retryAfter := 5
-			var limited *httpcache.RateLimitError
-			if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
-				remaining := time.Until(limited.RetryAfter)
-				retryAfter = max(int((remaining+time.Second-1)/time.Second), 1)
-			}
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
 		http.Error(w, http.StatusText(status), status)

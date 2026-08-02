@@ -401,8 +401,10 @@ func TestDeltaBypassesCacheWhenDisabled(t *testing.T) {
 			Upstreams:       []string{upstream.URL},
 			BusyPolicy:      config.BusyPolicyStale,
 			DefaultFreshFor: config.Freshness(defaultMetadataFreshFor),
-			DownloadLimiter: httpcache.NewDownloadLimiter(8, 4),
-			VerifyFunc:      handler.verifyCacheObject,
+			UpstreamGate: httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
+				MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second,
+			}),
+			VerifyFunc: handler.verifyCacheObject,
 		},
 		store,
 		resolver{policy: &Policy{
@@ -497,6 +499,21 @@ func TestFlatpakRepoDescriptorRewrite(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "GPGKey=abc\n")
 }
 
+func TestFlatpakDescriptorRateLimitReturnsServiceUnavailable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(t, openTestStore(t), []string{upstream.URL})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/test.flatpakrepo", nil))
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.NotEmpty(t, recorder.Header().Get("Retry-After"))
+}
+
 func TestFlatpakBrowserDescriptorVaryIsNotCached(t *testing.T) {
 	const browserUserAgent = "Mozilla/5.0 Firefox/127.0"
 	var requests atomic.Int32
@@ -582,15 +599,16 @@ func newTestHandlerWithStatsAndHealth(
 	t.Helper()
 	policy := &Policy{}
 	applyDefaults(policy)
-	downloads := httpcache.NewDownloadLimiter(8, 4)
-	downloads.ConfigurePacing(10000, 1000, time.Second)
+	upstreamGate := httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
+		MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second,
+	})
 	runtimeCfg := httpcache.RuntimeConfig{
 		Mode:            config.ModeFlatpak,
 		ExpireAfter:     config.DefaultExpireAfter,
 		Upstreams:       upstreams,
 		BusyPolicy:      policy.MetadataBusyPolicy,
 		DefaultFreshFor: policy.MetadataFreshFor,
-		DownloadLimiter: downloads,
+		UpstreamGate:    upstreamGate,
 	}
 	return NewHandler(
 		"flatpak-test",
@@ -602,7 +620,7 @@ func newTestHandlerWithStatsAndHealth(
 		store,
 		stats,
 		sh,
-		downloads,
+		upstreamGate,
 		runtimeCfg,
 	)
 }

@@ -170,6 +170,13 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 		if current := h.rootSnapshot(rootID); current != nil && current.Upstream == upstream {
 			unchanged, err := h.canSkipRefresh(ctx, current, upstream, targets)
 			if err != nil {
+				var limited *httpcache.UpstreamRateLimitError
+				if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
+					return nil, scheduler.RetryAt(limited.RetryAfter)
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -201,6 +208,13 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 		snapshot, cleanupPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
 		if err != nil {
 			h.cleanupFailedGeneration(rootID, generation)
+			var limited *httpcache.UpstreamRateLimitError
+			if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
+				return nil, scheduler.RetryAt(limited.RetryAfter)
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -254,10 +268,6 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 	}
 	if firstErr == nil {
 		firstErr = errMetadataTransient
-	}
-	var rateLimit *httpcache.RateLimitError
-	if errors.As(firstErr, &rateLimit) && !rateLimit.RetryAfter.IsZero() {
-		return nil, scheduler.RetryAt(rateLimit.RetryAfter)
 	}
 	if h.sh != nil {
 		h.sh.FinishRefresh(rootID, refreshGen, refreshHealthError(firstErr), nil)

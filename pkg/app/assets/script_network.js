@@ -574,10 +574,14 @@ function networkLayout(target, edges, data, previousData) {
             kind: 'upstream',
             label: upstream.host,
             sub: networkUpstreamNodeSubtitle(upstream),
+            title: networkUpstreamNodeTitle(upstream),
             state: upstream.state || 'unknown',
             hash: [
                 upstream.state, upstream.active_upstream_requests, upstream.requests,
-                upstream.errors, upstream.weight, upstream.latency_ms
+                upstream.errors, upstream.weight, upstream.latency_ms,
+                upstream.admission_active, upstream.admission_queued,
+                upstream.admission_max_active, upstream.request_interval_ms,
+                upstream.next_request_at, upstream.cooldown_until
             ].join(':')
         });
     });
@@ -728,7 +732,7 @@ function updateNetworkNode(node, model) {
     node.setAttribute('data-node-id', model.key);
     node.setAttribute('data-node-hash', model.hash);
     node.setAttribute('transform', 'translate(' + model.x + ' ' + model.y + ')');
-    node.querySelector('title').textContent = model.label;
+    node.querySelector('title').textContent = model.title || model.label;
     node.querySelector('circle').setAttribute('r', model.size || 22);
     node.querySelector('.node-label').textContent = compactNetworkLabel(model.label);
     node.querySelector('.node-sub').textContent = model.sub || '';
@@ -863,7 +867,11 @@ function networkInstanceSubtitle(instance) {
 }
 
 function networkUpstreamNodeSubtitle(upstream) {
-    var active = upstream.active_upstream_requests || 0;
+    var queued = upstream.admission_queued || 0;
+    if (queued > 0) {
+        return String(queued) + ' ' + (window.I18N.network_queued || 'queued');
+    }
+    var active = Math.max(upstream.active_upstream_requests || 0, upstream.admission_active || 0);
     if (active > 0) {
         return String(active) + ' ' + (window.I18N.network_active_short || 'active');
     }
@@ -878,6 +886,27 @@ function networkUpstreamNodeSubtitle(upstream) {
         return Math.round(upstream.latency_ms) + 'ms';
     }
     return translateUpstreamState(upstream.state || 'unknown');
+}
+
+function networkUpstreamNodeTitle(upstream) {
+    var active = upstream.admission_active || 0;
+    var limit = upstream.admission_max_active || 0;
+    var lines = [
+        upstream.host || '-',
+        (window.I18N.status || 'Status') + ': ' + translateUpstreamState(upstream.state || 'unknown'),
+        (window.I18N.network_active || 'Active') + ': ' + String(active) + (limit > 0 ? '/' + String(limit) : ''),
+        (window.I18N.network_queued || 'Queued') + ': ' + String(upstream.admission_queued || 0)
+    ];
+    if ((upstream.request_interval_ms || 0) > 0) {
+        lines.push((window.I18N.network_request_interval || 'Request interval') + ': ' +
+            String(upstream.request_interval_ms) + 'ms');
+    }
+    if (upstream.cooldown_until) {
+        lines.push((window.I18N.network_rate_limited || 'Rate limited') + ': ' + upstream.cooldown_until);
+    } else if (upstream.next_request_at) {
+        lines.push((window.I18N.network_next_request || 'Next request') + ': ' + upstream.next_request_at);
+    }
+    return lines.join('\n');
 }
 
 function laneY(index, total, height) {

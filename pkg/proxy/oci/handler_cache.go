@@ -82,6 +82,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if err != nil {
 		return 0, "", 0, err
 	}
+	_ = response.Body.Close()
 	defer tempFile.Close()
 	defer os.Remove(tempFile.Name())
 	if size > maxManifestSize {

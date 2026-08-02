@@ -62,7 +62,7 @@ func PlanRepoMode(
 		probeUserAgent = block.Transport.UserAgent
 	}
 	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats(), probeUserAgent)
-	sh.SetUpstreamAdmission(plan.Downloads())
+	sh.SetUpstreamAdmission(plan.UpstreamGate())
 	sh.SetProbeScheduler(plan.ProbeScheduler())
 	sh.SetBus(plan.Bus())
 	handler := NewIndexedHandler(
@@ -78,7 +78,7 @@ func PlanRepoMode(
 		plan.Store(),
 		plan.Stats(),
 		sh,
-		plan.Downloads(),
+		plan.UpstreamGate(),
 	)
 	handler.SetBus(plan.Bus())
 

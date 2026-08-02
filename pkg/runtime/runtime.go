@@ -123,18 +123,18 @@ type Result struct {
 }
 
 type PlanContext struct {
-	store       *blobfs.Store
-	stats       *httpcache.Stats
-	downloads   *httpcache.DownloadLimiter
-	cleanup     config.CleanupConfig
-	mainBind    string
-	metricsPath string
-	entries     map[string]*Entry
-	pathOwners  map[string]string
-	bindOwners  map[string]string
-	scheduler   *scheduler.Scheduler
-	probes      *health.ProbeScheduler
-	bus         *bus.Bus
+	store        *blobfs.Store
+	stats        *httpcache.Stats
+	upstreamGate *httpcache.UpstreamGate
+	cleanup      config.CleanupConfig
+	mainBind     string
+	metricsPath  string
+	entries      map[string]*Entry
+	pathOwners   map[string]string
+	bindOwners   map[string]string
+	scheduler    *scheduler.Scheduler
+	probes       *health.ProbeScheduler
+	bus          *bus.Bus
 }
 
 type InstancePlan struct {
@@ -148,7 +148,7 @@ type InstancePlan struct {
 func NewPlanContext(
 	store *blobfs.Store,
 	stats *httpcache.Stats,
-	downloads *httpcache.DownloadLimiter,
+	upstreamGate *httpcache.UpstreamGate,
 	cleanup config.CleanupConfig,
 	mainBind string,
 	metricsPath string,
@@ -157,18 +157,18 @@ func NewPlanContext(
 	b *bus.Bus,
 ) *PlanContext {
 	return &PlanContext{
-		store:       store,
-		stats:       stats,
-		downloads:   downloads,
-		cleanup:     cleanup,
-		mainBind:    mainBind,
-		metricsPath: metricsPath,
-		entries:     map[string]*Entry{},
-		pathOwners:  map[string]string{},
-		bindOwners:  map[string]string{mainBind: "main"},
-		scheduler:   sched,
-		probes:      probes,
-		bus:         b,
+		store:        store,
+		stats:        stats,
+		upstreamGate: upstreamGate,
+		cleanup:      cleanup,
+		mainBind:     mainBind,
+		metricsPath:  metricsPath,
+		entries:      map[string]*Entry{},
+		pathOwners:   map[string]string{},
+		bindOwners:   map[string]string{mainBind: "main"},
+		scheduler:    sched,
+		probes:       probes,
+		bus:          b,
 	}
 }
 
@@ -214,7 +214,7 @@ func (p *PlanContext) Finalize() (*Result, error) {
 
 func (p *PlanContext) Store() *blobfs.Store                   { return p.store }
 func (p *PlanContext) Stats() *httpcache.Stats                { return p.stats }
-func (p *PlanContext) Downloads() *httpcache.DownloadLimiter  { return p.downloads }
+func (p *PlanContext) UpstreamGate() *httpcache.UpstreamGate  { return p.upstreamGate }
 func (p *PlanContext) CleanupConfig() config.CleanupConfig    { return p.cleanup }
 func (p *PlanContext) Scheduler() *scheduler.Scheduler        { return p.scheduler }
 func (p *PlanContext) ProbeScheduler() *health.ProbeScheduler { return p.probes }
@@ -225,7 +225,7 @@ func (i *InstancePlan) Mode() string                           { return i.entry.
 func (i *InstancePlan) Enabled() bool                          { return i.entry.Enabled }
 func (i *InstancePlan) Store() *blobfs.Store                   { return i.ctx.store }
 func (i *InstancePlan) Stats() *httpcache.Stats                { return i.ctx.stats }
-func (i *InstancePlan) Downloads() *httpcache.DownloadLimiter  { return i.ctx.downloads }
+func (i *InstancePlan) UpstreamGate() *httpcache.UpstreamGate  { return i.ctx.upstreamGate }
 func (i *InstancePlan) CleanupConfig() config.CleanupConfig    { return i.ctx.cleanup }
 func (i *InstancePlan) Scheduler() *scheduler.Scheduler        { return i.ctx.scheduler }
 func (i *InstancePlan) ProbeScheduler() *health.ProbeScheduler { return i.ctx.probes }

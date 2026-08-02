@@ -30,7 +30,8 @@ type networkSummary struct {
 	UpstreamErrorRate      float64 `json:"upstream_error_rate"`
 	DegradedUpstreams      int     `json:"degraded_upstreams"`
 	QueuedUpstreamRequests int     `json:"queued_upstream_requests"`
-	BackgroundRequests     int     `json:"background_upstream_requests"`
+	AdmissionActive        int     `json:"admission_active"`
+	AdmissionMaxActive     int     `json:"admission_max_active"`
 	RateLimitedUpstreams   int     `json:"rate_limited_upstreams"`
 }
 
@@ -60,6 +61,10 @@ type networkUpstream struct {
 	ErrorRate              float64 `json:"error_rate"`
 	LatencyMS              float64 `json:"latency_ms"`
 	AdmissionActive        int     `json:"admission_active"`
+	AdmissionQueued        int     `json:"admission_queued"`
+	AdmissionMaxActive     int     `json:"admission_max_active"`
+	RequestIntervalMS      int64   `json:"request_interval_ms"`
+	NextRequestAt          string  `json:"next_request_at,omitempty"`
 	CooldownUntil          string  `json:"cooldown_until,omitempty"`
 }
 
@@ -128,9 +133,14 @@ func (s *appStatus) network(app *App) networkStatus {
 			status.addNetworkEdge(instance, entry, upstreamNodes, upstreamURL, upstream)
 		}
 	}
-	admission := app.downloads.Snapshot()
+	admission := app.upstreamGate.Snapshot()
 	status.Summary.QueuedUpstreamRequests = admission.Queued
-	status.Summary.BackgroundRequests = admission.Background
+	status.Summary.AdmissionActive = admission.Active
+	status.Summary.AdmissionMaxActive = admission.MaxActive
+	for _, node := range upstreamNodes {
+		node.AdmissionMaxActive = admission.MaxActivePerHost
+		node.RequestIntervalMS = admission.RequestInterval.Milliseconds()
+	}
 	for host, hostAdmission := range admission.Hosts {
 		key := "upstream:" + host
 		node := upstreamNodes[key]
@@ -139,6 +149,12 @@ func (s *appStatus) network(app *App) networkStatus {
 			upstreamNodes[key] = node
 		}
 		node.AdmissionActive = hostAdmission.Active
+		node.AdmissionQueued = hostAdmission.Queued
+		node.AdmissionMaxActive = hostAdmission.MaxActive
+		node.RequestIntervalMS = hostAdmission.RequestInterval.Milliseconds()
+		if !hostAdmission.NextRequest.IsZero() {
+			node.NextRequestAt = hostAdmission.NextRequest.Format(time.RFC3339Nano)
+		}
 		if !hostAdmission.CooldownUntil.IsZero() {
 			node.State = "rate_limited"
 			node.CooldownUntil = hostAdmission.CooldownUntil.Format(time.RFC3339)

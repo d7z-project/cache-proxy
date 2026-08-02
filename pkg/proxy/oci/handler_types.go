@@ -41,18 +41,18 @@ type ociChallenge struct {
 }
 
 type handler struct {
-	name             string
-	upstream         string
-	expireAfter      config.Expiration
-	policy           *Policy
-	store            *blobfs.Store
-	stats            *httpcache.Stats
-	client           *utils.HttpClientWrapper
-	downloadsLimiter *httpcache.DownloadLimiter
-	lifecycleCtx     context.Context
-	cancel           context.CancelFunc
-	wait             sync.WaitGroup
-	auth             authHandler
-	downloads        sync.Map
-	refLocks         *utils.RWLockGroup
+	name         string
+	upstream     string
+	expireAfter  config.Expiration
+	policy       *Policy
+	store        *blobfs.Store
+	stats        *httpcache.Stats
+	client       *utils.HttpClientWrapper
+	upstreamGate *httpcache.UpstreamGate
+	lifecycleCtx context.Context
+	cancel       context.CancelFunc
+	wait         sync.WaitGroup
+	auth         authHandler
+	downloads    sync.Map
+	refLocks     *utils.RWLockGroup
 }

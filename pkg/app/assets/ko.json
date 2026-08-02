@@ -174,6 +174,8 @@
   "network_degraded": "저하된 업스트림",
   "network_history_errors": "과거 오류",
   "network_latency": "지연 시간",
+  "network_request_interval": "요청 간격",
+  "network_next_request": "다음 요청",
   "network_links": "링크",
   "network_upstreams": "업스트림",
   "network_recent_error": "최근 오류",

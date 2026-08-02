@@ -86,12 +86,13 @@ storage:
     batch_size: 100
   download:
     max_active: 32
-    max_active_per_instance: 6
     max_active_per_host: 4
-    max_background: 2
-    requests_per_second_per_host: 8
-    request_burst_per_host: 4
+    request_interval_per_host: 125ms
     foreground_queue_wait: 3s
+    hosts:
+      packages.d7z.net:
+        max_active: 16
+        request_interval: 0s
 instances:
   - name: files
     enabled: true
@@ -112,12 +113,13 @@ instances:
 	require.Equal(t, "/metrics", doc.Metrics.Path)
 	require.Equal(t, "secret", doc.Metrics.Token)
 	require.Equal(t, 32, doc.Storage.Download.MaxActive)
-	require.Equal(t, 6, doc.Storage.Download.MaxActivePerInstance)
 	require.Equal(t, 4, doc.Storage.Download.MaxActivePerHost)
-	require.Equal(t, 2, doc.Storage.Download.MaxBackground)
-	require.Equal(t, float64(8), doc.Storage.Download.RequestsPerSecondHost)
-	require.Equal(t, 4, doc.Storage.Download.RequestBurstPerHost)
+	require.Equal(t, Duration(125*time.Millisecond), doc.Storage.Download.RequestIntervalPerHost)
 	require.Equal(t, Duration(3*time.Second), doc.Storage.Download.ForegroundQueueWait)
+	host := doc.Storage.Download.Hosts["packages.d7z.net"]
+	require.Equal(t, 16, host.MaxActive)
+	require.NotNil(t, host.RequestInterval)
+	require.Zero(t, *host.RequestInterval)
 	require.Len(t, doc.Instances, 1)
 	spec, err := doc.Instances[0].SelectMode()
 	require.NoError(t, err)

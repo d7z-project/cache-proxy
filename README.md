@@ -56,15 +56,29 @@ Top-level fields:
 | `storage.cleanup.dry_run` | bool | `false` | Run scheduled cleanup without deleting files |
 | `storage.cleanup.batch_size` | int | `500` | Maximum deletions per cleanup batch |
 | `storage.orphan_policy` | string | — | Home page orphan cleanup policy (`auto`) |
-| `storage.download.max_active` | int | `256` | Global concurrent upstream requests; up to the same number may wait in the bounded queue |
-| `storage.download.max_active_per_instance` | int | `64` | Concurrent upstream requests per instance; up to the same number may wait per instance |
+| `storage.download.max_active` | int | `256` | Process-wide concurrent upstream response bodies |
 | `storage.download.max_active_per_host` | int | `4` | Concurrent upstream transfers to one normalized host across all instances |
-| `storage.download.max_background` | int | `1` | Concurrent metadata refreshes and active probes across the process |
-| `storage.download.requests_per_second_per_host` | number | `8` | Sustained request admission rate for one upstream host across all instances |
-| `storage.download.request_burst_per_host` | int | `4` | Maximum short request burst allowed by the per-host token bucket |
-| `storage.download.foreground_queue_wait` | duration | `3s` | Maximum time a foreground request waits for upstream admission; background work fails fast |
+| `storage.download.request_interval_per_host` | duration | `125ms` | Minimum interval between request starts to one normalized host |
+| `storage.download.foreground_queue_wait` | duration | `3s` | Maximum time a client request waits for upstream admission |
+| `storage.download.hosts.<host>.max_active` | int | global host limit | Exact-host concurrent transfer override |
+| `storage.download.hosts.<host>.request_interval` | duration | global interval | Exact-host request interval override; `0s` disables proactive pacing |
 
-The upstream admission budget is shared by metadata, artifacts, refreshes, health probes, OCI token requests, and bypass requests. Concurrency limits bound active bodies while a per-host token bucket smooths npm/Maven-style bursts of small files. Foreground queue waits are bounded so package clients receive `503` plus `Retry-After` before their low-speed timeout; background work yields immediately. A `429` activates a host-wide cooldown, reduces that host's effective request rate, and honors `Retry-After`; recovery is gradual.
+The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, health probes, OCI token requests, and bypass requests. It limits active response bodies and spaces request starts per host, which prevents npm/Maven-style small-file bursts without imposing a fixed burst size on multi-file repository refreshes. Client requests have a bounded queue wait, repository refreshes wait within their scheduler task context, and probes skip immediately when capacity or pacing is unavailable. Only an actual upstream `429` activates a host-wide cooldown; `Retry-After` is honored and that refresh does not fan out to another mirror.
+
+An exact-host override is useful when a deliberately short freshness policy targets a private upstream that is known to tolerate a higher request rate:
+
+```yaml
+storage:
+  download:
+    max_active: 256
+    max_active_per_host: 4
+    request_interval_per_host: 125ms
+    foreground_queue_wait: 3s
+    hosts:
+      packages.d7z.net:
+        max_active: 32
+        request_interval: 0s
+```
 
 Value types:
 

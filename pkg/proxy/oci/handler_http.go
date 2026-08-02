@@ -20,7 +20,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath, userA
 		userAgent = h.client.UserAgent
 	}
 	send := func(authorization string) (*http.Response, error) {
-		releaseAdmission, err := h.downloadsLimiter.AcquireUpstream(ctx, h.name, h.upstream, false)
+		releaseAdmission, err := h.upstreamGate.Acquire(ctx, h.upstream, httpcache.AdmissionForeground)
 		if err != nil {
 			return nil, err
 		}
@@ -51,7 +51,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath, userA
 			return nil, err
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
-			h.downloadsLimiter.ObserveResponse(h.upstream, response.StatusCode, response.Header.Get("Retry-After"))
+			h.upstreamGate.RateLimited(h.upstream, response.Header.Get("Retry-After"))
 		}
 		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
 		counted := &countingReadCloser{ReadCloser: utils.NewRateLimitReader(h.client.WrapBody(response.Body))}
