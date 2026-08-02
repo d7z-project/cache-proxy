@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
@@ -313,8 +314,11 @@ instances:
 }
 
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
 	app := &App{
 		stopRuntime: func() {},
+		store:       store,
 		handlers: []proxyruntime.Instance{
 			blockingInstance{},
 		},
@@ -323,8 +327,11 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	err := app.Close(ctx)
+	err = app.Close(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	_, err = store.Stats(context.Background())
+	require.NoError(t, err, "store must remain open while a handler has not drained")
+	require.NoError(t, store.Close())
 }
 
 func TestPrepareHandlersUsesPerInstanceContext(t *testing.T) {
@@ -571,6 +578,7 @@ func TestStatusEndpointsReturnJSON(t *testing.T) {
 		app.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code, path)
 		require.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+		require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 		require.NotEmpty(t, rec.Body.String())
 	}
 }
@@ -613,6 +621,7 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	app.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 	var payload networkStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
 	require.Equal(t, uint64(4), payload.Summary.Requests)
@@ -798,6 +807,25 @@ func TestStatusPersistsAndRestoresHistory(t *testing.T) {
 	require.Equal(t, "published", events[0].ReasonCode)
 	require.Equal(t, "generation=abc upstream=https://example.test", events[0].Detail)
 	require.Equal(t, "metadata published", events[0].Message)
+}
+
+func TestAppCloseWaitsForFinalStatusPersistence(t *testing.T) {
+	backend := t.TempDir()
+	app := openApp(t, context.Background(), testDocument(backend, nil))
+	app.status.observeTaskRun(scheduler.TaskRun{
+		Key:    scheduler.NewTaskKey("files", scheduler.TypeExpireCleanup, ""),
+		Result: "success",
+	})
+	require.NoError(t, app.Close(context.Background()))
+
+	store, err := blobfs.Open(backend, blobfs.DefaultConfig())
+	require.NoError(t, err)
+	defer store.Close()
+	restored := newAppStatus(app.config.Server.Status, store)
+	restored.restore()
+	events := restored.taskEvents(app.config.Server.Status.EventLimit)
+	require.Len(t, events, 1)
+	require.Equal(t, "files", events[0].Storage)
 }
 
 func TestStatusCapturesUpstreamStateEvents(t *testing.T) {

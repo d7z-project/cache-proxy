@@ -17,6 +17,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const statusAPIPath = "/-/status/"
@@ -60,6 +61,8 @@ type appStatus struct {
 	blobStore          *blobfs.Store
 	persistCh          chan struct{}
 	ctx                context.Context
+	wg                 sync.WaitGroup
+	persistMu          sync.Mutex
 }
 
 type statusStore struct {
@@ -106,16 +109,24 @@ func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
 	}
 	s.ctx = ctx
 	s.restore()
-	go s.persistLoop()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.persistLoop()
+	}()
 	if b != nil {
 		ch := b.Subscribe(bus.EventUpstreamState)
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
 			defer b.Unsubscribe(ch)
 			s.busLoop(ctx, ch)
 		}()
 	}
 	s.recordDiskUsage(ctx, app)
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		ticker := time.NewTicker(s.diskSampleInterval)
 		defer ticker.Stop()
 		for {
@@ -127,6 +138,16 @@ func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
 			}
 		}
 	}()
+}
+
+func (s *appStatus) stop(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if err := utils.WaitGroupContext(ctx, &s.wg); err != nil {
+		return err
+	}
+	return s.persistContext(ctx)
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
@@ -277,6 +298,7 @@ func (s *statusStore) eventSnapshotLocked() []taskEvent {
 }
 
 func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
@@ -356,7 +378,6 @@ func (s *appStatus) persistLoop() {
 	for {
 		select {
 		case <-s.ctx.Done():
-			s.persist()
 			return
 		case <-s.persistCh:
 			s.persist()
@@ -365,9 +386,17 @@ func (s *appStatus) persistLoop() {
 }
 
 func (s *appStatus) persist() {
-	if s.blobStore == nil {
-		return
+	if err := s.persistContext(context.Background()); err != nil {
+		slog.Warn("failed to persist app status", "err", err)
 	}
+}
+
+func (s *appStatus) persistContext(parent context.Context) error {
+	if s.blobStore == nil {
+		return nil
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	state := persistedStatus{
 		Version: 1,
 		Disk:    s.diskSamples(),
@@ -375,18 +404,17 @@ func (s *appStatus) persist() {
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
-		return
+		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	if err := s.blobStore.MkdirAll(path.Join(statusTenant, path.Dir(statusStatePath)), 0o755); err != nil {
-		return
+		return err
 	}
-	if _, err := s.blobStore.Put(ctx, statusTenant, statusStatePath, bytes.NewReader(data), map[string]string{
+	_, err = s.blobStore.Put(ctx, statusTenant, statusStatePath, bytes.NewReader(data), map[string]string{
 		"content-type": "application/json",
-	}); err != nil {
-		slog.Warn("failed to persist app status", "err", err)
-	}
+	})
+	return err
 }
 
 func (s *appStatus) restore() {
@@ -472,6 +500,7 @@ func writeStatusJSON(w http.ResponseWriter, req *http.Request, payload any) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if req.Method == http.MethodHead {
 		return

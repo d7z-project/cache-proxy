@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -23,8 +24,55 @@ type ResponseWrapper struct {
 
 type HttpClientWrapper struct {
 	*http.Client
-	UserAgent       string
-	IdleBodyTimeout time.Duration
+	UserAgent           string
+	UserAgentConfigured bool
+	IdleBodyTimeout     time.Duration
+}
+
+// RequestUserAgent returns the User-Agent for a foreground upstream request.
+// The boolean reports whether an inbound browser value was selected.
+func (receiver *HttpClientWrapper) RequestUserAgent(req *http.Request) (string, bool) {
+	if receiver.UserAgentConfigured || !IsBrowserRequest(req) {
+		return receiver.UserAgent, false
+	}
+	return req.UserAgent(), true
+}
+
+func IsBrowserRequest(req *http.Request) bool {
+	if req == nil || req.UserAgent() == "" {
+		return false
+	}
+	for _, name := range []string{"Sec-Fetch-Mode", "Sec-Fetch-Site", "Sec-Fetch-Dest", "Sec-Fetch-User"} {
+		if req.Header.Get(name) != "" {
+			return true
+		}
+	}
+
+	userAgent := strings.ToLower(req.UserAgent())
+	if !strings.Contains(userAgent, "mozilla/5.0") {
+		return false
+	}
+	for _, product := range []string{
+		"firefox/", "fxios/", "chrome/", "crios/", "chromium/", "headlesschrome/",
+		"safari/", "edg/", "edga/", "edgios/", "opr/", "opera/",
+	} {
+		if strings.Contains(userAgent, product) {
+			return true
+		}
+	}
+	return false
+}
+
+func VariesByUserAgent(values ...string) bool {
+	for _, value := range values {
+		for field := range strings.SplitSeq(value, ",") {
+			field = strings.TrimSpace(field)
+			if field == "*" || strings.EqualFold(field, "User-Agent") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {

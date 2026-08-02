@@ -3,6 +3,8 @@ var networkStageState = {
     openedModal: false,
     timers: {},
     controllers: {},
+    pollFailures: {},
+    pollErrors: {},
     summary: null,
     disk: null,
     events: null,
@@ -29,8 +31,7 @@ function initNetworkStage() {
 
 function requestNetworkStage() {
     var t = window.I18N;
-    if (!statusState.modal || !statusState.modal.requestFullscreen) {
-        showStageLaunchError(t.stage_fullscreen_unsupported || 'Fullscreen is not supported');
+    if (!statusState.modal) {
         return;
     }
     if (networkStageState.state === 'requesting' || networkStageState.state === 'active') {
@@ -43,15 +44,18 @@ function requestNetworkStage() {
     statusState.activeTab = 'network';
     openStatusModal();
     switchStatusTab('network');
+    if (!statusState.modal.requestFullscreen) {
+        activateNetworkStage();
+        return;
+    }
 
     statusState.modal.requestFullscreen().then(function() {
         if (document.fullscreenElement === statusState.modal) {
             activateNetworkStage();
         }
     }).catch(function() {
-        networkStageState.state = 'failed';
         showStageLaunchError(t.stage_fullscreen_failed || 'Fullscreen permission was denied');
-        exitNetworkStage({ closeModal: networkStageState.openedModal });
+        activateNetworkStage();
     });
 }
 
@@ -72,6 +76,7 @@ function activateNetworkStage() {
     networkStageState.state = 'active';
     document.body.classList.add('network-stage-open');
     statusState.modal.classList.add('network-stage-open');
+    statusState.modal.classList.toggle('network-stage-windowed', document.fullscreenElement !== statusState.modal);
     setStageARIA(true);
     stopAutoRefresh();
     statusState.activeTab = 'network';
@@ -90,7 +95,7 @@ function exitNetworkStage(opts) {
     abortNetworkStageRequests();
     document.body.classList.remove('network-stage-open');
     if (statusState.modal) {
-        statusState.modal.classList.remove('network-stage-open');
+        statusState.modal.classList.remove('network-stage-open', 'network-stage-windowed');
     }
     setStageARIA(false);
     setNetworkMapFocus('');
@@ -131,17 +136,13 @@ function setStageARIA(open) {
 
 function startNetworkStageTimers() {
     stopNetworkStageTimers();
-    networkStageState.timers.clock = window.setInterval(renderNetworkStageFromCache, 1000);
-    networkStageState.timers.network = window.setInterval(refreshNetworkStageNetwork, 4000);
-    networkStageState.timers.summary = window.setInterval(refreshNetworkStageSummary, 10000);
-    networkStageState.timers.events = window.setInterval(refreshNetworkStageEvents, 8000);
-    networkStageState.timers.disk = window.setInterval(refreshNetworkStageDisk, 20000);
+    networkStageState.timers.clock = window.setInterval(renderNetworkStageClock, 1000);
     networkStageState.timers.hotspot = window.setInterval(advanceNetworkStageHotspot, 7000);
 }
 
 function stopNetworkStageTimers() {
     Object.keys(networkStageState.timers).forEach(function(key) {
-        window.clearInterval(networkStageState.timers[key]);
+        window.clearTimeout(networkStageState.timers[key]);
     });
     networkStageState.timers = {};
 }
@@ -170,7 +171,6 @@ function refreshNetworkStageSummary() {
 }
 
 function refreshNetworkStageNetwork() {
-    networkStageState.nextNetworkRefreshAt = Date.now() + 4000;
     fetchNetworkStageJSON('network', '/-/status/network', function(data) {
         var previous = networkStageState.network || statusState.cache.network || null;
         networkStageState.previousNetwork = previous;
@@ -203,9 +203,14 @@ function refreshNetworkStageEvents() {
 
 function fetchNetworkStageJSON(key, url, onSuccess) {
     if (networkStageState.controllers[key]) {
-        networkStageState.controllers[key].abort();
+        return;
     }
     var controller = new AbortController();
+    var timedOut = false;
+    var timeout = window.setTimeout(function() {
+        timedOut = true;
+        controller.abort();
+    }, 15000);
     networkStageState.controllers[key] = controller;
     fetch(url, { signal: controller.signal }).then(function(resp) {
         if (!resp.ok) {
@@ -213,18 +218,48 @@ function fetchNetworkStageJSON(key, url, onSuccess) {
         }
         return resp.json();
     }).then(function(data) {
-        if (networkStageState.controllers[key] === controller) {
-            delete networkStageState.controllers[key];
-        }
+        networkStageState.pollFailures[key] = 0;
+        delete networkStageState.pollErrors[key];
         onSuccess(data);
     }).catch(function(err) {
+        if (timedOut || !err || err.name !== 'AbortError') {
+            networkStageState.pollFailures[key] = (networkStageState.pollFailures[key] || 0) + 1;
+            networkStageState.pollErrors[key] = timedOut ? 'Request timed out' : String(err && err.message || err || 'Request failed');
+            renderNetworkStageFromCache();
+        }
+    }).then(function() {
+        window.clearTimeout(timeout);
         if (networkStageState.controllers[key] === controller) {
             delete networkStageState.controllers[key];
         }
-        if (!err || err.name !== 'AbortError') {
-            renderNetworkStageFromCache();
-        }
+        scheduleNetworkStageRefresh(key);
     });
+}
+
+function scheduleNetworkStageRefresh(key) {
+    if (!isNetworkStageOpen()) {
+        return;
+    }
+    var intervals = { network: 4000, summary: 10000, events: 8000, disk: 20000 };
+    var failures = networkStageState.pollFailures[key] || 0;
+    var delay = Math.min(30000, (intervals[key] || 10000) * Math.pow(2, Math.min(failures, 3)));
+    if (key === 'network') {
+        networkStageState.nextNetworkRefreshAt = Date.now() + delay;
+    }
+    networkStageState.timers[key] = window.setTimeout(function() {
+        if (key === 'network') refreshNetworkStageNetwork();
+        if (key === 'summary') refreshNetworkStageSummary();
+        if (key === 'events') refreshNetworkStageEvents();
+        if (key === 'disk') refreshNetworkStageDisk();
+    }, delay);
+}
+
+function renderNetworkStageClock() {
+    if (!isNetworkStageOpen()) {
+        return;
+    }
+    var network = networkStageState.network || statusState.cache.network || {};
+    renderNetworkStageBanner(network.summary || {});
 }
 
 function renderNetworkStageFromCache() {
@@ -248,6 +283,11 @@ function renderNetworkStageBanner(summary) {
         formatDisplayTime(new Date(networkStageState.networkAt).toISOString()).display :
         (t.loading || 'Loading');
     var countdown = Math.max(0, Math.ceil((networkStageState.nextNetworkRefreshAt - Date.now()) / 1000));
+    var failedPolls = Object.keys(networkStageState.pollFailures).filter(function(key) {
+        return networkStageState.pollFailures[key] > 0;
+    });
+    var pollError = failedPolls.length ?
+        failedPolls[0] + ': ' + (networkStageState.pollErrors[failedPolls[0]] || 'Request failed') : '';
     var degradedUpstreams = summary.degraded_upstreams || 0;
     var storeSummary = networkStageState.summary || {};
     var degradedObjects = storeSummary.degraded_objects || 0;
@@ -278,9 +318,9 @@ function renderNetworkStageBanner(summary) {
         },
         {
             label: t.stage_refreshed || 'Refreshed',
-            value: refreshed,
-            sub: (t.stage_next_refresh || 'Next refresh') + ': ' + countdown + 's',
-            level: countdown <= 1 ? 'is-live' : 'is-muted'
+            value: failedPolls.length ? (t.network_recent_error || 'Recent error') : refreshed,
+            sub: failedPolls.length ? pollError : (t.stage_next_refresh || 'Next refresh') + ': ' + countdown + 's',
+            level: failedPolls.length ? 'is-warn' : (countdown <= 1 ? 'is-live' : 'is-muted')
         }
     ], 'network-stage-status-card');
 }

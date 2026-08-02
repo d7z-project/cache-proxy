@@ -465,11 +465,11 @@ func TestFormatHitRate(t *testing.T) {
 		"HIT": 80, "FRESH": 10, "REFRESH": 5, "STALE": 1, "GENERATION": 1,
 		"MISS": 1, "BYPASS": 1, "PASSTHROUGH": 1,
 	}
-	require.Equal(t, "97.0%", formatHitRate(cache))
+	require.Equal(t, "92.0%", formatHitRate(cache))
 
 	rate, ok := cacheHitRate(cache)
 	require.True(t, ok)
-	require.InDelta(t, 0.97, rate, 0.000001)
+	require.InDelta(t, 0.92, rate, 0.000001)
 
 	cache = map[string]uint64{"HIT": 0, "MISS": 10}
 	require.Equal(t, "0.0%", formatHitRate(cache))

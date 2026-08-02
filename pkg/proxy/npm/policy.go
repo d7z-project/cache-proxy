@@ -14,6 +14,7 @@ import (
 )
 
 const defaultCleanupInterval = 6 * time.Hour
+const defaultMetadataFreshFor = time.Minute
 
 type Policy struct {
 	MetadataPolicy     string           `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
@@ -53,6 +54,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	}
 	if block.MetadataBusyPolicy == "" {
 		block.MetadataBusyPolicy = config.BusyPolicyStale
+	}
+	if block.MetadataFreshFor.IsUnset() {
+		block.MetadataFreshFor = config.Freshness(defaultMetadataFreshFor)
 	}
 	if block.TarballPolicy == "" {
 		block.TarballPolicy = config.PolicyImmutable

@@ -2,8 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	goruntime "runtime"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -607,6 +609,78 @@ func TestAPIsReturnAfterStop(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		require.FailNow(t, "scheduler API blocked after stop")
+	}
+}
+
+func TestTaskHandlerCanCallSchedulerAPIs(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	key := NewTaskKey("reentrant", TypeBlobGC, "")
+	finished := make(chan struct{})
+	sched.Register(TaskDef{
+		Key:      key,
+		Interval: 0,
+		Handler: func(context.Context) (*TaskOutcome, error) {
+			info, ok := sched.Info(key)
+			require.True(t, ok)
+			require.Equal(t, StatusRunning, info.Status)
+			sched.Register(TaskDef{Key: NewTaskKey("nested", TypeExpireCleanup, ""), Interval: time.Hour, Handler: noopTask})
+			close(finished)
+			return nil, nil
+		},
+	})
+	sched.Start(context.Background())
+
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		require.FailNow(t, "reentrant task handler blocked")
+	}
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestRunObserverCanCallSchedulerAPIs(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	observed := make(chan struct{})
+	sched.SetRunObserver(func(TaskRun) {
+		require.NotEmpty(t, sched.Snapshot())
+		close(observed)
+	})
+	sched.Register(TaskDef{Key: NewTaskKey("observer", TypeBlobGC, ""), Interval: 0, Handler: noopTask})
+	sched.Start(context.Background())
+
+	select {
+	case <-observed:
+	case <-time.After(3 * time.Second):
+		require.FailNow(t, "reentrant observer blocked")
+	}
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestConcurrentAPIsReturnWhileStopping(t *testing.T) {
+	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched.Start(context.Background())
+
+	var callers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		callers.Add(1)
+		go func(index int) {
+			defer callers.Done()
+			key := NewTaskKey(fmt.Sprintf("late-%d", index), TypeBlobGC, "")
+			sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: noopTask})
+			_, _ = sched.Info(key)
+			_ = sched.Snapshot()
+		}(i)
+	}
+	require.NoError(t, sched.Stop(context.Background()))
+	done := make(chan struct{})
+	go func() {
+		callers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		require.FailNow(t, "scheduler API blocked during stop")
 	}
 }
 

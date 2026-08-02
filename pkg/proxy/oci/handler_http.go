@@ -14,16 +14,24 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string, headers map[string]string) (*http.Response, error) {
-	targetURL := h.upstream + "/" + httpcache.EscapePath(strings.TrimLeft(upstreamPath, "/"))
-	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath, userAgent string, headers map[string]string) (*http.Response, error) {
+	releaseAdmission, err := h.downloadsLimiter.Acquire(ctx, h.name)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("User-Agent", h.client.UserAgent)
+	targetURL := h.upstream + "/" + httpcache.EscapePath(strings.TrimLeft(upstreamPath, "/"))
+	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+	if err != nil {
+		releaseAdmission()
+		return nil, err
+	}
+	if userAgent == "" {
+		userAgent = h.client.UserAgent
+	}
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	request.Header.Set("User-Agent", userAgent)
 	if auth := h.staticAuthorization(); auth != "" {
 		request.Header.Set("Authorization", auth)
 	}
@@ -34,13 +42,15 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string
 	latency := time.Since(start)
 	if err != nil {
 		release()
+		releaseAdmission()
 		h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, 0, latency, 0)
 		return nil, err
 	}
 	if response.StatusCode == http.StatusUnauthorized {
-		retry, retryErr := h.retryChallenge(ctx, method, targetURL, headers, response)
+		retry, retryErr := h.retryChallenge(ctx, method, targetURL, userAgent, headers, response)
 		if retryErr != nil {
 			release()
+			releaseAdmission()
 			h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, 0, latency, 0)
 			return nil, retryErr
 		}
@@ -49,18 +59,14 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath string
 			response = retry
 		}
 	}
-	h.stats.RecordUpstreamRequest(
-		h.name,
-		config.ModeOCI,
-		h.upstream,
-		method,
-		response.StatusCode,
-		latency,
-		ociContentLength(response),
-	)
 	slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
-	response.Body = utils.NewRateLimitReader(h.client.WrapBody(response.Body))
-	response.Body = &closeCallbackBody{ReadCloser: response.Body, done: release}
+	counted := &countingReadCloser{ReadCloser: utils.NewRateLimitReader(h.client.WrapBody(response.Body))}
+	status := response.StatusCode
+	response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
+		release()
+		releaseAdmission()
+		h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, status, latency, counted.bytes)
+	}}
 	return response, nil
 }
 
@@ -70,17 +76,21 @@ type closeCallbackBody struct {
 	once sync.Once
 }
 
+type countingReadCloser struct {
+	io.ReadCloser
+	bytes uint64
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.bytes += uint64(n)
+	return n, err
+}
+
 func (b *closeCallbackBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(b.done)
 	return err
-}
-
-func ociContentLength(response *http.Response) uint64 {
-	if response == nil || response.ContentLength <= 0 {
-		return 0
-	}
-	return uint64(response.ContentLength)
 }
 
 func (h *handler) copyRemote(w http.ResponseWriter, req *http.Request, response *http.Response, cache string) (int, uint64, error) {

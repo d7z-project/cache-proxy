@@ -25,53 +25,61 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, uint64, error) {
+const maxManifestSize = 50 << 20
+
+func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
 	h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
 	defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
 
 	slog.Debug("oci fetch manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "upstream", h.upstream)
-	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, map[string]string{"Accept": manifestAccept})
+	userAgent, _ := h.client.RequestUserAgent(req)
+	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, userAgent, map[string]string{"Accept": manifestAccept})
 	if err != nil {
-		return 0, 0, err
+		return 0, "", 0, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return h.copyRemote(w, req, response, "BYPASS")
+		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+		return status, "BYPASS", bytes, copyErr
+	}
+	if !h.client.UserAgentConfigured && utils.VariesByUserAgent(response.Header.Values("Vary")...) {
+		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+		return status, "BYPASS", bytes, copyErr
 	}
 
-	tempFile, size, err := utils.TempFileFromReader(io.LimitReader(response.Body, 50<<20))
+	tempFile, size, err := utils.TempFileFromReader(io.LimitReader(response.Body, maxManifestSize+1))
 	if err != nil {
-		return 0, 0, err
+		return 0, "", 0, err
 	}
 	defer tempFile.Close()
 	defer os.Remove(tempFile.Name())
-	if size > 50<<20 {
-		return 0, 0, fmt.Errorf("oci manifest exceeds size limit")
+	if size > maxManifestSize {
+		return 0, "", 0, fmt.Errorf("oci manifest exceeds size limit")
 	}
 
 	manifestDigest := response.Header.Get("Docker-Content-Digest")
 	if manifestDigest != "" {
 		if err := verifyDigestReader(manifestDigest, tempFile); err != nil {
-			return 0, 0, err
+			return 0, "", 0, err
 		}
 		if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-			return 0, 0, err
+			return 0, "", 0, err
 		}
 	}
 	if manifestDigest == "" {
 		sum := sha256.New()
 		if _, err := io.Copy(sum, tempFile); err != nil {
-			return 0, 0, err
+			return 0, "", 0, err
 		}
 		manifestDigest = "sha256:" + hex.EncodeToString(sum.Sum(nil))
 		if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-			return 0, 0, err
+			return 0, "", 0, err
 		}
 	}
 
 	blobDigests := collectBlobDigests(tempFile)
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-		return 0, 0, err
+		return 0, "", 0, err
 	}
 
 	state := refState{
@@ -84,10 +92,11 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 
 	meta := map[string]string{
-		"content-type":          response.Header.Get("Content-Type"),
-		"content-length":        strconv.FormatInt(size, 10),
-		"fetched-at":            time.Now().UTC().Format(time.RFC3339Nano),
-		"docker-content-digest": manifestDigest,
+		"content-type":                    response.Header.Get("Content-Type"),
+		"content-length":                  strconv.FormatInt(size, 10),
+		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
+		"docker-content-digest":           manifestDigest,
+		httpcache.UserAgentReviewedOption: "true",
 	}
 	if v := response.Header.Get("ETag"); v != "" {
 		meta["etag"] = v
@@ -95,15 +104,18 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if v := response.Header.Get("Last-Modified"); v != "" {
 		meta["last-modified"] = v
 	}
+	if v := strings.Join(response.Header.Values("Vary"), ", "); v != "" {
+		meta["vary"] = v
+	}
 	if err := h.storeObject(ctx, h.refManifestPath(resolved.repo, resolved.ref), tempFile, meta); err != nil {
-		return 0, 0, err
+		return 0, "", 0, err
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-		return 0, 0, err
+		return 0, "", 0, err
 	}
 
 	if err := h.writeState(ctx, state); err != nil {
-		return 0, 0, err
+		return 0, "", 0, err
 	}
 
 	for _, d := range blobDigests {
@@ -119,10 +131,10 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		"Docker-Content-Digest": manifestDigest,
 	}
 	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, tempFile)
-	return status, bytes, err
+	return status, "MISS", bytes, err
 }
 
-func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
+func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, state refState) (int, string, uint64, error) {
 	slog.Debug("oci fetch blob", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest, "upstream", h.upstream)
 	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
 	cleanupDownload := true
@@ -132,7 +144,8 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		}
 	}()
 
-	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, nil)
+	userAgent, _ := h.client.RequestUserAgent(req)
+	response, err := h.remoteRequest(h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, nil)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -141,19 +154,24 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
+	if !h.client.UserAgentConfigured && utils.VariesByUserAgent(response.Header.Values("Vary")...) {
+		defer response.Body.Close()
+		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+		return status, "BYPASS", bytes, copyErr
+	}
 
 	contentLen := response.ContentLength
 	respHeader := response.Header
 
-	pr, err := httpcache.StreamToPipe(ctx, httpcache.StreamConfig{
+	pr, err := httpcache.StreamToCache(h.lifecycleCtx, httpcache.StreamConfig{
 		Body:       response.Body,
-		Instance:   h.name,
 		ObjectPath: objectPath,
-		Downloads:  &h.downloads,
 		Wait:       &h.wait,
-		Limiter:    h.downloadsLimiter,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
+		Done: func(error) {
+			h.downloads.Delete(objectPath)
+		},
 		VerifyFn: func(r io.ReadSeeker) error {
 			return verifyDigestReader(resolved.digest, r)
 		},
@@ -172,10 +190,10 @@ func (h *handler) fetchBlob(ctx context.Context, w http.ResponseWriter, req *htt
 }
 
 func verifyDigestReader(digest string, reader io.Reader) error {
-	algo, expected, ok := strings.Cut(digest, ":")
-	if !ok || algo != "sha256" || len(expected) != 64 {
-		return nil
+	if !isSHA256Digest(digest) {
+		return fmt.Errorf("invalid SHA256 digest %q", digest)
 	}
+	_, expected, _ := strings.Cut(digest, ":")
 	sum := sha256.New()
 	if _, err := io.Copy(sum, reader); err != nil {
 		return err
@@ -185,6 +203,15 @@ func verifyDigestReader(digest string, reader io.Reader) error {
 		return fmt.Errorf("digest mismatch: expected %s got sha256:%s", digest, actual)
 	}
 	return nil
+}
+
+func isSHA256Digest(value string) bool {
+	algorithm, encoded, ok := strings.Cut(value, ":")
+	if !ok || algorithm != "sha256" || len(encoded) != sha256.Size*2 || encoded != strings.ToLower(encoded) {
+		return false
+	}
+	_, err := hex.DecodeString(encoded)
+	return err == nil
 }
 
 func (h *handler) readState(ctx context.Context, objectPath string) (refState, error) {
@@ -341,7 +368,7 @@ func collectBlobDigests(r io.Reader) []string {
 	seen := map[string]struct{}{}
 	var digests []string
 	for _, item := range append(append([]descriptor{doc.Config}, doc.Layers...), doc.Blobs...) {
-		if item.Digest == "" {
+		if !isSHA256Digest(item.Digest) {
 			continue
 		}
 		if _, ok := seen[item.Digest]; ok {
@@ -366,6 +393,7 @@ func objectHeaders(headers http.Header, length int, cache string) map[string]str
 		"Content-Length": headers.Get("Content-Length"),
 		"ETag":           headers.Get("ETag"),
 		"Last-Modified":  headers.Get("Last-Modified"),
+		"Vary":           strings.Join(headers.Values("Vary"), ", "),
 		"X-Cache":        cache,
 	}
 	if length >= 0 && result["Content-Length"] == "" {

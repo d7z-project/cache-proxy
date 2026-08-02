@@ -238,7 +238,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		},
 	})
 
-	app.mainServer = &http.Server{Addr: doc.Server.Bind, Handler: app}
+	app.mainServer = newHTTPServer(doc.Server.Bind, app)
 	app.checkOrphans(lifecycleCtx)
 	return app, nil
 }
@@ -315,7 +315,7 @@ func (a *App) Start() error {
 		}
 	}()
 	for addr, listener := range prepared {
-		server := &http.Server{Addr: addr, Handler: bindDispatchHandler{app: a, addr: addr}}
+		server := newHTTPServer(addr, bindDispatchHandler{app: a, addr: addr})
 		a.bindServers[addr] = server
 		go func(server *http.Server, listener net.Listener) {
 			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -326,13 +326,23 @@ func (a *App) Start() error {
 	return nil
 }
 
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
 func (a *App) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	if a.closed.Swap(true) {
+	if a.closed.Load() {
 		return nil
 	}
 	a.ready.Store(false)
@@ -341,27 +351,54 @@ func (a *App) Close(ctx context.Context) error {
 	}
 
 	var joined error
+	drained := true
 	if a.scheduler != nil {
-		joined = errors.Join(joined, a.scheduler.Stop(ctx))
+		if err := a.scheduler.Stop(ctx); err != nil {
+			joined = errors.Join(joined, err)
+			drained = false
+		}
 	}
 	if a.probes != nil {
-		joined = errors.Join(joined, a.probes.Stop(ctx))
+		if err := a.probes.Stop(ctx); err != nil {
+			joined = errors.Join(joined, err)
+			drained = false
+		}
 	}
 	if a.mainServer != nil {
-		joined = errors.Join(joined, a.mainServer.Shutdown(ctx))
+		if err := a.mainServer.Shutdown(ctx); err != nil {
+			joined = errors.Join(joined, err)
+			drained = false
+		}
 	}
 	for _, server := range a.bindServers {
-		joined = errors.Join(joined, server.Shutdown(ctx))
+		if err := server.Shutdown(ctx); err != nil {
+			joined = errors.Join(joined, err)
+			drained = false
+		}
 	}
 	a.routesMu.RLock()
 	handlers := make([]proxyruntime.Instance, len(a.handlers))
 	copy(handlers, a.handlers)
 	a.routesMu.RUnlock()
 	for _, handler := range handlers {
-		joined = errors.Join(joined, handler.Stop(ctx))
+		if err := handler.Stop(ctx); err != nil {
+			joined = errors.Join(joined, err)
+			drained = false
+		}
 	}
-	if a.store != nil {
-		joined = errors.Join(joined, a.store.Close())
+	if a.status != nil {
+		if err := a.status.stop(ctx); err != nil {
+			joined = errors.Join(joined, err)
+			drained = false
+		}
+	}
+	if drained {
+		if a.store != nil {
+			joined = errors.Join(joined, a.store.Close())
+		}
+		if joined == nil {
+			a.closed.Store(true)
+		}
 	}
 	return joined
 }

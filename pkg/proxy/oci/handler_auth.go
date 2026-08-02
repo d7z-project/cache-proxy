@@ -16,7 +16,7 @@ import (
 
 const maxTokenResponseSize = 1 << 20 // 1MB
 
-func (h *handler) retryChallenge(ctx context.Context, method, targetURL string, headers map[string]string, response *http.Response) (*http.Response, error) {
+func (h *handler) retryChallenge(ctx context.Context, method, targetURL, userAgent string, headers map[string]string, response *http.Response) (*http.Response, error) {
 	challenge, ok := parseOCIChallenge(response.Header.Get("WWW-Authenticate"))
 	if !ok {
 		return nil, nil
@@ -40,10 +40,10 @@ func (h *handler) retryChallenge(ctx context.Context, method, targetURL string, 
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("User-Agent", h.client.UserAgent)
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Authorization", auth)
 	return h.client.Do(request)
 }

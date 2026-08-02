@@ -1,8 +1,10 @@
 package httpcache
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -122,145 +124,16 @@ func TestRewriteNPMTarballURLScopedPackage(t *testing.T) {
 	require.Equal(t, "https://proxy/npm/@angular/core/-/core-15.0.0.tgz", result)
 }
 
-func TestRewriteNPMTarballsChangesNestedTarballs(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-	publicBase := "https://proxy/npm"
-
-	doc := map[string]any{
-		"versions": map[string]any{
-			"1.0.0": map[string]any{
-				"dist": map[string]any{
-					"tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz",
-				},
-			},
-			"2.0.0": map[string]any{
-				"dist": map[string]any{
-					"tarball": "https://registry.npmjs.org/pkg/-/pkg-2.0.0.tgz",
-				},
-			},
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, upstreams, publicBase)
-	require.True(t, changed)
-
-	versions := doc["versions"].(map[string]any)
-	v1 := versions["1.0.0"].(map[string]any)
-	require.Equal(t, "https://proxy/npm/pkg/-/pkg-1.0.0.tgz", v1["dist"].(map[string]any)["tarball"])
-	v2 := versions["2.0.0"].(map[string]any)
-	require.Equal(t, "https://proxy/npm/pkg/-/pkg-2.0.0.tgz", v2["dist"].(map[string]any)["tarball"])
+func TestRewriteNPMMetadata(t *testing.T) {
+	source := `{"versions":{"1.0.0":{"dist":{"tarball":"https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz","integrity":"sha512-value"}}},"other":[true,null,42]}`
+	var rewritten bytes.Buffer
+	require.NoError(t, RewriteNPMMetadata(strings.NewReader(source), &rewritten, []string{"https://registry.npmjs.org"}, "https://proxy/npm"))
+	require.JSONEq(t, `{"versions":{"1.0.0":{"dist":{"tarball":"https://proxy/npm/pkg/-/pkg-1.0.0.tgz","integrity":"sha512-value"}}},"other":[true,null,42]}`, rewritten.String())
 }
 
-func TestRewriteNPMTarballsStandardMetadata(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-	publicBase := "https://proxy/npm"
-
-	doc := map[string]any{
-		"name":      "react",
-		"dist-tags": map[string]any{"latest": "18.2.0"},
-		"versions": map[string]any{
-			"18.2.0": map[string]any{
-				"name":    "react",
-				"version": "18.2.0",
-				"dist": map[string]any{
-					"tarball":   "https://registry.npmjs.org/react/-/react-18.2.0.tgz",
-					"shasum":    "abc123",
-					"integrity": "sha512-xyz",
-				},
-			},
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, upstreams, publicBase)
-	require.True(t, changed)
-	require.Equal(t, "https://proxy/npm/react/-/react-18.2.0.tgz",
-		doc["versions"].(map[string]any)["18.2.0"].(map[string]any)["dist"].(map[string]any)["tarball"])
-}
-
-func TestRewriteNPMTarballsNoTarballsUnchanged(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-	publicBase := "https://proxy/npm"
-
-	doc := map[string]any{
-		"name":    "react",
-		"version": "1.0.0",
-		"dependencies": map[string]any{
-			"lodash": "^4.0.0",
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, upstreams, publicBase)
-	require.False(t, changed)
-}
-
-func TestRewriteNPMTarballsDistWithoutTarball(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-	publicBase := "https://proxy/npm"
-
-	doc := map[string]any{
-		"dist": map[string]any{
-			"shasum": "abc123",
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, upstreams, publicBase)
-	require.False(t, changed)
-}
-
-func TestRewriteNPMTarballsTarballNonString(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-	publicBase := "https://proxy/npm"
-
-	doc := map[string]any{
-		"dist": map[string]any{
-			"tarball": nil,
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, upstreams, publicBase)
-	require.False(t, changed)
-}
-
-func TestRewriteNPMTarballsEmptyUpstreamsNoChange(t *testing.T) {
-	doc := map[string]any{
-		"dist": map[string]any{
-			"tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.tgz",
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, nil, "https://proxy/npm")
-	require.False(t, changed)
-}
-
-func TestRewriteNPMTarballsArrayOfObjects(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-	publicBase := "https://proxy/npm"
-
-	doc := []any{
-		map[string]any{
-			"dist": map[string]any{
-				"tarball": "https://registry.npmjs.org/pkg-a/-/a-1.0.tgz",
-			},
-		},
-		map[string]any{
-			"dist": map[string]any{
-				"tarball": "https://registry.npmjs.org/pkg-b/-/b-2.0.tgz",
-			},
-		},
-	}
-
-	changed := RewriteNPMTarballs(doc, upstreams, publicBase)
-	require.True(t, changed)
-	require.Equal(t, "https://proxy/npm/pkg-a/-/a-1.0.tgz", doc[0].(map[string]any)["dist"].(map[string]any)["tarball"])
-	require.Equal(t, "https://proxy/npm/pkg-b/-/b-2.0.tgz", doc[1].(map[string]any)["dist"].(map[string]any)["tarball"])
-}
-
-func TestRewriteNPMTarballsPrimitiveValuesPassThrough(t *testing.T) {
-	upstreams := []string{"https://registry.npmjs.org"}
-
-	require.False(t, RewriteNPMTarballs("string", upstreams, "https://proxy/npm"))
-	require.False(t, RewriteNPMTarballs(42, upstreams, "https://proxy/npm"))
-	require.False(t, RewriteNPMTarballs(true, upstreams, "https://proxy/npm"))
+func TestRewriteNPMMetadataRejectsInvalidJSON(t *testing.T) {
+	var rewritten bytes.Buffer
+	require.Error(t, RewriteNPMMetadata(strings.NewReader(`{"dist":`), &rewritten, []string{"https://registry.npmjs.org"}, "https://proxy/npm"))
 }
 
 func TestBaseURLConstructsFromHeaders(t *testing.T) {

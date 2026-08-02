@@ -30,26 +30,30 @@ func (h *Handler) serveDescriptor(w http.ResponseWriter, req *http.Request, clea
 		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", http.StatusBadRequest, 0)
 		return
 	}
-	if body, headers, ok := h.openFreshDescriptor(req.Context(), route.ObjectPath); ok {
+	if body, headers, ok := h.openFreshDescriptor(req.Context(), req, route.ObjectPath); ok {
 		h.flushDescriptor(w, req, rewriteDescriptor(req, body), headers, "FRESH")
 		return
 	}
-	body, headers, err := h.fetchDescriptor(req.Context(), route)
+	userAgent, _ := h.client.RequestUserAgent(req)
+	body, headers, cacheStatus, err := h.fetchDescriptor(req.Context(), route, userAgent, !h.client.UserAgentConfigured)
 	if err != nil {
 		httpcache.ErrorResponse(http.StatusBadGateway, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", http.StatusBadGateway, 0)
 		return
 	}
-	h.flushDescriptor(w, req, rewriteDescriptor(req, body), headers, "MISS")
+	h.flushDescriptor(w, req, rewriteDescriptor(req, body), headers, cacheStatus)
 }
 
-func (h *Handler) openFreshDescriptor(ctx context.Context, objectPath string) ([]byte, map[string]string, bool) {
+func (h *Handler) openFreshDescriptor(ctx context.Context, req *http.Request, objectPath string) ([]byte, map[string]string, bool) {
 	reader, err := h.store.OpenObject(ctx, h.name, objectPath)
 	if err != nil {
 		return nil, nil, false
 	}
 	defer reader.Close()
 	info := reader.Info()
+	if !httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
+		return nil, nil, false
+	}
 	fetchedAt, err := utils.ParseFetchedAt(info.Options["fetched-at"])
 	if err != nil || time.Since(fetchedAt) > defaultDescriptorFreshFor {
 		return nil, nil, false
@@ -65,15 +69,20 @@ func (h *Handler) openFreshDescriptor(ctx context.Context, objectPath string) ([
 	return body, headers, true
 }
 
-func (h *Handler) fetchDescriptor(ctx context.Context, route httpcache.Route) ([]byte, map[string]string, error) {
+func (h *Handler) fetchDescriptor(
+	ctx context.Context,
+	route httpcache.Route,
+	userAgent string,
+	rejectUserAgentVariants bool,
+) ([]byte, map[string]string, string, error) {
 	var firstErr error
 	for _, upstream := range h.upstreams {
 		targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(route.UpstreamPath)
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 		if err != nil {
-			return nil, nil, fmt.Errorf("create flatpak descriptor request: %w", err)
+			return nil, nil, "", fmt.Errorf("create flatpak descriptor request: %w", err)
 		}
-		request.Header.Set("User-Agent", h.client.UserAgent)
+		request.Header.Set("User-Agent", userAgent)
 		start := time.Now()
 		response, err := h.client.Do(request)
 		latency := time.Since(start)
@@ -84,7 +93,8 @@ func (h *Handler) fetchDescriptor(ctx context.Context, route httpcache.Route) ([
 			}
 			continue
 		}
-		body, headers, err := h.readDescriptorResponse(ctx, route.ObjectPath, upstream, response, latency)
+		storeResponse := !rejectUserAgentVariants || !utils.VariesByUserAgent(response.Header.Values("Vary")...)
+		body, headers, err := h.readDescriptorResponse(ctx, route.ObjectPath, upstream, response, latency, storeResponse)
 		response.Body.Close()
 		if err != nil {
 			if firstErr == nil {
@@ -92,12 +102,15 @@ func (h *Handler) fetchDescriptor(ctx context.Context, route httpcache.Route) ([
 			}
 			continue
 		}
-		return body, headers, nil
+		if !storeResponse {
+			return body, headers, "BYPASS", nil
+		}
+		return body, headers, "MISS", nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
-	return nil, nil, firstErr
+	return nil, nil, "", firstErr
 }
 
 func (h *Handler) readDescriptorResponse(
@@ -106,6 +119,7 @@ func (h *Handler) readDescriptorResponse(
 	upstream string,
 	response *http.Response,
 	latency time.Duration,
+	storeResponse bool,
 ) ([]byte, map[string]string, error) {
 	h.stats.RecordUpstreamRequest(
 		h.name,
@@ -129,17 +143,22 @@ func (h *Handler) readDescriptorResponse(
 	headers := map[string]string{}
 	for key, value := range response.Header {
 		if len(value) > 0 {
-			headers[http.CanonicalHeaderKey(key)] = value[0]
+			headers[http.CanonicalHeaderKey(key)] = strings.Join(value, ", ")
 		}
 	}
+	if !storeResponse {
+		return body, headers, nil
+	}
 	meta := map[string]string{
-		"content-type":   headers["Content-Type"],
-		"content-length": strconv.Itoa(len(body)),
-		"last-modified":  headers["Last-Modified"],
-		"etag":           headers["Etag"],
-		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
-		"mode":           config.ModeFlatpak,
-		"cache":          "MISS",
+		"content-type":                    headers["Content-Type"],
+		"content-length":                  strconv.Itoa(len(body)),
+		"last-modified":                   headers["Last-Modified"],
+		"etag":                            headers["Etag"],
+		"vary":                            headers["Vary"],
+		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
+		"mode":                            config.ModeFlatpak,
+		"cache":                           "MISS",
+		httpcache.UserAgentReviewedOption: "true",
 	}
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(objectPath)), 0o755); err != nil {
 		return nil, nil, fmt.Errorf("create flatpak descriptor directory: %w", err)

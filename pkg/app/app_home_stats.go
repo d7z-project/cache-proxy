@@ -30,7 +30,7 @@ func cacheHitRate(cache map[string]uint64) (float64, bool) {
 	for cacheResult, count := range cache {
 		total += count
 		switch strings.ToUpper(cacheResult) {
-		case "HIT", "FRESH", "REFRESH", "STALE", "GENERATION":
+		case "HIT", "FRESH", "STALE", "GENERATION":
 			hits += count
 		}
 	}

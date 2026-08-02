@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -53,9 +54,12 @@ type handler struct {
 	stats            *httpcache.Stats
 	client           *utils.HttpClientWrapper
 	downloadsLimiter *httpcache.DownloadLimiter
+	lifecycleCtx     context.Context
+	cancel           context.CancelFunc
 	wait             sync.WaitGroup
 	auth             authHandler
 	downloads        sync.Map
+	refLocks         *utils.RWLockGroup
 	blobIndexMu      sync.Mutex
 	blobIndex        map[string]blobIndexEntry
 }

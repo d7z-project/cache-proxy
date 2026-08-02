@@ -92,6 +92,9 @@ func ValidatePassHeaders(headers []string) error {
 		if name == "" || strings.ContainsAny(name, " \t\r\n:") {
 			return fmt.Errorf("invalid pass header %q", header)
 		}
+		if strings.EqualFold(name, "User-Agent") {
+			return fmt.Errorf("pass header %q is managed by transport.ua", header)
+		}
 	}
 	return nil
 }

@@ -497,6 +497,55 @@ func TestFlatpakRepoDescriptorRewrite(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "GPGKey=abc\n")
 }
 
+func TestFlatpakBrowserDescriptorVaryIsNotCached(t *testing.T) {
+	const browserUserAgent = "Mozilla/5.0 Firefox/127.0"
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		require.Equal(t, browserUserAgent, req.UserAgent())
+		w.Header().Set("Vary", "User-Agent")
+		_, _ = io.WriteString(w, "[Flatpak Repo]\nTitle=Test\nUrl=https://dl.example/repo\n")
+	}))
+	defer upstream.Close()
+
+	store := openTestStore(t)
+	handler := newTestHandler(t, store, []string{upstream.URL})
+	for range 2 {
+		req := httptest.NewRequest(http.MethodGet, "/test.flatpakrepo", nil)
+		req.Header.Set("User-Agent", browserUserAgent)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+		require.Equal(t, "User-Agent", rec.Header().Get("Vary"))
+	}
+	require.Equal(t, int32(2), requests.Load())
+}
+
+func TestFlatpakMetadataRefreshUsesInternalUserAgent(t *testing.T) {
+	var userAgents []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		userAgents = append(userAgents, req.UserAgent())
+		switch req.URL.Path {
+		case "/summary":
+			_, _ = io.WriteString(w, "summary-data")
+		case "/summary.sig", "/config":
+			http.NotFound(w, req)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer upstream.Close()
+
+	store := openTestStore(t)
+	handler := newTestHandler(t, store, []string{upstream.URL})
+	require.NoError(t, handler.Refresh(context.Background()))
+	require.NotEmpty(t, userAgents)
+	for _, userAgent := range userAgents {
+		require.Equal(t, httpcache.DefaultUserAgent, userAgent)
+	}
+}
+
 func openTestStore(t *testing.T) *blobfs.Store {
 	t.Helper()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())

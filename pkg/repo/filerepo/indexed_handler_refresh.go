@@ -30,7 +30,7 @@ func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig)
 		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
 			return fs.SkipAll
 		}
-		if err != nil || entry.IsDir() || strings.Contains(objectPath, "/.roots/") {
+		if err != nil || entry.IsDir() || objectPath == h.statePath() || strings.Contains(objectPath, "/.roots/") {
 			return nil
 		}
 		if opts.DryRun {
@@ -220,7 +220,8 @@ func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
 }
 
 func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts config.CleanupConfig) error {
-	rootDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "generations")
+	rootBase := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID))
+	rootDir := path.Join(rootBase, "generations")
 	currentGen := h.currentGeneration(rootID)
 	if currentGen == "" {
 		return nil
@@ -268,10 +269,72 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 		}
 		if err := h.store.DeleteObject(ctx, h.name, item); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Debug("metadata gc failed", "path", item, "err", err)
+			continue
 		}
 		deleted++
 	}
-	return nil
+	if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+		return nil
+	}
+	snapshotDir := path.Join(rootBase, "snapshots")
+	err = fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+			return fs.SkipAll
+		}
+		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			return nil
+		}
+		generation := strings.TrimSuffix(entry.Name(), ".yaml")
+		if generation == "" || generation == currentGen {
+			return nil
+		}
+		hasFiles, err := h.generationHasFiles(ctx, path.Join(rootDir, generation))
+		if err != nil || hasFiles {
+			return err
+		}
+		if opts.DryRun {
+			deleted++
+			slog.Info("metadata gc dry-run delete snapshot", "instance", h.name, "root_id", rootID, "path", objectPath)
+			return nil
+		}
+		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Debug("metadata snapshot gc failed", "path", objectPath, "err", err)
+			return nil
+		}
+		deleted++
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func (h *IndexedHandler) generationHasFiles(ctx context.Context, generationDir string) (bool, error) {
+	hasFiles := false
+	err := fs.WalkDir(h.store.TenantFS(h.name), generationDir, func(_ string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return walkErr
+		}
+		if !entry.IsDir() {
+			hasFiles = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return hasFiles, err
 }
 
 func (h *IndexedHandler) buildSnapshot(

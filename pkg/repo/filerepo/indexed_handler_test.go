@@ -381,6 +381,11 @@ func TestGenerationResolverUsesGenerationScopedObjectPath(t *testing.T) {
 	require.NotEqual(t, firstRoute.ObjectPath, secondRoute.ObjectPath)
 }
 
+func TestValidatePassHeadersRejectsManagedUserAgent(t *testing.T) {
+	require.NoError(t, ValidatePassHeaders([]string{"X-Custom"}))
+	require.ErrorContains(t, ValidatePassHeaders([]string{"user-agent"}), "transport.ua")
+}
+
 func TestStartReconcilesMetadataTasksWithoutSchedulerState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1174,6 +1179,55 @@ func TestCleanupRootFailsWhenCleanupIndexMissing(t *testing.T) {
 	handler.setRootSnapshot("root", &LiveSnapshot{RootID: "root", Generation: "gen1"})
 
 	require.Error(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
+}
+
+func TestCleanupPreservesPersistedRepositoryRoots(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	handler.saveState(ctx)
+	_, err := store.Put(ctx, handler.name, path.Join(handler.objectRoot, "legacy.cache"), strings.NewReader("legacy"), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
+	require.Len(t, handler.loadState(ctx).Roots, 1)
+	handler.mu.Lock()
+	handler.roots = map[string]*rootEntry{}
+	handler.mu.Unlock()
+	handler.restoreRoots(ctx)
+	require.Equal(t, []string{"root"}, handler.currentRootIDs(), "restored roots must remain available to scheduler reconciliation")
+	_, err = store.StatObject(ctx, handler.name, path.Join(handler.objectRoot, "legacy.cache"))
+	require.Error(t, err)
+}
+
+func TestCleanupRootRemovesSnapshotAfterGenerationIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	handler.setRootSnapshot("root", &LiveSnapshot{RootID: "root", Generation: "current"})
+
+	currentIndex := handler.cleanupIndexPath("root", "current")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(currentIndex)), 0o755))
+	_, err := store.Put(ctx, handler.name, currentIndex, strings.NewReader("pool/current.pkg\n"), nil)
+	require.NoError(t, err)
+	oldObject := handler.generationContentPath("root", "old", ResourceArtifact, "pool/old.pkg")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(oldObject)), 0o755))
+	_, err = store.Put(ctx, handler.name, oldObject, strings.NewReader("old"), nil)
+	require.NoError(t, err)
+	oldSnapshot := handler.snapshotPath("root", "old")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(oldSnapshot)), 0o755))
+	_, err = store.Put(ctx, handler.name, oldSnapshot, strings.NewReader("root_id: root\ngeneration: old\n"), nil)
+	require.NoError(t, err)
+
+	opts := config.DefaultCleanupConfig()
+	opts.BatchSize = 1
+	require.NoError(t, handler.CleanupRoot(ctx, "root", opts))
+	_, err = store.StatObject(ctx, handler.name, oldSnapshot)
+	require.NoError(t, err, "snapshot must remain until a later batch confirms the generation is empty")
+
+	require.NoError(t, handler.CleanupRoot(ctx, "root", opts))
+	_, err = store.StatObject(ctx, handler.name, oldSnapshot)
+	require.Error(t, err)
 }
 
 func TestCanSkipRefreshReturnsFalseWhenSnapshotNil(t *testing.T) {

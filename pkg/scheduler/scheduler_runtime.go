@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Scheduler) loop() {
-	defer s.wg.Done()
+	defer s.finish()
 	close(s.startGate)
 
 	for _, def := range s.preStartTasks {
@@ -241,10 +241,34 @@ func (s *Scheduler) execute(ts *taskState) {
 
 	ts.Status = StatusRunning
 	start := time.Now()
-	outcome, err := safeCall(ctx, ts.handler)
+	type taskResult struct {
+		outcome *TaskOutcome
+		err     error
+	}
+	completed := make(chan taskResult, 1)
+	go func() {
+		outcome, err := safeCall(ctx, ts.handler)
+		completed <- taskResult{outcome: outcome, err: err}
+	}()
+	var call taskResult
+	waiting := true
+	for waiting {
+		select {
+		case call = <-completed:
+			waiting = false
+		case c := <-s.cmdCh:
+			s.handleCmd(c)
+		case evt := <-s.busSub:
+			s.handleBusEvent(evt)
+		}
+	}
+	outcome, err := call.outcome, call.err
 	dur := time.Since(start)
 
 	if s.stopped.Load() {
+		return
+	}
+	if current := s.tasks[ts.Key]; current != ts {
 		return
 	}
 
@@ -310,7 +334,7 @@ func (s *Scheduler) execute(ts *taskState) {
 	runObserver := s.runObserver
 	s.observerMu.RUnlock()
 	if runObserver != nil {
-		runObserver(TaskRun{
+		run := TaskRun{
 			Key:        ts.Key,
 			StartedAt:  start,
 			FinishedAt: start.Add(dur),
@@ -320,7 +344,28 @@ func (s *Scheduler) execute(ts *taskState) {
 			Detail:     detail,
 			Message:    message,
 			Err:        ts.LastError,
-		})
+		}
+		observed := make(chan struct{})
+		go func() {
+			defer close(observed)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					slog.Error("scheduler observer panic", "panic", recovered)
+				}
+			}()
+			runObserver(run)
+		}()
+		waiting = true
+		for waiting {
+			select {
+			case <-observed:
+				waiting = false
+			case c := <-s.cmdCh:
+				s.handleCmd(c)
+			case evt := <-s.busSub:
+				s.handleBusEvent(evt)
+			}
+		}
 	}
 
 	if ts.Interval > 0 {

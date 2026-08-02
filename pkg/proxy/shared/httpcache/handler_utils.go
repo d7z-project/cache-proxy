@@ -29,6 +29,7 @@ var internalHeaders = map[string]struct{}{
 	"indexed-digest":            {},
 	"indexed-digest-verifiable": {},
 	"source-upstream":           {},
+	UserAgentReviewedOption:     {},
 }
 
 func StripInternal(headers map[string]string) {
@@ -133,6 +134,46 @@ type closeCallbackBody struct {
 	once sync.Once
 }
 
+type countingBody struct {
+	io.ReadCloser
+	bytes uint64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.bytes += uint64(n)
+	return n, err
+}
+
+type countingSeekBody struct {
+	io.ReadSeekCloser
+	bytes uint64
+}
+
+func (b *countingSeekBody) Read(p []byte) (int, error) {
+	n, err := b.ReadSeekCloser.Read(p)
+	b.bytes += uint64(n)
+	return n, err
+}
+
+type responseBodyCounter interface {
+	bytesRead() uint64
+}
+
+func (b *countingBody) bytesRead() uint64     { return b.bytes }
+func (b *countingSeekBody) bytesRead() uint64 { return b.bytes }
+
+func countResponseBody(response *utils.ResponseWrapper) responseBodyCounter {
+	if body, ok := response.Body.(io.ReadSeekCloser); ok {
+		counted := &countingSeekBody{ReadSeekCloser: body}
+		response.Body = counted
+		return counted
+	}
+	counted := &countingBody{ReadCloser: response.Body}
+	response.Body = counted
+	return counted
+}
+
 func (b *closeCallbackBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(b.done)
@@ -141,9 +182,10 @@ func (b *closeCallbackBody) Close() error {
 
 func copyHeaders(headers http.Header) map[string]string {
 	result := map[string]string{}
-	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "Content-Range", "Accept-Ranges", "ETag", "Docker-Content-Digest", "Docker-Distribution-API-Version"} {
-		if value := headers.Get(key); value != "" {
-			result[key] = value
+	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "Content-Range", "Accept-Ranges", "ETag", "Vary", "Docker-Content-Digest", "Docker-Distribution-API-Version"} {
+		values := headers.Values(key)
+		if len(values) > 0 {
+			result[key] = strings.Join(values, ", ")
 		}
 	}
 	return result
@@ -170,8 +212,13 @@ func ResponseBytes(headers map[string]string) uint64 {
 }
 
 func metadata(headers map[string]string, mode, status string) map[string]string {
-	result := map[string]string{"mode": mode, "cache": status, "fetched-at": time.Now().UTC().Format(time.RFC3339Nano)}
-	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "ETag", "Docker-Content-Digest"} {
+	result := map[string]string{
+		"mode":                  mode,
+		"cache":                 status,
+		"fetched-at":            time.Now().UTC().Format(time.RFC3339Nano),
+		UserAgentReviewedOption: "true",
+	}
+	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "ETag", "Vary", "Docker-Content-Digest"} {
 		if value := headers[key]; value != "" {
 			result[strings.ToLower(key)] = value
 		}
@@ -189,6 +236,8 @@ func HeaderName(key string) string {
 		return "Last-Modified"
 	case "etag":
 		return "ETag"
+	case "vary":
+		return "Vary"
 	case "docker-content-digest":
 		return "Docker-Content-Digest"
 	default:

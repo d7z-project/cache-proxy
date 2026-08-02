@@ -14,6 +14,8 @@ type Resolver struct {
 	cfg *Policy
 }
 
+const abbreviatedMetadataType = "application/vnd.npm.install-v1+json"
+
 func New(cfg *Policy) *Resolver {
 	return &Resolver{cfg: cfg}
 }
@@ -40,13 +42,19 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		}, nil
 	}
 	match := r.resolveResource("metadata")
+	requestHeaders := map[string]string(nil)
+	if strings.Contains(strings.ToLower(req.Header.Get("Accept")), abbreviatedMetadataType) {
+		objectPath += "/install-v1"
+		requestHeaders = map[string]string{"Accept": abbreviatedMetadataType}
+	}
 	return httpcache.Route{
-		ObjectPath:   "npm/metadata/" + httpcache.HashKey(objectPath),
-		UpstreamPath: upstreamPath,
-		Policy:       match.policy,
-		FreshFor:     match.freshFor,
-		ExpireAfter:  match.expireAfter,
-		RewriteKind:  "npm-metadata",
+		ObjectPath:     "npm/metadata/" + httpcache.HashKey(objectPath),
+		UpstreamPath:   upstreamPath,
+		RequestHeaders: requestHeaders,
+		Policy:         match.policy,
+		FreshFor:       match.freshFor,
+		ExpireAfter:    match.expireAfter,
+		RewriteKind:    "npm-metadata",
 	}, nil
 }
 

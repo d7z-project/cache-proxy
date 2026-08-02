@@ -55,12 +55,15 @@ type Handler struct {
 	config              RuntimeConfig
 	store               *blobfs.Store
 	client              *utils.HttpClientWrapper
-	locks               *utils.RWLockGroup
 	resolver            Resolver
 	stats               *Stats
 	health              *health.ServiceHealth
+	lifecycleCtx        context.Context
+	cancel              context.CancelFunc
 	wait                sync.WaitGroup
-	downloads           sync.Map
+	flights             objectFlights
+	cleanupMu           sync.Mutex
+	cleanupAfter        string
 	downloadLimiter     *DownloadLimiter
 	parsedUpstreamHosts []string
 }
@@ -68,6 +71,7 @@ type Handler struct {
 type remoteOptions struct {
 	AcceptErrors           bool
 	Record                 bool
+	UserAgent              string
 	TargetURL              string
 	AllowedTargetHosts     []string
 	PreferredUpstream      string
@@ -77,7 +81,19 @@ type remoteOptions struct {
 // DefaultUserAgent identifies cache-proxy to upstream services.
 const DefaultUserAgent = utils.DefaultUserAgent
 
+// UserAgentReviewedOption marks objects stored after evaluating upstream Vary headers.
+const UserAgentReviewedOption = "user-agent-reviewed"
+
+// CacheSupportsRequestUserAgent reports whether a cached representation is safe for req.
+func CacheSupportsRequestUserAgent(client *utils.HttpClientWrapper, req *http.Request, options map[string]string) bool {
+	if client.UserAgentConfigured || !utils.IsBrowserRequest(req) {
+		return true
+	}
+	return options[UserAgentReviewedOption] == "true" && !utils.VariesByUserAgent(options["vary"])
+}
+
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	client := utils.DefaultHttpClientWrapper()
 	ConfigureClientTransport(client, name, runtime.Transport)
 	hosts := make([]string, 0, len(runtime.Upstreams))
@@ -86,16 +102,18 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 			hosts = append(hosts, pu.Host)
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, locks: utils.NewRWLockGroup(), resolver: resolver, stats: stats, health: svcHealth, downloadLimiter: runtime.DownloadLimiter, parsedUpstreamHosts: hosts}
+	return &Handler{name: name, config: runtime, store: store, client: client, resolver: resolver, stats: stats, health: svcHealth, lifecycleCtx: lifecycleCtx, cancel: cancel, downloadLimiter: runtime.DownloadLimiter, parsedUpstreamHosts: hosts}
 }
 
 func ConfigureClientTransport(client *utils.HttpClientWrapper, name string, transport *config.TransportConfig) {
 	client.UserAgent = DefaultUserAgent
+	client.UserAgentConfigured = false
 	if transport == nil {
 		return
 	}
 	if transport.UserAgent != "" {
 		client.UserAgent = transport.UserAgent
+		client.UserAgentConfigured = true
 	}
 	baseTransport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -142,7 +160,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
 		resp.Header().Set("Retry-After", "5")
 		status := http.StatusBadGateway
-		if errors.Is(err, ErrUpstreamUnavailable) {
+		if errors.Is(err, ErrUpstreamUnavailable) || errors.Is(err, ErrDownloadLimit) {
 			status = http.StatusServiceUnavailable
 		}
 		http.Error(resp, http.StatusText(status), status)
@@ -155,19 +173,21 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 func (h *Handler) flushResult(req *http.Request, resp http.ResponseWriter, result *utils.ResponseWrapper, logMsg string) {
 	status := result.StatusCode
 	cache := result.Headers["X-Cache"]
-	bytes := ResponseBytes(result.Headers)
+	counted := countResponseBody(result)
 	StripInternal(result.Headers)
 	if err := result.FlushClose(req, resp); err != nil {
 		slog.Info(logMsg, "instance", h.name, "err", err)
 	}
-	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, bytes)
+	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, counted.bytesRead())
 }
 
 func (h *Handler) Close() {
+	h.cancel()
 	h.wait.Wait()
 }
 
 func (h *Handler) CloseContext(ctx context.Context) error {
+	h.cancel()
 	return utils.WaitGroupContext(ctx, &h.wait)
 }
 

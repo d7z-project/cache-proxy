@@ -2,6 +2,7 @@ package npm
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -110,6 +111,22 @@ func TestResolverMetadataFreshFor(t *testing.T) {
 	route, err := r.Resolve(req)
 	require.NoError(t, err)
 	require.Equal(t, config.Freshness(300), route.FreshFor)
+}
+
+func TestResolverSeparatesAbbreviatedMetadataRepresentation(t *testing.T) {
+	resolver := New(&Policy{MetadataPolicy: config.PolicyRevalidate, MetadataBusyPolicy: config.BusyPolicyStale})
+	fullReq := httptest.NewRequest(http.MethodGet, "/react", nil)
+	full, err := resolver.Resolve(fullReq)
+	require.NoError(t, err)
+
+	abbreviatedReq := httptest.NewRequest(http.MethodGet, "/react", nil)
+	abbreviatedReq.Header.Set("Accept", abbreviatedMetadataType+", application/json")
+	abbreviated, err := resolver.Resolve(abbreviatedReq)
+	require.NoError(t, err)
+
+	require.NotEqual(t, full.ObjectPath, abbreviated.ObjectPath)
+	require.Empty(t, full.RequestHeaders)
+	require.Equal(t, abbreviatedMetadataType, abbreviated.RequestHeaders["Accept"])
 }
 
 func TestResolverTarballNoFreshFor(t *testing.T) {

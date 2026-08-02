@@ -68,7 +68,7 @@ func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
 		if part == "blobs" && i+1 < len(parts) {
 			repo := strings.Join(parts[1:i], "/")
 			digest := parts[i+1]
-			if repo == "" || digest == "" || !strings.Contains(digest, ":") {
+			if repo == "" || !isSHA256Digest(digest) {
 				return request{}, errors.New("invalid OCI blob path")
 			}
 			return request{

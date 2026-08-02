@@ -146,6 +146,8 @@ type Scheduler struct {
 	bus             *bus.Bus
 	busSub          <-chan bus.Event
 	startGate       chan struct{}
+	done            chan struct{}
+	doneOnce        sync.Once
 	stopped         atomic.Bool
 	factories       map[string]*TaskFactory
 	metricInstances map[string]struct{}
@@ -165,7 +167,6 @@ type Scheduler struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
 }
 
 func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler {
@@ -174,6 +175,7 @@ func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler 
 		bus:             b,
 		busSub:          b.Subscribe(bus.EventMetadataDiscovered, bus.EventMetadataRemoved),
 		startGate:       make(chan struct{}),
+		done:            make(chan struct{}),
 		factories:       map[string]*TaskFactory{},
 		metricInstances: map[string]struct{}{},
 		tasks:           map[TaskKey]*taskState{},
@@ -194,10 +196,8 @@ func (s *Scheduler) Register(def TaskDef) {
 	}) {
 		return
 	}
-	<-s.startGate
 	respCh := make(chan any, 1)
-	s.cmdCh <- cmd{kind: cmdRegister, def: def, respCh: respCh}
-	<-respCh
+	s.submit(cmd{kind: cmdRegister, def: def, respCh: respCh})
 }
 
 func (s *Scheduler) RegisterFactory(factory TaskFactory) {
@@ -209,10 +209,8 @@ func (s *Scheduler) RegisterFactory(factory TaskFactory) {
 	}) {
 		return
 	}
-	<-s.startGate
 	respCh := make(chan any, 1)
-	s.cmdCh <- cmd{kind: cmdRegisterFactory, factory: factory, respCh: respCh}
-	<-respCh
+	s.submit(cmd{kind: cmdRegisterFactory, factory: factory, respCh: respCh})
 }
 
 func (s *Scheduler) Unregister(key TaskKey) {
@@ -224,10 +222,8 @@ func (s *Scheduler) Unregister(key TaskKey) {
 	}) {
 		return
 	}
-	<-s.startGate
 	respCh := make(chan any, 1)
-	s.cmdCh <- cmd{kind: cmdUnregister, key: key, respCh: respCh}
-	<-respCh
+	s.submit(cmd{kind: cmdUnregister, key: key, respCh: respCh})
 }
 
 func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
@@ -248,10 +244,12 @@ func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
 		return TaskInfo{}, false
 	}
 	s.startMu.Unlock()
-	<-s.startGate
 	respCh := make(chan any, 1)
-	s.cmdCh <- cmd{kind: cmdInfo, key: key, respCh: respCh}
-	result := (<-respCh).(TaskInfo)
+	value, ok := s.submit(cmd{kind: cmdInfo, key: key, respCh: respCh})
+	if !ok {
+		return TaskInfo{}, false
+	}
+	result := value.(TaskInfo)
 	return result, result.Key.instance != ""
 }
 
@@ -273,10 +271,12 @@ func (s *Scheduler) Snapshot() []TaskInfo {
 		return infos
 	}
 	s.startMu.Unlock()
-	<-s.startGate
 	respCh := make(chan any, 1)
-	s.cmdCh <- cmd{kind: cmdSnapshot, respCh: respCh}
-	return (<-respCh).([]TaskInfo)
+	value, ok := s.submit(cmd{kind: cmdSnapshot, respCh: respCh})
+	if !ok {
+		return nil
+	}
+	return value.([]TaskInfo)
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -287,6 +287,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 		ctx = context.Background()
 	}
 	s.startMu.Lock()
+	if s.stopped.Load() {
+		s.startMu.Unlock()
+		return
+	}
 	if s.started {
 		s.startMu.Unlock()
 		return
@@ -294,7 +298,6 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.started = true
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.startMu.Unlock()
-	s.wg.Add(1)
 	go s.loop()
 }
 
@@ -308,33 +311,57 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.stopped.Load() {
-		return nil
-	}
-	if s.cancel != nil {
-		s.cancel()
-	}
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		s.stopped.Store(true)
+	if s.stopped.CompareAndSwap(false, true) {
+		s.startMu.Lock()
+		started := s.started
+		cancel := s.cancel
+		s.startMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if !started {
+			s.finish()
+		}
 		s.bus.Unsubscribe(s.busSub)
+	}
+	select {
+	case <-s.done:
+	case <-ctx.Done():
 		return ctx.Err()
 	}
-	s.bus.Unsubscribe(s.busSub)
 	s.saveState()
-	s.stopped.Store(true)
 	return nil
+}
+
+func (s *Scheduler) submit(c cmd) (any, bool) {
+	select {
+	case <-s.startGate:
+	case <-s.done:
+		return nil, false
+	}
+	select {
+	case s.cmdCh <- c:
+	case <-s.done:
+		return nil, false
+	}
+	select {
+	case value := <-c.respCh:
+		return value, true
+	case <-s.done:
+		return nil, false
+	}
+}
+
+func (s *Scheduler) finish() {
+	s.doneOnce.Do(func() { close(s.done) })
 }
 
 func (s *Scheduler) withPreStart(fn func()) bool {
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
+	if s.stopped.Load() {
+		return true
+	}
 	if s.started {
 		return false
 	}

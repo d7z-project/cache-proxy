@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ type tokenCacheEntry struct {
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, downloads *httpcache.DownloadLimiter) *handler {
 	client := utils.DefaultHttpClientWrapper()
 	httpcache.ConfigureClientTransport(client, name, block.Transport)
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	return &handler{
 		name:             name,
 		upstream:         strings.TrimRight(block.Upstream, "/"),
@@ -38,12 +40,17 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 		stats:            stats,
 		client:           client,
 		downloadsLimiter: downloads,
+		lifecycleCtx:     lifecycleCtx,
+		cancel:           cancel,
 		auth:             authHandler{tokens: map[string]ociToken{}},
+		refLocks:         utils.NewRWLockGroup(),
 		blobIndex:        map[string]blobIndexEntry{},
 	}
 }
 
 func (h *handler) Start(ctx context.Context) error {
+	h.cancel()
+	h.lifecycleCtx, h.cancel = context.WithCancel(ctx)
 	return nil
 }
 
@@ -86,6 +93,7 @@ func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 }
 
 func (h *handler) Stop(ctx context.Context) error {
+	h.cancel()
 	return utils.WaitGroupContext(ctx, &h.wait)
 }
 
@@ -101,6 +109,11 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		if err != nil || entry.IsDir() || path.Base(current) != "state.yaml" {
 			return nil
 		}
+		lock := h.refLocks.Get(current)
+		if !lock.TryLock() {
+			return nil
+		}
+		defer lock.Unlock()
 		state, readErr := h.readState(ctx, current)
 		if readErr != nil || h.stateExpired(state) {
 			if opts.DryRun {
@@ -137,8 +150,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	status, cache, bytes, err := h.serve(req.Context(), w, req, resolved)
 	if err != nil {
 		slog.Info("oci proxy failed", "instance", h.name, "method", req.Method, "path", req.URL.Path, "err", err)
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", http.StatusBadGateway, 0)
+		status := http.StatusBadGateway
+		if errors.Is(err, httpcache.ErrDownloadLimit) {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", "5")
+		}
+		http.Error(w, http.StatusText(status), status)
+		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", status, 0)
 		return
 	}
 	h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, cache, status, bytes)
@@ -169,10 +187,30 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 
 	staleState := state
-	status, bytes, fetchErr := h.fetchManifest(ctx, w, req, resolved)
+	lock := h.refLocks.Get(statePath)
+	if !lock.TryLock() {
+		if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
+			if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "STALE"); cacheErr == nil {
+				return status, "STALE", bytes, nil
+			}
+		}
+		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", map[string]string{"Accept": manifestAccept})
+	}
+	defer lock.Unlock()
+
+	state, err = h.readState(ctx, statePath)
+	if err == nil && !h.stateExpired(state) {
+		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "HIT"); cacheErr == nil {
+			return status, "HIT", bytes, nil
+		}
+	}
+	if state.Repo != "" {
+		staleState = state
+	}
+	status, cache, bytes, fetchErr := h.fetchManifest(ctx, w, req, resolved)
 	if fetchErr == nil {
 		slog.Debug("oci manifest fetched", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
-		return status, "MISS", bytes, nil
+		return status, cache, bytes, nil
 	}
 	if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
 		slog.Debug("oci manifest fetch failed, serving stale", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", fetchErr)
@@ -185,15 +223,21 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 
 func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
 	state, err := h.findBlobState(ctx, resolved.repo, resolved.digest)
-	if err == nil {
-		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refBlobPath(state.Repo, state.Ref, resolved.digest), "HIT"); cacheErr == nil {
-			slog.Debug("oci blob cache hit", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
-			return status, "HIT", bytes, nil
-		}
-	}
 	if err != nil {
 		slog.Debug("oci blob not found in refs, bypass", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+	}
+	statePath := h.refStatePath(state.Repo, state.Ref)
+	lock := h.refLocks.Get(statePath)
+	lock.RLock()
+	defer lock.RUnlock()
+	state, err = h.readState(ctx, statePath)
+	if err != nil || h.stateExpired(state) || !slices.Contains(state.BlobDigests, resolved.digest) {
+		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+	}
+	if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refBlobPath(state.Repo, state.Ref, resolved.digest), "HIT"); cacheErr == nil {
+		slog.Debug("oci blob cache hit", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
+		return status, "HIT", bytes, nil
 	}
 	objectPath := h.refBlobPath(state.Repo, state.Ref, resolved.digest)
 	if _, downloading := h.downloads.LoadOrStore(objectPath, struct{}{}); downloading {
@@ -201,7 +245,7 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	slog.Debug("oci blob miss, fetching", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
-	return h.fetchBlob(ctx, w, req, resolved, state)
+	return h.fetchBlob(w, req, resolved, state)
 }
 
 func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, req *http.Request, objectPath, cache string) (int, uint64, error) {
@@ -211,11 +255,15 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 	}
 	defer reader.Close()
 	info := reader.Info()
+	if !httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
+		return 0, 0, errors.New("cached OCI object has unknown or incompatible User-Agent variance")
+	}
 	headers := map[string]string{
 		"Content-Length": info.Options["content-length"],
 		"Content-Type":   info.Options["content-type"],
 		"ETag":           info.Options["etag"],
 		"Last-Modified":  info.Options["last-modified"],
+		"Vary":           info.Options["vary"],
 		"X-Cache":        cache,
 	}
 	if digest := info.Options["docker-content-digest"]; digest != "" {
@@ -228,7 +276,8 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 }
 
 func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {
-	response, err := h.remoteRequest(ctx, req.Method, upstreamPath, headers)
+	userAgent, _ := h.client.RequestUserAgent(req)
+	response, err := h.remoteRequest(ctx, req.Method, upstreamPath, userAgent, headers)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -239,11 +288,12 @@ func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *h
 
 func (h *handler) putObjectFromReader(ctx context.Context, objectPath string, body io.Reader, size int64, headers http.Header, extra map[string]string) error {
 	meta := map[string]string{
-		"content-type":   headers.Get("Content-Type"),
-		"content-length": strconv.FormatInt(size, 10),
-		"fetched-at":     time.Now().UTC().Format(time.RFC3339Nano),
+		"content-type":                    headers.Get("Content-Type"),
+		"content-length":                  strconv.FormatInt(size, 10),
+		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
+		httpcache.UserAgentReviewedOption: "true",
 	}
-	for _, key := range []string{"ETag", "Last-Modified", "Docker-Content-Digest"} {
+	for _, key := range []string{"ETag", "Last-Modified", "Vary", "Docker-Content-Digest"} {
 		if value := headers.Get(key); value != "" {
 			meta[strings.ToLower(key)] = value
 		}

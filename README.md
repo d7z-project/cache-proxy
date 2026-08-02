@@ -56,8 +56,10 @@ Top-level fields:
 | `storage.cleanup.dry_run` | bool | `false` | Run scheduled cleanup without deleting files |
 | `storage.cleanup.batch_size` | int | `500` | Maximum deletions per cleanup batch |
 | `storage.orphan_policy` | string | — | Home page orphan cleanup policy (`auto`) |
-| `storage.download.max_active` | int | `256` | Global concurrent cache-fill downloads |
-| `storage.download.max_active_per_instance` | int | `64` | Concurrent cache-fill downloads per instance |
+| `storage.download.max_active` | int | `256` | Global concurrent upstream requests; up to the same number may wait in the bounded queue |
+| `storage.download.max_active_per_instance` | int | `64` | Concurrent upstream requests per instance; up to the same number may wait per instance |
+
+The upstream admission budget is shared by metadata, artifacts, refreshes, and bypass requests. Requests wait in arrival order while allowing instances with available per-instance capacity to proceed; tune both limits against upstream capacity, file descriptors, and temporary-disk bandwidth.
 
 Value types:
 
@@ -86,7 +88,11 @@ Notes:
 - Each instance must define exactly one mode block.
 - Most modes use `route.path`; `oci` uses `bind`.
 - `git` has its own block shape and does not use `expire_after` or `transport`.
-- The default upstream `User-Agent` is `cache-proxy/1`; set `transport.ua` only when an instance needs a custom value.
+- Browser `User-Agent` values are forwarded on foreground upstream requests. Other clients and internal refresh,
+  health-probe, and OCI token requests use `cache-proxy/1`; `transport.ua` overrides all of these behaviors for an instance.
+- Without `transport.ua`, responses declaring `Vary: User-Agent` or `Vary: *` are not stored, preventing
+  default-UA and browser-specific content from sharing a cache entry. Browsers refresh legacy entries once
+  when those entries predate User-Agent variance tracking.
 - `transport.health` exists for upstream health tuning; active probes default to `probe_interval: 2m`,
   reject intervals below `30s`, and are shared by upstream host to avoid bursty checks.
 - Active health probes use discovered Linux repository metadata targets; upstream roots without metadata targets
@@ -154,7 +160,7 @@ Use this mode for ordinary HTTP content where different path groups may need dif
 | `route.path` | path | required | URL mount path |
 | `expire_after` | expiration | `720h` | Maximum object lifetime |
 | `upstreams` | `[]URL` | required | Upstream base URLs, tried in order |
-| `pass_headers` | `[]string` | — | Request headers forwarded upstream |
+| `pass_headers` | `[]string` | — | Request headers forwarded upstream; use `transport.ua` for `User-Agent` |
 | `default_policy` | policy | `bypass` | Default cache policy |
 | `fresh_for` | freshness | — | Freshness for cached responses |
 | `busy_policy` | busy policy | `bypass` | Behavior while another request is already downloading |
@@ -187,7 +193,7 @@ oci:
       expire_after: 168h
 ```
 
-Use this mode for a dedicated registry listener. Clients point Docker or other OCI tooling at the bound address.
+Use this mode for a dedicated registry listener. Clients point Docker or other OCI tooling at the bound address. Cache publication is serialized per repository reference so a manifest and its persisted state are updated together. Blob cache admission accepts canonical SHA256 digests only and verifies the complete response before publishing the immutable object.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -221,7 +227,7 @@ npm:
   tarball_policy: immutable
 ```
 
-Use this mode for npm metadata and package tarballs behind a single prefix.
+Use this mode for npm metadata and package tarballs behind a single prefix. Concurrent cold requests for the same metadata or tarball join one cache fill; stale metadata is served immediately when available, otherwise followers wait for the bounded fill instead of opening duplicate upstream requests. Metadata tarball URLs are rewritten consistently for cold, refreshed, and cached responses. The npm abbreviated metadata media type is forwarded upstream and stored as a separate cache representation.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -229,7 +235,7 @@ Use this mode for npm metadata and package tarballs behind a single prefix.
 | `expire_after` | expiration | `720h` | Maximum object lifetime |
 | `upstream` | URL | required | Upstream registry |
 | `metadata_policy` | policy | `revalidate` | Policy for package metadata |
-| `metadata_fresh_for` | freshness | — | Freshness for metadata |
+| `metadata_fresh_for` | freshness | `1m` | Freshness for metadata |
 | `metadata_busy_policy` | busy policy | `stale` | Busy policy for metadata |
 | `tarball_policy` | policy | `immutable` | Policy for tarballs |
 
@@ -563,7 +569,7 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
 - Artifact and auxiliary cache objects are generation-scoped. Switching current generation changes visible repository content immediately without in-place overwrites.
 - Artifact and auxiliary downloads are still independent requests; they are not blocked by index misses or refresh failure.
-- Cleanup removes obsolete non-generation repository objects, and metadata GC removes superseded generations. No package index is persisted for runtime validation.
+- Cleanup removes obsolete non-generation repository objects while preserving discovered-root state. Metadata GC removes superseded generation objects, cleanup indexes, and snapshot descriptors together. No package index is persisted for runtime validation.
 
 ## Operations
 
