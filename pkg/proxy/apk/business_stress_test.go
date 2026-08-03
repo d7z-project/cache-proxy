@@ -83,7 +83,7 @@ func TestAPKBusinessStressRefreshCacheCleanupMemoryRecovery(t *testing.T) {
 		buildSnapshot,
 		store,
 		stats,
-		health.New("apk-business", config.ModeAPK, health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		health.New("apk-business", config.ModeAPK, health.DefaultConfig(), []string{server.URL}, stats),
 		nil,
 	)
 	handler.AddRepository(filerepo.RepositoryRoot{

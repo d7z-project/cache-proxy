@@ -232,7 +232,7 @@ function resultClass(result) {
     var okResults = ['success', 'updated', 'unchanged', 'ok', 'active', 'up', 'healthy', 'closed', 'skipped'];
     if (okResults.indexOf(lower) !== -1) return 'result-ok';
     if (['failed', 'error', 'failure', 'degraded', 'down', 'err', 'open'].indexOf(lower) !== -1) return 'result-err';
-    if (['aborted', 'timeout', 'cancelled', 'canceled', 'suspect', 'halfopen', 'unknown'].indexOf(lower) !== -1) return 'result-warn';
+    if (['aborted', 'timeout', 'cancelled', 'canceled', 'suspect', 'unknown'].indexOf(lower) !== -1) return 'result-warn';
     return '';
 }
 

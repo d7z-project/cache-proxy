@@ -78,7 +78,7 @@ func TestDEBBusinessStressRefreshCacheCleanupMemoryRecovery(t *testing.T) {
 		buildSnapshot,
 		store,
 		stats,
-		health.New("deb-business", config.ModeDEB, health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		health.New("deb-business", config.ModeDEB, health.DefaultConfig(), []string{server.URL}, stats),
 		nil,
 	)
 	handler.AddRepository(filerepo.RepositoryRoot{

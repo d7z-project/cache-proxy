@@ -12,7 +12,9 @@ import (
 	"time"
 )
 
-var ErrAdmissionWaitTimeout = errors.New("upstream admission wait timed out")
+const maxAdmissionWaiters = 4096
+
+var ErrAdmissionOverloaded = errors.New("upstream admission queue is full")
 
 type AdmissionClass uint8
 
@@ -21,18 +23,10 @@ const (
 	AdmissionRefresh
 )
 
-type AdmissionWaitError struct {
-	Host string
-}
+type AdmissionOverloadError struct{}
 
-func (e *AdmissionWaitError) Error() string {
-	if e.Host == "" {
-		return ErrAdmissionWaitTimeout.Error()
-	}
-	return "upstream " + e.Host + " admission wait timed out"
-}
-
-func (e *AdmissionWaitError) Unwrap() error { return ErrAdmissionWaitTimeout }
+func (*AdmissionOverloadError) Error() string { return ErrAdmissionOverloaded.Error() }
+func (*AdmissionOverloadError) Unwrap() error { return ErrAdmissionOverloaded }
 
 type UpstreamRateLimitError struct {
 	Host       string
@@ -42,81 +36,76 @@ type UpstreamRateLimitError struct {
 func (e *UpstreamRateLimitError) Error() string { return "upstream " + e.Host + " is rate limited" }
 
 func AdmissionRetryAfterSeconds(err error) (int, bool) {
+	var overloaded *AdmissionOverloadError
+	if errors.As(err, &overloaded) {
+		return 1, true
+	}
 	var limited *UpstreamRateLimitError
-	if errors.As(err, &limited) {
-		if limited.RetryAfter.IsZero() {
-			return 5, true
-		}
+	if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
 		remaining := time.Until(limited.RetryAfter)
 		return max(int((remaining+time.Second-1)/time.Second), 1), true
-	}
-	if errors.Is(err, ErrAdmissionWaitTimeout) {
-		return 5, true
 	}
 	return 0, false
 }
 
 type UpstreamGateConfig struct {
-	MaxActive           int
-	MaxActivePerHost    int
-	RequestInterval     time.Duration
-	ForegroundQueueWait time.Duration
-	Hosts               map[string]UpstreamHostGateConfig
+	MaxActive        int
+	MaxActivePerHost int
+	Hosts            map[string]UpstreamHostGateConfig
 }
 
 type UpstreamHostGateConfig struct {
-	MaxActive       int
-	RequestInterval time.Duration
+	MaxActive int
 }
 
 type gateWaiter struct {
-	host    string
-	ready   chan struct{}
-	granted bool
-	err     error
-	element *list.Element
+	host      string
+	class     AdmissionClass
+	queuedAt  time.Time
+	ready     chan struct{}
+	granted   bool
+	element   *list.Element
+	waitQueue *list.List
 }
 
 type upstreamHostGate struct {
-	active          int
-	queued          int
-	maxActive       int
-	requestInterval time.Duration
-	nextRequest     time.Time
-	cooldownUntil   time.Time
+	active        int
+	queued        int
+	maxActive     int
+	cooldownUntil time.Time
 }
 
 type UpstreamGate struct {
-	mu                  sync.Mutex
-	maxActive           int
-	maxActivePerHost    int
-	requestInterval     time.Duration
-	foregroundQueueWait time.Duration
-	hostConfigs         map[string]UpstreamHostGateConfig
-	active              int
-	waiters             list.List
-	hosts               map[string]*upstreamHostGate
-	wakeTimer           *time.Timer
-	wakeAt              time.Time
-	wakeSequence        uint64
+	mu               sync.Mutex
+	maxActive        int
+	maxActivePerHost int
+	hostConfigs      map[string]UpstreamHostGateConfig
+	active           int
+	foreground       list.List
+	refresh          list.List
+	hosts            map[string]*upstreamHostGate
+	wakeTimer        *time.Timer
+	wakeAt           time.Time
+	wakeSequence     uint64
+	lastGrantedHost  [2]string
 }
 
 type UpstreamGateSnapshot struct {
 	Active           int
 	Queued           int
+	ForegroundQueued int
+	RefreshQueued    int
+	OldestWait       time.Duration
 	MaxActive        int
 	MaxActivePerHost int
-	RequestInterval  time.Duration
 	Hosts            map[string]UpstreamHostGateSnapshot
 }
 
 type UpstreamHostGateSnapshot struct {
-	Active          int
-	Queued          int
-	MaxActive       int
-	RequestInterval time.Duration
-	NextRequest     time.Time
-	CooldownUntil   time.Time
+	Active        int
+	Queued        int
+	MaxActive     int
+	CooldownUntil time.Time
 }
 
 func NewUpstreamGate(cfg UpstreamGateConfig) *UpstreamGate {
@@ -128,12 +117,10 @@ func NewUpstreamGate(cfg UpstreamGateConfig) *UpstreamGate {
 		hostConfigs[host] = hostConfig
 	}
 	gate := &UpstreamGate{
-		maxActive:           cfg.MaxActive,
-		maxActivePerHost:    cfg.MaxActivePerHost,
-		requestInterval:     max(cfg.RequestInterval, 0),
-		foregroundQueueWait: max(cfg.ForegroundQueueWait, 0),
-		hostConfigs:         hostConfigs,
-		hosts:               map[string]*upstreamHostGate{},
+		maxActive:        cfg.MaxActive,
+		maxActivePerHost: cfg.MaxActivePerHost,
+		hostConfigs:      hostConfigs,
+		hosts:            map[string]*upstreamHostGate{},
 	}
 	for host := range hostConfigs {
 		gate.hosts[host] = gate.newHostState(host)
@@ -149,73 +136,44 @@ func (g *UpstreamGate) Acquire(ctx context.Context, upstream string, class Admis
 		return nil, err
 	}
 	host := normalizeUpstreamHost(upstream)
-	waiter := &gateWaiter{host: host, ready: make(chan struct{})}
+	waiter := &gateWaiter{host: host, class: class, queuedAt: time.Now(), ready: make(chan struct{})}
 
 	g.mu.Lock()
 	state := g.hostStateLocked(host)
-	if time.Now().Before(state.cooldownUntil) {
+	if class == AdmissionRefresh && time.Now().Before(state.cooldownUntil) {
 		err := &UpstreamRateLimitError{Host: host, RetryAfter: state.cooldownUntil}
 		g.mu.Unlock()
 		return nil, err
 	}
-	waiter.element = g.waiters.PushBack(waiter)
+	if g.foreground.Len()+g.refresh.Len() >= maxAdmissionWaiters {
+		g.mu.Unlock()
+		return nil, &AdmissionOverloadError{}
+	}
+	if class == AdmissionForeground {
+		waiter.waitQueue = &g.foreground
+	} else {
+		waiter.waitQueue = &g.refresh
+	}
+	waiter.element = waiter.waitQueue.PushBack(waiter)
 	state.queued++
 	g.grantWaitersLocked()
 	g.mu.Unlock()
 
-	if class == AdmissionRefresh || g.foregroundQueueWait <= 0 {
-		select {
-		case <-waiter.ready:
-			return g.waiterResult(waiter)
-		case <-ctx.Done():
-			g.cancelOrReleaseWaiter(waiter)
-			return nil, ctx.Err()
-		}
-	}
-
-	timer := time.NewTimer(g.foregroundQueueWait)
-	defer timer.Stop()
 	select {
 	case <-waiter.ready:
-		return g.waiterResult(waiter)
+		return g.releaseFunc(waiter.host), nil
 	case <-ctx.Done():
 		g.cancelOrReleaseWaiter(waiter)
 		return nil, ctx.Err()
-	case <-timer.C:
-		if g.cancelWaiter(waiter) {
-			return nil, &AdmissionWaitError{Host: host}
-		}
-		return g.waiterResult(waiter)
 	}
-}
-
-func (g *UpstreamGate) TryAcquireProbe(upstream string) (func(), bool) {
-	if g == nil {
-		return func() {}, true
-	}
-	host := normalizeUpstreamHost(upstream)
-	now := time.Now()
-	g.mu.Lock()
-	state := g.hostStateLocked(host)
-	if g.active >= g.maxActive || state.active >= state.maxActive || state.queued > 0 ||
-		now.Before(state.nextRequest) || now.Before(state.cooldownUntil) {
-		g.mu.Unlock()
-		return nil, false
-	}
-	g.activateLocked(state, now)
-	g.mu.Unlock()
-	return g.releaseFunc(host), true
 }
 
 func (g *UpstreamGate) RateLimited(upstream, retryAfter string) *UpstreamRateLimitError {
 	host := normalizeUpstreamHost(upstream)
-	if g == nil {
-		return &UpstreamRateLimitError{Host: host}
-	}
 	now := time.Now()
 	delay := parseRetryAfter(retryAfter, now)
-	if delay <= 0 {
-		delay = 30 * time.Second
+	if g == nil || delay <= 0 {
+		return &UpstreamRateLimitError{Host: host}
 	}
 
 	g.mu.Lock()
@@ -224,26 +182,11 @@ func (g *UpstreamGate) RateLimited(upstream, retryAfter string) *UpstreamRateLim
 		state.cooldownUntil = candidate
 	}
 	limited := &UpstreamRateLimitError{Host: host, RetryAfter: state.cooldownUntil}
-	for element := g.waiters.Front(); element != nil; {
-		next := element.Next()
-		waiter := element.Value.(*gateWaiter)
-		if waiter.host == host {
-			g.removeWaiterLocked(waiter)
-			waiter.err = limited
-			close(waiter.ready)
-		}
-		element = next
-	}
+	g.scheduleWakeLocked(state.cooldownUntil)
 	g.grantWaitersLocked()
 	g.mu.Unlock()
 	slog.Warn("upstream rate limit activated", "host", host, "retry_at", limited.RetryAfter, "backoff", time.Until(limited.RetryAfter))
 	return limited
-}
-
-// ObserveRateLimit records a real upstream 429 for callers that do not need
-// the resulting typed error, such as active health probes.
-func (g *UpstreamGate) ObserveRateLimit(upstream, retryAfter string) {
-	g.RateLimited(upstream, retryAfter)
 }
 
 func (g *UpstreamGate) Snapshot() UpstreamGateSnapshot {
@@ -255,24 +198,29 @@ func (g *UpstreamGate) Snapshot() UpstreamGateSnapshot {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	snapshot.Active = g.active
-	snapshot.Queued = g.waiters.Len()
+	snapshot.ForegroundQueued = g.foreground.Len()
+	snapshot.RefreshQueued = g.refresh.Len()
+	snapshot.Queued = snapshot.ForegroundQueued + snapshot.RefreshQueued
 	snapshot.MaxActive = g.maxActive
 	snapshot.MaxActivePerHost = g.maxActivePerHost
-	snapshot.RequestInterval = g.requestInterval
+	for _, queue := range []*list.List{&g.foreground, &g.refresh} {
+		if first := queue.Front(); first != nil {
+			wait := now.Sub(first.Value.(*gateWaiter).queuedAt)
+			if wait > snapshot.OldestWait {
+				snapshot.OldestWait = wait
+			}
+		}
+	}
 	for host, state := range g.hosts {
 		_, configured := g.hostConfigs[host]
-		if !configured && state.active == 0 && state.queued == 0 && !now.Before(state.nextRequest) && !now.Before(state.cooldownUntil) {
+		if !configured && state.active == 0 && state.queued == 0 && !now.Before(state.cooldownUntil) {
 			delete(g.hosts, host)
 			continue
 		}
 		hostSnapshot := UpstreamHostGateSnapshot{
-			Active:          state.active,
-			Queued:          state.queued,
-			MaxActive:       state.maxActive,
-			RequestInterval: state.requestInterval,
-		}
-		if now.Before(state.nextRequest) {
-			hostSnapshot.NextRequest = state.nextRequest
+			Active:    state.active,
+			Queued:    state.queued,
+			MaxActive: state.maxActive,
 		}
 		if now.Before(state.cooldownUntil) {
 			hostSnapshot.CooldownUntil = state.cooldownUntil
@@ -290,32 +238,16 @@ func normalizeUpstreamHost(rawURL string) string {
 	return strings.ToLower(parsed.Host)
 }
 
-func (g *UpstreamGate) waiterResult(waiter *gateWaiter) (func(), error) {
-	if waiter.err != nil {
-		return nil, waiter.err
-	}
-	return g.releaseFunc(waiter.host), nil
-}
-
-func (g *UpstreamGate) cancelWaiter(waiter *gateWaiter) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if waiter.granted || waiter.err != nil {
-		return false
-	}
-	g.removeWaiterLocked(waiter)
-	g.grantWaitersLocked()
-	return true
-}
-
 func (g *UpstreamGate) cancelOrReleaseWaiter(waiter *gateWaiter) {
-	if g.cancelWaiter(waiter) {
-		return
+	g.mu.Lock()
+	if waiter.granted {
+		g.active--
+		g.hostStateLocked(waiter.host).active--
+	} else {
+		g.removeWaiterLocked(waiter)
 	}
-	release, err := g.waiterResult(waiter)
-	if err == nil {
-		release()
-	}
+	g.grantWaitersLocked()
+	g.mu.Unlock()
 }
 
 func (g *UpstreamGate) hostStateLocked(host string) *upstreamHostGate {
@@ -329,12 +261,9 @@ func (g *UpstreamGate) hostStateLocked(host string) *upstreamHostGate {
 }
 
 func (g *UpstreamGate) newHostState(host string) *upstreamHostGate {
-	state := &upstreamHostGate{maxActive: g.maxActivePerHost, requestInterval: g.requestInterval}
-	if override, ok := g.hostConfigs[host]; ok {
-		if override.MaxActive > 0 {
-			state.maxActive = override.MaxActive
-		}
-		state.requestInterval = max(override.RequestInterval, 0)
+	state := &upstreamHostGate{maxActive: g.maxActivePerHost}
+	if override, ok := g.hostConfigs[host]; ok && override.MaxActive > 0 {
+		state.maxActive = override.MaxActive
 	}
 	return state
 }
@@ -343,60 +272,64 @@ func (g *UpstreamGate) removeWaiterLocked(waiter *gateWaiter) {
 	if waiter.element == nil {
 		return
 	}
-	g.waiters.Remove(waiter.element)
+	waiter.waitQueue.Remove(waiter.element)
 	waiter.element = nil
-	state := g.hostStateLocked(waiter.host)
-	state.queued--
+	g.hostStateLocked(waiter.host).queued--
 }
 
 func (g *UpstreamGate) grantWaitersLocked() {
 	for g.active < g.maxActive {
-		now := time.Now()
-		var selected *gateWaiter
-		seenHosts := map[string]struct{}{}
-		var nextWake time.Time
-		for element := g.waiters.Front(); element != nil; element = element.Next() {
-			waiter := element.Value.(*gateWaiter)
-			if _, seen := seenHosts[waiter.host]; seen {
-				continue
-			}
-			seenHosts[waiter.host] = struct{}{}
-			state := g.hostStateLocked(waiter.host)
-			if now.Before(state.cooldownUntil) || state.active >= state.maxActive {
-				continue
-			}
-			if now.Before(state.nextRequest) {
-				if nextWake.IsZero() || state.nextRequest.Before(nextWake) {
-					nextWake = state.nextRequest
-				}
-				continue
-			}
-			selected = waiter
-			break
-		}
+		selected, nextWake := g.selectWaiterLocked(time.Now())
 		if selected == nil {
 			g.scheduleWakeLocked(nextWake)
 			return
 		}
 		g.removeWaiterLocked(selected)
 		state := g.hostStateLocked(selected.host)
-		g.activateLocked(state, now)
+		g.active++
+		state.active++
+		g.lastGrantedHost[selected.class] = selected.host
 		selected.granted = true
 		close(selected.ready)
 	}
 }
 
-func (g *UpstreamGate) activateLocked(state *upstreamHostGate, now time.Time) {
-	g.active++
-	state.active++
-	state.nextRequest = now.Add(state.requestInterval)
+func (g *UpstreamGate) selectWaiterLocked(now time.Time) (*gateWaiter, time.Time) {
+	var nextWake time.Time
+	for class, queue := range []*list.List{&g.foreground, &g.refresh} {
+		seenHosts := map[string]struct{}{}
+		var firstEligible *gateWaiter
+		for element := queue.Front(); element != nil; element = element.Next() {
+			waiter := element.Value.(*gateWaiter)
+			if _, seen := seenHosts[waiter.host]; seen {
+				continue
+			}
+			seenHosts[waiter.host] = struct{}{}
+			state := g.hostStateLocked(waiter.host)
+			if now.Before(state.cooldownUntil) {
+				if nextWake.IsZero() || state.cooldownUntil.Before(nextWake) {
+					nextWake = state.cooldownUntil
+				}
+				continue
+			}
+			if state.active < state.maxActive {
+				if firstEligible == nil {
+					firstEligible = waiter
+				}
+				if waiter.host != g.lastGrantedHost[class] {
+					return waiter, nextWake
+				}
+			}
+		}
+		if firstEligible != nil {
+			return firstEligible, nextWake
+		}
+	}
+	return nil, nextWake
 }
 
 func (g *UpstreamGate) scheduleWakeLocked(at time.Time) {
-	if at.IsZero() {
-		return
-	}
-	if g.wakeTimer != nil && !at.Before(g.wakeAt) {
+	if at.IsZero() || (g.wakeTimer != nil && !at.Before(g.wakeAt)) {
 		return
 	}
 	if g.wakeTimer != nil {
@@ -407,13 +340,11 @@ func (g *UpstreamGate) scheduleWakeLocked(at time.Time) {
 	sequence := g.wakeSequence
 	g.wakeTimer = time.AfterFunc(max(time.Until(at), time.Millisecond), func() {
 		g.mu.Lock()
-		if sequence != g.wakeSequence {
-			g.mu.Unlock()
-			return
+		if sequence == g.wakeSequence {
+			g.wakeTimer = nil
+			g.wakeAt = time.Time{}
+			g.grantWaitersLocked()
 		}
-		g.wakeTimer = nil
-		g.wakeAt = time.Time{}
-		g.grantWaitersLocked()
 		g.mu.Unlock()
 	})
 }
@@ -437,7 +368,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return 0
 	}
 	if when, err := http.ParseTime(value); err == nil {
-		return when.Sub(now)
+		return max(when.Sub(now), 0)
 	}
 	seconds, err := time.ParseDuration(value + "s")
 	if err != nil || seconds <= 0 {

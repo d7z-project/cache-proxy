@@ -225,7 +225,7 @@ func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 	limiter := httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
-		MaxActive: 8, MaxActivePerHost: 8, ForegroundQueueWait: time.Second,
+		MaxActive: 8, MaxActivePerHost: 8,
 	})
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,

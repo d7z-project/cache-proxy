@@ -182,7 +182,7 @@ func (b *closeCallbackBody) Close() error {
 
 func copyHeaders(headers http.Header) map[string]string {
 	result := map[string]string{}
-	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "Content-Range", "Accept-Ranges", "ETag", "Vary", "Docker-Content-Digest", "Docker-Distribution-API-Version"} {
+	for _, key := range []string{"Content-Type", "Content-Length", "Last-Modified", "Content-Range", "Accept-Ranges", "ETag", "Vary", "Retry-After", "Docker-Content-Digest", "Docker-Distribution-API-Version"} {
 		values := headers.Values(key)
 		if len(values) > 0 {
 			result[key] = strings.Join(values, ", ")

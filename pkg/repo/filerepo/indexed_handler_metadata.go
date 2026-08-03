@@ -40,7 +40,7 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 		if h.sh != nil {
 			h.sh.RecordFailure(upstream, err)
 		}
-		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("fetch %s: %w", targetURL, err)}
+		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("%w: fetch %s: %v", errMetadataMirrorRetry, targetURL, err)}
 	}
 	defer func() { _ = response.Body.Close(); release() }()
 	response.Body = utils.NewContextReadCloser(ctx, h.client.WrapBody(response.Body))
@@ -65,6 +65,8 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataNotFound}
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataForbidden}
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("%w: HTTP %d", errMetadataMirrorRetry, response.StatusCode)}
 		default:
 			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("HTTP %d from upstream: %w", response.StatusCode, errMetadataTransient)}
 		}

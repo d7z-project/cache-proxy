@@ -7,7 +7,6 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
@@ -57,13 +56,7 @@ func PlanRepoMode(
 	if err := health.ValidateConfig(healthCfg); err != nil {
 		return fmt.Errorf("health: %w", err)
 	}
-	probeUserAgent := httpcache.DefaultUserAgent
-	if block.Transport != nil && block.Transport.UserAgent != "" {
-		probeUserAgent = block.Transport.UserAgent
-	}
-	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats(), probeUserAgent)
-	sh.SetUpstreamAdmission(plan.UpstreamGate())
-	sh.SetProbeScheduler(plan.ProbeScheduler())
+	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats())
 	sh.SetBus(plan.Bus())
 	handler := NewIndexedHandler(
 		plan.Name(),

@@ -18,9 +18,10 @@ import (
 )
 
 var (
-	errMetadataNotFound  = errors.New("metadata upstream not found")
-	errMetadataTransient = errors.New("metadata upstream transient failure")
-	errMetadataForbidden = errors.New("metadata upstream forbidden")
+	errMetadataNotFound    = errors.New("metadata upstream not found")
+	errMetadataTransient   = errors.New("metadata upstream transient failure")
+	errMetadataForbidden   = errors.New("metadata upstream forbidden")
+	errMetadataMirrorRetry = errors.New("metadata upstream allows mirror retry")
 )
 
 func ResolveMetadataRefreshInterval(value config.Duration, fallback time.Duration) time.Duration {

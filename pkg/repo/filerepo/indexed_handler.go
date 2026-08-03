@@ -2,9 +2,7 @@ package filerepo
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -152,9 +150,6 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (h *IndexedHandler) Start(ctx context.Context) error {
 	h.lifecycleCtx = ctx
-	if h.sh != nil {
-		h.sh.Start(ctx)
-	}
 	h.restoreRoots(ctx)
 	h.cleanCurrentRefTemps(ctx)
 	h.restoreGenerations(ctx)
@@ -163,11 +158,6 @@ func (h *IndexedHandler) Start(ctx context.Context) error {
 }
 
 func (h *IndexedHandler) Stop(ctx context.Context) error {
-	if h.sh != nil {
-		if err := h.sh.Stop(ctx); err != nil {
-			return err
-		}
-	}
 	if err := utils.WaitGroupContext(ctx, &h.wait); err != nil {
 		return err
 	}
@@ -256,14 +246,10 @@ func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnaps
 		if err != nil {
 			release()
 			h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodHead, 0, latency, 0)
-			if errors.Is(err, context.Canceled) {
+			if ctx.Err() != nil {
 				return false, err
 			}
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				return false, err
-			}
-			return false, nil
+			return false, fmt.Errorf("%w: metadata head request: %v", errMetadataMirrorRetry, err)
 		}
 		h.stats.RecordUpstreamRequest(
 			h.name,

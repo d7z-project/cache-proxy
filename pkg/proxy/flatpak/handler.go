@@ -110,24 +110,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) Start(ctx context.Context) error {
 	if h.sh != nil {
-		h.sh.Start(ctx)
-		h.sh.AddResource("/", []health.ProbeTarget{{Path: "summary"}}, h.upstreams)
+		h.sh.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
 	}
 	h.cleanCurrentTemp(ctx)
 	if err := h.restoreCurrent(ctx); err != nil {
 		return err
 	}
 	if h.sh != nil && h.currentSnapshot().Generation != "" {
-		h.sh.MarkResourceActive("/", []health.ProbeTarget{{Path: "summary"}})
+		h.sh.MarkResourceActive("/", []health.ResourceTarget{{Path: "summary"}})
 	}
 	return nil
 }
 
 func (h *Handler) Stop(ctx context.Context) error {
-	if h.sh != nil {
-		if err := h.sh.Stop(ctx); err != nil {
-			return err
-		}
-	}
 	return h.base.CloseContext(ctx)
 }

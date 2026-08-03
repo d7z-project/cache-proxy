@@ -83,13 +83,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := health.ValidateConfig(healthCfg); err != nil {
 		return fmt.Errorf("health: %w", err)
 	}
-	probeUserAgent := httpcache.DefaultUserAgent
-	if block.Transport != nil && block.Transport.UserAgent != "" {
-		probeUserAgent = block.Transport.UserAgent
-	}
-	sh := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats(), probeUserAgent)
-	sh.SetUpstreamAdmission(plan.UpstreamGate())
-	sh.SetProbeScheduler(plan.ProbeScheduler())
+	sh := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats())
 	sh.SetBus(plan.Bus())
 
 	runtimeCfg := httpcache.RuntimeConfig{

@@ -55,7 +55,6 @@ func (Driver) Mode() string { return config.ModeFile }
 
 type handler struct {
 	base *httpcache.Handler
-	sh   *health.ServiceHealth
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -63,18 +62,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *handler) Start(ctx context.Context) error {
-	if h.sh != nil {
-		h.sh.Start(ctx)
-	}
 	return nil
 }
 
 func (h *handler) Stop(ctx context.Context) error {
-	if h.sh != nil {
-		if err := h.sh.Stop(ctx); err != nil {
-			return err
-		}
-	}
 	return h.base.CloseContext(ctx)
 }
 
@@ -111,13 +102,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := health.ValidateConfig(healthCfg); err != nil {
 		return fmt.Errorf("health: %w", err)
 	}
-	probeUserAgent := httpcache.DefaultUserAgent
-	if block.Transport != nil && block.Transport.UserAgent != "" {
-		probeUserAgent = block.Transport.UserAgent
-	}
-	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats(), probeUserAgent)
-	sh.SetUpstreamAdmission(plan.UpstreamGate())
-	sh.SetProbeScheduler(plan.ProbeScheduler())
+	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats())
 	sh.SetBus(plan.Bus())
 	base := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
 		Mode:            config.ModeFile,
@@ -129,7 +114,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		DefaultFreshFor: block.FreshFor,
 		UpstreamGate:    plan.UpstreamGate(),
 	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), sh)
-	handler := &handler{base: base, sh: sh}
+	handler := &handler{base: base}
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: defaultCleanupInterval,

@@ -62,7 +62,7 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 		builder,
 		store,
 		stats,
-		health.New("repo", "test", health.DefaultConfig(), upstreams, stats, "cache-proxy-test"),
+		health.New("repo", "test", health.DefaultConfig(), upstreams, stats),
 		nil,
 	)
 	handler.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
@@ -484,7 +484,7 @@ func TestDiscoverRootIgnoresUpdateOnlyRootCreation(t *testing.T) {
 		nil,
 		store,
 		httpcache.NewStats(prometheus.NewRegistry()),
-		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, nil, "cache-proxy-test"),
+		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, nil),
 		nil,
 	)
 
@@ -651,7 +651,7 @@ func TestRegisterRootFinalizesMergedRoot(t *testing.T) {
 		nil,
 		store,
 		httpcache.NewStats(prometheus.NewRegistry()),
-		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, nil, "cache-proxy-test"),
+		health.New("repo", "test", health.DefaultConfig(), []string{"https://upstream.example"}, nil),
 		nil,
 	)
 
@@ -683,7 +683,7 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	handler.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
-	handler.sh.AddResource("root", targetsToProbe([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
+	handler.sh.AddResource("root", targetsToResourceTargets([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
 	handler.saveState(ctx)
 
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
@@ -697,7 +697,7 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	info, ok := restored.sh.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, "root", info.Path)
-	require.Equal(t, []health.ProbeTarget{{Path: "meta/index.txt"}}, info.LastTargets)
+	require.Equal(t, []health.ResourceTarget{{Path: "meta/index.txt"}}, info.LastTargets)
 	require.Equal(t, health.RPending, info.State)
 
 	restored.mu.RLock()
@@ -930,8 +930,7 @@ func TestRestoreGenerationsDoesNotOverwritePersistedBlockedState(t *testing.T) {
 	restoredHealth, ok := restored.sh.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, health.RBlocked, restoredHealth.State)
-	require.NotZero(t, restoredHealth.NextRefreshAt)
-	require.Equal(t, []health.ProbeTarget{{Path: "meta/index.txt"}}, restoredHealth.LastTargets)
+	require.Equal(t, []health.ResourceTarget{{Path: "meta/index.txt"}}, restoredHealth.LastTargets)
 }
 
 func TestRestoreGenerationDoesNotFallbackFromInvalidCurrentReference(t *testing.T) {
@@ -1200,7 +1199,7 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.Equal(t, uint64(2), stats.Instances["repo"].UpstreamRequests)
 	require.Equal(t, uint64(1), stats.Instances["repo"].UpstreamStatus["304"])
 	require.Equal(t, "304", stats.Instances["repo"].Upstreams[server.URL].LastStatus)
-	require.Equal(t, "closed", stats.Instances["repo"].Upstreams[server.URL].StateText)
+	require.Zero(t, stats.Instances["repo"].Upstreams[server.URL].ErrorRate)
 }
 
 func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
@@ -1232,7 +1231,7 @@ func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
 		},
 	)
 	handler.upstreamGate = httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
-		MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second,
+		MaxActive: 8, MaxActivePerHost: 4,
 	})
 
 	_, err := handler.RefreshRootTask(ctx, "root")
@@ -1246,6 +1245,52 @@ func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
 	require.ErrorAs(t, err, &retry)
 	require.EqualValues(t, 1, requests.Load())
 	require.Zero(t, fallbackRequests.Load())
+}
+
+func TestRefreshTransfersOnlyGatewayFailures(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		status          int
+		expectSuccess   bool
+		expectFallbacks int64
+	}{
+		{name: "internal server error stops", status: http.StatusInternalServerError},
+		{name: "service unavailable transfers", status: http.StatusServiceUnavailable, expectSuccess: true, expectFallbacks: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, http.StatusText(test.status), test.status)
+			}))
+			defer first.Close()
+			var fallbackRequests atomic.Int64
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fallbackRequests.Add(1)
+				_, _ = io.WriteString(w, "metadata")
+			}))
+			defer fallback.Close()
+
+			handler := newTestHandler(t, newTestStore(t), []string{first.URL, fallback.URL},
+				func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
+					blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+					if err != nil {
+						return nil, err
+					}
+					return &LiveSnapshot{Metadata: map[string]MetadataObject{
+						blob.Path: {Path: blob.Path, Required: true},
+					}}, nil
+				},
+			)
+			outcome, err := handler.RefreshRootTask(context.Background(), "root")
+			if test.expectSuccess {
+				require.NoError(t, err)
+				require.Equal(t, "updated", outcome.Result)
+			} else {
+				require.Error(t, err)
+				require.Nil(t, outcome)
+			}
+			require.Equal(t, test.expectFallbacks, fallbackRequests.Load())
+		})
+	}
 }
 
 func TestRefreshWaitsThroughMoreRequestsThanLegacyBurst(t *testing.T) {
@@ -1274,7 +1319,7 @@ func TestRefreshWaitsThroughMoreRequestsThanLegacyBurst(t *testing.T) {
 		},
 	)
 	handler.upstreamGate = httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
-		MaxActive: 2, MaxActivePerHost: 1, RequestInterval: 2 * time.Millisecond,
+		MaxActive: 2, MaxActivePerHost: 1,
 	})
 
 	outcome, err := handler.RefreshRootTask(ctx, "root")
@@ -1324,7 +1369,6 @@ func TestRefreshHeadPrecheckDoesNotUpdateUpstreamHealth(t *testing.T) {
 	stats := handler.stats.Snapshot()
 	require.Equal(t, uint64(11), stats.Instances["repo"].UpstreamRequests)
 	require.Equal(t, uint64(10), stats.Instances["repo"].UpstreamStatus["500"])
-	require.Equal(t, "closed", stats.Instances["repo"].Upstreams[server.URL].StateText)
 }
 
 func TestCleanCurrentRefTempsRemovesStalePublishRefs(t *testing.T) {
@@ -1560,7 +1604,7 @@ func TestMarkResourceActiveOnRemovedNoop(t *testing.T) {
 	healthCfg := health.DefaultConfig()
 	healthCfg.ResourceRemoveAge = 0
 	healthCfg.ResourceRemoveCount = 1
-	sh := health.New("test", "test", healthCfg, []string{"https://upstream.example"}, nil, "test")
+	sh := health.New("test", "test", healthCfg, []string{"https://upstream.example"}, nil)
 	rh := sh.AddResource("root", nil, []string{"https://upstream.example"})
 	require.Equal(t, health.RPending, rh.State)
 

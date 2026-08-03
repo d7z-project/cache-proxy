@@ -325,13 +325,12 @@ func (h *Handler) streamResponse(req *http.Request, route Route, status string, 
 func (h *Handler) remoteOptionsForRoute(route Route, record bool, req *http.Request) remoteOptions {
 	userAgent, _ := h.client.RequestUserAgent(req)
 	return remoteOptions{
-		AcceptErrors:           true,
-		Record:                 record,
-		UserAgent:              userAgent,
-		TargetURL:              route.TargetURL,
-		AllowedTargetHosts:     route.AllowedTargetHosts,
-		PreferredUpstream:      route.PreferredUpstream,
-		ArtifactMirrorFallback: route.ArtifactMirrorFallback,
+		AcceptErrors:       true,
+		Record:             record,
+		UserAgent:          userAgent,
+		TargetURL:          route.TargetURL,
+		AllowedTargetHosts: route.AllowedTargetHosts,
+		PreferredUpstream:  route.PreferredUpstream,
 	}
 }
 

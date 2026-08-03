@@ -28,14 +28,14 @@ func TestHandlerStartsHealthAndRecordsUpstreamFailures(t *testing.T) {
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	cfg := health.DefaultConfig()
-	sh := health.New("files", config.ModeFile, cfg, []string{upstream.URL}, stats, "cache-proxy-test")
+	sh := health.New("files", config.ModeFile, cfg, []string{upstream.URL}, stats)
 	base := httpcache.NewHandler("files", httpcache.RuntimeConfig{
 		Mode:        config.ModeFile,
 		ExpireAfter: config.DefaultExpireAfter,
 		Upstreams:   []string{upstream.URL},
 		BusyPolicy:  config.BusyPolicyBypass,
 	}, store, fileResolver{policy: &Policy{DefaultPolicy: config.PolicyBypass}}, stats, sh)
-	h := &handler{base: base, sh: sh}
+	h := &handler{base: base}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -46,10 +46,10 @@ func TestHandlerStartsHealthAndRecordsUpstreamFailures(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/object.txt", nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
 	}
 
-	require.Equal(t, health.StateUnhealthy, sh.AggregateState())
+	require.Equal(t, float64(1), stats.Snapshot().Instances["files"].Upstreams[upstream.URL].ErrorRate)
 }
 
 func TestHandlerStopClosesHealthBeforeBase(t *testing.T) {
@@ -58,13 +58,13 @@ func TestHandlerStopClosesHealthBeforeBase(t *testing.T) {
 	defer store.Close()
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	sh := health.New("files", config.ModeFile, health.DefaultConfig(), []string{"https://example.com"}, stats, "ua")
+	sh := health.New("files", config.ModeFile, health.DefaultConfig(), []string{"https://example.com"}, stats)
 	base := httpcache.NewHandler("files", httpcache.RuntimeConfig{
 		Mode:        config.ModeFile,
 		ExpireAfter: config.Expiration(time.Hour),
 		Upstreams:   []string{"https://example.com"},
 	}, store, fileResolver{policy: &Policy{DefaultPolicy: config.PolicyBypass}}, stats, sh)
-	h := &handler{base: base, sh: sh}
+	h := &handler{base: base}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

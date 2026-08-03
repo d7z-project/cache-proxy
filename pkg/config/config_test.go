@@ -87,12 +87,9 @@ storage:
   download:
     max_active: 32
     max_active_per_host: 4
-    request_interval_per_host: 125ms
-    foreground_queue_wait: 3s
     hosts:
       packages.d7z.net:
         max_active: 16
-        request_interval: 0s
 instances:
   - name: files
     enabled: true
@@ -114,12 +111,8 @@ instances:
 	require.Equal(t, "secret", doc.Metrics.Token)
 	require.Equal(t, 32, doc.Storage.Download.MaxActive)
 	require.Equal(t, 4, doc.Storage.Download.MaxActivePerHost)
-	require.Equal(t, Duration(125*time.Millisecond), doc.Storage.Download.RequestIntervalPerHost)
-	require.Equal(t, Duration(3*time.Second), doc.Storage.Download.ForegroundQueueWait)
 	host := doc.Storage.Download.Hosts["packages.d7z.net"]
 	require.Equal(t, 16, host.MaxActive)
-	require.NotNil(t, host.RequestInterval)
-	require.Zero(t, *host.RequestInterval)
 	require.Len(t, doc.Instances, 1)
 	spec, err := doc.Instances[0].SelectMode()
 	require.NoError(t, err)
@@ -155,8 +148,8 @@ instances:
       transport:
         health:
           enabled: false
-          trip_rate: 0.5
-          probe_timeout: 7s
+          resource_remove_count: 7
+          resource_remove_age: 3m
 `))
 	require.NoError(t, err)
 	selected, err := doc.Instances[0].SelectMode()
@@ -173,11 +166,10 @@ instances:
 	require.NotNil(t, cfg.Transport.Health)
 	require.NotNil(t, cfg.Transport.Health.Enabled)
 	require.False(t, *cfg.Transport.Health.Enabled)
-	require.NotNil(t, cfg.Transport.Health.TripRate)
-	require.Equal(t, 0.5, *cfg.Transport.Health.TripRate)
-	require.NotNil(t, cfg.Transport.Health.ProbeTimeout)
-	require.Equal(t, 7*time.Second, *cfg.Transport.Health.ProbeTimeout)
-	require.Nil(t, cfg.Transport.Health.DegradeRate)
+	require.NotNil(t, cfg.Transport.Health.ResourceRemoveCount)
+	require.Equal(t, 7, *cfg.Transport.Health.ResourceRemoveCount)
+	require.NotNil(t, cfg.Transport.Health.ResourceRemoveAge)
+	require.Equal(t, 3*time.Minute, *cfg.Transport.Health.ResourceRemoveAge)
 }
 
 func TestDecodeRejectsRemovedCleanupFields(t *testing.T) {
@@ -190,6 +182,29 @@ storage:
 instances: []
 `))
 	require.ErrorContains(t, err, "field interval not found")
+}
+
+func TestDecodeRejectsRemovedDownloadAdmissionFields(t *testing.T) {
+	for name, field := range map[string]string{
+		"global request interval": "request_interval_per_host: 125ms",
+		"foreground wait":         "foreground_queue_wait: 3s",
+		"host request interval": `hosts:
+      packages.example:
+        request_interval: 125ms`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Decode(strings.NewReader(`
+storage:
+  download:
+    max_active: 256
+    max_active_per_host: 16
+    ` + field + `
+instances: []
+`))
+			require.Error(t, err)
+			require.ErrorContains(t, err, "field")
+		})
+	}
 }
 
 func TestDecodePackageRepositoryConfig(t *testing.T) {

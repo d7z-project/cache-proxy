@@ -238,7 +238,7 @@ func newDebDistributionTestHandler(t *testing.T, upstream string) *filerepo.Inde
 		buildSnapshot,
 		store,
 		stats,
-		health.New("deb-test", config.ModeDEB, health.DefaultConfig(), []string{upstream}, stats, "cache-proxy-test"),
+		health.New("deb-test", config.ModeDEB, health.DefaultConfig(), []string{upstream}, stats),
 		nil,
 	)
 	handler.AddRepository(debDistributionRoot("dists/trixie", "trixie", nil, nil, false))

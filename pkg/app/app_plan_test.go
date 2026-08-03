@@ -2,7 +2,6 @@ package app
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -10,22 +9,18 @@ import (
 )
 
 func TestUpstreamGateConfigAppliesExactHostOverrides(t *testing.T) {
-	disabled := config.Duration(0)
 	download := config.DownloadConfig{
-		MaxActive:              256,
-		MaxActivePerHost:       4,
-		RequestIntervalPerHost: config.Duration(125 * time.Millisecond),
-		ForegroundQueueWait:    config.Duration(3 * time.Second),
+		MaxActive:        256,
+		MaxActivePerHost: 16,
 		Hosts: map[string]config.DownloadHostConfig{
-			"Packages.D7Z.NET": {MaxActive: 32, RequestInterval: &disabled},
+			"Packages.D7Z.NET": {MaxActive: 32},
 			"registry.example": {MaxActive: 8},
 		},
 	}
 
 	gateConfig := upstreamGateConfig(download)
 	require.Equal(t, 32, gateConfig.Hosts["packages.d7z.net"].MaxActive)
-	require.Zero(t, gateConfig.Hosts["packages.d7z.net"].RequestInterval)
-	require.Equal(t, 125*time.Millisecond, gateConfig.Hosts["registry.example"].RequestInterval)
+	require.Equal(t, 8, gateConfig.Hosts["registry.example"].MaxActive)
 }
 
 func TestValidateServerConfigRejectsInvalidDownloadSettings(t *testing.T) {

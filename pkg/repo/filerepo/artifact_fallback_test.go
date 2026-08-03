@@ -10,183 +10,87 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 )
 
-func TestArtifactMirrorFallbackKeepsHealthyPreferredUpstreamAndCaches(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+func setArtifactGenerationOrigin(handler *IndexedHandler, upstream string) string {
+	artifactPath := "root/pool/pkg.deb"
+	handler.setRootSnapshot("root", &LiveSnapshot{
+		RootID:     "root",
+		RootPath:   "root",
+		Generation: "gen1",
+		Upstream:   upstream,
+		Published:  time.Now(),
+	})
+	return artifactPath
+}
 
+func TestArtifactPreferredOriginIsStableDespitePassiveFailures(t *testing.T) {
 	var preferredRequests atomic.Int64
-	var fallbackRequests atomic.Int64
-	preferred := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	preferred := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		preferredRequests.Add(1)
 		_, _ = io.WriteString(w, "preferred")
 	}))
 	defer preferred.Close()
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var otherRequests atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherRequests.Add(1)
+		_, _ = io.WriteString(w, "other")
+	}))
+	defer other.Close()
+
+	handler := newTestHandler(t, newTestStore(t), []string{other.URL, preferred.URL}, nil)
+	for range 10 {
+		handler.sh.RecordResult(preferred.URL, http.StatusServiceUnavailable, time.Millisecond)
+	}
+	artifactPath := setArtifactGenerationOrigin(handler, preferred.URL)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+artifactPath, nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "preferred", rec.Body.String())
+	require.EqualValues(t, 1, preferredRequests.Load())
+	require.Zero(t, otherRequests.Load())
+}
+
+func TestArtifactNotFoundDoesNotTransferToAnotherMirror(t *testing.T) {
+	var fallbackRequests atomic.Int64
+	preferred := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer preferred.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fallbackRequests.Add(1)
 		_, _ = io.WriteString(w, "fallback")
 	}))
 	defer fallback.Close()
 
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{preferred.URL, fallback.URL}, nil)
-	artifactPath := "root/pool/pkg.deb"
-	handler.setRootSnapshot("root", &LiveSnapshot{
-		RootID:     "root",
-		RootPath:   "root",
-		Generation: "gen1",
-		Upstream:   preferred.URL,
-		Published:  time.Now(),
-	})
-
+	handler := newTestHandler(t, newTestStore(t), []string{preferred.URL, fallback.URL}, nil)
+	artifactPath := setArtifactGenerationOrigin(handler, preferred.URL)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+artifactPath, nil)
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+artifactPath, nil))
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "preferred", rec.Body.String())
-	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
-	require.Empty(t, rec.Header().Get("source-upstream"))
-	require.Equal(t, int64(1), preferredRequests.Load())
-	require.Equal(t, int64(0), fallbackRequests.Load())
-
-	objectPath := handler.contentPath(ResourceArtifact, artifactPath)
-	require.Eventually(t, func() bool {
-		reader, openErr := store.OpenObject(ctx, "repo", objectPath)
-		if openErr != nil {
-			return false
-		}
-		body, readErr := io.ReadAll(reader)
-		closeErr := reader.Close()
-		return readErr == nil && closeErr == nil && string(body) == "preferred"
-	}, time.Second, 5*time.Millisecond)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Zero(t, fallbackRequests.Load())
 }
 
-func TestArtifactMirrorFallbackCachesHealthyUpstreamWhenPreferredDegraded(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	var preferredRequests atomic.Int64
+func TestArtifactGatewayFailureTransfersToNextConfiguredMirror(t *testing.T) {
 	var fallbackRequests atomic.Int64
-	preferred := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		preferredRequests.Add(1)
-		_, _ = io.WriteString(w, "preferred")
+	preferred := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer preferred.Close()
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fallbackRequests.Add(1)
-		_, _ = io.WriteString(w, "rescue")
+		_, _ = io.WriteString(w, "fallback")
 	}))
 	defer fallback.Close()
 
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{preferred.URL, fallback.URL}, nil)
-	for i := 0; i < 8; i++ {
-		handler.sh.RecordResult(preferred.URL, http.StatusOK, time.Millisecond)
-	}
-	for i := 0; i < 2; i++ {
-		handler.sh.RecordResult(preferred.URL, http.StatusInternalServerError, time.Millisecond)
-	}
-	state, ok := handler.sh.UpstreamState(preferred.URL)
-	require.True(t, ok)
-	require.Equal(t, health.SDegraded, state)
-
-	artifactPath := "root/pool/pkg.deb"
-	handler.setRootSnapshot("root", &LiveSnapshot{
-		RootID:     "root",
-		RootPath:   "root",
-		Generation: "gen1",
-		Upstream:   preferred.URL,
-		Published:  time.Now(),
-	})
-
+	handler := newTestHandler(t, newTestStore(t), []string{preferred.URL, fallback.URL}, nil)
+	artifactPath := setArtifactGenerationOrigin(handler, preferred.URL)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+artifactPath, nil)
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/"+artifactPath, nil))
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "rescue", rec.Body.String())
-	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
-	require.Equal(t, int64(0), preferredRequests.Load())
-	require.Equal(t, int64(1), fallbackRequests.Load())
-	require.Eventually(t, func() bool {
-		reader, err := store.OpenObject(ctx, "repo", handler.contentPath(ResourceArtifact, artifactPath))
-		if err != nil {
-			return false
-		}
-		return reader.Close() == nil
-	}, time.Second, 5*time.Millisecond)
-}
-
-func TestArtifactMirrorFallbackRetriesNonPreferredNotFound(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	var preferredRequests atomic.Int64
-	var missingRequests atomic.Int64
-	preferred := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		preferredRequests.Add(1)
-		_, _ = io.WriteString(w, "preferred")
-	}))
-	defer preferred.Close()
-	missing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		missingRequests.Add(1)
-		http.NotFound(w, r)
-	}))
-	defer missing.Close()
-
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{preferred.URL, missing.URL}, nil)
-	for i := 0; i < 8; i++ {
-		handler.sh.RecordResult(preferred.URL, http.StatusOK, time.Millisecond)
-	}
-	for i := 0; i < 2; i++ {
-		handler.sh.RecordResult(preferred.URL, http.StatusInternalServerError, time.Millisecond)
-	}
-	artifactPath := "root/pool/pkg.deb"
-	handler.setRootSnapshot("root", &LiveSnapshot{
-		RootID:     "root",
-		RootPath:   "root",
-		Generation: "gen1",
-		Upstream:   preferred.URL,
-		Published:  time.Now(),
-	})
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+artifactPath, nil)
-	handler.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "preferred", rec.Body.String())
-	require.Equal(t, int64(1), missingRequests.Load())
-	require.Equal(t, int64(1), preferredRequests.Load())
-}
-
-func TestArtifactMirrorFallbackFlagOnlyAppliesToArtifactRoutes(t *testing.T) {
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	handler.setRootSnapshot("root", &LiveSnapshot{
-		RootID:     "root",
-		RootPath:   "root",
-		Generation: "gen1",
-		Upstream:   "https://upstream.example",
-		Published:  time.Now(),
-		Metadata: map[string]MetadataObject{
-			"meta/index.txt": {Path: "meta/index.txt", StorePath: "repo/meta/index.txt", Required: true},
-		},
-	})
-	resolver := &generationResolver{handler: handler, policy: &Policy{}}
-
-	metadataReq := httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil)
-	metadataRoute, err := resolver.Resolve(metadataReq)
-	require.NoError(t, err)
-	require.False(t, metadataRoute.ArtifactMirrorFallback)
-
-	artifactReq := httptest.NewRequest(http.MethodGet, "/root/pool/pkg.deb", nil)
-	artifactRoute, err := resolver.Resolve(artifactReq)
-	require.NoError(t, err)
-	require.True(t, artifactRoute.ArtifactMirrorFallback)
+	require.Equal(t, "fallback", rec.Body.String())
+	require.EqualValues(t, 1, fallbackRequests.Load())
 }

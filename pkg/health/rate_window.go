@@ -59,7 +59,7 @@ func (w *rateWindow) errorRate() float64 {
 		fail += w.buckets[i].failures
 	}
 	total := success + fail
-	if total < minSampleSize {
+	if total == 0 {
 		return 0
 	}
 	return float64(fail) / float64(total)

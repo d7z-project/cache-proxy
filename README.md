@@ -57,13 +57,10 @@ Top-level fields:
 | `storage.cleanup.batch_size` | int | `500` | Maximum deletions per cleanup batch |
 | `storage.orphan_policy` | string | — | Home page orphan cleanup policy (`auto`) |
 | `storage.download.max_active` | int | `256` | Process-wide concurrent upstream response bodies |
-| `storage.download.max_active_per_host` | int | `4` | Concurrent upstream transfers to one normalized host across all instances |
-| `storage.download.request_interval_per_host` | duration | `125ms` | Minimum interval between request starts to one normalized host |
-| `storage.download.foreground_queue_wait` | duration | `3s` | Maximum time a client request waits for upstream admission |
+| `storage.download.max_active_per_host` | int | `16` | Concurrent upstream transfers to one normalized host across all instances |
 | `storage.download.hosts.<host>.max_active` | int | global host limit | Exact-host concurrent transfer override |
-| `storage.download.hosts.<host>.request_interval` | duration | global interval | Exact-host request interval override; `0s` disables proactive pacing |
 
-The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, health probes, OCI token requests, and bypass requests. It limits active response bodies and spaces request starts per host, which prevents npm/Maven-style small-file bursts without imposing a fixed burst size on multi-file repository refreshes. Client requests have a bounded queue wait, repository refreshes wait within their scheduler task context, and probes skip immediately when capacity or pacing is unavailable. Only an actual upstream `429` activates a host-wide cooldown; `Retry-After` is honored and that refresh does not fan out to another mirror.
+The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, OCI token requests, and bypass requests. It limits active response bodies globally and per normalized host. Saturated client requests wait within their request context, with foreground requests taking priority over repository refreshes. A real upstream `429` is returned unchanged to the client; a valid positive `Retry-After` activates a host-wide cooldown without clearing queued requests or spreading the request to another mirror.
 
 An exact-host override is useful when a deliberately short freshness policy targets a private upstream that is known to tolerate a higher request rate:
 
@@ -71,13 +68,10 @@ An exact-host override is useful when a deliberately short freshness policy targ
 storage:
   download:
     max_active: 256
-    max_active_per_host: 4
-    request_interval_per_host: 125ms
-    foreground_queue_wait: 3s
+    max_active_per_host: 16
     hosts:
       packages.d7z.net:
         max_active: 32
-        request_interval: 0s
 ```
 
 Value types:
@@ -109,15 +103,15 @@ Notes:
 - Each instance must define exactly one mode block.
 - Most modes use `route.path`; `oci` uses `bind`.
 - `git` has its own block shape and does not use `expire_after` or `transport`.
-- Browser `User-Agent` values are forwarded on foreground upstream requests. Other clients and internal refresh,
-  health-probe, and OCI token requests use `cache-proxy/1`; `transport.ua` overrides all of these behaviors for an instance.
+- Browser `User-Agent` values are forwarded on foreground upstream requests. Other clients, internal refreshes,
+  and OCI token requests use `cache-proxy/1`; `transport.ua` overrides all of these behaviors for an instance.
 - Without `transport.ua`, responses declaring `Vary: User-Agent` or `Vary: *` are not stored, preventing
   default-UA and browser-specific content from sharing a cache entry. Browsers refresh legacy entries once
   when those entries predate User-Agent variance tracking.
-- `transport.health` exists for upstream health tuning; active probes default to `probe_interval: 2m`,
-  reject intervals below `30s`, and are shared by upstream host to avoid bursty checks.
-- Active health probes use discovered Linux repository metadata targets; upstream roots without metadata targets
-  are not probed actively.
+- `transport.health.enabled` controls passive upstream observations; `resource_remove_age` and
+  `resource_remove_count` control missing repository removal. Error rate and latency never reorder or suppress requests.
+- Multiple upstreams are tried in configured order. Only transport errors and HTTP `502`, `503`, or `504` transfer
+  to the next mirror; `429`, `403`, `404`, `408`, and `500` do not.
 - The built-in home page fetches status data from `/-/status/summary`, `/-/status/disk`, and `/-/status/events`.
 - Linux repository modes expose discovered repository roots on the home page, including the root path, primary metadata paths, refresh state, and mode-specific attributes.
 - Status history is persisted in bounded form and trimmed by `server.status.disk_history_window` and `server.status.event_limit`.
@@ -595,7 +589,7 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 - Metadata and its signatures/checksums are generation-scoped and fixed to one upstream. Package artifacts and package sidecars use an instance-wide stable content namespace, so a metadata refresh does not change their cache keys.
 - Artifact and sidecar downloads are independent requests; they are not blocked by index misses or refresh failure. Protocol inspectors classify these resources before the generic cache executes their policy.
 - The current cleanup indexes are loaded only during cleanup and combined to retain shared content such as Debian `pool/` files. They are never runtime download allowlists.
-- Metadata refreshes and probes share the same per-host admission and `429` cooldown as client downloads; a rate-limited refresh is rescheduled for the advertised retry time.
+- Metadata refreshes share the same per-host admission and `429` cooldown as client downloads; a rate-limited refresh is rescheduled for the advertised retry time.
 - Cleanup expires stable content absent from all current cleanup indexes while preserving discovered-root state. Metadata GC pins durable/in-memory current generations and active response readers, keeps a grace window plus the newest previous generation, and removes generation objects, cleanup indexes, and snapshot descriptors in that order.
 
 ## Operations

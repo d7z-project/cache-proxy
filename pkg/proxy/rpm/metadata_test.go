@@ -175,7 +175,7 @@ func newRPMMetadataTestHandler(t *testing.T, upstream string, gate *httpcache.Up
 	handler := filerepo.NewIndexedHandler(
 		"rpm-test", config.ModeRPM, config.ModeRPM, inspector{}, []string{upstream}, nil,
 		config.Expiration(time.Hour), &filerepo.Policy{}, buildSnapshot, store, stats,
-		health.New("rpm-test", config.ModeRPM, health.DefaultConfig(), []string{upstream}, stats, "cache-proxy-test"), gate,
+		health.New("rpm-test", config.ModeRPM, health.DefaultConfig(), []string{upstream}, stats), gate,
 	)
 	handler.AddRepository(filerepo.RepositoryRoot{
 		ID: "rpm:repo", Path: "repo", Layout: filerepo.LayoutRPM,

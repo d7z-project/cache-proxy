@@ -88,7 +88,7 @@ func TestRPMBusinessStressRefreshCacheCleanupMemoryRecovery(t *testing.T) {
 		buildSnapshot,
 		store,
 		stats,
-		health.New("rpm-business", config.ModeRPM, health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"),
+		health.New("rpm-business", config.ModeRPM, health.DefaultConfig(), []string{server.URL}, stats),
 		nil,
 	)
 	handler.AddRepository(filerepo.RepositoryRoot{

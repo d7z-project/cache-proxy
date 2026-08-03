@@ -19,150 +19,178 @@ func testUpstreamGate(cfg UpstreamGateConfig) *UpstreamGate {
 	return NewUpstreamGate(cfg)
 }
 
-func TestUpstreamGateBoundsForegroundWait(t *testing.T) {
-	gate := testUpstreamGate(UpstreamGateConfig{
-		MaxActive:           1,
-		MaxActivePerHost:    1,
-		ForegroundQueueWait: 30 * time.Millisecond,
-	})
-	release, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionForeground)
-	require.NoError(t, err)
-	defer release()
-
-	started := time.Now()
-	_, err = gate.Acquire(context.Background(), "https://two.example/b", AdmissionForeground)
-	require.ErrorIs(t, err, ErrAdmissionWaitTimeout)
-	require.GreaterOrEqual(t, time.Since(started), 25*time.Millisecond)
+type gateAcquireResult struct {
+	release func()
+	err     error
 }
 
-func TestUpstreamGateRefreshWaitsForCapacity(t *testing.T) {
-	gate := testUpstreamGate(UpstreamGateConfig{
-		MaxActive:           1,
-		MaxActivePerHost:    1,
-		ForegroundQueueWait: time.Millisecond,
-	})
-	release, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionForeground)
-	require.NoError(t, err)
-
-	type result struct {
-		release func()
-		err     error
-	}
-	resultCh := make(chan result, 1)
+func acquireAsync(gate *UpstreamGate, ctx context.Context, upstream string, class AdmissionClass) <-chan gateAcquireResult {
+	result := make(chan gateAcquireResult, 1)
 	go func() {
-		next, acquireErr := gate.Acquire(context.Background(), "https://one.example/b", AdmissionRefresh)
-		resultCh <- result{release: next, err: acquireErr}
+		release, err := gate.Acquire(ctx, upstream, class)
+		result <- gateAcquireResult{release: release, err: err}
 	}()
-	require.Never(t, func() bool { return len(resultCh) != 0 }, 20*time.Millisecond, 2*time.Millisecond)
-	release()
-
-	acquired := <-resultCh
-	require.NoError(t, acquired.err)
-	acquired.release()
+	return result
 }
 
-func TestUpstreamGatePacesRequestStarts(t *testing.T) {
-	gate := testUpstreamGate(UpstreamGateConfig{RequestInterval: 40 * time.Millisecond})
-	release, err := gate.Acquire(context.Background(), "https://mirror.example/a", AdmissionRefresh)
+func TestUpstreamGateSaturationWaitsUntilRelease(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+	release, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionForeground)
 	require.NoError(t, err)
+
+	queued := acquireAsync(gate, context.Background(), "https://two.example/b", AdmissionForeground)
+	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 1 }, time.Second, time.Millisecond)
+	require.Never(t, func() bool { return len(queued) > 0 }, 30*time.Millisecond, 2*time.Millisecond)
 	release()
 
-	started := time.Now()
-	release, err = gate.Acquire(context.Background(), "https://mirror.example/b", AdmissionRefresh)
+	result := <-queued
+	require.NoError(t, result.err)
+	result.release()
+}
+
+func TestUpstreamGateForegroundPrecedesRefresh(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+	release, err := gate.Acquire(context.Background(), "https://busy.example/a", AdmissionForeground)
 	require.NoError(t, err)
+	refresh := acquireAsync(gate, context.Background(), "https://refresh.example/a", AdmissionRefresh)
+	require.Eventually(t, func() bool { return gate.Snapshot().RefreshQueued == 1 }, time.Second, time.Millisecond)
+	foreground := acquireAsync(gate, context.Background(), "https://client.example/a", AdmissionForeground)
+	require.Eventually(t, func() bool { return gate.Snapshot().ForegroundQueued == 1 }, time.Second, time.Millisecond)
+
 	release()
-	require.GreaterOrEqual(t, time.Since(started), 35*time.Millisecond)
+	clientResult := <-foreground
+	require.NoError(t, clientResult.err)
+	require.Never(t, func() bool { return len(refresh) > 0 }, 20*time.Millisecond, 2*time.Millisecond)
+	clientResult.release()
+	refreshResult := <-refresh
+	require.NoError(t, refreshResult.err)
+	refreshResult.release()
 }
 
 func TestUpstreamGateDoesNotHeadOfLineBlockOtherHosts(t *testing.T) {
 	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 2, MaxActivePerHost: 1})
-	releaseA, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionRefresh)
+	releaseA, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionForeground)
 	require.NoError(t, err)
 	defer releaseA()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	queued := make(chan error, 1)
-	go func() {
-		_, acquireErr := gate.Acquire(ctx, "https://one.example/b", AdmissionRefresh)
-		queued <- acquireErr
-	}()
+	blocked := acquireAsync(gate, ctx, "https://one.example/b", AdmissionForeground)
 	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 1 }, time.Second, time.Millisecond)
 
 	releaseB, err := gate.Acquire(context.Background(), "https://two.example/a", AdmissionForeground)
 	require.NoError(t, err)
 	releaseB()
 	cancel()
-	require.ErrorIs(t, <-queued, context.Canceled)
+	require.ErrorIs(t, (<-blocked).err, context.Canceled)
 }
 
-func TestUpstreamGateHostOverrideDisablesPacing(t *testing.T) {
-	gate := testUpstreamGate(UpstreamGateConfig{
-		RequestInterval: 200 * time.Millisecond,
-		Hosts: map[string]UpstreamHostGateConfig{
-			"packages.d7z.net": {MaxActive: 8, RequestInterval: 0},
-		},
-	})
-	for range 3 {
-		release, err := gate.Acquire(context.Background(), "https://packages.d7z.net/repo", AdmissionRefresh)
+func TestUpstreamGateRoundRobinsHostsWithinPriority(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+	release, err := gate.Acquire(context.Background(), "https://busy.example/a", AdmissionForeground)
+	require.NoError(t, err)
+	firstA := acquireAsync(gate, context.Background(), "https://a.example/one", AdmissionForeground)
+	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 1 }, time.Second, time.Millisecond)
+	secondA := acquireAsync(gate, context.Background(), "https://a.example/two", AdmissionForeground)
+	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 2 }, time.Second, time.Millisecond)
+	requestB := acquireAsync(gate, context.Background(), "https://b.example/one", AdmissionForeground)
+	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 3 }, time.Second, time.Millisecond)
+
+	release()
+	resultA := <-firstA
+	require.NoError(t, resultA.err)
+	resultA.release()
+	resultB := <-requestB
+	require.NoError(t, resultB.err)
+	require.Never(t, func() bool { return len(secondA) > 0 }, 20*time.Millisecond, 2*time.Millisecond)
+	resultB.release()
+	lastA := <-secondA
+	require.NoError(t, lastA.err)
+	lastA.release()
+}
+
+func TestUpstreamGateHasNoRequestStartPacing(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{})
+	start := time.Now()
+	for range 100 {
+		release, err := gate.Acquire(context.Background(), "https://fast.example/file", AdmissionForeground)
 		require.NoError(t, err)
 		release()
 	}
-	snapshot := gate.Snapshot().Hosts["packages.d7z.net"]
-	require.Equal(t, 8, snapshot.MaxActive)
-	require.Zero(t, snapshot.RequestInterval)
+	require.Less(t, time.Since(start), 200*time.Millisecond)
 }
 
-func TestUpstreamGateProbeSkipsWithoutQueueing(t *testing.T) {
-	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
-	release, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionForeground)
-	require.NoError(t, err)
-	defer release()
-
-	probeRelease, ok := gate.TryAcquireProbe("https://two.example/a")
-	require.False(t, ok)
-	require.Nil(t, probeRelease)
-	require.Zero(t, gate.Snapshot().Queued)
+func TestUpstreamGateHostOverride(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{Hosts: map[string]UpstreamHostGateConfig{
+		"packages.example": {MaxActive: 8},
+	}})
+	require.Equal(t, 8, gate.Snapshot().Hosts["packages.example"].MaxActive)
 }
 
-func TestUpstreamGateRateLimitReleasesSameHostWaiters(t *testing.T) {
+func TestUpstreamGateRateLimitKeepsForegroundQueued(t *testing.T) {
 	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
 	release, err := gate.Acquire(context.Background(), "https://mirror.example/a", AdmissionForeground)
 	require.NoError(t, err)
-
-	resultCh := make(chan error, 1)
-	go func() {
-		_, acquireErr := gate.Acquire(context.Background(), "https://mirror.example/b", AdmissionRefresh)
-		resultCh <- acquireErr
-	}()
+	queued := acquireAsync(gate, context.Background(), "https://mirror.example/b", AdmissionForeground)
 	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 1 }, time.Second, time.Millisecond)
 
-	limited := gate.RateLimited("https://mirror.example/a", "60")
-	var queuedLimit *UpstreamRateLimitError
-	require.ErrorAs(t, <-resultCh, &queuedLimit)
-	require.Equal(t, "mirror.example", queuedLimit.Host)
-	require.WithinDuration(t, limited.RetryAfter, queuedLimit.RetryAfter, time.Millisecond)
+	limited := gate.RateLimited("https://mirror.example/a", "1")
+	require.False(t, limited.RetryAfter.IsZero())
 	release()
+	require.Never(t, func() bool { return len(queued) > 0 }, 50*time.Millisecond, 5*time.Millisecond)
 
-	otherRelease, err := gate.Acquire(context.Background(), "https://other.example/a", AdmissionRefresh)
+	otherRelease, err := gate.Acquire(context.Background(), "https://other.example/a", AdmissionForeground)
 	require.NoError(t, err)
 	otherRelease()
+	result := <-queued
+	require.NoError(t, result.err)
+	result.release()
+}
+
+func TestUpstreamGateRefreshReturnsCooldownWithoutQueueing(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{})
+	limited := gate.RateLimited("https://mirror.example/a", "2")
+	_, err := gate.Acquire(context.Background(), "https://mirror.example/b", AdmissionRefresh)
+	var acquiredLimit *UpstreamRateLimitError
+	require.ErrorAs(t, err, &acquiredLimit)
+	require.WithinDuration(t, limited.RetryAfter, acquiredLimit.RetryAfter, time.Millisecond)
+	require.Zero(t, gate.Snapshot().Queued)
+}
+
+func TestUpstreamGateInvalidRetryAfterDoesNotCreateCooldown(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{})
+	require.True(t, gate.RateLimited("https://mirror.example/a", "invalid").RetryAfter.IsZero())
+	require.True(t, gate.RateLimited("https://mirror.example/a", "").RetryAfter.IsZero())
+	release, err := gate.Acquire(context.Background(), "https://mirror.example/b", AdmissionRefresh)
+	require.NoError(t, err)
+	release()
 }
 
 func TestUpstreamGateCanceledWaiterDoesNotConsumeCapacity(t *testing.T) {
 	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
 	release, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionRefresh)
 	require.NoError(t, err)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	resultCh := make(chan error, 1)
-	go func() {
-		_, acquireErr := gate.Acquire(ctx, "https://two.example/a", AdmissionRefresh)
-		resultCh <- acquireErr
-	}()
+	queued := acquireAsync(gate, ctx, "https://two.example/a", AdmissionForeground)
 	require.Eventually(t, func() bool { return gate.Snapshot().Queued == 1 }, time.Second, time.Millisecond)
 	cancel()
-	require.True(t, errors.Is(<-resultCh, context.Canceled))
+	require.True(t, errors.Is((<-queued).err, context.Canceled))
 	release()
 	require.Zero(t, gate.Snapshot().Active)
+	require.Zero(t, gate.Snapshot().Queued)
+}
+
+func TestUpstreamGateEmergencyWaiterCeiling(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{})
+	gate.mu.Lock()
+	for range maxAdmissionWaiters {
+		waiter := &gateWaiter{host: "queued.example", waitQueue: &gate.foreground}
+		waiter.element = gate.foreground.PushBack(waiter)
+	}
+	gate.mu.Unlock()
+
+	_, err := gate.Acquire(context.Background(), "https://overflow.example", AdmissionForeground)
+	require.ErrorIs(t, err, ErrAdmissionOverloaded)
+	seconds, ok := AdmissionRetryAfterSeconds(err)
+	require.True(t, ok)
+	require.Equal(t, 1, seconds)
 }

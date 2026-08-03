@@ -95,16 +95,13 @@ type CleanupConfig struct {
 }
 
 type DownloadConfig struct {
-	MaxActive              int                           `yaml:"max_active"`
-	MaxActivePerHost       int                           `yaml:"max_active_per_host"`
-	RequestIntervalPerHost Duration                      `yaml:"request_interval_per_host"`
-	ForegroundQueueWait    Duration                      `yaml:"foreground_queue_wait"`
-	Hosts                  map[string]DownloadHostConfig `yaml:"hosts,omitempty"`
+	MaxActive        int                           `yaml:"max_active"`
+	MaxActivePerHost int                           `yaml:"max_active_per_host"`
+	Hosts            map[string]DownloadHostConfig `yaml:"hosts,omitempty"`
 }
 
 type DownloadHostConfig struct {
-	MaxActive       int       `yaml:"max_active,omitempty"`
-	RequestInterval *Duration `yaml:"request_interval,omitempty"`
+	MaxActive int `yaml:"max_active,omitempty"`
 }
 
 func DefaultCleanupConfig() CleanupConfig {
@@ -140,7 +137,6 @@ type TransportConfig struct {
 	IdleBodyTimeout    Duration            `yaml:"idle_body_timeout,omitempty"`
 	MaxRequestDuration Duration            `yaml:"max_request_duration,omitempty"`
 	MaxIdleConns       int                 `yaml:"max_idle_conns,omitempty"`
-	MaxConnsPerHost    int                 `yaml:"max_conns_per_host,omitempty"`
 	Health             *health.ConfigPatch `yaml:"health,omitempty"`
 }
 

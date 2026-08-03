@@ -94,7 +94,7 @@ func TestPacmanCurrentGenerationDoesNotFallbackForMissingMetadata(t *testing.T) 
 	handler := filerepo.NewIndexedHandler(
 		"pacman-test", config.ModePacman, config.ModePacman, inspector{}, []string{server.URL}, nil,
 		config.Expiration(time.Hour), &filerepo.Policy{}, buildSnapshot, store, stats,
-		health.New("pacman-test", config.ModePacman, health.DefaultConfig(), []string{server.URL}, stats, "cache-proxy-test"), nil,
+		health.New("pacman-test", config.ModePacman, health.DefaultConfig(), []string{server.URL}, stats), nil,
 	)
 	rootID := filerepo.RepositoryID(filerepo.LayoutPacman, repoRoot)
 	handler.AddRepository(filerepo.RepositoryRoot{

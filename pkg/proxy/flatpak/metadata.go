@@ -29,7 +29,10 @@ import (
 
 const currentMetadataObject = "flatpak/metadata/current.yaml"
 
-var errMetadataUnavailable = errors.New("flatpak metadata unavailable")
+var (
+	errMetadataUnavailable = errors.New("flatpak metadata unavailable")
+	errMetadataMirrorRetry = errors.New("flatpak metadata upstream allows mirror retry")
+)
 
 type generationEntry struct {
 	name string
@@ -62,13 +65,10 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 			switch {
 			case errors.Is(err, health.ErrRefreshAlreadyRunning):
 				return nil, scheduler.ErrTaskSkipped
-			case errors.Is(err, health.ErrRefreshBlockedUntil):
-				if blockedUntil, ok := h.sh.RefreshBlockedUntil("/"); ok && !blockedUntil.IsZero() {
-					return nil, scheduler.RetryAt(blockedUntil)
-				}
+			case errors.Is(err, health.ErrRefreshBlocked):
 				return nil, scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
-				h.sh.AddResource("/", []health.ProbeTarget{{Path: "summary"}}, h.upstreams)
+				h.sh.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
 				rh, done, err = h.sh.TryStartRefresh("/", time.Now())
 				if err != nil {
 					return nil, fmt.Errorf("restart flatpak metadata refresh: %w", err)
@@ -86,15 +86,24 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 		}
 	}
 	var firstErr error
-	for _, upstream := range h.weightedUpstreams() {
+	for _, upstream := range h.orderedUpstreams() {
 		next, changed, err := h.refreshFromUpstream(ctx, upstream)
 		if err != nil {
 			var limited *httpcache.UpstreamRateLimitError
-			if errors.As(err, &limited) && !limited.RetryAfter.IsZero() {
-				return nil, scheduler.RetryAt(limited.RetryAfter)
+			if errors.As(err, &limited) {
+				if !limited.RetryAfter.IsZero() {
+					return nil, scheduler.RetryAt(limited.RetryAfter)
+				}
+				return nil, err
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			if !errors.Is(err, errMetadataMirrorRetry) {
+				if h.sh != nil && release != nil {
+					h.sh.FinishRefresh("/", refreshGen, flatpakRefreshHealthError(err), nil)
+				}
+				return nil, err
 			}
 			if firstErr == nil {
 				firstErr = err
@@ -103,7 +112,7 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 		}
 		if !changed {
 			if h.sh != nil && release != nil {
-				h.sh.FinishRefresh("/", refreshGen, nil, []health.ProbeTarget{{Path: "summary"}})
+				h.sh.FinishRefresh("/", refreshGen, nil, []health.ResourceTarget{{Path: "summary"}})
 			}
 			return flatpakRefreshOutcome("unchanged", "same_as_current", next.Generation, upstream), nil
 		}
@@ -111,7 +120,7 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 		h.current = next
 		h.mu.Unlock()
 		if h.sh != nil && release != nil {
-			h.sh.FinishRefresh("/", refreshGen, nil, []health.ProbeTarget{{Path: "summary"}})
+			h.sh.FinishRefresh("/", refreshGen, nil, []health.ResourceTarget{{Path: "summary"}})
 		}
 		return flatpakRefreshOutcome("updated", "published", next.Generation, upstream), nil
 	}
@@ -119,21 +128,13 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 		firstErr = errMetadataUnavailable
 	}
 	if h.sh != nil && release != nil {
-		h.sh.FinishRefresh("/", refreshGen, health.ErrResourceTransient, nil)
+		h.sh.FinishRefresh("/", refreshGen, flatpakRefreshHealthError(firstErr), nil)
 	}
 	return nil, firstErr
 }
 
-func (h *Handler) weightedUpstreams() []string {
-	if h.sh == nil {
-		return append([]string(nil), h.upstreams...)
-	}
-	weighted := h.sh.WeightedUpstreams(h.upstreams)
-	upstreams := make([]string, 0, len(weighted))
-	for _, item := range weighted {
-		upstreams = append(upstreams, item.URL)
-	}
-	return upstreams
+func (h *Handler) orderedUpstreams() []string {
+	return append([]string(nil), h.upstreams...)
 }
 
 func (h *Handler) CleanupMetadata(ctx context.Context) error {
@@ -307,7 +308,7 @@ func (h *Handler) fetchMetadata(
 		if h.sh != nil {
 			h.sh.RecordFailure(upstream, err)
 		}
-		return nil, fmt.Errorf("fetch flatpak metadata %s: %w", cleanPath, err)
+		return nil, fmt.Errorf("%w: fetch flatpak metadata %s: %v", errMetadataMirrorRetry, cleanPath, err)
 	}
 	defer func() { _ = response.Body.Close(); release() }()
 	h.stats.RecordUpstreamRequest(
@@ -328,6 +329,14 @@ func (h *Handler) fetchMetadata(
 	if response.StatusCode != http.StatusOK {
 		if !required && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden) {
 			return nil, nil
+		}
+		switch response.StatusCode {
+		case http.StatusNotFound:
+			return nil, fmt.Errorf("%w: fetch flatpak metadata %s", health.ErrResourceNotFound, cleanPath)
+		case http.StatusForbidden:
+			return nil, fmt.Errorf("%w: fetch flatpak metadata %s", health.ErrResourceForbidden, cleanPath)
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return nil, fmt.Errorf("%w: fetch flatpak metadata %s: HTTP %d", errMetadataMirrorRetry, cleanPath, response.StatusCode)
 		}
 		return nil, fmt.Errorf("fetch flatpak metadata %s: HTTP %d", cleanPath, response.StatusCode)
 	}
@@ -362,6 +371,17 @@ func (h *Handler) fetchMetadata(
 		}
 	}
 	return &metadataDownload{temp: tempPath, size: size, digest: digest, headers: headers}, nil
+}
+
+func flatpakRefreshHealthError(err error) error {
+	switch {
+	case errors.Is(err, health.ErrResourceNotFound):
+		return health.ErrResourceNotFound
+	case errors.Is(err, health.ErrResourceForbidden):
+		return health.ErrResourceForbidden
+	default:
+		return health.ErrResourceTransient
+	}
 }
 
 func fileDigest(name string) (string, error) {

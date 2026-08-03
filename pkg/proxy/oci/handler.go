@@ -191,8 +191,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		slog.Info("oci proxy failed", "instance", h.name, "method", req.Method, "path", req.URL.Path, "err", err)
 		status := http.StatusBadGateway
+		var limited *httpcache.UpstreamRateLimitError
+		if errors.As(err, &limited) {
+			status = http.StatusTooManyRequests
+		}
 		if retryAfter, admissionError := httpcache.AdmissionRetryAfterSeconds(err); admissionError {
-			status = http.StatusServiceUnavailable
+			if !errors.As(err, &limited) {
+				status = http.StatusServiceUnavailable
+			}
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
 		http.Error(w, http.StatusText(status), status)

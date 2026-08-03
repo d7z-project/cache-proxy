@@ -87,7 +87,6 @@ func TestConfigureClientTransportTimeouts(t *testing.T) {
 		IdleBodyTimeout:    config.Duration(4 * time.Second),
 		MaxRequestDuration: config.Duration(5 * time.Second),
 		MaxIdleConns:       7,
-		MaxConnsPerHost:    8,
 	})
 
 	require.Equal(t, 5*time.Second, client.Timeout)
@@ -98,7 +97,7 @@ func TestConfigureClientTransportTimeouts(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 3*time.Second, transport.ResponseHeaderTimeout)
 	require.Equal(t, 7, transport.MaxIdleConns)
-	require.Equal(t, 8, transport.MaxConnsPerHost)
+	require.Zero(t, transport.MaxConnsPerHost)
 	require.NotNil(t, transport.DialContext)
 }
 
@@ -655,7 +654,7 @@ func TestTargetURLReturnsClientErrorWithoutFallback(t *testing.T) {
 	require.Zero(t, upstreamRequests)
 }
 
-func TestTargetURLFallsBackOnRetryableStatus(t *testing.T) {
+func TestTargetURLDoesNotFallbackOnGatewayStatus(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -663,7 +662,9 @@ func TestTargetURLFallsBackOnRetryableStatus(t *testing.T) {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 	}))
 	defer target.Close()
+	var upstreamRequests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
 		_, _ = io.WriteString(w, "upstream")
 	}))
 	defer upstream.Close()
@@ -681,8 +682,8 @@ func TestTargetURLFallsBackOnRetryableStatus(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "upstream", rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Zero(t, upstreamRequests.Load())
 }
 
 func TestTargetURLReturnsClientErrorWithoutUpstreamFallback(t *testing.T) {
@@ -746,7 +747,7 @@ func TestTargetURLReturnsClientErrorWithoutFallbackPath(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestFailoverRetriesRetryableStatus(t *testing.T) {
+func TestFailoverDoesNotRetryInternalServerError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -754,7 +755,9 @@ func TestFailoverRetriesRetryableStatus(t *testing.T) {
 		http.Error(w, "down", http.StatusInternalServerError)
 	}))
 	defer first.Close()
+	var secondRequests atomic.Int64
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondRequests.Add(1)
 		_, _ = io.WriteString(w, "ok")
 	}))
 	defer second.Close()
@@ -774,8 +777,8 @@ func TestFailoverRetriesRetryableStatus(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "ok", rec.Body.String())
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Zero(t, secondRequests.Load())
 }
 
 func TestFailoverDoesNotRetryClientErrors(t *testing.T) {
@@ -1144,13 +1147,13 @@ func TestRateLimitDoesNotFailOverToAnotherUpstream(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
-	require.NotEmpty(t, recorder.Header().Get("Retry-After"))
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Equal(t, "60", recorder.Header().Get("Retry-After"))
 	require.EqualValues(t, 1, firstRequests.Load())
 	require.Zero(t, secondRequests.Load())
 }
 
-func TestRateLimitCooldownIsSharedAndServesStale(t *testing.T) {
+func TestRateLimitCooldownQueuesNextForegroundRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
@@ -1164,7 +1167,7 @@ func TestRateLimitCooldownIsSharedAndServesStale(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second})
+	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 8, MaxActivePerHost: 4})
 	var requests atomic.Int64
 	newHandler := func(instance string) *Handler {
 		handler := NewHandler(instance, RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}, UpstreamGate: limiter}, store, literalResolver{route: Route{
@@ -1172,10 +1175,11 @@ func TestRateLimitCooldownIsSharedAndServesStale(t *testing.T) {
 		}}, NewStats(prometheus.NewRegistry()), nil)
 		handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			requests.Add(1)
-			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"60"}}, Body: http.NoBody, Request: req}, nil
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"1"}}, Body: http.NoBody, Request: req}, nil
 		})
 		return handler
 	}
+	started := time.Now()
 	for _, instance := range []string{"arch", "alpine"} {
 		recorder := httptest.NewRecorder()
 		newHandler(instance).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
@@ -1183,7 +1187,8 @@ func TestRateLimitCooldownIsSharedAndServesStale(t *testing.T) {
 		require.Equal(t, "STALE", recorder.Header().Get("X-Cache"))
 		require.Equal(t, instance, recorder.Body.String())
 	}
-	require.EqualValues(t, 1, requests.Load())
+	require.GreaterOrEqual(t, time.Since(started), 900*time.Millisecond)
+	require.EqualValues(t, 2, requests.Load())
 }
 
 func TestStaleValidationFailureDoesNotFailOver(t *testing.T) {
@@ -1477,24 +1482,24 @@ func TestAllUpstreamsUnavailableReturns503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
-func TestOpenCircuitUpstreamReturns503WithoutRequest(t *testing.T) {
+func TestPassiveHealthFailuresDoNotSuppressUpstreamRequest(t *testing.T) {
 	const upstream = "https://mirror.example"
 	stats := NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("test", "test", health.DefaultConfig(), []string{upstream}, stats, DefaultUserAgent)
+	svcHealth := health.New("test", "test", health.DefaultConfig(), []string{upstream}, stats)
 	for range 10 {
 		svcHealth.RecordResult(upstream, http.StatusServiceUnavailable, time.Millisecond)
 	}
-	require.Empty(t, svcHealth.WeightedUpstreams([]string{upstream}))
-
 	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream}}, nil,
 		literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, stats, svcHealth)
-	handler.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("open-circuit upstream must not be requested")
-		return nil, nil
+	var requests atomic.Int64
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
 	})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.EqualValues(t, 1, requests.Load())
 }
 
 func TestConcurrentNPMMetadataMissIsFetchedOnceAndRewritten(t *testing.T) {
@@ -1601,7 +1606,7 @@ func TestUpstreamAdmissionIsAcquiredBeforeRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1, ForegroundQueueWait: time.Second})
+	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
 	release, err := limiter.Acquire(context.Background(), upstream.URL, AdmissionForeground)
 	require.NoError(t, err)
 	handler := NewHandler("test", RuntimeConfig{
@@ -1623,37 +1628,6 @@ func TestUpstreamAdmissionIsAcquiredBeforeRequest(t *testing.T) {
 	recorder := <-done
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.EqualValues(t, 1, requests.Load())
-}
-
-func TestAdmissionWaitTimeoutDoesNotFanOutToAnotherUpstream(t *testing.T) {
-	var firstRequests atomic.Int64
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		firstRequests.Add(1)
-		_, _ = io.WriteString(w, "first")
-	}))
-	defer first.Close()
-	var secondRequests atomic.Int64
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		secondRequests.Add(1)
-		_, _ = io.WriteString(w, "second")
-	}))
-	defer second.Close()
-
-	gate := NewUpstreamGate(UpstreamGateConfig{
-		MaxActive: 2, MaxActivePerHost: 1, ForegroundQueueWait: 25 * time.Millisecond,
-	})
-	release, err := gate.Acquire(context.Background(), first.URL, AdmissionForeground)
-	require.NoError(t, err)
-	defer release()
-	handler := NewHandler("test", RuntimeConfig{
-		Mode: "test", Upstreams: []string{first.URL, second.URL}, UpstreamGate: gate,
-	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
-
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
-	require.Zero(t, firstRequests.Load())
-	require.Zero(t, secondRequests.Load())
 }
 
 func TestHandlerCountsInterruptedResponseBytes(t *testing.T) {

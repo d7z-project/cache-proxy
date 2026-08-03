@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -23,7 +22,6 @@ const responseSourceUpstreamHeader = "source-upstream"
 
 type upstreamCandidate struct {
 	URL       string
-	Weight    float64
 	Preferred bool
 }
 
@@ -161,14 +159,7 @@ func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, o
 
 func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	if options.TargetURL != "" {
-		result, err, fallback := h.doTargetURL(ctx, method, upstreamPath, options, headers)
-		if err == nil {
-			return result, nil
-		}
-		if !fallback || options.DisableFailover {
-			return nil, err
-		}
-		slog.Debug("target url error, fallback to upstream list", "instance", h.name, "url", redactedURL(options.TargetURL), "err", err)
+		return h.doTargetURL(ctx, method, options, headers)
 	}
 
 	pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
@@ -178,36 +169,35 @@ func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath s
 	for i, candidate := range upstreams {
 		result, err := h.tryUpstream(ctx, method, pathPart, rawQuery, candidate, i, len(upstreams), options, headers)
 		if err == nil {
-			slog.Debug("upstream selected", "instance", h.name, "method", method, "path", upstreamPath, "upstream", redactedURL(candidate.URL), "weight", candidate.Weight)
+			slog.Debug("upstream selected", "instance", h.name, "method", method, "path", upstreamPath, "upstream", redactedURL(candidate.URL))
 			return result, nil
 		}
-		var limited *UpstreamRateLimitError
-		if errors.As(err, &limited) || errors.Is(err, ErrAdmissionWaitTimeout) || ctx.Err() != nil || options.DisableFailover {
+		if !errors.Is(err, ErrUpstreamUnavailable) || ctx.Err() != nil || options.DisableFailover {
 			return nil, err
 		}
 		lastErr = err
 	}
 	if lastErr == nil {
 		if len(h.config.Upstreams) > 0 {
-			return nil, fmt.Errorf("%w: no healthy upstream is available", ErrUpstreamUnavailable)
+			return nil, fmt.Errorf("%w: no upstream is available", ErrUpstreamUnavailable)
 		}
 		return nil, fmt.Errorf("no upstream url configured")
 	}
 	return nil, lastErr
 }
 
-func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error, bool) {
+func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
-		return nil, err, false
+		return nil, err
 	}
 	releaseAdmission, err := h.upstreamGate.Acquire(ctx, options.TargetURL, AdmissionForeground)
 	if err != nil {
-		return nil, err, false
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
 	if err != nil {
 		releaseAdmission()
-		return nil, err, false
+		return nil, err
 	}
 	userAgent := options.UserAgent
 	if userAgent == "" {
@@ -234,7 +224,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 				h.health.RecordFailure(options.TargetURL, err)
 			}
 		}
-		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err), true
+		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
 		if options.Record {
@@ -243,34 +233,16 @@ func (h *Handler) doTargetURL(ctx context.Context, method, upstreamPath string, 
 				h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 			}
 		}
-		limited := h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
-		_ = response.Body.Close()
-		releaseAdmission()
-		release()
-		return nil, limited, false
+		h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
 	}
 	if options.Record && h.health != nil {
 		h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
-	}
-	if shouldFailoverUpstreamStatus(response.StatusCode) {
-		if options.Record {
-			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, response.StatusCode, latency, 0)
-		}
-		_ = response.Body.Close()
-		releaseAdmission()
-		release()
-		err := fmt.Errorf("%w: target url returned retryable status %d", ErrUpstreamUnavailable, response.StatusCode)
-		h.logUpstreamFailover(method, upstreamPath, options.TargetURL, response.StatusCode, err)
-		if upstreamPath == "" {
-			return nil, err, false
-		}
-		return nil, err, true
 	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
 	result := responseFromHTTP(h.client, response)
 	result.Headers[responseSourceUpstreamHeader] = statsUpstream
 	result.Body = h.recordUpstreamBody(result.Body, func() { releaseAdmission(); release() }, options.Record, statsUpstream, method, response.StatusCode, latency)
-	return result, nil, false
+	return result, nil
 }
 
 func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error {
@@ -292,31 +264,16 @@ func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error 
 }
 
 func (h *Handler) buildUpstreamList(options remoteOptions) []upstreamCandidate {
-	var upstreams []upstreamCandidate
-	if h.health != nil {
-		weighted := h.health.WeightedUpstreams(h.config.Upstreams)
-		for _, wu := range weighted {
-			upstreams = append(upstreams, upstreamCandidate{
-				URL:       wu.URL,
-				Weight:    wu.Weight,
-				Preferred: wu.URL == options.PreferredUpstream,
-			})
-		}
-	} else {
-		for _, url := range h.config.Upstreams {
-			upstreams = append(upstreams, upstreamCandidate{
-				URL:       url,
-				Weight:    1.0,
-				Preferred: url == options.PreferredUpstream,
-			})
-		}
+	upstreams := make([]upstreamCandidate, 0, len(h.config.Upstreams))
+	for _, upstream := range h.config.Upstreams {
+		upstreams = append(upstreams, upstreamCandidate{
+			URL:       upstream,
+			Preferred: upstream == options.PreferredUpstream,
+		})
 	}
-	if h.shouldPromotePreferred(options) {
+	if options.PreferredUpstream != "" {
 		for i := range upstreams {
 			if upstreams[i].URL == options.PreferredUpstream {
-				if upstreams[i].Weight <= 0 {
-					break
-				}
 				item := upstreams[i]
 				copy(upstreams[1:i+1], upstreams[0:i])
 				upstreams[0] = item
@@ -325,17 +282,6 @@ func (h *Handler) buildUpstreamList(options remoteOptions) []upstreamCandidate {
 		}
 	}
 	return upstreams
-}
-
-func (h *Handler) shouldPromotePreferred(options remoteOptions) bool {
-	if options.PreferredUpstream == "" {
-		return false
-	}
-	if !options.ArtifactMirrorFallback || h.health == nil {
-		return true
-	}
-	state, ok := h.health.UpstreamState(options.PreferredUpstream)
-	return !ok || state == health.SClosed
 }
 
 func (h *Handler) tryUpstream(
@@ -397,17 +343,13 @@ func (h *Handler) tryUpstream(
 		if h.health != nil {
 			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 		}
-		limited := h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
-		_ = response.Body.Close()
-		releaseAdmission()
-		release()
-		return nil, limited
+		h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
 	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 	}
-	if options.AcceptErrors && shouldFailoverCandidateStatus(response.StatusCode, candidate, options) {
+	if options.AcceptErrors && shouldFailoverUpstreamStatus(response.StatusCode) {
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)
 		}
@@ -428,8 +370,12 @@ func (h *Handler) tryUpstream(
 		_ = response.Body.Close()
 		releaseAdmission()
 		release()
-		err = fmt.Errorf("%w: upstream %s failed with %d", ErrUpstreamUnavailable, method, response.StatusCode)
-		if idx+1 < total {
+		if shouldFailoverUpstreamStatus(response.StatusCode) {
+			err = fmt.Errorf("%w: upstream %s failed with %d", ErrUpstreamUnavailable, method, response.StatusCode)
+		} else {
+			err = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
+		}
+		if errors.Is(err, ErrUpstreamUnavailable) && idx+1 < total {
 			slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL))
 		}
 		return nil, err
@@ -464,17 +410,6 @@ func (h *Handler) recordUpstreamBody(body io.ReadCloser, release func(), record 
 	}}
 }
 
-func shouldFailoverCandidateStatus(
-	status int,
-	candidate upstreamCandidate,
-	options remoteOptions,
-) bool {
-	if shouldFailoverUpstreamStatus(status) {
-		return true
-	}
-	return options.ArtifactMirrorFallback && !candidate.Preferred && status == http.StatusNotFound
-}
-
 func statsUpstreamKey(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -488,7 +423,7 @@ func shouldFailoverUpstreamStatus(status int) bool {
 }
 
 func upstreamStatusIsFailure(status int) bool {
-	return status == 0 || status == http.StatusRequestTimeout || status >= http.StatusInternalServerError
+	return status == 0 || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 func (h *Handler) logUpstreamFailover(method, upstreamPath, upstream string, status int, err error) {

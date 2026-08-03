@@ -7,16 +7,8 @@ import (
 	"sort"
 )
 
-func (h *IndexedHandler) weightedUpstreams() []string {
-	if h.sh == nil {
-		return append([]string(nil), h.upstreams...)
-	}
-	weighted := h.sh.WeightedUpstreams(h.upstreams)
-	upstreams := make([]string, 0, len(weighted))
-	for _, item := range weighted {
-		upstreams = append(upstreams, item.URL)
-	}
-	return upstreams
+func (h *IndexedHandler) orderedUpstreams() []string {
+	return append([]string(nil), h.upstreams...)
 }
 
 func (h *IndexedHandler) currentRootIDs() []string {
@@ -58,7 +50,7 @@ func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool, boo
 	if created {
 		slog.Debug("discovered new repository root", "instance", h.name, "mode", h.mode, "root_id", rootID, "path", result.Root.Path)
 		if h.sh != nil {
-			h.sh.AddResource(rootID, targetsToProbe(result.Root.Targets), h.upstreams)
+			h.sh.AddResource(rootID, targetsToResourceTargets(result.Root.Targets), h.upstreams)
 		}
 	}
 	h.saveState(context.Background())
@@ -213,7 +205,7 @@ func (h *IndexedHandler) AddRepository(root RepositoryRoot) {
 	h.roots[root.ID] = &rootEntry{root: root}
 	h.mu.Unlock()
 	if h.sh != nil {
-		h.sh.AddResource(root.ID, targetsToProbe(root.Targets), h.upstreams)
+		h.sh.AddResource(root.ID, targetsToResourceTargets(root.Targets), h.upstreams)
 	}
 }
 

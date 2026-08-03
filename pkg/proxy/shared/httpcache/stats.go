@@ -17,11 +17,8 @@ type metricsCollector struct {
 	metadataRefreshTotal  *prometheus.CounterVec
 	metadataRefreshTime   *prometheus.HistogramVec
 	metadataSnapshotReady *prometheus.GaugeVec
-	upstreamHealth        *prometheus.GaugeVec
-	upstreamWeight        *prometheus.GaugeVec
 	upstreamErrorRate     *prometheus.GaugeVec
 	upstreamLatency       *prometheus.GaugeVec
-	circuitEvents         *prometheus.CounterVec
 }
 
 func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
@@ -55,14 +52,6 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 			Name: "cache_proxy_metadata_snapshot_ready",
 			Help: "Whether the instance currently has at least one successfully loaded metadata snapshot.",
 		}, []string{"instance", "mode"}),
-		upstreamHealth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "cache_proxy_upstream_health",
-			Help: "Upstream health state: 0=closed, 1=degraded, 2=open, 3=halfopen.",
-		}, []string{"instance", "mode", "upstream"}),
-		upstreamWeight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "cache_proxy_upstream_weight",
-			Help: "Current upstream traffic weight (0-1).",
-		}, []string{"instance", "mode", "upstream"}),
 		upstreamErrorRate: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cache_proxy_upstream_error_rate",
 			Help: "Sliding-window error rate for the upstream (0-1).",
@@ -71,12 +60,8 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 			Name: "cache_proxy_upstream_latency_seconds",
 			Help: "EWMA latency for the upstream in seconds.",
 		}, []string{"instance", "mode", "upstream"}),
-		circuitEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "cache_proxy_circuit_breaker_events_total",
-			Help: "Circuit breaker events by transition type.",
-		}, []string{"instance", "mode", "upstream", "event"}),
 	}
-	reg.MustRegister(mc.requestsTotal, mc.responseBytesTotal, mc.upstreamRequestsTotal, mc.activeDownloads, mc.metadataRefreshTotal, mc.metadataRefreshTime, mc.metadataSnapshotReady, mc.upstreamHealth, mc.upstreamWeight, mc.upstreamErrorRate, mc.upstreamLatency, mc.circuitEvents)
+	reg.MustRegister(mc.requestsTotal, mc.responseBytesTotal, mc.upstreamRequestsTotal, mc.activeDownloads, mc.metadataRefreshTotal, mc.metadataRefreshTime, mc.metadataSnapshotReady, mc.upstreamErrorRate, mc.upstreamLatency)
 	return mc
 }
 
@@ -147,9 +132,6 @@ type UpstreamStats struct {
 	LastStatus     string            `json:"lastStatus,omitempty"`
 	LastUsedAt     time.Time         `json:"lastUsedAt,omitempty"`
 	LastError      string            `json:"lastError,omitempty"`
-	State          int               `json:"state"`
-	StateText      string            `json:"stateText,omitempty"`
-	Weight         float64           `json:"weight"`
 	ErrorRate      float64           `json:"errorRate"`
 	LatencySeconds float64           `json:"latencySeconds"`
 }
@@ -378,12 +360,10 @@ func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
 	s.totalMu.Unlock()
 }
 
-func (s *Stats) SetUpstreamHealth(instance, mode, upstream string, state int, weight, errorRate, latencySecs float64) {
+func (s *Stats) SetUpstreamObservation(instance, mode, upstream string, errorRate, latencySecs float64) {
 	if s == nil {
 		return
 	}
-	s.mc.upstreamHealth.WithLabelValues(instance, mode, upstream).Set(float64(state))
-	s.mc.upstreamWeight.WithLabelValues(instance, mode, upstream).Set(weight)
 	s.mc.upstreamErrorRate.WithLabelValues(instance, mode, upstream).Set(errorRate)
 	s.mc.upstreamLatency.WithLabelValues(instance, mode, upstream).Set(latencySecs)
 
@@ -397,20 +377,10 @@ func (s *Stats) SetUpstreamHealth(instance, mode, upstream string, state int, we
 	if upstreamStats.Status == nil {
 		upstreamStats.Status = map[string]uint64{}
 	}
-	upstreamStats.State = state
-	upstreamStats.StateText = upstreamStateText(state)
-	upstreamStats.Weight = weight
 	upstreamStats.ErrorRate = errorRate
 	upstreamStats.LatencySeconds = latencySecs
 	entry.data.Upstreams[upstream] = upstreamStats
 	entry.mu.Unlock()
-}
-
-func (s *Stats) RecordCircuitEvent(instance, mode, upstream, event string) {
-	if s == nil {
-		return
-	}
-	s.mc.circuitEvents.WithLabelValues(instance, mode, upstream, event).Inc()
 }
 
 func (s *Stats) Snapshot() StatsSnapshot {
@@ -462,11 +432,8 @@ func (s *Stats) RemoveInstance(name string) {
 	s.mc.metadataRefreshTotal.DeletePartialMatch(label)
 	s.mc.metadataRefreshTime.DeletePartialMatch(label)
 	s.mc.metadataSnapshotReady.DeletePartialMatch(label)
-	s.mc.upstreamHealth.DeletePartialMatch(label)
-	s.mc.upstreamWeight.DeletePartialMatch(label)
 	s.mc.upstreamErrorRate.DeletePartialMatch(label)
 	s.mc.upstreamLatency.DeletePartialMatch(label)
-	s.mc.circuitEvents.DeletePartialMatch(label)
 }
 
 func (s *Stats) getOrCreateEntry(name, mode string) *instanceEntry {
@@ -546,19 +513,4 @@ func cloneMap(src map[string]uint64) map[string]uint64 {
 		dst[k] = v
 	}
 	return dst
-}
-
-func upstreamStateText(state int) string {
-	switch state {
-	case 0:
-		return "closed"
-	case 1:
-		return "degraded"
-	case 2:
-		return "open"
-	case 3:
-		return "halfopen"
-	default:
-		return "unknown"
-	}
 }

@@ -12,12 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -290,8 +288,27 @@ instances:
 	require.ErrorContains(t, err, "field default_polciy not found")
 }
 
-func TestValidateRejectsUnsafeHealthProbeInterval(t *testing.T) {
-	doc, err := config.Decode(strings.NewReader(`
+func TestValidateRejectsRemovedTransportConfig(t *testing.T) {
+	tests := map[string]string{
+		"transport connection limit": "      max_conns_per_host: 8",
+		"health degrade rate":        "          degrade_rate: 0.2",
+		"health trip rate":           "          trip_rate: 0.5",
+		"health evaluation window":   "          evaluation_window: 2m",
+		"health degrade latency":     "          degrade_latency: 500ms",
+		"health minimum weight":      "          min_weight: 0.1",
+		"health canary cooldown":     "          canary_cooldown: 1m",
+		"health canary step":         "          canary_step: 0.1",
+		"health probe interval":      "          probe_interval: 1s",
+		"health probe timeout":       "          probe_timeout: 3s",
+		"resource block interval":    "          resource_block_interval: 30s",
+	}
+	for name, removedField := range tests {
+		t.Run(name, func(t *testing.T) {
+			healthPrefix := "      health:\n"
+			if name == "transport connection limit" {
+				healthPrefix = ""
+			}
+			doc, err := config.Decode(strings.NewReader(fmt.Sprintf(`
 server:
   bind: 127.0.0.1:8080
   backend: /tmp/cache
@@ -304,13 +321,16 @@ instances:
       upstreams:
         - https://example.com/debian
       transport:
-        health:
-          probe_interval: 1s
-`))
-	require.NoError(t, err)
 
-	err = Validate(doc)
-	require.ErrorContains(t, err, "health probe_interval")
+%s%s
+`, healthPrefix, removedField)))
+			require.NoError(t, err)
+
+			err = Validate(doc)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "field")
+		})
+	}
 }
 
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
@@ -614,7 +634,7 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "GENERATION", http.StatusOK, 512)
 	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "MISS", http.StatusOK, 256)
 	app.stats.RecordUpstreamRequest("files", config.ModeFile, upstream, http.MethodGet, http.StatusBadGateway, 25*time.Millisecond, 1024)
-	app.stats.SetUpstreamHealth("files", config.ModeFile, upstream, 2, 0.75, 0.5, 0.025)
+	app.stats.SetUpstreamObservation("files", config.ModeFile, upstream, 0.5, 0.025)
 
 	req := httptest.NewRequest(http.MethodGet, "/-/status/network", nil)
 	rec := httptest.NewRecorder()
@@ -635,7 +655,6 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	require.Equal(t, int64(1), payload.Instances[0].ActiveUpstreamRequests)
 	require.Len(t, payload.Upstreams, 1)
 	require.Equal(t, "mirror.example.test", payload.Upstreams[0].Host)
-	require.Equal(t, "open", payload.Upstreams[0].State)
 	require.Equal(t, int64(1), payload.Upstreams[0].ActiveUpstreamRequests)
 	require.Len(t, payload.Edges, 1)
 	require.Equal(t, "files", payload.Edges[0].Instance)
@@ -645,7 +664,7 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	require.Equal(t, float64(25), payload.Edges[0].LatencyMS)
 }
 
-func TestStatusNetworkEndpointCountsSharedDegradedHostOnce(t *testing.T) {
+func TestStatusNetworkEndpointCombinesSharedHostObservations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -659,7 +678,7 @@ func TestStatusNetworkEndpointCountsSharedDegradedHostOnce(t *testing.T) {
 
 	for _, name := range []string{"files-a", "files-b"} {
 		app.stats.RecordUpstreamRequest(name, config.ModeFile, upstream, http.MethodGet, http.StatusBadGateway, 0, 0)
-		app.stats.SetUpstreamHealth(name, config.ModeFile, upstream, 2, 0, 1, 0)
+		app.stats.SetUpstreamObservation(name, config.ModeFile, upstream, 1, 0)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/-/status/network", nil)
@@ -669,7 +688,6 @@ func TestStatusNetworkEndpointCountsSharedDegradedHostOnce(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var payload networkStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
-	require.Equal(t, 1, payload.Summary.DegradedUpstreams)
 	require.Len(t, payload.Upstreams, 1)
 	require.Equal(t, "mirror.example.test", payload.Upstreams[0].Host)
 	require.Len(t, payload.Edges, 2)
@@ -693,11 +711,8 @@ func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
 	var payload networkStatus
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
 	require.Equal(t, 1, payload.Summary.RateLimitedUpstreams)
-	require.Equal(t, 1, payload.Summary.DegradedUpstreams)
 	require.Len(t, payload.Upstreams, 1)
-	require.Equal(t, "rate_limited", payload.Upstreams[0].State)
 	require.Equal(t, DefaultMaxActiveDownloadsPerHost, payload.Upstreams[0].AdmissionMaxActive)
-	require.EqualValues(t, DefaultRequestIntervalPerHost.Milliseconds(), payload.Upstreams[0].RequestIntervalMS)
 	require.NotEmpty(t, payload.Upstreams[0].CooldownUntil)
 }
 
@@ -852,122 +867,6 @@ func TestAppCloseWaitsForFinalStatusPersistence(t *testing.T) {
 	events := restored.taskEvents(app.config.Server.Status.EventLimit)
 	require.Len(t, events, 1)
 	require.Equal(t, "files", events[0].Storage)
-}
-
-func TestStatusCapturesUpstreamStateEvents(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	b := bus.New()
-	status := newAppStatus(config.ServerStatusConfig{
-		DiskSampleInterval: config.Duration(time.Minute),
-		DiskHistoryWindow:  config.Duration(time.Hour),
-		EventLimit:         8,
-	}, nil)
-	status.start(ctx, &App{}, b)
-
-	b.Publish(bus.Event{
-		Type: bus.EventUpstreamState,
-		Payload: bus.UpstreamStatePayload{
-			Instance: "debian",
-			Mode:     "deb",
-			Upstream: "https://deb.example.com",
-			From:     "closed",
-			To:       "degraded",
-			Reason:   "failure",
-			Detail:   "HTTP 502",
-		},
-	})
-
-	require.Eventually(t, func() bool {
-		events := status.taskEvents(8)
-		return len(events) == 1 && events[0].Message != ""
-	}, time.Second, 20*time.Millisecond)
-
-	events := status.taskEvents(8)
-	require.Equal(t, "debian", events[0].Storage)
-	require.Equal(t, "upstream_state", events[0].TaskType)
-	require.Equal(t, "degraded", events[0].Result)
-	require.Equal(t, "closed", events[0].StateFrom)
-	require.Equal(t, "failure", events[0].ReasonCode)
-	require.Equal(t, "HTTP 502", events[0].Detail)
-	require.Contains(t, events[0].Message, "failure")
-	require.Contains(t, events[0].Message, "HTTP 502")
-}
-
-func TestStatusCapturesRecoveryUpstreamStateEvents(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	b := bus.New()
-	status := newAppStatus(config.ServerStatusConfig{
-		DiskSampleInterval: config.Duration(time.Minute),
-		DiskHistoryWindow:  config.Duration(time.Hour),
-		EventLimit:         8,
-	}, nil)
-	status.start(ctx, &App{}, b)
-
-	b.Publish(bus.Event{
-		Type: bus.EventUpstreamState,
-		Payload: bus.UpstreamStatePayload{
-			Instance: "debian",
-			Mode:     "deb",
-			Upstream: "https://mirror.sjtu.edu.cn/debian",
-			From:     "degraded",
-			To:       "closed",
-			Reason:   "success",
-		},
-	})
-
-	require.Eventually(t, func() bool {
-		events := status.taskEvents(8)
-		return len(events) == 1 && events[0].ReasonCode == "success"
-	}, time.Second, 20*time.Millisecond)
-
-	events := status.taskEvents(8)
-	require.Equal(t, "closed", events[0].Result)
-	require.Equal(t, "degraded", events[0].StateFrom)
-	require.Equal(t, "success", events[0].ReasonCode)
-	require.Contains(t, events[0].Message, "degraded")
-	require.Contains(t, events[0].Message, "closed")
-}
-
-func TestStatusUnsubscribesBusOnStop(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	reg := prometheus.NewRegistry()
-	b := bus.NewWithRegisterer(reg)
-	status := newAppStatus(config.ServerStatusConfig{
-		DiskSampleInterval: config.Duration(time.Minute),
-		DiskHistoryWindow:  config.Duration(time.Hour),
-		EventLimit:         8,
-	}, nil)
-	status.start(ctx, &App{}, b)
-
-	upstreamStateSubscribers := func() float64 {
-		families, err := reg.Gather()
-		require.NoError(t, err)
-		for _, family := range families {
-			if family.GetName() != "cache_proxy_bus_subscribers" {
-				continue
-			}
-			for _, metric := range family.GetMetric() {
-				if len(metric.GetLabel()) == 1 &&
-					metric.GetLabel()[0].GetValue() == string(bus.EventUpstreamState) {
-					return metric.GetGauge().GetValue()
-				}
-			}
-		}
-		return -1
-	}
-
-	require.Eventually(t, func() bool {
-		return upstreamStateSubscribers() == 1
-	}, time.Second, 20*time.Millisecond)
-
-	cancel()
-	require.Eventually(t, func() bool {
-		return upstreamStateSubscribers() == 0
-	}, time.Second, 20*time.Millisecond)
 }
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {

@@ -27,7 +27,7 @@ import (
 
 func TestRefreshUsesOneUpstreamForMetadataGeneration(t *testing.T) {
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "failed", http.StatusInternalServerError)
+		http.Error(w, "failed", http.StatusServiceUnavailable)
 	}))
 	defer first.Close()
 
@@ -151,11 +151,11 @@ func TestFailedRefreshKeepsCurrentGeneration(t *testing.T) {
 	require.Equal(t, current.Generation, handler.currentSnapshot().Generation)
 }
 
-func TestRefreshUsesHealthyWeightedUpstreamFirst(t *testing.T) {
+func TestRefreshUsesConfiguredOrderDespitePassiveFailures(t *testing.T) {
 	var firstHits atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstHits.Add(1)
-		http.Error(w, "failed", http.StatusInternalServerError)
+		http.Error(w, "failed", http.StatusServiceUnavailable)
 	}))
 	defer first.Close()
 
@@ -177,7 +177,7 @@ func TestRefreshUsesHealthyWeightedUpstreamFirst(t *testing.T) {
 	}
 
 	require.NoError(t, handler.Refresh(context.Background()))
-	require.Equal(t, int32(0), firstHits.Load())
+	require.Greater(t, firstHits.Load(), int32(0))
 	require.Greater(t, secondHits.Load(), int32(0))
 	require.Equal(t, second.URL, handler.currentSnapshot().Upstream)
 }
@@ -402,7 +402,7 @@ func TestDeltaBypassesCacheWhenDisabled(t *testing.T) {
 			BusyPolicy:      config.BusyPolicyStale,
 			DefaultFreshFor: config.Freshness(defaultMetadataFreshFor),
 			UpstreamGate: httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
-				MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second,
+				MaxActive: 8, MaxActivePerHost: 4,
 			}),
 			VerifyFunc: handler.verifyCacheObject,
 		},
@@ -499,7 +499,7 @@ func TestFlatpakRepoDescriptorRewrite(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "GPGKey=abc\n")
 }
 
-func TestFlatpakDescriptorRateLimitReturnsServiceUnavailable(t *testing.T) {
+func TestFlatpakDescriptorRateLimitPreservesUpstreamResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
@@ -510,8 +510,8 @@ func TestFlatpakDescriptorRateLimitReturnsServiceUnavailable(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/test.flatpakrepo", nil))
 
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
-	require.NotEmpty(t, recorder.Header().Get("Retry-After"))
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Equal(t, "60", recorder.Header().Get("Retry-After"))
 }
 
 func TestFlatpakBrowserDescriptorVaryIsNotCached(t *testing.T) {
@@ -584,7 +584,7 @@ func newTestHandlerWithHealth(
 ) (*Handler, *httpcache.Stats, *health.ServiceHealth) {
 	t.Helper()
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	sh := health.New("flatpak-test", config.ModeFlatpak, health.DefaultConfig(), upstreams, stats, "cache-proxy-test")
+	sh := health.New("flatpak-test", config.ModeFlatpak, health.DefaultConfig(), upstreams, stats)
 	handler := newTestHandlerWithStatsAndHealth(t, store, upstreams, stats, sh)
 	return handler, stats, sh
 }
@@ -600,7 +600,7 @@ func newTestHandlerWithStatsAndHealth(
 	policy := &Policy{}
 	applyDefaults(policy)
 	upstreamGate := httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
-		MaxActive: 8, MaxActivePerHost: 4, ForegroundQueueWait: time.Second,
+		MaxActive: 8, MaxActivePerHost: 4,
 	})
 	runtimeCfg := httpcache.RuntimeConfig{
 		Mode:            config.ModeFlatpak,

@@ -13,7 +13,6 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
@@ -103,7 +102,7 @@ func newAppStatus(cfg config.ServerStatusConfig, store *blobfs.Store) *appStatus
 	}
 }
 
-func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
+func (s *appStatus) start(ctx context.Context, app *App) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -114,15 +113,6 @@ func (s *appStatus) start(ctx context.Context, app *App, b *bus.Bus) {
 		defer s.wg.Done()
 		s.persistLoop()
 	}()
-	if b != nil {
-		ch := b.Subscribe(bus.EventUpstreamState)
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			defer b.Unsubscribe(ch)
-			s.busLoop(ctx, ch)
-		}()
-	}
 	s.recordDiskUsage(ctx, app)
 	s.wg.Add(1)
 	go func() {
@@ -319,51 +309,6 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 		writeStatusJSON(w, req, a.status.network(a))
 	default:
 		http.NotFound(w, req)
-	}
-}
-
-func (s *appStatus) busLoop(ctx context.Context, ch <-chan bus.Event) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt := <-ch:
-			if evt.Type != bus.EventUpstreamState {
-				continue
-			}
-			payload, ok := evt.Payload.(bus.UpstreamStatePayload)
-			if !ok {
-				continue
-			}
-			timestamp := evt.Timestamp
-			if timestamp.IsZero() {
-				timestamp = time.Now()
-			}
-			message := payload.Reason
-			if payload.Detail != "" {
-				message += ": " + payload.Detail
-			}
-			if payload.From != "" && payload.To != "" {
-				if message != "" {
-					message += " (" + payload.From + " -> " + payload.To + ")"
-				} else {
-					message = payload.From + " -> " + payload.To
-				}
-			}
-			s.appendEvent(taskEvent{
-				Storage:    payload.Instance,
-				TaskType:   "upstream_state",
-				Target:     payload.Upstream,
-				StartedAt:  timestamp.Format(time.RFC3339),
-				FinishedAt: timestamp.Format(time.RFC3339),
-				DurationMS: 0,
-				Result:     payload.To,
-				StateFrom:  payload.From,
-				ReasonCode: payload.Reason,
-				Detail:     payload.Detail,
-				Message:    message,
-			})
-		}
 	}
 }
 

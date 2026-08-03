@@ -22,7 +22,6 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -46,7 +45,6 @@ type App struct {
 	metricsReg   *prometheus.Registry
 
 	scheduler *scheduler.Scheduler
-	probes    *health.ProbeScheduler
 	bus       *bus.Bus
 	status    *appStatus
 
@@ -149,7 +147,7 @@ func Validate(doc *config.Document) error {
 	b := bus.NewWithRegisterer(registry)
 	sched := scheduler.New(b, store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
-	_, err = planEntries(context.Background(), &docCopy, store, stats, upstreamGate, sched, nil, b)
+	_, err = planEntries(context.Background(), &docCopy, store, stats, upstreamGate, sched, b)
 	sched.Start(validateCtx)
 	defer validateCancel()
 	defer func() { _ = sched.Stop(validateCtx) }()
@@ -181,7 +179,6 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	b := bus.NewWithRegisterer(metricsReg)
 	sched := scheduler.New(b, store, metricsReg)
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
-	probes := health.NewProbeScheduler(lifecycleCtx)
 	status := newAppStatus(doc.Server.Status, store)
 	sched.SetRunObserver(status.observeTaskRun)
 
@@ -189,12 +186,11 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		stopRuntime()
 		stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 		defer cancel()
-		_ = probes.Stop(stopCtx)
 		_ = sched.Stop(stopCtx)
 		_ = store.Close()
 	}
 
-	entries, err := planEntries(ctx, doc, store, stats, upstreamGate, sched, probes, b)
+	entries, err := planEntries(ctx, doc, store, stats, upstreamGate, sched, b)
 	if err != nil {
 		cleanupOpenFailure()
 		return nil, err
@@ -208,7 +204,6 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		upstreamGate:  upstreamGate,
 		metricsReg:    metricsReg,
 		scheduler:     sched,
-		probes:        probes,
 		bus:           b,
 		status:        status,
 		entries:       entries,
@@ -224,7 +219,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		return nil, err
 	}
 	sched.Start(lifecycleCtx)
-	status.start(lifecycleCtx, app, b)
+	status.start(lifecycleCtx, app)
 
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),
@@ -351,12 +346,6 @@ func (a *App) Close(ctx context.Context) error {
 	drained := true
 	if a.scheduler != nil {
 		if err := a.scheduler.Stop(ctx); err != nil {
-			joined = errors.Join(joined, err)
-			drained = false
-		}
-	}
-	if a.probes != nil {
-		if err := a.probes.Stop(ctx); err != nil {
 			joined = errors.Join(joined, err)
 			drained = false
 		}

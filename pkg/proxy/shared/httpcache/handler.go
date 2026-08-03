@@ -18,19 +18,18 @@ import (
 )
 
 type Route struct {
-	ObjectPath             string
-	UpstreamPath           string
-	TargetURL              string
-	AllowedTargetHosts     []string
-	Policy                 string
-	FreshFor               config.Freshness
-	BusyPolicy             string
-	ExpireAfter            config.Expiration
-	RequestHeaders         map[string]string
-	RewriteKind            string
-	AuthRequired           bool
-	PreferredUpstream      string
-	ArtifactMirrorFallback bool
+	ObjectPath         string
+	UpstreamPath       string
+	TargetURL          string
+	AllowedTargetHosts []string
+	Policy             string
+	FreshFor           config.Freshness
+	BusyPolicy         string
+	ExpireAfter        config.Expiration
+	RequestHeaders     map[string]string
+	RewriteKind        string
+	AuthRequired       bool
+	PreferredUpstream  string
 }
 
 type Resolver interface {
@@ -70,15 +69,14 @@ type Handler struct {
 }
 
 type remoteOptions struct {
-	AcceptErrors           bool
-	Record                 bool
-	UserAgent              string
-	TargetURL              string
-	AllowedTargetHosts     []string
-	PreferredUpstream      string
-	ArtifactMirrorFallback bool
-	DisableFailover        bool
-	ValidatorOrigin        string
+	AcceptErrors       bool
+	Record             bool
+	UserAgent          string
+	TargetURL          string
+	AllowedTargetHosts []string
+	PreferredUpstream  string
+	DisableFailover    bool
+	ValidatorOrigin    string
 }
 
 // DefaultUserAgent identifies cache-proxy to upstream services.
@@ -146,9 +144,6 @@ func ConfigureClientTransport(client *utils.HttpClientWrapper, name string, tran
 		baseTransport.MaxIdleConns = transport.MaxIdleConns
 		baseTransport.MaxIdleConnsPerHost = transport.MaxIdleConns
 	}
-	if transport.MaxConnsPerHost > 0 {
-		baseTransport.MaxConnsPerHost = transport.MaxConnsPerHost
-	}
 }
 
 func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
@@ -161,7 +156,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	result, err := h.handle(req.Context(), req)
 	if err != nil {
 		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
-		resp.Header().Set("Retry-After", retryAfterValue(err))
+		setRetryAfter(resp.Header(), err)
 		status := proxyErrorStatus(err)
 		http.Error(resp, http.StatusText(status), status)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
@@ -212,7 +207,7 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 	result, err := h.bypass(req.Context(), req, route)
 	if err != nil {
 		slog.Info("proxy passthrough failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "upstream_path", upstreamPath, "err", err)
-		resp.Header().Set("Retry-After", retryAfterValue(err))
+		setRetryAfter(resp.Header(), err)
 		status := proxyErrorStatus(err)
 		http.Error(resp, http.StatusText(status), status)
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", status, 0)
@@ -226,14 +221,17 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 	return status
 }
 
-func retryAfterValue(err error) string {
+func setRetryAfter(header http.Header, err error) {
 	if seconds, ok := AdmissionRetryAfterSeconds(err); ok {
-		return strconv.Itoa(seconds)
+		header.Set("Retry-After", strconv.Itoa(seconds))
 	}
-	return "5"
 }
 
 func proxyErrorStatus(err error) int {
+	var limited *UpstreamRateLimitError
+	if errors.As(err, &limited) {
+		return http.StatusTooManyRequests
+	}
 	_, admissionError := AdmissionRetryAfterSeconds(err)
 	if errors.Is(err, ErrUpstreamUnavailable) || admissionError {
 		return http.StatusServiceUnavailable

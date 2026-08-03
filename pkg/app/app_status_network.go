@@ -28,8 +28,10 @@ type networkSummary struct {
 	ActiveUpstreamRequests int64   `json:"active_upstream_requests"`
 	HitRate                float64 `json:"hit_rate"`
 	UpstreamErrorRate      float64 `json:"upstream_error_rate"`
-	DegradedUpstreams      int     `json:"degraded_upstreams"`
 	QueuedUpstreamRequests int     `json:"queued_upstream_requests"`
+	ForegroundQueued       int     `json:"foreground_queued"`
+	RefreshQueued          int     `json:"refresh_queued"`
+	OldestAdmissionWaitMS  int64   `json:"oldest_admission_wait_ms"`
 	AdmissionActive        int     `json:"admission_active"`
 	AdmissionMaxActive     int     `json:"admission_max_active"`
 	RateLimitedUpstreams   int     `json:"rate_limited_upstreams"`
@@ -56,15 +58,11 @@ type networkUpstream struct {
 	Errors                 uint64  `json:"errors"`
 	ResponseBytes          uint64  `json:"response_bytes"`
 	ActiveUpstreamRequests int64   `json:"active_upstream_requests"`
-	State                  string  `json:"state"`
-	Weight                 float64 `json:"weight"`
 	ErrorRate              float64 `json:"error_rate"`
 	LatencyMS              float64 `json:"latency_ms"`
 	AdmissionActive        int     `json:"admission_active"`
 	AdmissionQueued        int     `json:"admission_queued"`
 	AdmissionMaxActive     int     `json:"admission_max_active"`
-	RequestIntervalMS      int64   `json:"request_interval_ms"`
-	NextRequestAt          string  `json:"next_request_at,omitempty"`
 	CooldownUntil          string  `json:"cooldown_until,omitempty"`
 }
 
@@ -80,8 +78,6 @@ type networkEdge struct {
 	Errors                 uint64  `json:"errors"`
 	ResponseBytes          uint64  `json:"response_bytes"`
 	ActiveUpstreamRequests int64   `json:"active_upstream_requests"`
-	State                  string  `json:"state"`
-	Weight                 float64 `json:"weight"`
 	ErrorRate              float64 `json:"error_rate"`
 	LatencyMS              float64 `json:"latency_ms"`
 	LastStatus             string  `json:"last_status,omitempty"`
@@ -135,37 +131,31 @@ func (s *appStatus) network(app *App) networkStatus {
 	}
 	admission := app.upstreamGate.Snapshot()
 	status.Summary.QueuedUpstreamRequests = admission.Queued
+	status.Summary.ForegroundQueued = admission.ForegroundQueued
+	status.Summary.RefreshQueued = admission.RefreshQueued
+	status.Summary.OldestAdmissionWaitMS = admission.OldestWait.Milliseconds()
 	status.Summary.AdmissionActive = admission.Active
 	status.Summary.AdmissionMaxActive = admission.MaxActive
 	for _, node := range upstreamNodes {
 		node.AdmissionMaxActive = admission.MaxActivePerHost
-		node.RequestIntervalMS = admission.RequestInterval.Milliseconds()
 	}
 	for host, hostAdmission := range admission.Hosts {
 		key := "upstream:" + host
 		node := upstreamNodes[key]
 		if node == nil {
-			node = &networkUpstream{ID: key, Host: host, State: "unknown"}
+			node = &networkUpstream{ID: key, Host: host}
 			upstreamNodes[key] = node
 		}
 		node.AdmissionActive = hostAdmission.Active
 		node.AdmissionQueued = hostAdmission.Queued
 		node.AdmissionMaxActive = hostAdmission.MaxActive
-		node.RequestIntervalMS = hostAdmission.RequestInterval.Milliseconds()
-		if !hostAdmission.NextRequest.IsZero() {
-			node.NextRequestAt = hostAdmission.NextRequest.Format(time.RFC3339Nano)
-		}
 		if !hostAdmission.CooldownUntil.IsZero() {
-			node.State = "rate_limited"
 			node.CooldownUntil = hostAdmission.CooldownUntil.Format(time.RFC3339)
 			status.Summary.RateLimitedUpstreams++
 		}
 	}
 	for _, key := range sortedNetworkKeys(upstreamNodes) {
 		upstream := *upstreamNodes[key]
-		if upstream.State != "closed" && upstream.State != "unknown" {
-			status.Summary.DegradedUpstreams++
-		}
 		status.Upstreams = append(status.Upstreams, upstream)
 	}
 	sort.Slice(status.Edges, func(i, j int) bool {
@@ -189,10 +179,6 @@ func (s *networkStatus) addNetworkEdge(
 	}
 	host := upstreamHost(upstreamURL)
 	upstreamID := "upstream:" + host
-	state := upstream.StateText
-	if state == "" {
-		state = "unknown"
-	}
 	edge := networkEdge{
 		ID:                     instance.ID + "->" + upstreamID + ":" + upstreamURL,
 		From:                   instance.ID,
@@ -205,8 +191,6 @@ func (s *networkStatus) addNetworkEdge(
 		Errors:                 upstream.Errors,
 		ResponseBytes:          upstream.ResponseBytes,
 		ActiveUpstreamRequests: upstream.ActiveRequests,
-		State:                  state,
-		Weight:                 upstream.Weight,
 		ErrorRate:              upstream.ErrorRate,
 		LatencyMS:              upstream.LatencySeconds * 1000,
 		LastStatus:             upstream.LastStatus,
@@ -219,19 +203,13 @@ func (s *networkStatus) addNetworkEdge(
 
 	node := upstreamNodes[upstreamID]
 	if node == nil {
-		node = &networkUpstream{ID: upstreamID, Host: host, State: state}
+		node = &networkUpstream{ID: upstreamID, Host: host}
 		upstreamNodes[upstreamID] = node
 	}
 	node.Requests += upstream.Requests
 	node.Errors += upstream.Errors
 	node.ResponseBytes += upstream.ResponseBytes
 	node.ActiveUpstreamRequests += upstream.ActiveRequests
-	if networkStateRank(state) > networkStateRank(node.State) {
-		node.State = state
-	}
-	if upstream.Weight > node.Weight {
-		node.Weight = upstream.Weight
-	}
 	if upstream.ErrorRate > node.ErrorRate {
 		node.ErrorRate = upstream.ErrorRate
 	}
@@ -280,19 +258,4 @@ func errorRate(requests, errors uint64) float64 {
 		return 0
 	}
 	return float64(errors) / float64(requests)
-}
-
-func networkStateRank(state string) int {
-	switch state {
-	case "open":
-		return 4
-	case "halfopen":
-		return 3
-	case "degraded":
-		return 2
-	case "closed":
-		return 1
-	default:
-		return 0
-	}
 }

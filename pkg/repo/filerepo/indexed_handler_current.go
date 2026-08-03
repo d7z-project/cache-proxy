@@ -239,10 +239,10 @@ func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.R
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
 }
 
-func targetsToProbe(targets []MetadataTarget) []health.ProbeTarget {
-	probes := make([]health.ProbeTarget, 0, len(targets))
+func targetsToResourceTargets(targets []MetadataTarget) []health.ResourceTarget {
+	probes := make([]health.ResourceTarget, 0, len(targets))
 	for _, target := range targets {
-		probes = append(probes, health.ProbeTarget{Path: target.URL})
+		probes = append(probes, health.ResourceTarget{Path: target.URL})
 	}
 	return probes
 }
@@ -252,8 +252,12 @@ func refreshHealthError(err error) error {
 	switch {
 	case errors.Is(err, errMetadataNotFound):
 		return health.ErrResourceNotFound
+	case errors.Is(err, errMetadataForbidden):
+		return health.ErrResourceForbidden
+	case errors.Is(err, errMetadataMirrorRetry), errors.Is(err, errMetadataTransient):
+		return health.ErrResourceTransient
 	case errors.As(err, &fetchErr):
-		return fetchErr.Err
+		return refreshHealthError(fetchErr.Err)
 	default:
 		return err
 	}

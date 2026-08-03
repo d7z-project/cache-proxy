@@ -37,11 +37,11 @@ var (
 	ErrResourceForbidden      = errors.New("resource upstream forbidden")
 	ErrResourceTransient      = errors.New("resource upstream transient failure")
 	ErrRefreshAlreadyRunning  = errors.New("resource refresh already running")
-	ErrRefreshBlockedUntil    = errors.New("resource refresh blocked until next retry window")
+	ErrRefreshBlocked         = errors.New("resource refresh is permanently blocked")
 	ErrRefreshResourceRemoved = errors.New("resource refresh rejected because resource was removed")
 )
 
-type ProbeTarget struct {
+type ResourceTarget struct {
 	Path string `yaml:"path"`
 }
 
@@ -58,35 +58,33 @@ type ResourceHealth struct {
 	DiscoveredAt    time.Time
 	LastRefreshAt   time.Time
 	LastSuccessAt   time.Time
-	NextRefreshAt   time.Time
 	FirstNotFoundAt time.Time
 	LastError       string
 
-	LastTargets  []ProbeTarget
+	LastTargets  []ResourceTarget
 	UpstreamURLs []string
 }
 
 func (rh *ResourceHealth) snapshot() ResourceHealth {
 	copied := *rh
-	copied.LastTargets = append([]ProbeTarget(nil), rh.LastTargets...)
+	copied.LastTargets = append([]ResourceTarget(nil), rh.LastTargets...)
 	copied.UpstreamURLs = append([]string(nil), rh.UpstreamURLs...)
 	return copied
 }
 
 type ResourceSnapshot struct {
-	Path                 string        `yaml:"path"`
-	State                string        `yaml:"state"`
-	Refreshing           bool          `yaml:"refreshing,omitempty"`
-	LastRefreshAt        time.Time     `yaml:"last_refresh_at"`
-	LastSuccessAt        time.Time     `yaml:"last_success_at"`
-	NextRefreshAt        time.Time     `yaml:"next_refresh_at"`
-	FirstNotFoundAt      time.Time     `yaml:"first_not_found_at"`
-	ConsecutiveNotFound  int           `yaml:"consecutive_not_found"`
-	ConsecutiveInvalid   int           `yaml:"consecutive_invalid"`
-	ConsecutiveTransient int           `yaml:"consecutive_transient"`
-	LastError            string        `yaml:"last_error,omitempty"`
-	LastTargets          []ProbeTarget `yaml:"last_targets,omitempty"`
-	UpstreamURLs         []string      `yaml:"upstream_urls,omitempty"`
+	Path                 string           `yaml:"path"`
+	State                string           `yaml:"state"`
+	Refreshing           bool             `yaml:"refreshing,omitempty"`
+	LastRefreshAt        time.Time        `yaml:"last_refresh_at"`
+	LastSuccessAt        time.Time        `yaml:"last_success_at"`
+	FirstNotFoundAt      time.Time        `yaml:"first_not_found_at"`
+	ConsecutiveNotFound  int              `yaml:"consecutive_not_found"`
+	ConsecutiveInvalid   int              `yaml:"consecutive_invalid"`
+	ConsecutiveTransient int              `yaml:"consecutive_transient"`
+	LastError            string           `yaml:"last_error,omitempty"`
+	LastTargets          []ResourceTarget `yaml:"last_targets,omitempty"`
+	UpstreamURLs         []string         `yaml:"upstream_urls,omitempty"`
 }
 
 func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
@@ -96,13 +94,12 @@ func (rh *ResourceHealth) Snapshot() ResourceSnapshot {
 		Refreshing:           rh.Refreshing,
 		LastRefreshAt:        rh.LastRefreshAt,
 		LastSuccessAt:        rh.LastSuccessAt,
-		NextRefreshAt:        rh.NextRefreshAt,
 		FirstNotFoundAt:      rh.FirstNotFoundAt,
 		ConsecutiveNotFound:  rh.ConsecutiveNotFound,
 		ConsecutiveInvalid:   rh.ConsecutiveInvalid,
 		ConsecutiveTransient: rh.ConsecutiveTransient,
 		LastError:            rh.LastError,
-		LastTargets:          append([]ProbeTarget(nil), rh.LastTargets...),
+		LastTargets:          append([]ResourceTarget(nil), rh.LastTargets...),
 		UpstreamURLs:         append([]string(nil), rh.UpstreamURLs...),
 	}
 }
@@ -112,13 +109,12 @@ func ResourceFromSnapshot(snapshot ResourceSnapshot) *ResourceHealth {
 		Path:                 snapshot.Path,
 		LastRefreshAt:        snapshot.LastRefreshAt,
 		LastSuccessAt:        snapshot.LastSuccessAt,
-		NextRefreshAt:        snapshot.NextRefreshAt,
 		FirstNotFoundAt:      snapshot.FirstNotFoundAt,
 		ConsecutiveNotFound:  snapshot.ConsecutiveNotFound,
 		ConsecutiveInvalid:   snapshot.ConsecutiveInvalid,
 		ConsecutiveTransient: snapshot.ConsecutiveTransient,
 		LastError:            snapshot.LastError,
-		LastTargets:          append([]ProbeTarget(nil), snapshot.LastTargets...),
+		LastTargets:          append([]ResourceTarget(nil), snapshot.LastTargets...),
 		UpstreamURLs:         append([]string(nil), snapshot.UpstreamURLs...),
 	}
 	switch snapshot.State {

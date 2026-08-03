@@ -366,7 +366,7 @@ function networkNodeSize(layoutMode, kind) {
 }
 
 function worseNetworkState(a, b) {
-    var ranks = { unknown: 0, closed: 1, halfopen: 2, degraded: 3, open: 4 };
+	var ranks = { unknown: 0, rate_limited: 1 };
     a = String(a || 'unknown').toLowerCase();
     b = String(b || 'unknown').toLowerCase();
     return (ranks[b] || 0) > (ranks[a] || 0) ? b : a;
@@ -575,13 +575,12 @@ function networkLayout(target, edges, data, previousData) {
             label: upstream.host,
             sub: networkUpstreamNodeSubtitle(upstream),
             title: networkUpstreamNodeTitle(upstream),
-            state: upstream.state || 'unknown',
+			state: 'unknown',
             hash: [
-                upstream.state, upstream.active_upstream_requests, upstream.requests,
-                upstream.errors, upstream.weight, upstream.latency_ms,
-                upstream.admission_active, upstream.admission_queued,
-                upstream.admission_max_active, upstream.request_interval_ms,
-                upstream.next_request_at, upstream.cooldown_until
+				upstream.active_upstream_requests, upstream.requests,
+				upstream.errors, upstream.latency_ms,
+				upstream.admission_active, upstream.admission_queued,
+				upstream.admission_max_active, upstream.cooldown_until
             ].join(':')
         });
     });
@@ -875,9 +874,6 @@ function networkUpstreamNodeSubtitle(upstream) {
     if (active > 0) {
         return String(active) + ' ' + (window.I18N.network_active_short || 'active');
     }
-    if (networkStateIsDegraded(upstream.state)) {
-        return translateUpstreamState(upstream.state || 'unknown') + ' · ' + formatErrorPercent(upstream.error_rate || 0);
-    }
     var requests = upstream.requests || 0;
     if (requests > 0) {
         return String(requests) + ' ' + (window.I18N.requests_short || 'req');
@@ -885,27 +881,20 @@ function networkUpstreamNodeSubtitle(upstream) {
     if (upstream.latency_ms > 0) {
         return Math.round(upstream.latency_ms) + 'ms';
     }
-    return translateUpstreamState(upstream.state || 'unknown');
+	return '-';
 }
 
 function networkUpstreamNodeTitle(upstream) {
     var active = upstream.admission_active || 0;
     var limit = upstream.admission_max_active || 0;
-    var lines = [
-        upstream.host || '-',
-        (window.I18N.status || 'Status') + ': ' + translateUpstreamState(upstream.state || 'unknown'),
-        (window.I18N.network_active || 'Active') + ': ' + String(active) + (limit > 0 ? '/' + String(limit) : ''),
-        (window.I18N.network_queued || 'Queued') + ': ' + String(upstream.admission_queued || 0)
-    ];
-    if ((upstream.request_interval_ms || 0) > 0) {
-        lines.push((window.I18N.network_request_interval || 'Request interval') + ': ' +
-            String(upstream.request_interval_ms) + 'ms');
-    }
-    if (upstream.cooldown_until) {
-        lines.push((window.I18N.network_rate_limited || 'Rate limited') + ': ' + upstream.cooldown_until);
-    } else if (upstream.next_request_at) {
-        lines.push((window.I18N.network_next_request || 'Next request') + ': ' + upstream.next_request_at);
-    }
+	var lines = [
+		upstream.host || '-',
+		(window.I18N.network_active || 'Active') + ': ' + String(active) + (limit > 0 ? '/' + String(limit) : ''),
+		(window.I18N.network_queued || 'Queued') + ': ' + String(upstream.admission_queued || 0)
+	];
+	if (upstream.cooldown_until) {
+		lines.push((window.I18N.network_rate_limited || 'Rate limited') + ': ' + upstream.cooldown_until);
+	}
     return lines.join('\n');
 }
 
@@ -1196,7 +1185,7 @@ function networkEdgeIsDegraded(edge) {
 }
 
 function networkStateIsDegraded(state) {
-    return state === 'open' || state === 'degraded' || state === 'halfopen';
+	return state === 'rate_limited';
 }
 
 function networkEdgeHasRecentNotice(edge) {

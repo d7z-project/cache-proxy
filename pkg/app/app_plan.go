@@ -12,7 +12,6 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
@@ -20,9 +19,7 @@ import (
 
 const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 256
-const DefaultMaxActiveDownloadsPerHost = 4
-const DefaultRequestIntervalPerHost = 125 * time.Millisecond
-const DefaultForegroundQueueWait = 3 * time.Second
+const DefaultMaxActiveDownloadsPerHost = 16
 const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500
@@ -45,21 +42,14 @@ func upstreamGateConfig(download config.DownloadConfig) httpcache.UpstreamGateCo
 	hosts := make(map[string]httpcache.UpstreamHostGateConfig, len(download.Hosts))
 	for configuredHost, override := range download.Hosts {
 		host, _ := normalizeDownloadHost(configuredHost)
-		requestInterval := download.RequestIntervalPerHost.Duration()
-		if override.RequestInterval != nil {
-			requestInterval = override.RequestInterval.Duration()
-		}
 		hosts[host] = httpcache.UpstreamHostGateConfig{
-			MaxActive:       override.MaxActive,
-			RequestInterval: requestInterval,
+			MaxActive: override.MaxActive,
 		}
 	}
 	return httpcache.UpstreamGateConfig{
-		MaxActive:           download.MaxActive,
-		MaxActivePerHost:    download.MaxActivePerHost,
-		RequestInterval:     download.RequestIntervalPerHost.Duration(),
-		ForegroundQueueWait: download.ForegroundQueueWait.Duration(),
-		Hosts:               hosts,
+		MaxActive:        download.MaxActive,
+		MaxActivePerHost: download.MaxActivePerHost,
+		Hosts:            hosts,
 	}
 }
 
@@ -70,7 +60,6 @@ func planEntries(
 	stats *httpcache.Stats,
 	upstreamGate *httpcache.UpstreamGate,
 	sched *scheduler.Scheduler,
-	probes *health.ProbeScheduler,
 	b *bus.Bus,
 ) (map[string]*proxyruntime.Entry, error) {
 	plan := proxyruntime.NewPlanContext(
@@ -81,7 +70,6 @@ func planEntries(
 		doc.Server.Bind,
 		doc.Metrics.Path,
 		sched,
-		probes,
 		b,
 	)
 	drivers := driverSet()
@@ -148,12 +136,6 @@ func normalizeDocument(doc *config.Document) {
 	if doc.Storage.Download.MaxActivePerHost == 0 {
 		doc.Storage.Download.MaxActivePerHost = DefaultMaxActiveDownloadsPerHost
 	}
-	if doc.Storage.Download.RequestIntervalPerHost == 0 {
-		doc.Storage.Download.RequestIntervalPerHost = config.Duration(DefaultRequestIntervalPerHost)
-	}
-	if doc.Storage.Download.ForegroundQueueWait == 0 {
-		doc.Storage.Download.ForegroundQueueWait = config.Duration(DefaultForegroundQueueWait)
-	}
 }
 
 func validateServerConfig(doc *config.Document) error {
@@ -169,12 +151,6 @@ func validateServerConfig(doc *config.Document) error {
 	if doc.Storage.Download.MaxActivePerHost <= 0 {
 		return errors.New("download max_active_per_host must be positive")
 	}
-	if doc.Storage.Download.RequestIntervalPerHost <= 0 {
-		return errors.New("download request_interval_per_host must be positive")
-	}
-	if doc.Storage.Download.ForegroundQueueWait <= 0 {
-		return errors.New("download foreground_queue_wait must be positive")
-	}
 	seenHosts := map[string]string{}
 	for configuredHost, override := range doc.Storage.Download.Hosts {
 		host, err := normalizeDownloadHost(configuredHost)
@@ -187,9 +163,6 @@ func validateServerConfig(doc *config.Document) error {
 		seenHosts[host] = configuredHost
 		if override.MaxActive < 0 {
 			return fmt.Errorf("download host %q max_active must not be negative", configuredHost)
-		}
-		if override.RequestInterval != nil && *override.RequestInterval < 0 {
-			return fmt.Errorf("download host %q request_interval must not be negative", configuredHost)
 		}
 	}
 	if doc.Server.Status.DiskSampleInterval <= 0 {

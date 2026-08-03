@@ -15,7 +15,6 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
@@ -132,7 +131,6 @@ type PlanContext struct {
 	pathOwners   map[string]string
 	bindOwners   map[string]string
 	scheduler    *scheduler.Scheduler
-	probes       *health.ProbeScheduler
 	bus          *bus.Bus
 }
 
@@ -152,7 +150,6 @@ func NewPlanContext(
 	mainBind string,
 	metricsPath string,
 	sched *scheduler.Scheduler,
-	probes *health.ProbeScheduler,
 	b *bus.Bus,
 ) *PlanContext {
 	return &PlanContext{
@@ -166,7 +163,6 @@ func NewPlanContext(
 		pathOwners:   map[string]string{},
 		bindOwners:   map[string]string{mainBind: "main"},
 		scheduler:    sched,
-		probes:       probes,
 		bus:          b,
 	}
 }
@@ -211,24 +207,22 @@ func (p *PlanContext) Finalize() (*Result, error) {
 	return &Result{Entries: entries}, nil
 }
 
-func (p *PlanContext) Store() *blobfs.Store                   { return p.store }
-func (p *PlanContext) Stats() *httpcache.Stats                { return p.stats }
-func (p *PlanContext) UpstreamGate() *httpcache.UpstreamGate  { return p.upstreamGate }
-func (p *PlanContext) CleanupConfig() config.CleanupConfig    { return p.cleanup }
-func (p *PlanContext) Scheduler() *scheduler.Scheduler        { return p.scheduler }
-func (p *PlanContext) ProbeScheduler() *health.ProbeScheduler { return p.probes }
-func (p *PlanContext) Bus() *bus.Bus                          { return p.bus }
+func (p *PlanContext) Store() *blobfs.Store                  { return p.store }
+func (p *PlanContext) Stats() *httpcache.Stats               { return p.stats }
+func (p *PlanContext) UpstreamGate() *httpcache.UpstreamGate { return p.upstreamGate }
+func (p *PlanContext) CleanupConfig() config.CleanupConfig   { return p.cleanup }
+func (p *PlanContext) Scheduler() *scheduler.Scheduler       { return p.scheduler }
+func (p *PlanContext) Bus() *bus.Bus                         { return p.bus }
 
-func (i *InstancePlan) Name() string                           { return i.entry.Name }
-func (i *InstancePlan) Mode() string                           { return i.entry.Mode }
-func (i *InstancePlan) Enabled() bool                          { return i.entry.Enabled }
-func (i *InstancePlan) Store() *blobfs.Store                   { return i.ctx.store }
-func (i *InstancePlan) Stats() *httpcache.Stats                { return i.ctx.stats }
-func (i *InstancePlan) UpstreamGate() *httpcache.UpstreamGate  { return i.ctx.upstreamGate }
-func (i *InstancePlan) CleanupConfig() config.CleanupConfig    { return i.ctx.cleanup }
-func (i *InstancePlan) Scheduler() *scheduler.Scheduler        { return i.ctx.scheduler }
-func (i *InstancePlan) ProbeScheduler() *health.ProbeScheduler { return i.ctx.probes }
-func (i *InstancePlan) Bus() *bus.Bus                          { return i.ctx.bus }
+func (i *InstancePlan) Name() string                          { return i.entry.Name }
+func (i *InstancePlan) Mode() string                          { return i.entry.Mode }
+func (i *InstancePlan) Enabled() bool                         { return i.entry.Enabled }
+func (i *InstancePlan) Store() *blobfs.Store                  { return i.ctx.store }
+func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.stats }
+func (i *InstancePlan) UpstreamGate() *httpcache.UpstreamGate { return i.ctx.upstreamGate }
+func (i *InstancePlan) CleanupConfig() config.CleanupConfig   { return i.ctx.cleanup }
+func (i *InstancePlan) Scheduler() *scheduler.Scheduler       { return i.ctx.scheduler }
+func (i *InstancePlan) Bus() *bus.Bus                         { return i.ctx.bus }
 
 func (i *InstancePlan) Decode(target any) error {
 	if i.selected.Block == nil {
