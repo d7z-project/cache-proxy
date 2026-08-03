@@ -3,6 +3,7 @@ package filerepo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -19,6 +20,7 @@ import (
 )
 
 const maxMetadataObjectSize = 512 << 20
+const snapshotSchemaVersion = 1
 
 type rootEntry struct {
 	root RepositoryRoot
@@ -32,6 +34,7 @@ type IndexedHandler struct {
 	stats        *httpcache.Stats
 	inspector    PathInspector
 	finalizer    RootFinalizer
+	validator    SnapshotValidator
 	base         *httpcache.Handler
 	client       *utils.HttpClientWrapper
 	upstreams    []string
@@ -41,34 +44,39 @@ type IndexedHandler struct {
 	bus          *bus.Bus
 	policy       Policy
 
-	mu            sync.RWMutex
-	roots         map[string]*rootEntry
-	rootSnapshots map[string]*LiveSnapshot
-	currentView   map[string]currentViewEntry
-	lifecycleCtx  context.Context
-	wait          sync.WaitGroup
+	mu              sync.RWMutex
+	roots           map[string]*rootEntry
+	rootSnapshots   map[string]*LiveSnapshot
+	currentView     map[string]currentViewEntry
+	metadataReaders map[string]int
+	lifecycleCtx    context.Context
+	wait            sync.WaitGroup
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, upstreamGate *httpcache.UpstreamGate) *IndexedHandler {
 	ApplyDefaults(policy)
 	handler := &IndexedHandler{
-		name:          name,
-		mode:          mode,
-		objectRoot:    objectRoot,
-		store:         store,
-		stats:         stats,
-		inspector:     inspector,
-		upstreams:     append([]string(nil), upstreams...),
-		build:         builder,
-		sh:            svcHealth,
-		upstreamGate:  upstreamGate,
-		policy:        *policy,
-		roots:         map[string]*rootEntry{},
-		rootSnapshots: map[string]*LiveSnapshot{},
-		currentView:   map[string]currentViewEntry{},
+		name:            name,
+		mode:            mode,
+		objectRoot:      objectRoot,
+		store:           store,
+		stats:           stats,
+		inspector:       inspector,
+		upstreams:       append([]string(nil), upstreams...),
+		build:           builder,
+		sh:              svcHealth,
+		upstreamGate:    upstreamGate,
+		policy:          *policy,
+		roots:           map[string]*rootEntry{},
+		rootSnapshots:   map[string]*LiveSnapshot{},
+		currentView:     map[string]currentViewEntry{},
+		metadataReaders: map[string]int{},
 	}
 	if finalizer, ok := inspector.(RootFinalizer); ok {
 		handler.finalizer = finalizer
+	}
+	if validator, ok := inspector.(SnapshotValidator); ok {
+		handler.validator = validator
 	}
 	handler.base = httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:         mode,
@@ -93,9 +101,9 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.base.ProxyPassthrough(w, req, "", "")
 		return
 	}
-	if current, ok := h.lookupCurrent(cleanPath); ok {
+	if current, release, ok := h.lookupCurrentRequest(cleanPath); ok {
 		if current.Class == ResourceMetadata {
-			h.serveCurrentMetadata(w, req, current)
+			h.serveCurrentMetadata(w, req, current, release)
 			return
 		}
 		h.base.ServeHTTP(w, req)
@@ -108,12 +116,21 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if class == ResourceMetadata {
-		if analysis.Role != DiscoveryUpdateRoot {
-			rootID, created, changed := h.registerRoot(analysis)
-			if h.bus != nil && rootID != "" && (created || changed || h.rootSnapshot(rootID) == nil) {
+		if rootID, snapshot, known := h.matchRepository(cleanPath); known {
+			if snapshot != nil {
 				h.publishDiscovered(rootID)
+				err := fmt.Errorf("metadata path %s is absent from current generation %s", cleanPath, snapshot.Generation)
+				httpcache.ErrorResponse(http.StatusServiceUnavailable, err).FlushClose(req, w)
+				h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusServiceUnavailable, 0)
+				return
 			}
+			h.publishDiscovered(rootID)
 			h.base.ProxyPassthrough(w, req, cleanPath, "")
+			return
+		}
+		if analysis.Role == DiscoveryIgnore {
+			httpcache.ErrorResponse(http.StatusNotFound, fmt.Errorf("metadata repository for %s is not discovered", cleanPath)).FlushClose(req, w)
+			h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusNotFound, 0)
 			return
 		}
 		status := h.base.ProxyPassthroughStatus(w, req, cleanPath, "")

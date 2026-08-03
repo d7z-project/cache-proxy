@@ -44,7 +44,9 @@ func TestDEBBusinessStressRefreshCacheCleanupMemoryRecovery(t *testing.T) {
 	)
 
 	var generation atomic.Int32
+	var upstreamRequests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
 		current := int(generation.Load())
 		switch {
 		case r.URL.Path == "/Packages":
@@ -89,6 +91,11 @@ func TestDEBBusinessStressRefreshCacheCleanupMemoryRecovery(t *testing.T) {
 
 	generation.Store(1)
 	require.NoError(t, handler.RefreshRoot(ctx, filerepo.RepositoryID(filerepo.LayoutDebFlat, "")))
+	requestsBeforeMissingMetadata := upstreamRequests.Load()
+	missingMetadata := httptest.NewRecorder()
+	handler.ServeHTTP(missingMetadata, httptest.NewRequest(http.MethodGet, "/Release", nil))
+	require.Equal(t, http.StatusServiceUnavailable, missingMetadata.Code)
+	require.Equal(t, requestsBeforeMissingMetadata, upstreamRequests.Load())
 	cacheDEBArtifacts(t, handler, 1, 6)
 	require.NoError(t, handler.CleanupRoot(ctx, filerepo.RepositoryID(filerepo.LayoutDebFlat, ""), config.DefaultCleanupConfig()))
 	baseline := debHeapAllocAfterGC()

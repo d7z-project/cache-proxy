@@ -57,7 +57,7 @@ func TestReleaseIndexTargetsPreferXZOverGZAndPlain(t *testing.T) {
 	}, targets[0].Candidates)
 }
 
-func TestDistributionRefreshPublishesWhenOneReleaseIndexIsMissing(t *testing.T) {
+func TestDistributionRefreshRejectsGenerationWhenOneReleaseIndexIsMissing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -80,23 +80,11 @@ func TestDistributionRefreshPublishesWhenOneReleaseIndexIsMissing(t *testing.T) 
 	defer server.Close()
 
 	handler := newDebDistributionTestHandler(t, server.URL)
-	require.NoError(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"))
+	require.ErrorContains(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"), "binary-arm64/Packages.gz")
 
 	statuses := handler.RepositoryStatuses()
 	require.Len(t, statuses, 1)
-	require.True(t, statuses[0].HasCurrent)
-	require.Equal(t, 1, statuses[0].ArtifactCount)
-	require.Contains(t, statuses[0].Warning, "partial metadata: skipped 1 missing indexes")
-
-	amd64Req := httptest.NewRequest(http.MethodGet, "/dists/trixie/main/binary-amd64/Packages.gz", nil)
-	amd64Rec := httptest.NewRecorder()
-	handler.ServeHTTP(amd64Rec, amd64Req)
-	require.Equal(t, http.StatusOK, amd64Rec.Code)
-
-	arm64Req := httptest.NewRequest(http.MethodGet, "/dists/trixie/main/binary-arm64/Packages.gz", nil)
-	arm64Rec := httptest.NewRecorder()
-	handler.ServeHTTP(arm64Rec, arm64Req)
-	require.Equal(t, http.StatusNotFound, arm64Rec.Code)
+	require.False(t, statuses[0].HasCurrent)
 }
 
 func TestDistributionRefreshFailsWhenAllReleaseIndexesAreMissing(t *testing.T) {
@@ -118,7 +106,7 @@ func TestDistributionRefreshFailsWhenAllReleaseIndexesAreMissing(t *testing.T) {
 	handler := newDebDistributionTestHandler(t, server.URL)
 	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no package indexes available")
+	require.Contains(t, err.Error(), "binary-arm64/Packages.gz")
 	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
 }
 
@@ -146,6 +134,26 @@ func TestDistributionRefreshFailsOnReleaseIndexChecksumMismatch(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "SHA256 mismatch")
 	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+}
+
+func TestDEBSnapshotValidatorRejectsMissingReleaseIndex(t *testing.T) {
+	index := gzipData(t, "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\n\n")
+	releasePath := "dists/trixie/InRelease"
+	indexPath := "dists/trixie/main/binary-amd64/Packages.gz"
+	release := releaseSHA256(map[string][]byte{"main/binary-amd64/Packages.gz": index})
+	snapshot := &filerepo.LiveSnapshot{
+		Targets: []filerepo.MetadataTarget{{URL: releasePath, Candidates: []string{"dists/trixie/Release"}}},
+		Metadata: map[string]filerepo.MetadataObject{
+			releasePath: {Path: releasePath, Required: true},
+		},
+	}
+	opener := func(cleanPath string) (io.ReadCloser, error) {
+		if cleanPath == releasePath {
+			return io.NopCloser(strings.NewReader(release)), nil
+		}
+		return nil, fmt.Errorf("missing %s", cleanPath)
+	}
+	require.ErrorContains(t, (inspector{}).ValidateSnapshot(context.Background(), snapshot, opener), indexPath)
 }
 
 func TestAnalyzerCreatesRootFromReleaseUnderPrefix(t *testing.T) {

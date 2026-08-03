@@ -18,6 +18,78 @@ var debPackageSidecarSuffixes = []string{".gpg", ".sig", ".asc", ".sha256", ".sh
 
 type inspector struct{}
 
+func (inspector) ValidateSnapshot(_ context.Context, snapshot *filerepo.LiveSnapshot, open filerepo.SnapshotObjectOpener) error {
+	validated := map[string]struct{}{}
+	for _, rootTarget := range snapshot.Targets {
+		if !isDistributionReleasePath(rootTarget.URL) {
+			continue
+		}
+		release, ok := resolveManifestTarget(snapshot, rootTarget)
+		if !ok || !release.Required || !isDistributionReleasePath(release.Path) {
+			return fmt.Errorf("%s: required distribution Release is absent from manifest", rootTarget.URL)
+		}
+		if _, ok := validated[release.Path]; ok {
+			continue
+		}
+		validated[release.Path] = struct{}{}
+		reader, err := open(release.Path)
+		if err != nil {
+			return err
+		}
+		sums, parseErr := parseReleaseSHA256Reader(reader)
+		closeErr := reader.Close()
+		if parseErr != nil {
+			return parseErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		for _, target := range releaseIndexTargets(release.Path, sums) {
+			metadata, ok := resolveManifestTarget(snapshot, target)
+			if !ok || !metadata.Required {
+				return fmt.Errorf("%s: required Release index is absent from manifest", target.URL)
+			}
+			expected := releaseChecksum(sums, metadata.Path)
+			if metadata.ChecksumType != "sha256" || !strings.EqualFold(metadata.Checksum, expected) {
+				return fmt.Errorf("%s: Release checksum declaration differs from manifest", metadata.Path)
+			}
+			indexReader, err := open(metadata.Path)
+			if err != nil {
+				return err
+			}
+			verifyErr := verifyReleaseChecksumReader(metadata.Path, expected, indexReader)
+			closeErr := indexReader.Close()
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
+	}
+	return nil
+}
+
+func isDistributionReleasePath(cleanPath string) bool {
+	base := path.Base(cleanPath)
+	return (base == "Release" || base == "InRelease") &&
+		(strings.HasPrefix(cleanPath, "dists/") || strings.Contains(cleanPath, "/dists/"))
+}
+
+func resolveManifestTarget(snapshot *filerepo.LiveSnapshot, target filerepo.MetadataTarget) (filerepo.MetadataObject, bool) {
+	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+		object, ok := snapshot.Metadata[candidate]
+		if !ok {
+			continue
+		}
+		if object.Path != candidate {
+			object, ok = snapshot.Metadata[object.Path]
+		}
+		return object, ok
+	}
+	return filerepo.MetadataObject{}, false
+}
+
 func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
 	repoPath := root.Path
 	if repoPath == "" {
@@ -269,31 +341,17 @@ func buildReleaseTarget(
 	if len(targets) == 0 {
 		return artifactCount, fmt.Errorf("%s: Release contains no package indexes", blob.Path)
 	}
-	var (
-		successfulIndexes int
-		missingIndexes    int
-		firstMissing      string
-	)
+	successfulIndexes := 0
 	for _, indexTarget := range targets {
 		nextCount, err := buildVerifiedIndexTarget(ctx, session, snapshot, indexTarget, releaseSums, paths, artifactCount)
 		if err != nil {
-			if filerepo.IsMetadataAbsent(err) {
-				missingIndexes++
-				if firstMissing == "" {
-					firstMissing = indexTarget.URL
-				}
-				continue
-			}
 			return artifactCount, err
 		}
 		artifactCount = nextCount
 		successfulIndexes++
 	}
 	if successfulIndexes == 0 {
-		return artifactCount, fmt.Errorf("%s: no package indexes available, first missing index %s", blob.Path, firstMissing)
-	}
-	if missingIndexes > 0 {
-		session.AddWarning(fmt.Sprintf("partial metadata: skipped %d missing indexes", missingIndexes))
+		return artifactCount, fmt.Errorf("%s: no package indexes available", blob.Path)
 	}
 	return artifactCount, nil
 }
@@ -338,6 +396,10 @@ func buildVerifiedIndexTarget(
 		return artifactCount, err
 	}
 	addMetadataAliases(snapshot, target, indexBlob.Path, true)
+	metadata := snapshot.Metadata[indexBlob.Path]
+	metadata.ChecksumType = "sha256"
+	metadata.Checksum = releaseChecksum(releaseSums, indexBlob.Path)
+	snapshot.Metadata[indexBlob.Path] = metadata
 	return parseIndexBlob(indexBlob, target.Kind, paths, artifactCount)
 }
 
@@ -354,7 +416,10 @@ func verifyFlatIndexRelease(
 	releaseTarget := debFlatIndexTarget(rootPath, "release")
 	releaseBlob, err := session.Fetch(ctx, releaseTarget)
 	if err != nil {
-		return nil
+		if filerepo.IsMetadataAbsent(err) {
+			return nil
+		}
+		return err
 	}
 	defer session.Release(releaseTarget)
 
@@ -541,12 +606,16 @@ func parseSources(input io.Reader, paths *filerepo.PathIndexBuilder, count int) 
 }
 
 func parseReleaseSHA256(blob filerepo.MetadataBlob) (map[string]string, error) {
-	result := map[string]string{}
 	reader, err := blob.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
+	return parseReleaseSHA256Reader(reader)
+}
+
+func parseReleaseSHA256Reader(reader io.Reader) (map[string]string, error) {
+	result := map[string]string{}
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 10<<20)
 	inSHA256 := false
@@ -574,20 +643,7 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filere
 	if len(sums) == 0 {
 		return fmt.Errorf("%s: Release SHA256 section is missing", cleanPath)
 	}
-	expected := sums[cleanPath]
-	if expected == "" {
-		trimmed := cleanPath
-		if index := strings.LastIndex(trimmed, "/dists/"); index >= 0 {
-			trimmed = trimmed[index+len("/dists/"):]
-		} else {
-			trimmed = strings.TrimPrefix(trimmed, "dists/")
-		}
-		parts := strings.SplitN(trimmed, "/", 2)
-		if len(parts) == 2 {
-			trimmed = parts[1]
-		}
-		expected = sums[trimmed]
-	}
+	expected := releaseChecksum(sums, cleanPath)
 	if expected == "" {
 		return fmt.Errorf("%s: missing Release SHA256", cleanPath)
 	}
@@ -596,6 +652,27 @@ func verifyReleaseChecksum(sums map[string]string, cleanPath string, blob filere
 		return err
 	}
 	defer reader.Close()
+	return verifyReleaseChecksumReader(cleanPath, expected, reader)
+}
+
+func releaseChecksum(sums map[string]string, cleanPath string) string {
+	if expected := sums[cleanPath]; expected != "" {
+		return expected
+	}
+	trimmed := cleanPath
+	if index := strings.LastIndex(trimmed, "/dists/"); index >= 0 {
+		trimmed = trimmed[index+len("/dists/"):]
+	} else {
+		trimmed = strings.TrimPrefix(trimmed, "dists/")
+	}
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) == 2 {
+		trimmed = parts[1]
+	}
+	return sums[trimmed]
+}
+
+func verifyReleaseChecksumReader(cleanPath, expected string, reader io.Reader) error {
 	sum := sha256.New()
 	if _, err := io.Copy(sum, reader); err != nil {
 		return err

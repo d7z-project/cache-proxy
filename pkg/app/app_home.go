@@ -38,7 +38,6 @@ type homeRepository struct {
 	LastOKTitle     string
 	LastTry         string
 	LastTryTitle    string
-	Warning         string
 	LastError       string
 	Attributes      []homeRepositoryAttribute
 }
@@ -223,7 +222,6 @@ func buildHomeRepository(repository proxyruntime.RepositoryStatus, i18n map[stri
 		LastOKTitle:     lastOKTitle,
 		LastTry:         lastTry,
 		LastTryTitle:    lastTryTitle,
-		Warning:         repository.Warning,
 		LastError:       repository.LastError,
 		Attributes:      attributes,
 	}

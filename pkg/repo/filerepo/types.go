@@ -66,10 +66,12 @@ func (b MetadataBlob) Close() {
 }
 
 type MetadataObject struct {
-	Path      string `yaml:"path"`
-	Required  bool   `yaml:"required"`
-	StorePath string `yaml:"store_path,omitempty"`
-	Digest    string `yaml:"digest,omitempty"`
+	Path         string `yaml:"path"`
+	Required     bool   `yaml:"required"`
+	StorePath    string `yaml:"store_path,omitempty"`
+	Digest       string `yaml:"digest,omitempty"`
+	ChecksumType string `yaml:"checksum_type,omitempty"`
+	Checksum     string `yaml:"checksum,omitempty"`
 }
 
 type RepositoryAttribute struct {
@@ -116,6 +118,7 @@ func RepositoryID(layout, rootPath string) string {
 }
 
 type LiveSnapshot struct {
+	Version       int                       `yaml:"version"`
 	RootID        string                    `yaml:"root_id"`
 	RootPath      string                    `yaml:"root_path"`
 	Generation    string                    `yaml:"generation"`
@@ -124,7 +127,6 @@ type LiveSnapshot struct {
 	Metadata      map[string]MetadataObject `yaml:"metadata"`
 	ArtifactCount int                       `yaml:"artifact_count"`
 	Targets       []MetadataTarget          `yaml:"targets,omitempty"`
-	Warning       string                    `yaml:"warning,omitempty"`
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession, *PathIndexBuilder) (*LiveSnapshot, error)
@@ -164,20 +166,10 @@ type RefreshSession struct {
 	generation string
 	blobs      map[string]*MetadataBlob
 	targets    []MetadataTarget
-	warnings   []string
 }
 
 func (s *RefreshSession) Targets() []MetadataTarget {
 	return append([]MetadataTarget(nil), s.targets...)
-}
-
-// AddWarning records a non-fatal metadata refresh condition.
-func (s *RefreshSession) AddWarning(message string) {
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return
-	}
-	s.warnings = append(s.warnings, message)
 }
 
 // IsMetadataAbsent reports whether err means upstream metadata is missing or forbidden.
@@ -277,6 +269,13 @@ type DiscoveryResult struct {
 
 type PathInspector interface {
 	InspectPath(cleanPath string) DiscoveryResult
+}
+
+type SnapshotObjectOpener func(cleanPath string) (io.ReadCloser, error)
+
+// SnapshotValidator verifies protocol references in an already persisted manifest.
+type SnapshotValidator interface {
+	ValidateSnapshot(context.Context, *LiveSnapshot, SnapshotObjectOpener) error
 }
 
 type RootFinalizer interface {

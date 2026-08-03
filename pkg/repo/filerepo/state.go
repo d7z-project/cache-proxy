@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"path"
@@ -151,12 +152,6 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		if !ok {
 			return nil
 		}
-		for key, obj := range snapshot.Metadata {
-			if obj.StorePath == "" {
-				obj.StorePath = h.generationMetadataPath(snapshot.RootID, snapshot.Generation, obj.Path)
-				snapshot.Metadata[key] = obj
-			}
-		}
 		h.setRootSnapshot(snapshot.RootID, snapshot)
 
 		if h.sh != nil {
@@ -199,53 +194,55 @@ func (h *IndexedHandler) cleanCurrentRefTemps(ctx context.Context) {
 
 func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath string) (*LiveSnapshot, bool) {
 	reader, err := h.store.OpenObject(ctx, h.name, currentPath)
-	if err == nil {
-		defer reader.Close()
-		var ref struct {
-			RootID     string `yaml:"root_id"`
-			Generation string `yaml:"generation"`
-		}
-		if yaml.NewDecoder(reader).Decode(&ref) == nil && ref.RootID != "" && ref.Generation != "" {
-			if snapshot, ok := h.loadSnapshot(ctx, h.snapshotPath(ref.RootID, ref.Generation)); ok {
-				return snapshot, true
-			}
-		}
-	}
-	return h.loadLatestSnapshot(ctx, path.Dir(currentPath))
-}
-
-func (h *IndexedHandler) loadLatestSnapshot(ctx context.Context, rootDir string) (*LiveSnapshot, bool) {
-	dir := path.Join(rootDir, "snapshots")
-	var snapshots []struct {
-		path       string
-		generation string
-	}
-	if err := fs.WalkDir(h.store.TenantFS(h.name), dir, func(objectPath string, entry fs.DirEntry, err error) error {
-		if err == nil && !entry.IsDir() && strings.HasSuffix(objectPath, ".yaml") {
-			generation := strings.TrimSuffix(path.Base(objectPath), ".yaml")
-			snapshots = append(snapshots, struct {
-				path       string
-				generation string
-			}{path: objectPath, generation: generation})
-		}
-		return nil
-	}); err != nil {
+	if err != nil {
 		return nil, false
 	}
-	sort.Slice(snapshots, func(i, j int) bool {
-		left := snapshots[i].generation
-		right := snapshots[j].generation
-		if len(left) == len(right) {
-			return left > right
-		}
-		return len(left) > len(right)
-	})
-	for _, item := range snapshots {
-		if snapshot, ok := h.loadSnapshot(ctx, item.path); ok {
-			return snapshot, true
+	defer reader.Close()
+	var ref struct {
+		RootID     string `yaml:"root_id"`
+		Generation string `yaml:"generation"`
+	}
+	if err := yaml.NewDecoder(reader).Decode(&ref); err != nil || ref.RootID == "" || ref.Generation == "" {
+		return nil, false
+	}
+	reject := func(err error) {
+		slog.Warn("committed metadata generation rejected", "instance", h.name, "root_id", ref.RootID, "generation", ref.Generation, "err", err)
+		if h.sh != nil {
+			resource := h.sh.AddResource(ref.RootID, nil, h.upstreams)
+			h.sh.FinishRefresh(
+				ref.RootID,
+				resource.Generation,
+				fmt.Errorf("%w: invalid committed metadata generation: %v", health.ErrResourceTransient, err),
+				nil,
+			)
 		}
 	}
-	return nil, false
+	snapshot, ok := h.loadSnapshot(ctx, h.snapshotPath(ref.RootID, ref.Generation))
+	if !ok || snapshot.RootID != ref.RootID || snapshot.Generation != ref.Generation {
+		reject(errors.New("referenced snapshot is missing or has mismatched identity"))
+		return nil, false
+	}
+	if err := h.validateSnapshot(ctx, snapshot, true); err != nil {
+		reject(err)
+		return nil, false
+	}
+	return snapshot, true
+}
+
+func (h *IndexedHandler) durableCurrentGeneration(ctx context.Context, rootID string) (string, bool) {
+	reader, err := h.store.OpenObject(ctx, h.name, h.currentPath(rootID))
+	if err != nil {
+		return "", false
+	}
+	defer reader.Close()
+	var ref struct {
+		RootID     string `yaml:"root_id"`
+		Generation string `yaml:"generation"`
+	}
+	if yaml.NewDecoder(reader).Decode(&ref) != nil || ref.RootID != rootID || ref.Generation == "" {
+		return "", false
+	}
+	return ref.Generation, true
 }
 
 func (h *IndexedHandler) loadSnapshot(ctx context.Context, objectPath string) (*LiveSnapshot, bool) {

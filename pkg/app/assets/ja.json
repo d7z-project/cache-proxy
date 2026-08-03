@@ -72,7 +72,6 @@
   "repository_generation": "世代",
   "last_ok": "最終成功",
   "last_try": "最終試行",
-  "warning": "警告",
   "last_error": "最終エラー",
   "repository_state_active": "アクティブ",
   "repository_state_suspect": "疑わしい",

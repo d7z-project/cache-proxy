@@ -155,12 +155,6 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(currentPath)), 0o755); err != nil {
 		return err
 	}
-	if _, err = h.store.Put(ctx, h.name, snapshotPath, bytes.NewReader(data), map[string]string{
-		"content-type": "application/yaml",
-		"mode":         h.mode,
-	}); err != nil {
-		return err
-	}
 	cleanupData := bytes.Buffer{}
 	writer := bufio.NewWriter(&cleanupData)
 	for _, item := range cleanupPaths {
@@ -177,6 +171,12 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	}
 	if _, err = h.store.Put(ctx, h.name, cleanupPath, bytes.NewReader(cleanupData.Bytes()), map[string]string{
 		"content-type": "text/plain; charset=utf-8",
+		"mode":         h.mode,
+	}); err != nil {
+		return err
+	}
+	if _, err = h.store.Put(ctx, h.name, snapshotPath, bytes.NewReader(data), map[string]string{
+		"content-type": "application/yaml",
 		"mode":         h.mode,
 	}); err != nil {
 		return err

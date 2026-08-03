@@ -25,13 +25,17 @@
 
 - 同一个 generation 内的 metadata、签名、校验文件必须来自同一个 upstream
 - refresh 先写 staging，全部必需文件校验通过后才能发布 current generation
+- 主元数据引用的每个 metadata 对象都必须下载并校验成功；只有外部伴生文件允许 `403` / `404` 缺失
 - 客户端 metadata 请求只读取 current generation；没有 current 时才允许直连上游并触发后台刷新
+- 已有 current generation 时，清单中缺失的 metadata 请求必须返回 `503` 并触发刷新，禁止回源补齐
+- `current.yaml` 是唯一持久化提交标记；启动只能恢复其精确引用且完整校验通过的 snapshot，禁止回退选择最新 snapshot
 - 自动发现只允许由主元数据请求触发；伴生文件请求不能创建或识别新仓库
 - artifact / package sidecar 下载不能依赖包索引命中，也不能因为 refresh 失败被阻断
 - 协议资源语义必须由各 mode inspector / resolver 分类；`httpcache` 和 `filerepo` 通用 resolver 禁止识别 Pacman、RPM 等协议文件名
 - metadata 及其伴生文件绑定 generation；artifact 和 package sidecar 使用不含 generation 的稳定 content cache key
 - 包索引只用于清理旧缓存：refresh 阶段生成完整相对路径集合，并随 generation 持久化为本地 cleanup index，供后续清理工具直接读取
 - cleanup index 不进入运行时长期内存，不作为下载校验或准入条件；metadata GC 删除旧 generation 时同步删除对应 cleanup index
+- metadata GC 必须保护内存 current、持久化 current 和活跃 reader generation，并保留宽限期内 generation 及至少一个最新 previous generation
 - metadata 下载、解压、解析必须走流式 reader 或临时文件，禁止对大 metadata 整体 `io.ReadAll`
 - 伴生文件获取里 `404` / `403` 视为非致命
 

@@ -2,10 +2,14 @@ package rpm
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"hash"
 	"io"
 	"path"
 	"strings"
@@ -16,6 +20,88 @@ import (
 var rpmPackageSidecarSuffixes = []string{".sig", ".asc", ".sha256", ".sha512", ".md5"}
 
 type inspector struct{}
+
+func (inspector) ValidateSnapshot(_ context.Context, snapshot *filerepo.LiveSnapshot, open filerepo.SnapshotObjectOpener) error {
+	repomdCount := 0
+	validated := map[string]struct{}{}
+	for _, target := range snapshot.Targets {
+		if path.Base(target.URL) != "repomd.xml" {
+			continue
+		}
+		cleanPath, ok := resolveRepomdTarget(snapshot, target)
+		if !ok {
+			return fmt.Errorf("%s: required repomd.xml is absent from manifest", target.URL)
+		}
+		if _, ok := validated[cleanPath]; ok {
+			continue
+		}
+		validated[cleanPath] = struct{}{}
+		repomdCount++
+		reader, err := open(cleanPath)
+		if err != nil {
+			return err
+		}
+		items, parseErr := parseRepomdReader(reader)
+		closeErr := reader.Close()
+		if parseErr != nil {
+			return parseErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		repoRoot := strings.TrimSuffix(cleanPath, "/repodata/repomd.xml")
+		foundPrimary := false
+		for _, item := range items {
+			if item.Location == "" {
+				continue
+			}
+			if item.Type == "primary" {
+				foundPrimary = true
+			}
+			metadataPath := path.Join(repoRoot, item.Location)
+			metadata, ok := snapshot.Metadata[metadataPath]
+			if !ok || !metadata.Required || metadata.Path != metadataPath {
+				return fmt.Errorf("%s: required repomd object is absent from manifest", metadataPath)
+			}
+			if !strings.EqualFold(metadata.ChecksumType, item.SumType) || !strings.EqualFold(metadata.Checksum, item.Checksum) {
+				return fmt.Errorf("%s: repomd checksum declaration differs from manifest", metadataPath)
+			}
+			metadataReader, err := open(metadataPath)
+			if err != nil {
+				return err
+			}
+			verifyErr := verifyRepomdChecksumReader(metadataPath, item.SumType, item.Checksum, metadataReader)
+			closeErr := metadataReader.Close()
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
+		if !foundPrimary {
+			return fmt.Errorf("%s: primary metadata not found", cleanPath)
+		}
+	}
+	if repomdCount == 0 {
+		return fmt.Errorf("RPM snapshot contains no repomd.xml")
+	}
+	return nil
+}
+
+func resolveRepomdTarget(snapshot *filerepo.LiveSnapshot, target filerepo.MetadataTarget) (string, bool) {
+	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+		object, ok := snapshot.Metadata[candidate]
+		if !ok || !object.Required || path.Base(object.Path) != "repomd.xml" {
+			continue
+		}
+		if actual, ok := snapshot.Metadata[object.Path]; !ok || !actual.Required {
+			continue
+		}
+		return object.Path, true
+	}
+	return "", false
+}
 
 func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
 	repoPath := root.Path
@@ -153,9 +239,6 @@ func buildRepomdItem(
 	metaTarget := filerepo.MetadataTarget{URL: metadataPath}
 	blob, err := session.Fetch(ctx, metaTarget)
 	if err != nil {
-		if item.Type != "primary" {
-			return 0, nil
-		}
 		return 0, err
 	}
 	defer session.Release(metaTarget)
@@ -163,7 +246,12 @@ func buildRepomdItem(
 	if err := verifyRepomdChecksum(metadataPath, item.SumType, item.Checksum, blob); err != nil {
 		return 0, err
 	}
-	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: item.Type == "primary"}
+	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{
+		Path:         blob.Path,
+		Required:     true,
+		ChecksumType: item.SumType,
+		Checksum:     item.Checksum,
+	}
 	if item.Type != "primary" {
 		return 0, nil
 	}
@@ -194,6 +282,10 @@ func parseRepomd(blob filerepo.MetadataBlob) ([]repomdItem, error) {
 		return nil, err
 	}
 	defer reader.Close()
+	return parseRepomdReader(reader)
+}
+
+func parseRepomdReader(reader io.Reader) ([]repomdItem, error) {
 	decoder := xml.NewDecoder(reader)
 	var items []repomdItem
 	for {
@@ -301,24 +393,43 @@ func parsePrimaryPackage(decoder *xml.Decoder) (string, string, error) {
 }
 
 func verifyRepomdChecksum(path, sumType, expected string, blob filerepo.MetadataBlob) error {
-	if expected == "" {
-		return fmt.Errorf("%s: missing repomd checksum", path)
-	}
-	if sumType != "" && sumType != "sha256" {
-		return nil
-	}
 	reader, err := blob.Open()
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-	sum := sha256.New()
+	return verifyRepomdChecksumReader(path, sumType, expected, reader)
+}
+
+func verifyRepomdChecksumReader(cleanPath, sumType, expected string, reader io.Reader) error {
+	if expected == "" {
+		return fmt.Errorf("%s: missing repomd checksum", cleanPath)
+	}
+	sum, err := rpmChecksum(sumType)
+	if err != nil {
+		return fmt.Errorf("%s: %w", cleanPath, err)
+	}
 	if _, err := io.Copy(sum, reader); err != nil {
 		return err
 	}
 	actual := hex.EncodeToString(sum.Sum(nil))
 	if !strings.EqualFold(expected, actual) {
-		return fmt.Errorf("%s: repomd checksum mismatch", path)
+		return fmt.Errorf("%s: repomd checksum mismatch", cleanPath)
 	}
 	return nil
+}
+
+func rpmChecksum(sumType string) (hash.Hash, error) {
+	switch strings.ToLower(strings.TrimSpace(sumType)) {
+	case "sha", "sha1":
+		return sha1.New(), nil
+	case "sha256":
+		return sha256.New(), nil
+	case "sha512":
+		return sha512.New(), nil
+	case "md5":
+		return md5.New(), nil
+	default:
+		return nil, fmt.Errorf("unsupported repomd checksum type %q", sumType)
+	}
 }

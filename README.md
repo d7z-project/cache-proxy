@@ -587,14 +587,16 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 
 - Repositories are discovered from client metadata requests.
 - Discovered repositories are persisted, and startup reconciles refresh tasks from the persisted repository set.
-- Metadata is published only after a full generation is fetched and validated.
+- Metadata is published only after a full generation is fetched and validated. Every object referenced by primary metadata is required; a missing, forbidden, unreadable, or checksum-invalid referenced object rejects the candidate generation.
 - The current generation is the authoritative serving view for repository metadata, including companion files such as signatures and checksums.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
+- Once a matching repository has a current generation, a metadata path absent from that generation returns `503` and triggers refresh without contacting upstream.
+- `current.yaml` is the durable commit marker. Startup restores only its exact snapshot after validating the schema, cleanup index, persisted object digests, and protocol manifest closure; orphan or newer snapshots are never selected as fallback.
 - Metadata and its signatures/checksums are generation-scoped and fixed to one upstream. Package artifacts and package sidecars use an instance-wide stable content namespace, so a metadata refresh does not change their cache keys.
 - Artifact and sidecar downloads are independent requests; they are not blocked by index misses or refresh failure. Protocol inspectors classify these resources before the generic cache executes their policy.
 - The current cleanup indexes are loaded only during cleanup and combined to retain shared content such as Debian `pool/` files. They are never runtime download allowlists.
 - Metadata refreshes and probes share the same per-host admission and `429` cooldown as client downloads; a rate-limited refresh is rescheduled for the advertised retry time.
-- Cleanup expires stable content absent from all current cleanup indexes while preserving discovered-root state. Metadata GC removes superseded generation objects, cleanup indexes, and snapshot descriptors together.
+- Cleanup expires stable content absent from all current cleanup indexes while preserving discovered-root state. Metadata GC pins durable/in-memory current generations and active response readers, keeps a grace window plus the newest previous generation, and removes generation objects, cleanup indexes, and snapshot descriptors in that order.
 
 ## Operations
 

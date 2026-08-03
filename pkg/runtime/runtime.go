@@ -53,7 +53,6 @@ type RepositoryStatus struct {
 	MetadataCount   int
 	State           string
 	Refreshing      bool
-	Warning         string
 	LastError       string
 	LastSuccessAt   time.Time
 	LastRefreshAt   time.Time

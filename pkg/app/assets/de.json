@@ -72,7 +72,6 @@
   "repository_generation": "Generation",
   "last_ok": "Letzter Erfolg",
   "last_try": "Letzter Versuch",
-  "warning": "Warnung",
   "last_error": "Letzter Fehler",
   "repository_state_active": "Aktiv",
   "repository_state_suspect": "Verdächtig",

@@ -2,10 +2,12 @@ package filerepo
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -20,6 +22,17 @@ type currentViewEntry struct {
 	PreferredUpstream string
 }
 
+type generationReadCloser struct {
+	io.ReadCloser
+	release func()
+}
+
+func (r *generationReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.release()
+	return err
+}
+
 func (h *IndexedHandler) hasAnyRootSnapshot() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -31,6 +44,19 @@ func (h *IndexedHandler) lookupCurrent(cleanPath string) (currentViewEntry, bool
 	defer h.mu.RUnlock()
 	current, ok := h.currentView[cleanPath]
 	return current, ok
+}
+
+func (h *IndexedHandler) lookupCurrentRequest(cleanPath string) (currentViewEntry, func(), bool) {
+	h.mu.Lock()
+	current, ok := h.currentView[cleanPath]
+	if !ok || current.Class != ResourceMetadata {
+		h.mu.Unlock()
+		return current, func() {}, ok
+	}
+	key := current.RootID + "\x00" + current.Generation
+	h.metadataReaders[key]++
+	h.mu.Unlock()
+	return current, h.metadataReaderRelease(key), true
 }
 
 func (h *IndexedHandler) lookupCurrentContent(cleanPath string, class ResourceClass) (currentViewEntry, bool) {
@@ -80,6 +106,58 @@ func (h *IndexedHandler) currentGeneration(rootID string) string {
 		return snapshot.Generation
 	}
 	return ""
+}
+
+func (h *IndexedHandler) matchRepository(cleanPath string) (string, *LiveSnapshot, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	selectedID := ""
+	selectedPathLength := -1
+	consider := func(rootID, rootPath string) {
+		rootPath = strings.Trim(strings.TrimSpace(rootPath), "/")
+		if rootPath != "" && cleanPath != rootPath && !strings.HasPrefix(cleanPath, rootPath+"/") {
+			return
+		}
+		if len(rootPath) > selectedPathLength || len(rootPath) == selectedPathLength && (selectedID == "" || rootID < selectedID) {
+			selectedID = rootID
+			selectedPathLength = len(rootPath)
+		}
+	}
+	for rootID, entry := range h.roots {
+		if entry == nil {
+			continue
+		}
+		consider(rootID, entry.root.Path)
+	}
+	for rootID, snapshot := range h.rootSnapshots {
+		if snapshot != nil {
+			consider(rootID, snapshot.RootPath)
+		}
+	}
+	if selectedID == "" {
+		return "", nil, false
+	}
+	return selectedID, h.rootSnapshots[selectedID], true
+}
+
+func (h *IndexedHandler) metadataReaderRelease(key string) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.mu.Lock()
+			h.metadataReaders[key]--
+			if h.metadataReaders[key] == 0 {
+				delete(h.metadataReaders, key)
+			}
+			h.mu.Unlock()
+		})
+	}
+}
+
+func (h *IndexedHandler) metadataGenerationInUse(rootID, generation string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.metadataReaders[rootID+"\x00"+generation] > 0
 }
 
 func (h *IndexedHandler) rebuildCurrentViewLocked() {
@@ -139,9 +217,10 @@ func (h *IndexedHandler) removeRoot(rootID string) {
 	h.rebuildCurrentViewLocked()
 }
 
-func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.Request, current currentViewEntry) {
+func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.Request, current currentViewEntry, release func()) {
 	reader, err := h.store.OpenObject(req.Context(), h.name, current.StorePath)
 	if err != nil {
+		release()
 		httpcache.ErrorResponse(http.StatusInternalServerError, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusInternalServerError, 0)
 		return
@@ -155,7 +234,7 @@ func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.R
 		headers[httpcache.HeaderName(key)] = value
 	}
 	httpcache.StripInternal(headers)
-	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: reader}
+	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: &generationReadCloser{ReadCloser: reader, release: release}}
 	result.FlushClose(req, w)
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
 }

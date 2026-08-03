@@ -72,7 +72,6 @@
   "repository_generation": "세대",
   "last_ok": "최근 성공",
   "last_try": "최근 시도",
-  "warning": "경고",
   "last_error": "최근 오류",
   "repository_state_active": "활성",
   "repository_state_suspect": "의심",

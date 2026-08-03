@@ -22,6 +22,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
+const metadataGenerationRetention = 15 * time.Minute
+
 func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
 	keep, err := h.currentCleanupPaths(ctx)
 	if err != nil {
@@ -251,10 +253,10 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 			}
 			continue
 		}
+		h.setRootSnapshot(rootID, snapshot)
 		if h.sh != nil {
 			h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToProbe(snapshot.Targets))
 		}
-		h.setRootSnapshot(rootID, snapshot)
 		h.saveState(context.Background())
 		h.reportMetadataState()
 		slog.Debug(
@@ -304,9 +306,9 @@ func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
 func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts config.CleanupConfig) error {
 	rootBase := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID))
 	rootDir := path.Join(rootBase, "generations")
-	currentGen := h.currentGeneration(rootID)
-	if currentGen == "" {
-		return nil
+	retained, err := h.retainedMetadataGenerations(ctx, rootID)
+	if err != nil {
+		return err
 	}
 	deleted := 0
 	var toDelete []string
@@ -325,7 +327,7 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 		if len(parts) == 0 {
 			return nil
 		}
-		if parts[0] != currentGen {
+		if _, keep := retained[parts[0]]; !keep && !h.metadataGenerationInUse(rootID, parts[0]) {
 			toDelete = append(toDelete, objectPath)
 			return nil
 		}
@@ -349,7 +351,7 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 		return nil
 	}
 	snapshotDir := path.Join(rootBase, "snapshots")
-	err := fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -360,7 +362,7 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 			return nil
 		}
 		generation := strings.TrimSuffix(entry.Name(), ".yaml")
-		if generation == "" || generation == currentGen {
+		if _, keep := retained[generation]; generation == "" || keep || h.metadataGenerationInUse(rootID, generation) {
 			return nil
 		}
 		hasFiles, err := h.generationHasFiles(ctx, path.Join(rootDir, generation))
@@ -383,6 +385,54 @@ func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts co
 		return nil
 	}
 	return err
+}
+
+func (h *IndexedHandler) retainedMetadataGenerations(ctx context.Context, rootID string) (map[string]struct{}, error) {
+	retained := map[string]struct{}{}
+	if generation := h.currentGeneration(rootID); generation != "" {
+		retained[generation] = struct{}{}
+	}
+	if generation, ok := h.durableCurrentGeneration(ctx, rootID); ok {
+		retained[generation] = struct{}{}
+	}
+	hasCurrent := len(retained) > 0
+
+	snapshotDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "snapshots")
+	cutoff := time.Now().Add(-metadataGenerationRetention)
+	var newestPrevious *LiveSnapshot
+	err := fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			return nil
+		}
+		snapshot, ok := h.loadSnapshot(ctx, objectPath)
+		if !ok || snapshot.RootID != rootID || snapshot.Generation == "" {
+			return nil
+		}
+		if _, current := retained[snapshot.Generation]; current {
+			return nil
+		}
+		if hasCurrent && snapshot.Published.After(cutoff) {
+			retained[snapshot.Generation] = struct{}{}
+		}
+		if newestPrevious == nil || snapshot.Published.After(newestPrevious.Published) ||
+			snapshot.Published.Equal(newestPrevious.Published) && snapshot.Generation > newestPrevious.Generation {
+			newestPrevious = snapshot
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("scan metadata snapshots for root %s: %w", rootID, err)
+	}
+	if hasCurrent && newestPrevious != nil {
+		retained[newestPrevious.Generation] = struct{}{}
+	}
+	return retained, nil
 }
 
 func (h *IndexedHandler) generationHasFiles(ctx context.Context, generationDir string) (bool, error) {
@@ -436,11 +486,11 @@ func (h *IndexedHandler) buildSnapshot(
 	}
 	snapshot.RootID = root.ID
 	snapshot.RootPath = root.Path
+	snapshot.Version = snapshotSchemaVersion
 	snapshot.Generation = generation
 	snapshot.Upstream = upstream
 	snapshot.Published = time.Now().UTC()
 	snapshot.Targets = append([]MetadataTarget(nil), root.Targets...)
-	snapshot.Warning = strings.Join(session.warnings, "; ")
 	cleanupPaths := indexBuilder.Finalize()
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {
@@ -461,7 +511,86 @@ func (h *IndexedHandler) buildSnapshot(
 		obj.Digest = digest
 		snapshot.Metadata[pathKey] = obj
 	}
+	if err := h.validateSnapshot(ctx, snapshot, false); err != nil {
+		return nil, nil, err
+	}
 	return snapshot, cleanupPaths, nil
+}
+
+func (h *IndexedHandler) validateSnapshot(ctx context.Context, snapshot *LiveSnapshot, requireCleanupIndex bool) error {
+	if snapshot == nil || snapshot.Version != snapshotSchemaVersion {
+		return fmt.Errorf("unsupported metadata snapshot version")
+	}
+	if snapshot.RootID == "" || snapshot.Generation == "" || len(snapshot.Metadata) == 0 {
+		return errors.New("metadata snapshot identity or manifest is empty")
+	}
+	if requireCleanupIndex {
+		if _, err := h.store.StatObject(ctx, h.name, h.cleanupIndexPath(snapshot.RootID, snapshot.Generation)); err != nil {
+			return fmt.Errorf("metadata cleanup index missing: %w", err)
+		}
+	}
+
+	required := 0
+	digests := make(map[string]string, len(snapshot.Metadata))
+	for cleanPath, obj := range snapshot.Metadata {
+		if !httpcache.SafePath(cleanPath) || !httpcache.SafePath(obj.Path) {
+			return fmt.Errorf("invalid metadata manifest path %q", cleanPath)
+		}
+		if obj.Required {
+			required++
+		}
+		if obj.Path != cleanPath {
+			actual, ok := snapshot.Metadata[obj.Path]
+			if !ok {
+				return fmt.Errorf("metadata alias %s targets missing object %s", cleanPath, obj.Path)
+			}
+			if actual.Path != obj.Path {
+				return fmt.Errorf("metadata alias %s targets non-canonical object %s", cleanPath, obj.Path)
+			}
+		}
+		expectedPath := h.generationMetadataPath(snapshot.RootID, snapshot.Generation, obj.Path)
+		if obj.StorePath != expectedPath {
+			return fmt.Errorf("metadata %s has invalid generation store path", cleanPath)
+		}
+		if obj.Digest == "" {
+			return fmt.Errorf("metadata %s has no persisted digest", cleanPath)
+		}
+		digest, ok := digests[obj.StorePath]
+		if !ok {
+			var err error
+			digest, err = h.metadataObjectDigest(ctx, obj.StorePath)
+			if err != nil {
+				return fmt.Errorf("validate metadata %s: %w", cleanPath, err)
+			}
+			digests[obj.StorePath] = digest
+		}
+		if digest != obj.Digest {
+			return fmt.Errorf("metadata %s persisted digest mismatch", cleanPath)
+		}
+	}
+	if required == 0 {
+		return errors.New("metadata snapshot has no required objects")
+	}
+	if h.validator == nil {
+		return nil
+	}
+	opener := func(cleanPath string) (io.ReadCloser, error) {
+		obj, ok := snapshot.Metadata[cleanPath]
+		if !ok {
+			return nil, fmt.Errorf("metadata %s is absent from manifest", cleanPath)
+		}
+		if obj.Path != cleanPath {
+			obj, ok = snapshot.Metadata[obj.Path]
+			if !ok {
+				return nil, fmt.Errorf("metadata alias %s target is absent", cleanPath)
+			}
+		}
+		return h.store.OpenObject(ctx, h.name, obj.StorePath)
+	}
+	if err := h.validator.ValidateSnapshot(ctx, snapshot, opener); err != nil {
+		return fmt.Errorf("validate protocol metadata manifest: %w", err)
+	}
+	return nil
 }
 
 func (h *IndexedHandler) metadataObjectDigest(ctx context.Context, objectPath string) (string, error) {
@@ -496,7 +625,9 @@ func snapshotsMetadataEqual(current, next *LiveSnapshot) bool {
 		}
 		if currentObject.Path != nextObject.Path ||
 			currentObject.Required != nextObject.Required ||
-			currentObject.Digest != nextObject.Digest {
+			currentObject.Digest != nextObject.Digest ||
+			currentObject.ChecksumType != nextObject.ChecksumType ||
+			currentObject.Checksum != nextObject.Checksum {
 			return false
 		}
 	}
