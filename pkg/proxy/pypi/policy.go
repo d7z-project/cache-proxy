@@ -30,6 +30,7 @@ type Policy struct {
 	ProxyJSON           *bool            `json:"proxyJson,omitempty" yaml:"proxy_json,omitempty"`
 	ProxyCoreMetadata   bool             `json:"proxyCoreMetadata,omitempty" yaml:"proxy_core_metadata,omitempty"`
 	ProxySignatures     bool             `json:"proxySignatures,omitempty" yaml:"proxy_signatures,omitempty"`
+	AllowedFileHosts    []string         `json:"allowedFileHosts,omitempty" yaml:"allowed_file_hosts,omitempty"`
 }
 
 type Block struct {
@@ -55,27 +56,34 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: pypi mode requires one upstream", plan.Name())
 	}
-	if _, err := url.Parse(block.Upstream); err != nil {
+	if err := config.ValidateHTTPUpstream(block.Upstream); err != nil {
 		return fmt.Errorf("instance %s: pypi upstream URL is invalid: %w", plan.Name(), err)
 	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: pypi transport: %w", plan.Name(), err)
+	}
 	applyDefaults(&block.Policy)
-	if err := validate(&block.Policy); err != nil {
+	if err := validatePolicy(&block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
 		expireAfter = config.DefaultExpireAfter
 	}
-	upstreams := []string{strings.TrimSpace(block.Upstream)}
+	upstream := strings.TrimSpace(block.Upstream)
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
-		Mode:            config.ModePyPI,
-		ExpireAfter:     expireAfter,
-		Upstreams:       upstreams,
-		Transport:       block.Transport,
-		BusyPolicy:      block.CompanionBusyPolicy,
-		DefaultFreshFor: block.CompanionFreshFor,
-		UpstreamGate:    plan.UpstreamGate(),
-	}, plan.Store(), &resolver{policy: &block.Policy, upstreams: upstreams}, plan.Stats(), nil)
+		Mode:               config.ModePyPI,
+		ExpireAfter:        expireAfter,
+		Upstreams:          []string{upstream},
+		Transport:          block.Transport,
+		BusyPolicy:         block.CompanionBusyPolicy,
+		DefaultFreshFor:    block.CompanionFreshFor,
+		AllowedTargetHosts: append([]string(nil), block.AllowedFileHosts...),
+		UpstreamGate:       plan.UpstreamGate(),
+	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats(), nil)
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: defaultCleanupInterval,
@@ -120,7 +128,7 @@ func applyDefaults(policy *Policy) {
 	}
 }
 
-func validate(policy *Policy) error {
+func validatePolicy(policy *Policy) error {
 	for _, value := range []string{policy.IndexPolicy, policy.FilePolicy, policy.CompanionPolicy} {
 		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
 			return fmt.Errorf("invalid pypi policy %q", value)
@@ -132,24 +140,38 @@ func validate(policy *Policy) error {
 		}
 	}
 	if policy.IndexFreshFor > 0 && policy.IndexFreshFor.Duration() < time.Second {
-		return fmt.Errorf("pypi index fresh_for must be at least 1s")
+		return errors.New("pypi index fresh_for must be at least 1s")
 	}
 	if policy.CompanionFreshFor > 0 && policy.CompanionFreshFor.Duration() < time.Second {
-		return fmt.Errorf("pypi companion fresh_for must be at least 1s")
+		return errors.New("pypi companion fresh_for must be at least 1s")
+	}
+	seenHosts := make(map[string]struct{}, len(policy.AllowedFileHosts))
+	for index, rawHost := range policy.AllowedFileHosts {
+		host := strings.TrimSpace(rawHost)
+		parsed, err := url.Parse("//" + host)
+		if err != nil || host == "" || strings.Contains(host, "://") || parsed.Host == "" ||
+			parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("invalid pypi allowed_file_hosts entry %q", rawHost)
+		}
+		host = strings.ToLower(parsed.Host)
+		if _, exists := seenHosts[host]; exists {
+			return fmt.Errorf("duplicate pypi allowed_file_hosts entry %q", rawHost)
+		}
+		seenHosts[host] = struct{}{}
+		policy.AllowedFileHosts[index] = host
 	}
 	return nil
 }
 
 type resolver struct {
-	policy    *Policy
-	upstreams []string
+	policy *Policy
 }
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
-	return routeForPath(r.policy, r.upstreams, strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
+	return routeForPath(r.policy, strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
 }
 
-func routeForPath(policy *Policy, upstreams []string, lookupPath string) (httpcache.Route, error) {
+func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
 	if lookupPath == "." || lookupPath == "" {
 		lookupPath = "simple/"
 	}
@@ -170,7 +192,7 @@ func routeForPath(policy *Policy, upstreams []string, lookupPath string) (httpca
 		trimmed := strings.TrimPrefix(lookupPath, "simple/")
 		if strings.HasSuffix(trimmed, "/json") {
 			name := normalizeProjectName(strings.TrimSuffix(trimmed, "/json"))
-			if !proxyJSONEnabled(policy) {
+			if policy.ProxyJSON == nil || !*policy.ProxyJSON {
 				return httpcache.Route{}, errors.New("json simple api is disabled")
 			}
 			return httpcache.Route{
@@ -197,13 +219,13 @@ func routeForPath(policy *Policy, upstreams []string, lookupPath string) (httpca
 		if err != nil {
 			return httpcache.Route{}, err
 		}
-		return fileRoute(policy, upstreams, lookupPath, sourceURL), nil
+		return fileRoute(policy, lookupPath, sourceURL), nil
 	default:
-		return fileRoute(policy, upstreams, lookupPath, lookupPath), nil
+		return fileRoute(policy, lookupPath, lookupPath), nil
 	}
 }
 
-func fileRoute(policy *Policy, _ []string, lookupPath, rawURL string) httpcache.Route {
+func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
 	objectPath := "pypi/files/" + path.Base(lookupPath)
 	if !strings.HasPrefix(lookupPath, "files/") {
 		objectPath = "pypi/files/" + encodeSourceURL(rawURL)
@@ -247,10 +269,6 @@ func isAuxiliaryPath(rawURL string, policy *Policy) bool {
 		}
 	}
 	return false
-}
-
-func proxyJSONEnabled(policy *Policy) bool {
-	return policy != nil && policy.ProxyJSON != nil && *policy.ProxyJSON
 }
 
 func normalizeProjectName(name string) string {

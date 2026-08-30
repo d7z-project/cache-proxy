@@ -2,9 +2,13 @@ package filerepo
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"slices"
 	"sort"
+	"strings"
+	"time"
 )
 
 func (h *IndexedHandler) orderedUpstreams() []string {
@@ -29,28 +33,39 @@ func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool, boo
 
 	rootID := result.Root.ID
 	root := h.finalizeRoot(result.Root)
+	now := time.Now().UTC()
+	persistInterval := h.rootSeenPersistenceInterval()
 	created := false
 	changed := false
+	seenChanged := false
 
 	h.mu.Lock()
 	entry, exists := h.roots[rootID]
 	switch {
 	case exists:
 		changed = h.mergeAndFinalizeRoot(&entry.root, root)
+		if entry.retired || entry.lastSeenSavedAt.IsZero() || now.Sub(entry.lastSeenSavedAt) >= persistInterval {
+			seenChanged = true
+		}
+		entry.lastSeenAt = now
+		entry.retired = false
+		if changed || seenChanged {
+			entry.lastSeenSavedAt = now
+		}
 	case result.Role == DiscoveryCreateRoot:
-		h.roots[rootID] = &rootEntry{root: root}
+		h.roots[rootID] = &rootEntry{root: root, lastSeenAt: now, lastSeenSavedAt: now}
 		created = true
 		changed = true
 	}
 	h.mu.Unlock()
 
-	if !created && !changed {
+	if !created && !changed && !seenChanged {
 		return rootID, false, false
 	}
 	if created {
 		slog.Debug("discovered new repository root", "instance", h.name, "mode", h.mode, "root_id", rootID, "path", result.Root.Path)
-		if h.sh != nil {
-			h.sh.AddResource(rootID, targetsToResourceTargets(result.Root.Targets), h.upstreams)
+		if h.serviceHealth != nil {
+			h.serviceHealth.AddResource(rootID, targetsToResourceTargets(result.Root.Targets), h.upstreams)
 		}
 	}
 	h.saveState(context.Background())
@@ -202,11 +217,95 @@ func (h *IndexedHandler) AddRepository(root RepositoryRoot) {
 		h.mu.Unlock()
 		return
 	}
-	h.roots[root.ID] = &rootEntry{root: root}
+	now := time.Now().UTC()
+	h.roots[root.ID] = &rootEntry{root: root, lastSeenAt: now}
 	h.mu.Unlock()
-	if h.sh != nil {
-		h.sh.AddResource(root.ID, targetsToResourceTargets(root.Targets), h.upstreams)
+	if h.serviceHealth != nil {
+		h.serviceHealth.AddResource(root.ID, targetsToResourceTargets(root.Targets), h.upstreams)
 	}
+}
+
+func (h *IndexedHandler) touchRoot(rootID string) {
+	now := time.Now().UTC()
+	persistInterval := h.rootSeenPersistenceInterval()
+	persist := false
+	h.mu.Lock()
+	if entry := h.roots[rootID]; entry != nil {
+		persist = entry.lastSeenSavedAt.IsZero() || now.Sub(entry.lastSeenSavedAt) >= persistInterval || entry.retired
+		entry.lastSeenAt = now
+		entry.retired = false
+		if persist {
+			entry.lastSeenSavedAt = now
+		}
+	}
+	h.mu.Unlock()
+	if persist {
+		h.saveState(context.Background())
+	}
+}
+
+func (h *IndexedHandler) rootSeenPersistenceInterval() time.Duration {
+	interval := time.Hour
+	if !h.rootExpireAfter.IsUnset() && !h.rootExpireAfter.IsNever() && h.rootExpireAfter.Duration()/4 < interval {
+		interval = max(h.rootExpireAfter.Duration()/4, time.Second)
+	}
+	return interval
+}
+
+func (h *IndexedHandler) rootNeedsRetirement(rootID string, now time.Time) bool {
+	if h.rootExpireAfter.IsUnset() || h.rootExpireAfter.IsNever() {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	entry := h.roots[rootID]
+	return entry != nil && !entry.retired && !entry.lastSeenAt.IsZero() && now.Sub(entry.lastSeenAt) >= h.rootExpireAfter.Duration()
+}
+
+func (h *IndexedHandler) rootRetired(rootID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	entry := h.roots[rootID]
+	return entry != nil && entry.retired
+}
+
+func (h *IndexedHandler) beginRootRetirement(ctx context.Context, rootID string) error {
+	h.mu.Lock()
+	entry := h.roots[rootID]
+	if entry == nil {
+		h.mu.Unlock()
+		return nil
+	}
+	if snapshot := h.rootSnapshots[rootID]; snapshot != nil {
+		entry.retirementCleanupGeneration = snapshot.Generation
+	}
+	entry.retired = true
+	h.mu.Unlock()
+	if staging, ok := h.loadRefreshStaging(ctx, rootID); ok {
+		h.discardRefreshStaging(ctx, staging)
+	} else {
+		if err := h.deleteRefreshStaging(ctx, rootID); err != nil {
+			return err
+		}
+	}
+	if err := h.store.DeleteObject(ctx, h.name, h.currentPath(rootID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	h.setRootSnapshot(rootID, nil)
+	h.saveState(context.Background())
+	return nil
+}
+
+func (h *IndexedHandler) rootHasReaders(rootID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	prefix := rootID + "\x00"
+	for key, readers := range h.metadataReaders {
+		if readers > 0 && strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *IndexedHandler) finalizeRoot(root RepositoryRoot) RepositoryRoot {

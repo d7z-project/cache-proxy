@@ -20,6 +20,7 @@ import (
 const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 256
 const DefaultMaxActiveDownloadsPerHost = 16
+const DefaultUpstreamStartInterval = 5 * time.Millisecond
 const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500
@@ -43,12 +44,14 @@ func upstreamGateConfig(download config.DownloadConfig) httpcache.UpstreamGateCo
 	for configuredHost, override := range download.Hosts {
 		host, _ := normalizeDownloadHost(configuredHost)
 		hosts[host] = httpcache.UpstreamHostGateConfig{
-			MaxActive: override.MaxActive,
+			MaxActive:   override.MaxActive,
+			MinInterval: override.MinInterval.Duration(),
 		}
 	}
 	return httpcache.UpstreamGateConfig{
 		MaxActive:        download.MaxActive,
 		MaxActivePerHost: download.MaxActivePerHost,
+		MinInterval:      download.MinInterval.Duration(),
 		Hosts:            hosts,
 	}
 }
@@ -72,6 +75,7 @@ func planEntries(
 		sched,
 		b,
 	)
+	plan.ReservePathPrefix(statusAPIPath, "status API")
 	drivers := driverSet()
 	for _, decl := range doc.Instances {
 		selected, err := decl.SelectMode()
@@ -136,6 +140,9 @@ func normalizeDocument(doc *config.Document) {
 	if doc.Storage.Download.MaxActivePerHost == 0 {
 		doc.Storage.Download.MaxActivePerHost = DefaultMaxActiveDownloadsPerHost
 	}
+	if doc.Storage.Download.MinInterval == 0 {
+		doc.Storage.Download.MinInterval = config.Duration(DefaultUpstreamStartInterval)
+	}
 }
 
 func validateServerConfig(doc *config.Document) error {
@@ -145,11 +152,23 @@ func validateServerConfig(doc *config.Document) error {
 	if err := validateMetricsPath(doc.Metrics.Path); err != nil {
 		return err
 	}
+	if publicURL := strings.TrimSpace(doc.Server.PublicURL); publicURL != "" {
+		if err := config.ValidateHTTPURL(publicURL); err != nil {
+			return fmt.Errorf("server public_url: %w", err)
+		}
+		parsed, _ := url.Parse(publicURL)
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("server public_url must not contain a query or fragment")
+		}
+	}
 	if doc.Storage.Download.MaxActive <= 0 {
 		return errors.New("download max_active must be positive")
 	}
 	if doc.Storage.Download.MaxActivePerHost <= 0 {
 		return errors.New("download max_active_per_host must be positive")
+	}
+	if doc.Storage.Download.MinInterval < 0 {
+		return errors.New("download min_interval must not be negative")
 	}
 	seenHosts := map[string]string{}
 	for configuredHost, override := range doc.Storage.Download.Hosts {
@@ -163,6 +182,9 @@ func validateServerConfig(doc *config.Document) error {
 		seenHosts[host] = configuredHost
 		if override.MaxActive < 0 {
 			return fmt.Errorf("download host %q max_active must not be negative", configuredHost)
+		}
+		if override.MinInterval < 0 {
+			return fmt.Errorf("download host %q min_interval must not be negative", configuredHost)
 		}
 	}
 	if doc.Server.Status.DiskSampleInterval <= 0 {

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -121,17 +122,18 @@ type Result struct {
 }
 
 type PlanContext struct {
-	store        *blobfs.Store
-	stats        *httpcache.Stats
-	upstreamGate *httpcache.UpstreamGate
-	cleanup      config.CleanupConfig
-	mainBind     string
-	metricsPath  string
-	entries      map[string]*Entry
-	pathOwners   map[string]string
-	bindOwners   map[string]string
-	scheduler    *scheduler.Scheduler
-	bus          *bus.Bus
+	store                *blobfs.Store
+	stats                *httpcache.Stats
+	upstreamGate         *httpcache.UpstreamGate
+	cleanup              config.CleanupConfig
+	mainBind             string
+	metricsPath          string
+	entries              map[string]*Entry
+	pathOwners           map[string]string
+	reservedPathPrefixes map[string]string
+	bindOwners           map[string]string
+	scheduler            *scheduler.Scheduler
+	bus                  *bus.Bus
 }
 
 type InstancePlan struct {
@@ -153,17 +155,18 @@ func NewPlanContext(
 	b *bus.Bus,
 ) *PlanContext {
 	return &PlanContext{
-		store:        store,
-		stats:        stats,
-		upstreamGate: upstreamGate,
-		cleanup:      cleanup,
-		mainBind:     mainBind,
-		metricsPath:  metricsPath,
-		entries:      map[string]*Entry{},
-		pathOwners:   map[string]string{},
-		bindOwners:   map[string]string{mainBind: "main"},
-		scheduler:    sched,
-		bus:          b,
+		store:                store,
+		stats:                stats,
+		upstreamGate:         upstreamGate,
+		cleanup:              cleanup,
+		mainBind:             mainBind,
+		metricsPath:          metricsPath,
+		entries:              map[string]*Entry{},
+		pathOwners:           map[string]string{},
+		reservedPathPrefixes: map[string]string{},
+		bindOwners:           map[string]string{mainBind: "main"},
+		scheduler:            sched,
+		bus:                  b,
 	}
 }
 
@@ -213,6 +216,12 @@ func (p *PlanContext) UpstreamGate() *httpcache.UpstreamGate { return p.upstream
 func (p *PlanContext) CleanupConfig() config.CleanupConfig   { return p.cleanup }
 func (p *PlanContext) Scheduler() *scheduler.Scheduler       { return p.scheduler }
 func (p *PlanContext) Bus() *bus.Bus                         { return p.bus }
+
+func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
+	if normalized := normalizeRoutePath(pathValue); normalized != "" && normalized != "/" {
+		p.reservedPathPrefixes[normalized] = owner
+	}
+}
 
 func (i *InstancePlan) Name() string                          { return i.entry.Name }
 func (i *InstancePlan) Mode() string                          { return i.entry.Mode }
@@ -270,10 +279,10 @@ func (i *InstancePlan) bind(pathValue, addr string, expireAfter config.Expiratio
 		return nil
 	}
 	if i.bound {
-		return fmt.Errorf("instance already declared a mount")
+		return errors.New("instance already declared a mount")
 	}
 	if runtime == nil {
-		return fmt.Errorf("runtime is nil")
+		return errors.New("runtime is nil")
 	}
 	if pathValue != "" {
 		normalized := normalizeRoutePath(pathValue)
@@ -282,6 +291,11 @@ func (i *InstancePlan) bind(pathValue, addr string, expireAfter config.Expiratio
 		}
 		if owner := i.ctx.pathOwners[normalized]; owner != "" {
 			return fmt.Errorf("listen path %s conflicts between %s and %s", normalized, owner, i.entry.Name)
+		}
+		for reserved, owner := range i.ctx.reservedPathPrefixes {
+			if normalized == reserved || strings.HasPrefix(normalized, reserved+"/") || strings.HasPrefix(reserved, normalized+"/") {
+				return fmt.Errorf("listen path %s conflicts with %s at %s", normalized, owner, reserved)
+			}
 		}
 		if normalized == i.ctx.metricsPath {
 			return fmt.Errorf("listen path %s conflicts with metrics path", normalized)

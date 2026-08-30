@@ -1,7 +1,7 @@
 package git
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -97,7 +97,7 @@ func (b *billyAdapter) ReadDir(name string) ([]os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return f.Readdir(-1)
 }
 
@@ -110,11 +110,11 @@ func (b *billyAdapter) Lstat(name string) (os.FileInfo, error) {
 }
 
 func (b *billyAdapter) Symlink(target, link string) error {
-	return fmt.Errorf("symlink not supported")
+	return errors.New("symlink not supported")
 }
 
 func (b *billyAdapter) Readlink(link string) (string, error) {
-	return "", fmt.Errorf("symlink not supported")
+	return "", errors.New("symlink not supported")
 }
 
 func (b *billyAdapter) Chroot(subPath string) (billy.Filesystem, error) {

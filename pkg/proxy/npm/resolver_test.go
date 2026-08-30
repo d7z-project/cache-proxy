@@ -148,7 +148,7 @@ func TestValidateRejectsInvalidMetadataPolicy(t *testing.T) {
 		MetadataBusyPolicy: config.BusyPolicyStale,
 		TarballPolicy:      config.PolicyImmutable,
 	}
-	err := validate(policy)
+	err := validatePolicy(policy)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid npm metadata policy")
 }
@@ -159,7 +159,7 @@ func TestValidateRejectsInvalidTarballPolicy(t *testing.T) {
 		MetadataBusyPolicy: config.BusyPolicyStale,
 		TarballPolicy:      "invalid-policy",
 	}
-	err := validate(policy)
+	err := validatePolicy(policy)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid npm tarball policy")
 }
@@ -170,7 +170,7 @@ func TestValidateRejectsInvalidBusyPolicy(t *testing.T) {
 		MetadataBusyPolicy: "unknown",
 		TarballPolicy:      config.PolicyImmutable,
 	}
-	err := validate(policy)
+	err := validatePolicy(policy)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid npm metadata busy policy")
 }
@@ -182,7 +182,7 @@ func TestValidateRejectsTooSmallFreshFor(t *testing.T) {
 		MetadataFreshFor:   1, // 1 nanosecond < 1 second
 		TarballPolicy:      config.PolicyImmutable,
 	}
-	err := validate(policy)
+	err := validatePolicy(policy)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fresh_for must be at least 1s")
 }
@@ -193,7 +193,7 @@ func TestValidateAcceptsBusyBypass(t *testing.T) {
 		MetadataBusyPolicy: config.BusyPolicyBypass,
 		TarballPolicy:      config.PolicyImmutable,
 	}
-	err := validate(policy)
+	err := validatePolicy(policy)
 	require.NoError(t, err)
 }
 
@@ -203,6 +203,6 @@ func TestValidateAcceptsBusyStale(t *testing.T) {
 		MetadataBusyPolicy: config.BusyPolicyStale,
 		TarballPolicy:      config.PolicyImmutable,
 	}
-	err := validate(policy)
+	err := validatePolicy(policy)
 	require.NoError(t, err)
 }

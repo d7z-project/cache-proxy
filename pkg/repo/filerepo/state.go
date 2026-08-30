@@ -10,6 +10,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -19,8 +20,11 @@ import (
 const rootsStateFileName = "_roots.yaml"
 
 type persistedRoot struct {
-	Root  RepositoryRoot          `yaml:"root"`
-	State health.ResourceSnapshot `yaml:"state"`
+	Root              RepositoryRoot          `yaml:"root"`
+	State             health.ResourceSnapshot `yaml:"state"`
+	LastSeenAt        time.Time               `yaml:"last_seen_at"`
+	Retired           bool                    `yaml:"retired,omitempty"`
+	CleanupGeneration string                  `yaml:"cleanup_generation,omitempty"`
 }
 
 type persistedState struct {
@@ -41,13 +45,13 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 	}
 
 	h.mu.RLock()
-	roots := make(map[string]RepositoryRoot, len(h.roots))
+	roots := make(map[string]rootEntry, len(h.roots))
 	currentRoots := make(map[string]struct{}, len(h.rootSnapshots))
 	for rootID, entry := range h.roots {
 		if entry == nil {
 			continue
 		}
-		roots[rootID] = entry.root
+		roots[rootID] = *entry
 	}
 	for rootID := range h.rootSnapshots {
 		currentRoots[rootID] = struct{}{}
@@ -55,8 +59,8 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 	h.mu.RUnlock()
 
 	resources := map[string]health.ResourceSnapshot{}
-	if h.sh != nil {
-		for _, item := range h.sh.SnapshotResources() {
+	if h.serviceHealth != nil {
+		for _, item := range h.serviceHealth.SnapshotResources() {
 			resources[item.Path] = item
 		}
 	}
@@ -81,8 +85,11 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 			}
 		}
 		state.Roots = append(state.Roots, persistedRoot{
-			Root:  roots[rootID],
-			State: snapshot,
+			Root:              roots[rootID].root,
+			State:             snapshot,
+			LastSeenAt:        roots[rootID].lastSeenAt,
+			Retired:           roots[rootID].retired,
+			CleanupGeneration: roots[rootID].retirementCleanupGeneration,
 		})
 	}
 
@@ -108,7 +115,7 @@ func (h *IndexedHandler) loadState(ctx context.Context) persistedState {
 	if err != nil {
 		return persistedState{Version: 1}
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	var state persistedState
 	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
@@ -126,6 +133,17 @@ func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 			continue
 		}
 		h.AddRepository(root.Root)
+		h.mu.Lock()
+		if entry := h.roots[root.Root.ID]; entry != nil {
+			entry.lastSeenAt = root.LastSeenAt
+			if entry.lastSeenAt.IsZero() {
+				entry.lastSeenAt = time.Now().UTC()
+			}
+			entry.lastSeenSavedAt = entry.lastSeenAt
+			entry.retired = root.Retired
+			entry.retirementCleanupGeneration = root.CleanupGeneration
+		}
+		h.mu.Unlock()
 		if root.State.Path == "" {
 			root.State.Path = root.Root.ID
 		}
@@ -137,8 +155,8 @@ func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 		}
 		resources = append(resources, root.State)
 	}
-	if h.sh != nil {
-		h.sh.RestoreResources(resources)
+	if h.serviceHealth != nil {
+		h.serviceHealth.RestoreResources(resources)
 	}
 }
 
@@ -154,10 +172,10 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
 		}
 		h.setRootSnapshot(snapshot.RootID, snapshot)
 
-		if h.sh != nil {
-			restored := h.sh.AddResource(snapshot.RootID, targetsToResourceTargets(snapshot.Targets), h.upstreams)
+		if h.serviceHealth != nil {
+			restored := h.serviceHealth.AddResource(snapshot.RootID, targetsToResourceTargets(snapshot.Targets), h.upstreams)
 			if restored.State == health.RPending && restored.LastSuccessAt.IsZero() {
-				h.sh.MarkResourceActive(snapshot.RootID, targetsToResourceTargets(snapshot.Targets))
+				h.serviceHealth.MarkResourceActive(snapshot.RootID, targetsToResourceTargets(snapshot.Targets))
 			}
 		}
 		h.reportMetadataState()
@@ -197,7 +215,7 @@ func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath st
 	if err != nil {
 		return nil, false
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var ref struct {
 		RootID     string `yaml:"root_id"`
 		Generation string `yaml:"generation"`
@@ -207,9 +225,9 @@ func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath st
 	}
 	reject := func(err error) {
 		slog.Warn("committed metadata generation rejected", "instance", h.name, "root_id", ref.RootID, "generation", ref.Generation, "err", err)
-		if h.sh != nil {
-			resource := h.sh.AddResource(ref.RootID, nil, h.upstreams)
-			h.sh.FinishRefresh(
+		if h.serviceHealth != nil {
+			resource := h.serviceHealth.AddResource(ref.RootID, nil, h.upstreams)
+			h.serviceHealth.FinishRefresh(
 				ref.RootID,
 				resource.Generation,
 				fmt.Errorf("%w: invalid committed metadata generation: %v", health.ErrResourceTransient, err),
@@ -234,7 +252,7 @@ func (h *IndexedHandler) durableCurrentGeneration(ctx context.Context, rootID st
 	if err != nil {
 		return "", false
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var ref struct {
 		RootID     string `yaml:"root_id"`
 		Generation string `yaml:"generation"`
@@ -250,7 +268,7 @@ func (h *IndexedHandler) loadSnapshot(ctx context.Context, objectPath string) (*
 	if err != nil {
 		return nil, false
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	var snapshot LiveSnapshot
 	if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootID == "" {

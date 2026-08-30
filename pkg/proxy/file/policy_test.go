@@ -24,7 +24,7 @@ func TestHandlerStartsHealthAndRecordsUpstreamFailures(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	cfg := health.DefaultConfig()
@@ -55,7 +55,7 @@ func TestHandlerStartsHealthAndRecordsUpstreamFailures(t *testing.T) {
 func TestHandlerStopClosesHealthBeforeBase(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	stats := httpcache.NewStats(prometheus.NewRegistry())
 	sh := health.New("files", config.ModeFile, health.DefaultConfig(), []string{"https://example.com"}, stats)

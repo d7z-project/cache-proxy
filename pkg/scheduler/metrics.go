@@ -1,10 +1,6 @@
 package scheduler
 
-import (
-	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-)
+import "github.com/prometheus/client_golang/prometheus"
 
 type metrics struct {
 	registered         *prometheus.CounterVec
@@ -22,6 +18,7 @@ type metrics struct {
 	stateRestore       *prometheus.CounterVec
 	restoredTasks      *prometheus.CounterVec
 	restoreSkipped     *prometheus.CounterVec
+	refreshRequests    *prometheus.CounterVec
 }
 
 func newMetrics(reg prometheus.Registerer) *metrics {
@@ -91,6 +88,10 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 			Name: "cache_proxy_scheduler_restore_skipped_total",
 			Help: "Total persisted scheduler tasks skipped during restore by task type and reason.",
 		}, []string{"task_type", "reason"}),
+		refreshRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_metadata_refresh_requests_total",
+			Help: "Total foreground metadata refresh requests by instance and scheduler action.",
+		}, []string{"instance", "result"}),
 	}
 	reg.MustRegister(
 		m.registered,
@@ -108,13 +109,7 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 		m.stateRestore,
 		m.restoredTasks,
 		m.restoreSkipped,
+		m.refreshRequests,
 	)
 	return m
-}
-
-func clampDurationSeconds(d time.Duration) float64 {
-	if d <= 0 {
-		return 0
-	}
-	return d.Seconds()
 }

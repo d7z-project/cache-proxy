@@ -71,10 +71,8 @@ func TestTaskKey(t *testing.T) {
 
 func TestSchedulerStartStopAllowsNilContext(t *testing.T) {
 	sched, _ := newTestScheduler(t, newTestStore(t))
-	//lint:ignore SA1012 This test verifies nil context fallback behavior.
-	sched.Start(nil)
-	//lint:ignore SA1012 This test verifies nil context fallback behavior.
-	require.NoError(t, sched.Stop(nil))
+	sched.Start(nil)                    //nolint:staticcheck // Verifies the documented nil-context fallback.
+	require.NoError(t, sched.Stop(nil)) //nolint:staticcheck // Verifies the documented nil-context fallback.
 }
 
 func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
@@ -236,7 +234,7 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		metricValue(t, sched.m.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")),
+		metricValue(t, sched.metrics.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")),
 	)
 	require.NoError(t, sched.Stop(context.Background()))
 }
@@ -430,7 +428,7 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 	require.Greater(t, calls.Load(), int32(0))
 	require.Greater(
 		t,
-		metricValue(t, sched.m.backoff.WithLabelValues("repo", string(TypeMetadataRefresh))),
+		metricValue(t, sched.metrics.backoff.WithLabelValues("repo", string(TypeMetadataRefresh))),
 		float64(0),
 	)
 	require.NoError(t, sched.Stop(context.Background()))
@@ -735,6 +733,41 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 		return !ok
 	}, time.Second, 10*time.Millisecond)
 	require.NoError(t, sched.Stop(context.Background()))
+}
+
+func TestMetadataRefreshRequestAdvancesExistingTaskAndCoalescesWhileRunning(t *testing.T) {
+	sched, b := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan int, 3)
+	releaseFirst := make(chan struct{})
+	var runs atomic.Int32
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh: func(string) TaskHandler {
+			return func(context.Context) (*TaskOutcome, error) {
+				run := int(runs.Add(1))
+				started <- run
+				if run == 1 {
+					<-releaseFirst
+				}
+				return nil, nil
+			}
+		},
+		NewGC: func(string) TaskHandler { return noopTask },
+	})
+	sched.Start(ctx)
+	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	require.Equal(t, 1, <-started)
+	for range 5 {
+		b.Publish(bus.Event{Type: bus.EventMetadataRefreshRequested, Payload: bus.MetadataRefreshRequestedPayload{Instance: "repo", RootID: "root"}})
+	}
+	close(releaseFirst)
+	require.Equal(t, 2, <-started)
+	require.Never(t, func() bool { return runs.Load() > 2 }, 100*time.Millisecond, 10*time.Millisecond)
 }
 
 func TestStopTimeoutMarksStopped(t *testing.T) {

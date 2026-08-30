@@ -74,7 +74,10 @@ type App struct {
 func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
 	a.tenantUsageMu.Lock()
 	prev := a.tenantUsageCachedAt
-	result := cloneUsage(a.tenantUsageCache)
+	result := make(map[string]int64, len(a.tenantUsageCache))
+	for tenant, bytes := range a.tenantUsageCache {
+		result[tenant] = bytes
+	}
 	a.tenantUsageMu.Unlock()
 	if time.Since(prev) >= 5*time.Minute {
 		a.refreshTenantUsage(ctx, tenants)
@@ -106,22 +109,14 @@ func (a *App) refreshTenantUsage(parent context.Context, tenants []string) {
 	}()
 }
 
-func cloneUsage(src map[string]int64) map[string]int64 {
-	if len(src) == 0 {
-		return map[string]int64{}
-	}
-	dst := make(map[string]int64, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
-}
-
 func Load(path string) (*config.Document, error) {
 	return config.LoadFile(path)
 }
 
 func Validate(doc *config.Document) error {
+	if doc == nil {
+		return errors.New("config document is nil")
+	}
 	dir, err := os.MkdirTemp("", "cache-proxy-validate-*")
 	if err != nil {
 		return err

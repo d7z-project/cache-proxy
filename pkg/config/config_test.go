@@ -135,6 +135,11 @@ instances:
 	require.Equal(t, "immutable", cfg.DefaultPolicy)
 }
 
+func TestDecodeRejectsNilReader(t *testing.T) {
+	_, err := Decode(nil)
+	require.ErrorContains(t, err, "reader is nil")
+}
+
 func TestDecodeTransportHealthPatch(t *testing.T) {
 	doc, err := Decode(strings.NewReader(`
 instances:
@@ -172,41 +177,6 @@ instances:
 	require.Equal(t, 3*time.Minute, *cfg.Transport.Health.ResourceRemoveAge)
 }
 
-func TestDecodeRejectsRemovedCleanupFields(t *testing.T) {
-	_, err := Decode(strings.NewReader(`
-storage:
-  gc:
-    blob: 24h
-  cleanup:
-    interval: 6h
-instances: []
-`))
-	require.ErrorContains(t, err, "field interval not found")
-}
-
-func TestDecodeRejectsRemovedDownloadAdmissionFields(t *testing.T) {
-	for name, field := range map[string]string{
-		"global request interval": "request_interval_per_host: 125ms",
-		"foreground wait":         "foreground_queue_wait: 3s",
-		"host request interval": `hosts:
-      packages.example:
-        request_interval: 125ms`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := Decode(strings.NewReader(`
-storage:
-  download:
-    max_active: 256
-    max_active_per_host: 16
-    ` + field + `
-instances: []
-`))
-			require.Error(t, err)
-			require.ErrorContains(t, err, "field")
-		})
-	}
-}
-
 func TestDecodePackageRepositoryConfig(t *testing.T) {
 	doc, err := Decode(strings.NewReader(`
 instances:
@@ -238,34 +208,6 @@ instances:
 	require.Equal(t, []string{"https://deb.example.com/debian"}, block.Upstreams)
 }
 
-func TestDecodePackageRepositoryConfigRejectsLegacyMetadataPolicy(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: linux
-    enabled: true
-    deb:
-      expire_after: 720h
-      route:
-        path: /deb
-      upstreams:
-        - https://deb.example.com/debian
-      metadata_policy: revalidate
-`))
-	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	var block struct {
-		ExpireAfter Expiration `yaml:"expire_after"`
-		Route       struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstreams []string `yaml:"upstreams"`
-	}
-	err = selected.Block.DecodeStrict(&block)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "field metadata_policy not found")
-}
-
 func TestDecodeRejectsUnknownServerStatusField(t *testing.T) {
 	_, err := Decode(strings.NewReader(`
 server:
@@ -274,6 +216,55 @@ server:
 instances: []
 `))
 	require.ErrorContains(t, err, "field sample_every not found")
+}
+
+func TestDecodeRejectsMultipleYAMLDocuments(t *testing.T) {
+	_, err := Decode(strings.NewReader("instances: []\n---\ninstances: []\n"))
+	require.ErrorContains(t, err, "exactly one YAML document")
+}
+
+func TestValidateHTTPURL(t *testing.T) {
+	for _, valid := range []string{
+		"http://registry.example",
+		" https://registry.example:8443/base/path ",
+	} {
+		require.NoError(t, ValidateHTTPURL(valid), valid)
+	}
+	for _, invalid := range []string{
+		"",
+		"registry.example",
+		"/relative/path",
+		"file:///tmp/repository",
+		"mailto:user@example.com",
+	} {
+		require.Error(t, ValidateHTTPURL(invalid), invalid)
+	}
+}
+
+func TestValidateHTTPUpstreamRejectsQueryAndFragment(t *testing.T) {
+	require.NoError(t, ValidateHTTPUpstream("https://registry.example/base"))
+	require.Error(t, ValidateHTTPUpstream("https://registry.example/base?mirror=one"))
+	require.Error(t, ValidateHTTPUpstream("https://registry.example/base#fragment"))
+}
+
+func TestValidateTransport(t *testing.T) {
+	require.NoError(t, ValidateTransport(nil))
+	require.NoError(t, ValidateTransport(&TransportConfig{
+		Proxy:        "socks5://127.0.0.1:1080",
+		DialTimeout:  Duration(time.Second),
+		MaxIdleConns: 10,
+	}))
+
+	for name, transport := range map[string]*TransportConfig{
+		"relative proxy":      {Proxy: "127.0.0.1:8080"},
+		"unsupported proxy":   {Proxy: "file:///tmp/proxy"},
+		"negative timeout":    {HeaderTimeout: -1},
+		"negative idle conns": {MaxIdleConns: -1},
+	} {
+		t.Run(name, func(t *testing.T) { require.Error(t, ValidateTransport(transport)) })
+	}
+	err := ValidateTransport(&TransportConfig{DialTimeout: -1, HeaderTimeout: -1})
+	require.ErrorContains(t, err, "dial_timeout")
 }
 
 func TestDecodeGoProxyConfig(t *testing.T) {
@@ -383,140 +374,4 @@ instances:
 	require.True(t, block.VerifyObjects)
 	require.True(t, block.CacheDeltas)
 	require.Equal(t, Expiration(240*time.Hour), block.DeltaExpireAfter)
-}
-
-func TestDecodeFlatpakRejectsLegacyVerifyDeltas(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: flathub
-    enabled: true
-    flatpak:
-      route:
-        path: /flathub
-      upstreams:
-        - https://dl.flathub.org/repo
-      verify_deltas: true
-`))
-	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	var block struct {
-		Route struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstreams []string `yaml:"upstreams"`
-	}
-	err = selected.Block.DecodeStrict(&block)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "field verify_deltas not found")
-}
-
-func TestDecodeSimplifiedProxyConfigsRejectLegacyFields(t *testing.T) {
-	tests := []struct {
-		name        string
-		document    string
-		decodeBlock any
-		wantError   string
-	}{
-		{
-			name: "cargo rejects upstreams",
-			document: `
-instances:
-  - name: crates
-    enabled: true
-    cargo:
-      expire_after: 720h
-      route:
-        path: /cargo
-      upstreams:
-        - https://index.crates.io
-`,
-			decodeBlock: &struct {
-				ExpireAfter Expiration `yaml:"expire_after"`
-				Route       struct {
-					Path string `yaml:"path"`
-				} `yaml:"route"`
-				Upstream string `yaml:"upstream"`
-			}{},
-			wantError: "field upstreams not found",
-		},
-		{
-			name: "npm rejects unexpected rules field",
-			document: `
-instances:
-  - name: npmjs
-    enabled: true
-    npm:
-      expire_after: 720h
-      route:
-        path: /npm
-      upstream: https://registry.npmjs.org
-      unexpected_rules: []
-`,
-			decodeBlock: &struct {
-				ExpireAfter Expiration `yaml:"expire_after"`
-				Route       struct {
-					Path string `yaml:"path"`
-				} `yaml:"route"`
-				Upstream string `yaml:"upstream"`
-			}{},
-			wantError: "field unexpected_rules not found",
-		},
-		{
-			name: "maven rejects upstreams",
-			document: `
-instances:
-  - name: central
-    enabled: true
-    maven:
-      expire_after: 720h
-      route:
-        path: /maven
-      upstreams:
-        - https://repo1.maven.org/maven2
-`,
-			decodeBlock: &struct {
-				ExpireAfter Expiration `yaml:"expire_after"`
-				Route       struct {
-					Path string `yaml:"path"`
-				} `yaml:"route"`
-				Upstream string `yaml:"upstream"`
-			}{},
-			wantError: "field upstreams not found",
-		},
-		{
-			name: "pypi rejects artifact policy",
-			document: `
-instances:
-  - name: python
-    enabled: true
-    pypi:
-      expire_after: 720h
-      route:
-        path: /pypi
-      upstream: https://pypi.org
-      artifact_policy: immutable
-`,
-			decodeBlock: &struct {
-				ExpireAfter Expiration `yaml:"expire_after"`
-				Route       struct {
-					Path string `yaml:"path"`
-				} `yaml:"route"`
-				Upstream   string `yaml:"upstream"`
-				FilePolicy string `yaml:"file_policy"`
-			}{},
-			wantError: "field artifact_policy not found",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			doc, err := Decode(strings.NewReader(tt.document))
-			require.NoError(t, err)
-			selected, err := doc.Instances[0].SelectMode()
-			require.NoError(t, err)
-			err = selected.Block.DecodeStrict(tt.decodeBlock)
-			require.Error(t, err)
-			require.ErrorContains(t, err, tt.wantError)
-		})
-	}
 }

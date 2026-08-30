@@ -171,9 +171,9 @@ func TestRefreshUsesConfiguredOrderDespitePassiveFailures(t *testing.T) {
 	defer second.Close()
 
 	store := openTestStore(t)
-	handler, _, sh := newTestHandlerWithHealth(t, store, []string{first.URL, second.URL})
+	handler, _, serviceHealth := newTestHandlerWithHealth(t, store, []string{first.URL, second.URL})
 	for range 10 {
-		sh.RecordResult(first.URL, http.StatusInternalServerError, time.Millisecond)
+		serviceHealth.RecordResult(first.URL, http.StatusInternalServerError, time.Millisecond)
 	}
 
 	require.NoError(t, handler.Refresh(context.Background()))
@@ -584,9 +584,9 @@ func newTestHandlerWithHealth(
 ) (*Handler, *httpcache.Stats, *health.ServiceHealth) {
 	t.Helper()
 	stats := httpcache.NewStats(prometheus.NewRegistry())
-	sh := health.New("flatpak-test", config.ModeFlatpak, health.DefaultConfig(), upstreams, stats)
-	handler := newTestHandlerWithStatsAndHealth(t, store, upstreams, stats, sh)
-	return handler, stats, sh
+	serviceHealth := health.New("flatpak-test", config.ModeFlatpak, health.DefaultConfig(), upstreams, stats)
+	handler := newTestHandlerWithStatsAndHealth(t, store, upstreams, stats, serviceHealth)
+	return handler, stats, serviceHealth
 }
 
 func newTestHandlerWithStatsAndHealth(
@@ -594,7 +594,7 @@ func newTestHandlerWithStatsAndHealth(
 	store *blobfs.Store,
 	upstreams []string,
 	stats *httpcache.Stats,
-	sh *health.ServiceHealth,
+	serviceHealth *health.ServiceHealth,
 ) *Handler {
 	t.Helper()
 	policy := &Policy{}
@@ -619,7 +619,7 @@ func newTestHandlerWithStatsAndHealth(
 		policy,
 		store,
 		stats,
-		sh,
+		serviceHealth,
 		upstreamGate,
 		runtimeCfg,
 	)

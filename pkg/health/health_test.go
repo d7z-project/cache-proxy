@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func (s *observationStats) SetUpstreamObservation(_, _, _ string, errorRate, lat
 	s.calls++
 }
 
-func TestConfigOnlyExposesObservationalAndResourceRemovalSettings(t *testing.T) {
+func TestApplyConfigPatchUpdatesObservationAndResourceRemovalSettings(t *testing.T) {
 	defaults := DefaultConfig()
 	disabled := false
 	removeCount := 3
@@ -98,6 +99,16 @@ func TestForbiddenResourceIsPermanentlyBlocked(t *testing.T) {
 	require.Equal(t, RBlocked, current.State)
 	_, _, err := h.TryStartRefresh("root", time.Now().Add(24*time.Hour))
 	require.ErrorIs(t, err, ErrRefreshBlocked)
+}
+
+func TestWrappedResourceErrorKeepsClassification(t *testing.T) {
+	h := New("repo", "rpm", DefaultConfig(), nil, nil)
+	rh := h.AddResource("root", nil, nil)
+	h.FinishRefresh("root", rh.Generation, fmt.Errorf("refresh failed: %w", ErrResourceForbidden), nil)
+
+	current, ok := h.ResourceHealth("root")
+	require.True(t, ok)
+	require.Equal(t, RBlocked, current.State)
 }
 
 func TestRepeatedNotFoundRemovesResource(t *testing.T) {

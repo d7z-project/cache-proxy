@@ -49,7 +49,7 @@ func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
 	parts := strings.Split(cleanPath, "/")
 	for i, part := range parts {
 		if part == "blobs" && i+2 < len(parts) && parts[i+1] == "uploads" {
-			return request{}, errors.New("OCI blob uploads are not proxied")
+			return request{}, errors.New("oci blob uploads are not proxied")
 		}
 		if part == "manifests" && i+1 < len(parts) {
 			repo := strings.Join(parts[1:i], "/")

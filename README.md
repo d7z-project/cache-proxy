@@ -58,9 +58,11 @@ Top-level fields:
 | `storage.orphan_policy` | string | — | Home page orphan cleanup policy (`auto`) |
 | `storage.download.max_active` | int | `256` | Process-wide concurrent upstream response bodies |
 | `storage.download.max_active_per_host` | int | `16` | Concurrent upstream transfers to one normalized host across all instances |
+| `storage.download.min_interval` | duration | `5ms` | Minimum interval between request starts to the same normalized host |
 | `storage.download.hosts.<host>.max_active` | int | global host limit | Exact-host concurrent transfer override |
+| `storage.download.hosts.<host>.min_interval` | duration | global interval | Exact-host request-start interval override |
 
-The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, OCI token requests, and bypass requests. It limits active response bodies globally and per normalized host. Saturated client requests wait within their request context, with foreground requests taking priority over repository refreshes. A real upstream `429` is returned unchanged to the client; a valid positive `Retry-After` activates a host-wide cooldown without clearing queued requests or spreading the request to another mirror.
+The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, health probes, OCI token requests, and bypass requests. It limits active response bodies globally and per normalized host and spaces request starts per host. Saturated client requests wait within their request context, with foreground requests taking priority over repository refreshes; a health probe skips when admission is not immediately available. A real upstream `429` is returned unchanged to the client; a valid positive `Retry-After` activates a host-wide cooldown without clearing queued requests or spreading the request to another mirror.
 
 An exact-host override is useful when a deliberately short freshness policy targets a private upstream that is known to tolerate a higher request rate:
 
@@ -69,9 +71,11 @@ storage:
   download:
     max_active: 256
     max_active_per_host: 16
+    min_interval: 5ms
     hosts:
       packages.d7z.net:
         max_active: 32
+        min_interval: 2ms
 ```
 
 Value types:
@@ -101,13 +105,16 @@ instances:
 Notes:
 
 - Each instance must define exactly one mode block.
+- Disabled instances are decoded and validated but do not create handlers or register background tasks.
 - Most modes use `route.path`; `oci` uses `bind`.
+- Proxy routes must not overlap the reserved `/-/status/` API prefix or the configured metrics path.
+- HTTP repository upstreams must be absolute `http://` or `https://` URLs.
 - `git` has its own block shape and does not use `expire_after` or `transport`.
 - Browser `User-Agent` values are forwarded on foreground upstream requests. Other clients, internal refreshes,
   and OCI token requests use `cache-proxy/1`; `transport.ua` overrides all of these behaviors for an instance.
 - Without `transport.ua`, responses declaring `Vary: User-Agent` or `Vary: *` are not stored, preventing
-  default-UA and browser-specific content from sharing a cache entry. Browsers refresh legacy entries once
-  when those entries predate User-Agent variance tracking.
+  default-UA and browser-specific content from sharing a cache entry. Cached entries without User-Agent
+  variance metadata are refreshed before browser reuse.
 - `transport.health.enabled` controls passive upstream observations; `resource_remove_age` and
   `resource_remove_count` control missing repository removal. Error rate and latency never reorder or suppress requests.
 - Multiple upstreams are tried in configured order. Only transport errors and HTTP `502`, `503`, or `504` transfer
@@ -349,7 +356,7 @@ cargo:
   auth_required: false
 ```
 
-Use this mode for Cargo sparse index traffic and crate downloads.
+Use this mode for Cargo sparse index traffic and crate downloads. Download URLs are read from the latest cached `config.json`; legacy base URLs and the standard `{crate}`, `{version}`, `{prefix}`, `{lowerprefix}`, and `{sha256-checksum}` templates are supported. Checksum templates are resolved from the bounded, line-streamed cached sparse index entry for the requested crate version.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -374,6 +381,8 @@ pypi:
   index_fresh_for: 1m
   index_busy_policy: stale
   file_policy: immutable
+  allowed_file_hosts:
+    - files.pythonhosted.org
   companion_policy: immutable
   companion_fresh_for: 30s
   companion_busy_policy: join
@@ -384,6 +393,8 @@ pypi:
 
 Use this mode for `/simple/` indexes and package file downloads, with optional sidecar proxying.
 
+Cross-origin package links are accepted only when their exact host is listed in `allowed_file_hosts`. The configured upstream host is always allowed. For public PyPI, add `files.pythonhosted.org`; this prevents a forged `/files/<encoded-url>` request from turning the proxy into an unrestricted URL fetcher.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `route.path` | path | required | URL mount path |
@@ -393,6 +404,7 @@ Use this mode for `/simple/` indexes and package file downloads, with optional s
 | `index_fresh_for` | freshness | `1m` | Freshness for simple index pages |
 | `index_busy_policy` | busy policy | `stale` | Busy policy for index pages |
 | `file_policy` | policy | `immutable` | Policy for package files |
+| `allowed_file_hosts` | `[]host` | — | Exact cross-origin hosts allowed for package links |
 | `companion_policy` | policy | `immutable` | Policy for versioned sidecar files |
 | `companion_fresh_for` | freshness | `30s` | Freshness for sidecars |
 | `companion_busy_policy` | busy policy | `join` | Busy policy for sidecars |
@@ -446,6 +458,7 @@ apk:
     - https://dl-cdn.alpinelinux.org/alpine
   refresh_interval: 1h
   cleanup_interval: 6h
+  root_expire_after: 720h
   artifact_policy: immutable
   auxiliary_policy: immutable
 ```
@@ -458,6 +471,7 @@ Use this mode for Alpine repositories discovered from `APKINDEX.tar.gz` requests
 | `upstreams` | `[]URL` | required | Upstream mirrors |
 | `refresh_interval` | duration | `1h` | Background metadata refresh interval |
 | `cleanup_interval` | duration | `6h` | Indexed cleanup interval |
+| `root_expire_after` | expiration | `720h` | Retire a discovered repository root after this period without client use; `never` disables retirement |
 | `artifact_policy` | policy | `immutable` | Policy for package files in the stable content namespace |
 | `artifact_fresh_for` | freshness | — | Freshness for package files |
 | `artifact_busy_policy` | busy policy | `join` | Busy policy for package files |
@@ -485,6 +499,12 @@ deb:
 
 Use this mode for Debian-style repositories discovered from `Release`, `InRelease`, `Packages*`, and `Sources*`
 metadata requests. Both standard `dists/<suite>/...` layouts and flat repositories are supported.
+
+For distribution repositories, every path in the signed Release `SHA256` section is an independent required
+metadata object. Compression variants never substitute for one another. With `Acquire-By-Hash: yes`, refresh
+prefers the exact `by-hash/SHA256/<digest>` URI and publishes the canonical and by-hash paths only after the
+download matches both the declared size and SHA256. DEP-11, Translations, Contents, installer indexes, and other
+Release-listed metadata are generation-bound just like Packages and Sources.
 
 Standard apt sources use `deb <proxy-url> <suite> <component>`. Flat repositories use
 `deb [trusted=yes] <proxy-url> ./`. In both cases, `<proxy-url>` is the cache-proxy HTTP(S) URL, not a
@@ -581,8 +601,10 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 
 - Repositories are discovered from client metadata requests.
 - Discovered repositories are persisted, and startup reconciles refresh tasks from the persisted repository set.
+- Primary metadata older than the mode freshness threshold is served from the current generation immediately while a coalesced background refresh is advanced. Repeated requests never start concurrent refreshes for the same root.
 - Metadata is published only after a full generation is fetched and validated. Every object referenced by primary metadata is required; a missing, forbidden, unreadable, or checksum-invalid referenced object rejects the candidate generation.
 - The current generation is the authoritative serving view for repository metadata, including companion files such as signatures and checksums.
+- Generation responses use `X-Cache: GENERATION` and expose the opaque committed generation in `X-Cache-Generation` for request-level diagnostics.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
 - Once a matching repository has a current generation, a metadata path absent from that generation returns `503` and triggers refresh without contacting upstream.
 - `current.yaml` is the durable commit marker. Startup restores only its exact snapshot after validating the schema, cleanup index, persisted object digests, and protocol manifest closure; orphan or newer snapshots are never selected as fallback.
@@ -590,7 +612,11 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 - Artifact and sidecar downloads are independent requests; they are not blocked by index misses or refresh failure. Protocol inspectors classify these resources before the generic cache executes their policy.
 - The current cleanup indexes are loaded only during cleanup and combined to retain shared content such as Debian `pool/` files. They are never runtime download allowlists.
 - Metadata refreshes share the same per-host admission and `429` cooldown as client downloads; a rate-limited refresh is rescheduled for the advertised retry time.
-- Cleanup expires stable content absent from all current cleanup indexes while preserving discovered-root state. Metadata GC pins durable/in-memory current generations and active response readers, keeps a grace window plus the newest previous generation, and removes generation objects, cleanup indexes, and snapshot descriptors in that order.
+- Large Debian refreshes use persisted, Release-digest-anchored staging. Each scheduler run has a bounded transfer/time slice; incomplete work resumes after a short delay, while an anchor change discards the candidate generation and starts cleanly.
+- Cleanup expires stable content absent from all current cleanup indexes. A truncated deletion batch is continued after a short delay instead of waiting for the normal cleanup interval; a missing current cleanup index fails closed and prevents deletion.
+- Metadata GC pins durable/in-memory current generations and active response readers, keeps a grace window plus the newest previous generation, and removes generation objects together with their cleanup indexes before snapshot descriptors.
+- `root_expire_after` retires inactive discovered roots. Retirement first removes the current commit, then drains generation data through normal bounded GC, removes persisted root/health state, and finally lets later content cleanup reclaim packages no longer protected by that root. A later primary metadata request discovers the root again.
+- Maintenance progress is visible in scheduler task outcomes and the `cache_proxy_repository_maintenance_total`, `cache_proxy_repository_maintenance_objects_total`, and `cache_proxy_metadata_refresh_requests_total` metrics. Network status also reports global and per-host admission start intervals.
 
 ## Operations
 
@@ -603,8 +629,15 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 
 ```bash
 make fmt
+make vet
 make test
+make test-fuzz
+make test-race
 ```
+
+The Make targets run in module mode (`GOWORK=off`) so a parent workspace cannot change dependency selection.
+Dependency normalization is explicit through `make tidy`; formatting does not modify `go.mod` or `go.sum`.
+`make test-fuzz` exercises bounded fuzz targets for configuration, cache rewrites, request parsing, path indexes, and Linux repository metadata. Each target runs for five seconds by default; use `make test-fuzz FUZZ_TIME=1m` for a longer campaign.
 
 ## License
 

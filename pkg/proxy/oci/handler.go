@@ -27,7 +27,7 @@ type tokenCacheEntry struct {
 }
 
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) *handler {
-	client := utils.DefaultHttpClientWrapper()
+	client := utils.DefaultHTTPClientWrapper()
 	httpcache.ConfigureClientTransport(client, name, block.Transport)
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	return &handler{
@@ -311,7 +311,7 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 	if err != nil {
 		return 0, 0, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	info := reader.Info()
 	if !httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
 		return 0, 0, errors.New("cached OCI object has unknown or incompatible User-Agent variance")
@@ -339,7 +339,7 @@ func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *h
 	if err != nil {
 		return 0, "", 0, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	status, bytes, err := h.copyRemote(w, req, response, cache)
 	return status, cache, bytes, err
 }

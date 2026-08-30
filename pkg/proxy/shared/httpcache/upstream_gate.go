@@ -51,11 +51,13 @@ func AdmissionRetryAfterSeconds(err error) (int, bool) {
 type UpstreamGateConfig struct {
 	MaxActive        int
 	MaxActivePerHost int
+	MinInterval      time.Duration
 	Hosts            map[string]UpstreamHostGateConfig
 }
 
 type UpstreamHostGateConfig struct {
-	MaxActive int
+	MaxActive   int
+	MinInterval time.Duration
 }
 
 type gateWaiter struct {
@@ -72,6 +74,8 @@ type upstreamHostGate struct {
 	active        int
 	queued        int
 	maxActive     int
+	minInterval   time.Duration
+	lastStarted   time.Time
 	cooldownUntil time.Time
 }
 
@@ -79,6 +83,7 @@ type UpstreamGate struct {
 	mu               sync.Mutex
 	maxActive        int
 	maxActivePerHost int
+	minInterval      time.Duration
 	hostConfigs      map[string]UpstreamHostGateConfig
 	active           int
 	foreground       list.List
@@ -98,6 +103,7 @@ type UpstreamGateSnapshot struct {
 	OldestWait       time.Duration
 	MaxActive        int
 	MaxActivePerHost int
+	MinInterval      time.Duration
 	Hosts            map[string]UpstreamHostGateSnapshot
 }
 
@@ -105,6 +111,7 @@ type UpstreamHostGateSnapshot struct {
 	Active        int
 	Queued        int
 	MaxActive     int
+	MinInterval   time.Duration
 	CooldownUntil time.Time
 }
 
@@ -119,6 +126,7 @@ func NewUpstreamGate(cfg UpstreamGateConfig) *UpstreamGate {
 	gate := &UpstreamGate{
 		maxActive:        cfg.MaxActive,
 		maxActivePerHost: cfg.MaxActivePerHost,
+		minInterval:      max(cfg.MinInterval, 0),
 		hostConfigs:      hostConfigs,
 		hosts:            map[string]*upstreamHostGate{},
 	}
@@ -203,6 +211,7 @@ func (g *UpstreamGate) Snapshot() UpstreamGateSnapshot {
 	snapshot.Queued = snapshot.ForegroundQueued + snapshot.RefreshQueued
 	snapshot.MaxActive = g.maxActive
 	snapshot.MaxActivePerHost = g.maxActivePerHost
+	snapshot.MinInterval = g.minInterval
 	for _, queue := range []*list.List{&g.foreground, &g.refresh} {
 		if first := queue.Front(); first != nil {
 			wait := now.Sub(first.Value.(*gateWaiter).queuedAt)
@@ -218,9 +227,10 @@ func (g *UpstreamGate) Snapshot() UpstreamGateSnapshot {
 			continue
 		}
 		hostSnapshot := UpstreamHostGateSnapshot{
-			Active:    state.active,
-			Queued:    state.queued,
-			MaxActive: state.maxActive,
+			Active:      state.active,
+			Queued:      state.queued,
+			MaxActive:   state.maxActive,
+			MinInterval: state.minInterval,
 		}
 		if now.Before(state.cooldownUntil) {
 			hostSnapshot.CooldownUntil = state.cooldownUntil
@@ -261,9 +271,14 @@ func (g *UpstreamGate) hostStateLocked(host string) *upstreamHostGate {
 }
 
 func (g *UpstreamGate) newHostState(host string) *upstreamHostGate {
-	state := &upstreamHostGate{maxActive: g.maxActivePerHost}
-	if override, ok := g.hostConfigs[host]; ok && override.MaxActive > 0 {
-		state.maxActive = override.MaxActive
+	state := &upstreamHostGate{maxActive: g.maxActivePerHost, minInterval: g.minInterval}
+	if override, ok := g.hostConfigs[host]; ok {
+		if override.MaxActive > 0 {
+			state.maxActive = override.MaxActive
+		}
+		if override.MinInterval > 0 {
+			state.minInterval = override.MinInterval
+		}
 	}
 	return state
 }
@@ -288,6 +303,7 @@ func (g *UpstreamGate) grantWaitersLocked() {
 		state := g.hostStateLocked(selected.host)
 		g.active++
 		state.active++
+		state.lastStarted = time.Now()
 		g.lastGrantedHost[selected.class] = selected.host
 		selected.granted = true
 		close(selected.ready)
@@ -309,6 +325,13 @@ func (g *UpstreamGate) selectWaiterLocked(now time.Time) (*gateWaiter, time.Time
 			if now.Before(state.cooldownUntil) {
 				if nextWake.IsZero() || state.cooldownUntil.Before(nextWake) {
 					nextWake = state.cooldownUntil
+				}
+				continue
+			}
+			nextStart := state.lastStarted.Add(state.minInterval)
+			if state.minInterval > 0 && now.Before(nextStart) {
+				if nextWake.IsZero() || nextStart.Before(nextWake) {
+					nextWake = nextStart
 				}
 				continue
 			}

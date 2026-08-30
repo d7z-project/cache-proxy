@@ -45,7 +45,7 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 
 	store, err = blobfs.Open(dir, blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
 	b := bus.NewWithRegisterer(reg)
@@ -98,7 +98,7 @@ func TestPersistenceRestoreSkipsMissingFactory(t *testing.T) {
 
 	store, err = blobfs.Open(dir, blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
 	b := bus.NewWithRegisterer(reg)
@@ -134,7 +134,7 @@ func TestRestoreMetrics(t *testing.T) {
 		sched.Start(ctx)
 		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
 		require.Eventually(t, func() bool {
-			return metricValue(t, sched.m.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")) == 1
+			return metricValue(t, sched.metrics.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")) == 1
 		}, time.Second, 10*time.Millisecond)
 		cancel()
 		require.NoError(t, sched.Stop(context.Background()))
@@ -143,7 +143,7 @@ func TestRestoreMetrics(t *testing.T) {
 
 	store, err = blobfs.Open(dir, blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
 	b := bus.NewWithRegisterer(reg)
@@ -160,17 +160,17 @@ func TestRestoreMetrics(t *testing.T) {
 	sched.Start(ctx)
 
 	require.Eventually(t, func() bool {
-		return metricValue(t, sched.m.stateRestore.WithLabelValues("success")) == 1
+		return metricValue(t, sched.metrics.stateRestore.WithLabelValues("success")) == 1
 	}, time.Second, 10*time.Millisecond)
-	require.Equal(t, float64(1), metricValue(t, sched.m.restoredTasks.WithLabelValues(string(TypeMetadataRefresh))))
-	require.Equal(t, float64(1), metricValue(t, sched.m.restoredTasks.WithLabelValues(string(TypeMetadataGC))))
+	require.Equal(t, float64(1), metricValue(t, sched.metrics.restoredTasks.WithLabelValues(string(TypeMetadataRefresh))))
+	require.Equal(t, float64(1), metricValue(t, sched.metrics.restoredTasks.WithLabelValues(string(TypeMetadataGC))))
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
 func TestLoadTaskStateTreatsOnlyMissingFileAsEmpty(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	data, err := loadTaskState(store, "_scheduler")
 	require.NoError(t, err)
@@ -188,7 +188,7 @@ func TestLoadTaskStateTreatsOnlyMissingFileAsEmpty(t *testing.T) {
 func TestSaveStatePublishesThroughTempAndCleansTemps(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
 	sched := New(bus.NewWithRegisterer(reg), store, reg)
@@ -216,7 +216,7 @@ func TestSaveStatePublishesThroughTempAndCleansTemps(t *testing.T) {
 func TestCleanStateTempsRemovesStaleSchedulerTemps(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	require.NoError(t, store.MkdirAll("_scheduler/", 0o755))
 	_, err = store.Put(context.Background(), "_scheduler", "tasks.yaml.tmp.old", strings.NewReader("old"), nil)

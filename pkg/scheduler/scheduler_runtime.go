@@ -108,6 +108,28 @@ func (s *Scheduler) handleBusEvent(evt bus.Event) {
 		s.refreshMetrics()
 		s.saveState()
 		slog.Debug("scheduler registered metadata tasks", "instance", p.Instance, "root_id", p.RootID)
+	case bus.EventMetadataRefreshRequested:
+		p, ok := evt.Payload.(bus.MetadataRefreshRequestedPayload)
+		if !ok {
+			slog.Debug("scheduler ignored metadata refresh request with invalid payload")
+			return
+		}
+		key := NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID)
+		registered := false
+		if _, exists := s.tasks[key]; !exists {
+			if factory := s.factories[p.Instance]; factory != nil {
+				s.syncMetadataTaskLocked(factory, TypeMetadataRefresh, p.RootID)
+				_, registered = s.tasks[key]
+			}
+		}
+		triggerResult := s.triggerLocked(key)
+		if s.metrics != nil {
+			s.metrics.refreshRequests.WithLabelValues(p.Instance, triggerResult).Inc()
+		}
+		s.refreshMetrics()
+		if registered || triggerResult == "advanced" {
+			s.saveState()
+		}
 	case bus.EventMetadataRemoved:
 		p, ok := evt.Payload.(bus.MetadataRemovedPayload)
 		if !ok {
@@ -312,23 +334,28 @@ func (s *Scheduler) execute(ts *taskState) {
 	} else {
 		ts.LastError = ""
 		ts.Status = StatusDone
-		ts.NextRun = time.Now().Add(ts.Interval)
+		if ts.rerunRequested {
+			ts.rerunRequested = false
+			ts.NextRun = time.Now()
+		} else {
+			ts.NextRun = time.Now().Add(ts.Interval)
+		}
 		if errors.Is(err, ErrTaskSkipped) {
 			result = "skipped"
 		}
 	}
 
 	if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone {
-		if !ts.discoveredAt.IsZero() && s.m != nil {
-			s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), result).
+		if !ts.discoveredAt.IsZero() && s.metrics != nil {
+			s.metrics.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), result).
 				Observe(time.Since(ts.discoveredAt).Seconds())
 		}
 		ts.firstRunDone = true
 		ts.discoveredAt = time.Time{}
 	}
-	if s.m != nil {
-		s.m.runs.WithLabelValues(ts.Key.Instance(), string(ts.Key.Type()), result).Inc()
-		s.m.duration.WithLabelValues(ts.Key.Instance(), string(ts.Key.Type()), result).Observe(dur.Seconds())
+	if s.metrics != nil {
+		s.metrics.runs.WithLabelValues(ts.Key.Instance(), string(ts.Key.Type()), result).Inc()
+		s.metrics.duration.WithLabelValues(ts.Key.Instance(), string(ts.Key.Type()), result).Observe(dur.Seconds())
 	}
 	s.observerMu.RLock()
 	runObserver := s.runObserver
@@ -396,8 +423,8 @@ func (s *Scheduler) registerLocked(def TaskDef, source string, discoveredAt time
 	}
 	s.tasks[def.Key] = ts
 	s.metricInstances[def.Key.Instance()] = struct{}{}
-	if s.m != nil {
-		s.m.registered.WithLabelValues(def.Key.Instance(), string(def.Key.Type()), source).Inc()
+	if s.metrics != nil {
+		s.metrics.registered.WithLabelValues(def.Key.Instance(), string(def.Key.Type()), source).Inc()
 	}
 }
 
@@ -409,12 +436,12 @@ func (s *Scheduler) unregisterLocked(key TaskKey, reason string) {
 	if ts.index >= 0 {
 		heap.Remove(&s.heap, ts.index)
 	}
-	if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone && !ts.discoveredAt.IsZero() && s.m != nil {
-		s.m.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), "removed_before_refresh").
+	if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone && !ts.discoveredAt.IsZero() && s.metrics != nil {
+		s.metrics.discoveryToRefresh.WithLabelValues(ts.Key.Instance(), "removed_before_refresh").
 			Observe(time.Since(ts.discoveredAt).Seconds())
 	}
-	if s.m != nil {
-		s.m.unregistered.WithLabelValues(key.Instance(), string(key.Type()), reason).Inc()
+	if s.metrics != nil {
+		s.metrics.unregistered.WithLabelValues(key.Instance(), string(key.Type()), reason).Inc()
 	}
 	delete(s.tasks, key)
 
@@ -427,13 +454,22 @@ func (s *Scheduler) unregisterLocked(key TaskKey, reason string) {
 	delete(s.metricInstances, instance)
 }
 
-func (s *Scheduler) triggerLocked(key TaskKey) {
+func (s *Scheduler) triggerLocked(key TaskKey) string {
 	ts, ok := s.tasks[key]
 	if !ok {
-		return
+		return "missing"
 	}
-	ts.NextRun = time.Now()
+	if ts.Status == StatusRunning {
+		ts.rerunRequested = true
+		return "coalesced"
+	}
+	now := time.Now()
+	if !ts.NextRun.After(now) {
+		return "coalesced"
+	}
+	ts.NextRun = now
 	s.updateHeap(key)
+	return "advanced"
 }
 
 func (s *Scheduler) updateHeap(key TaskKey) {
@@ -456,7 +492,7 @@ func (s *Scheduler) heapPeek() *taskState {
 }
 
 func (s *Scheduler) refreshMetrics() {
-	if s.m == nil {
+	if s.metrics == nil {
 		return
 	}
 	now := time.Now()
@@ -473,7 +509,7 @@ func (s *Scheduler) refreshMetrics() {
 		if ts.Key.Type() == TypeMetadataRefresh && !ts.firstRunDone && !ts.discoveredAt.IsZero() {
 			pending[ts.Key.Instance()]++
 		}
-		delaySeconds := clampDurationSeconds(ts.NextRun.Sub(now))
+		delaySeconds := max(ts.NextRun.Sub(now).Seconds(), 0)
 		if current, ok := nextDelay[key]; !ok || delaySeconds < current {
 			nextDelay[key] = delaySeconds
 		}
@@ -488,16 +524,16 @@ func (s *Scheduler) refreshMetrics() {
 	for inst := range s.metricInstances {
 		for _, typ := range []TaskType{TypeBlobGC, TypeExpireCleanup, TypeMetadataRefresh, TypeMetadataGC} {
 			key := [2]string{inst, string(typ)}
-			s.m.active.WithLabelValues(inst, string(typ)).Set(active[key])
-			s.m.nextDelay.WithLabelValues(inst, string(typ)).Set(nextDelay[key])
-			s.m.overdue.WithLabelValues(inst, string(typ)).Set(overdue[key])
-			s.m.backoff.WithLabelValues(inst, string(typ)).Set(backoffVals[key])
+			s.metrics.active.WithLabelValues(inst, string(typ)).Set(active[key])
+			s.metrics.nextDelay.WithLabelValues(inst, string(typ)).Set(nextDelay[key])
+			s.metrics.overdue.WithLabelValues(inst, string(typ)).Set(overdue[key])
+			s.metrics.backoff.WithLabelValues(inst, string(typ)).Set(backoffVals[key])
 			for _, status := range []TaskStatus{StatusIdle, StatusRunning, StatusDone, StatusFailed} {
-				s.m.status.WithLabelValues(inst, string(typ), string(status)).
+				s.metrics.status.WithLabelValues(inst, string(typ), string(status)).
 					Set(statuses[[3]string{inst, string(typ), string(status)}])
 			}
 		}
-		s.m.discoveriesPending.WithLabelValues(inst).Set(pending[inst])
+		s.metrics.discoveriesPending.WithLabelValues(inst).Set(pending[inst])
 	}
 }
 

@@ -3,7 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -49,6 +48,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.Upstream == "" {
 		return fmt.Errorf("instance %s: upstream is required", plan.Name())
 	}
+	if _, err := transport.NewEndpoint(strings.TrimSpace(block.Upstream)); err != nil {
+		return fmt.Errorf("instance %s: invalid git upstream: %w", plan.Name(), err)
+	}
 	if block.Route.Path == "" {
 		return fmt.Errorf("instance %s: route.path is required", plan.Name())
 	}
@@ -60,10 +62,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 
 	var proxyURLStr string
 	if block.Proxy != "" {
-		if _, err := url.Parse(block.Proxy); err != nil {
+		if err := config.ValidateTransport(&config.TransportConfig{Proxy: block.Proxy}); err != nil {
 			return fmt.Errorf("instance %s: proxy URL: %w", plan.Name(), err)
 		}
 		proxyURLStr = block.Proxy
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 
 	forceOverwrite := true

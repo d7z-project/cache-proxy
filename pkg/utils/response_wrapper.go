@@ -23,7 +23,7 @@ type ResponseWrapper struct {
 	Body       io.ReadCloser
 }
 
-type HttpClientWrapper struct {
+type HTTPClientWrapper struct {
 	*http.Client
 	UserAgent           string
 	UserAgentConfigured bool
@@ -32,9 +32,9 @@ type HttpClientWrapper struct {
 
 // RequestUserAgent returns the User-Agent for a foreground upstream request.
 // The boolean reports whether an inbound browser value was selected.
-func (receiver *HttpClientWrapper) RequestUserAgent(req *http.Request) (string, bool) {
-	if receiver.UserAgentConfigured || !IsBrowserRequest(req) {
-		return receiver.UserAgent, false
+func (client *HTTPClientWrapper) RequestUserAgent(req *http.Request) (string, bool) {
+	if client.UserAgentConfigured || !IsBrowserRequest(req) {
+		return client.UserAgent, false
 	}
 	return req.UserAgent(), true
 }
@@ -83,10 +83,10 @@ func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network
 	}
 }
 
-func DefaultHttpClientWrapper() *HttpClientWrapper {
+func DefaultHTTPClientWrapper() *HTTPClientWrapper {
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return &HttpClientWrapper{
+		return &HTTPClientWrapper{
 			Client:          &http.Client{Timeout: DefaultHTTPTimeout},
 			UserAgent:       DefaultUserAgent,
 			IdleBodyTimeout: DefaultIdleBodyTimeout,
@@ -98,28 +98,28 @@ func DefaultHttpClientWrapper() *HttpClientWrapper {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.DialContext = DefaultDialContext(3 * time.Second)
 	transport.ResponseHeaderTimeout = DefaultHeaderTimeout
-	return &HttpClientWrapper{
+	return &HTTPClientWrapper{
 		Client:          &http.Client{Transport: transport, Timeout: DefaultHTTPTimeout},
 		UserAgent:       DefaultUserAgent,
 		IdleBodyTimeout: DefaultIdleBodyTimeout,
 	}
 }
 
-func (receiver *HttpClientWrapper) WrapBody(body io.ReadCloser) io.ReadCloser {
-	if receiver == nil {
+func (client *HTTPClientWrapper) WrapBody(body io.ReadCloser) io.ReadCloser {
+	if client == nil {
 		return body
 	}
-	return NewIdleTimeoutReadCloser(body, receiver.IdleBodyTimeout)
+	return NewIdleTimeoutReadCloser(body, client.IdleBodyTimeout)
 }
 
-func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {
-	defer receiver.Close()
-	for key, value := range receiver.Headers {
+func (response *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {
+	defer func() { _ = response.Close() }()
+	for key, value := range response.Headers {
 		resp.Header().Set(key, value)
 	}
-	if seeker, ok := receiver.Body.(io.ReadSeekCloser); ok {
+	if seeker, ok := response.Body.(io.ReadSeekCloser); ok {
 		lastModified := time.Time{}
-		if value := receiver.Headers["Last-Modified"]; value != "" {
+		if value := response.Headers["Last-Modified"]; value != "" {
 			if parsed, err := time.Parse(http.TimeFormat, value); err == nil {
 				lastModified = parsed
 			}
@@ -127,14 +127,14 @@ func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.Respons
 		http.ServeContent(resp, req, "", lastModified, seeker)
 		return nil
 	}
-	resp.WriteHeader(receiver.StatusCode)
+	resp.WriteHeader(response.StatusCode)
 	if req.Method == http.MethodHead {
 		return nil
 	}
 	buffer := make([]byte, 32<<10)
 	flushed := false
 	for {
-		n, readErr := receiver.Body.Read(buffer)
+		n, readErr := response.Body.Read(buffer)
 		if n > 0 {
 			if _, err := resp.Write(buffer[:n]); err != nil {
 				return err
@@ -155,9 +155,9 @@ func (receiver *ResponseWrapper) FlushClose(req *http.Request, resp http.Respons
 	}
 }
 
-func (receiver *ResponseWrapper) Close() error {
-	if receiver.Body != nil {
-		return receiver.Body.Close()
+func (response *ResponseWrapper) Close() error {
+	if response.Body != nil {
+		return response.Body.Close()
 	}
 	return nil
 }

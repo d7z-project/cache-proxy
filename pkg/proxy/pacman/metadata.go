@@ -141,7 +141,7 @@ func buildDatabaseTarget(
 		_ = blobReader.Close()
 		return 0, false, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	tarReader := tar.NewReader(reader)
 	var count int

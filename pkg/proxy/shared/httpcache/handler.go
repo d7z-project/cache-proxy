@@ -54,7 +54,7 @@ type Handler struct {
 	name                string
 	config              RuntimeConfig
 	store               *blobfs.Store
-	client              *utils.HttpClientWrapper
+	client              *utils.HTTPClientWrapper
 	resolver            Resolver
 	stats               *Stats
 	health              *health.ServiceHealth
@@ -86,7 +86,7 @@ const DefaultUserAgent = utils.DefaultUserAgent
 const UserAgentReviewedOption = "user-agent-reviewed"
 
 // CacheSupportsRequestUserAgent reports whether a cached representation is safe for req.
-func CacheSupportsRequestUserAgent(client *utils.HttpClientWrapper, req *http.Request, options map[string]string) bool {
+func CacheSupportsRequestUserAgent(client *utils.HTTPClientWrapper, req *http.Request, options map[string]string) bool {
 	if client.UserAgentConfigured || !utils.IsBrowserRequest(req) {
 		return true
 	}
@@ -95,7 +95,7 @@ func CacheSupportsRequestUserAgent(client *utils.HttpClientWrapper, req *http.Re
 
 func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
-	client := utils.DefaultHttpClientWrapper()
+	client := utils.DefaultHTTPClientWrapper()
 	ConfigureClientTransport(client, name, runtime.Transport)
 	hosts := make([]string, 0, len(runtime.Upstreams))
 	for _, u := range runtime.Upstreams {
@@ -106,7 +106,7 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 	return &Handler{name: name, config: runtime, store: store, client: client, resolver: resolver, stats: stats, health: svcHealth, lifecycleCtx: lifecycleCtx, cancel: cancel, upstreamGate: runtime.UpstreamGate, parsedUpstreamHosts: hosts}
 }
 
-func ConfigureClientTransport(client *utils.HttpClientWrapper, name string, transport *config.TransportConfig) {
+func ConfigureClientTransport(client *utils.HTTPClientWrapper, name string, transport *config.TransportConfig) {
 	client.UserAgent = DefaultUserAgent
 	client.UserAgentConfigured = false
 	if transport == nil {
@@ -153,7 +153,7 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		h.stats.RecordRequest(h.name, h.config.Mode, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
 		return
 	}
-	result, err := h.handle(req.Context(), req)
+	result, err := h.handleRequest(req.Context(), req)
 	if err != nil {
 		slog.Info("proxy request failed", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "err", err)
 		setRetryAfter(resp.Header(), err)

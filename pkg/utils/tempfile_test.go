@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,41 +26,24 @@ func TestTempFileFromReader(t *testing.T) {
 	require.Equal(t, int64(len(body)), size)
 
 	t.Cleanup(func() {
-		file.Close()
-		os.Remove(file.Name())
+		require.NoError(t, file.Close())
+		_ = os.Remove(file.Name())
 	})
 
 	data, err := io.ReadAll(file)
 	require.NoError(t, err)
 	require.Equal(t, body, string(data))
 
-	pos, err := file.Seek(0, io.SeekCurrent)
+	pos, err := file.Seek(0, io.SeekStart)
 	require.NoError(t, err)
-	require.Equal(t, int64(len(body)), pos)
-}
-
-func TestTempFileFromReaderRewind(t *testing.T) {
-	body := "hello world"
-	file, size, err := TempFileFromReader(strings.NewReader(body))
+	require.Zero(t, pos)
+	data, err = io.ReadAll(file)
 	require.NoError(t, err)
-	require.Equal(t, int64(len(body)), size)
-	t.Cleanup(func() {
-		file.Close()
-		os.Remove(file.Name())
-	})
-
-	first, err := io.ReadAll(file)
-	require.NoError(t, err)
-	require.Equal(t, body, string(first))
-
-	_, err = file.Seek(0, io.SeekStart)
-	require.NoError(t, err)
-	second, err := io.ReadAll(file)
-	require.NoError(t, err)
-	require.Equal(t, body, string(second))
+	require.Equal(t, body, string(data))
 }
 
 func TestTempFileFromReaderCleansUpAfterReadError(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	before := cacheProxyTempFiles(t)
 	file, size, err := TempFileFromReader(brokenReader{})
 	require.Nil(t, file)
@@ -73,16 +55,16 @@ func TestTempFileFromReaderCleansUpAfterReadError(t *testing.T) {
 func TestCleanStaleTempFiles(t *testing.T) {
 	fakeOldFile, err := os.CreateTemp("", "cache-proxy-old")
 	require.NoError(t, err)
-	fakeOldFile.Close()
-	t.Cleanup(func() { os.Remove(fakeOldFile.Name()) })
+	require.NoError(t, fakeOldFile.Close())
+	t.Cleanup(func() { _ = os.Remove(fakeOldFile.Name()) })
 
 	oldTime := time.Now().Add(-48 * time.Hour)
 	require.NoError(t, os.Chtimes(fakeOldFile.Name(), oldTime, oldTime))
 
 	fakeNewFile, err := os.CreateTemp("", "cache-proxy-new")
 	require.NoError(t, err)
-	fakeNewFile.Close()
-	t.Cleanup(func() { os.Remove(fakeNewFile.Name()) })
+	require.NoError(t, fakeNewFile.Close())
+	t.Cleanup(func() { _ = os.Remove(fakeNewFile.Name()) })
 
 	CleanStaleTempFiles(24 * time.Hour)
 
@@ -91,15 +73,6 @@ func TestCleanStaleTempFiles(t *testing.T) {
 
 	_, err = os.Stat(fakeNewFile.Name())
 	require.NoError(t, err)
-
-	entries, err := os.ReadDir(os.TempDir())
-	require.NoError(t, err)
-	for _, entry := range entries {
-		if entry.Name() == filepath.Base(fakeNewFile.Name()) {
-			return
-		}
-	}
-	t.Fatal("new temp file was accidentally cleaned")
 }
 
 func cacheProxyTempFiles(t *testing.T) []string {

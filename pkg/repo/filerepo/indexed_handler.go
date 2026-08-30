@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,29 +20,35 @@ import (
 )
 
 const maxMetadataObjectSize = 512 << 20
-const snapshotSchemaVersion = 1
+const snapshotSchemaVersion = 2
 
 type rootEntry struct {
-	root RepositoryRoot
+	root                        RepositoryRoot
+	lastSeenAt                  time.Time
+	lastSeenSavedAt             time.Time
+	retired                     bool
+	retirementCleanupGeneration string
 }
 
 type IndexedHandler struct {
-	name         string
-	mode         string
-	objectRoot   string
-	store        *blobfs.Store
-	stats        *httpcache.Stats
-	inspector    PathInspector
-	finalizer    RootFinalizer
-	validator    SnapshotValidator
-	base         *httpcache.Handler
-	client       *utils.HttpClientWrapper
-	upstreams    []string
-	build        SnapshotBuilder
-	sh           *health.ServiceHealth
-	upstreamGate *httpcache.UpstreamGate
-	bus          *bus.Bus
-	policy       Policy
+	name             string
+	mode             string
+	objectRoot       string
+	store            *blobfs.Store
+	stats            *httpcache.Stats
+	inspector        PathInspector
+	finalizer        RootFinalizer
+	validator        SnapshotValidator
+	base             *httpcache.Handler
+	client           *utils.HTTPClientWrapper
+	upstreams        []string
+	build            SnapshotBuilder
+	serviceHealth    *health.ServiceHealth
+	upstreamGate     *httpcache.UpstreamGate
+	bus              *bus.Bus
+	policy           Policy
+	metadataFreshFor time.Duration
+	rootExpireAfter  config.Expiration
 
 	mu              sync.RWMutex
 	roots           map[string]*rootEntry
@@ -62,7 +70,7 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		inspector:       inspector,
 		upstreams:       append([]string(nil), upstreams...),
 		build:           builder,
-		sh:              svcHealth,
+		serviceHealth:   svcHealth,
 		upstreamGate:    upstreamGate,
 		policy:          *policy,
 		roots:           map[string]*rootEntry{},
@@ -85,7 +93,7 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		BusyPolicy:   policy.AuxiliaryBusyPolicy,
 		UpstreamGate: upstreamGate,
 	}, store, &generationResolver{handler: handler, policy: policy}, stats, svcHealth)
-	handler.client = utils.DefaultHttpClientWrapper()
+	handler.client = utils.DefaultHTTPClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, transport)
 	handler.reportMetadataState()
 	return handler
@@ -93,14 +101,29 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 
 func (h *IndexedHandler) SetBus(b *bus.Bus) { h.bus = b }
 
+func (h *IndexedHandler) SetMetadataFreshFor(value config.Freshness) {
+	h.metadataFreshFor = value.Duration()
+}
+
+func (h *IndexedHandler) SetRootExpireAfter(value config.Expiration) {
+	h.rootExpireAfter = value
+}
+
 func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	cleanPath := cleanRequestPath(req.URL.Path)
+	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if cleanPath == "." {
+		cleanPath = ""
+	}
 	if cleanPath == "" {
 		h.base.ProxyPassthrough(w, req, "", "")
 		return
 	}
 	if current, release, ok := h.lookupCurrentRequest(cleanPath); ok {
 		if current.Class == ResourceMetadata {
+			h.touchRoot(current.RootID)
+			if h.currentPrimaryNeedsRefresh(current.RootID, cleanPath) {
+				h.publishRefreshRequested(current.RootID)
+			}
 			h.serveCurrentMetadata(w, req, current, release)
 			return
 		}
@@ -116,18 +139,27 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if class == ResourceMetadata {
 		if rootID, snapshot, known := h.matchRepository(cleanPath); known {
 			if snapshot != nil {
-				h.publishDiscovered(rootID)
+				if analysis.Role == DiscoveryUpdateRoot && analysis.Root.ID == rootID {
+					h.registerRoot(analysis)
+				}
+				h.publishRefreshRequested(rootID)
+				w.Header().Set("Retry-After", "1")
+				w.Header().Set("X-Cache-Generation", snapshot.Generation)
 				err := fmt.Errorf("metadata path %s is absent from current generation %s", cleanPath, snapshot.Generation)
-				httpcache.ErrorResponse(http.StatusServiceUnavailable, err).FlushClose(req, w)
+				_ = httpcache.ErrorResponse(http.StatusServiceUnavailable, err).FlushClose(req, w)
 				h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusServiceUnavailable, 0)
 				return
 			}
-			h.publishDiscovered(rootID)
+			if analysis.Role != DiscoveryIgnore && analysis.Root.ID == rootID {
+				h.registerRoot(analysis)
+			}
+			h.touchRoot(rootID)
+			h.publishRefreshRequested(rootID)
 			h.base.ProxyPassthrough(w, req, cleanPath, "")
 			return
 		}
 		if analysis.Role == DiscoveryIgnore {
-			httpcache.ErrorResponse(http.StatusNotFound, fmt.Errorf("metadata repository for %s is not discovered", cleanPath)).FlushClose(req, w)
+			_ = httpcache.ErrorResponse(http.StatusNotFound, fmt.Errorf("metadata repository for %s is not discovered", cleanPath)).FlushClose(req, w)
 			h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusNotFound, 0)
 			return
 		}
@@ -141,7 +173,8 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if _, ok := h.lookupCurrentContent(cleanPath, class); ok {
+	if current, ok := h.lookupCurrentContent(cleanPath, class); ok {
+		h.touchRoot(current.RootID)
 		h.base.ServeHTTP(w, req)
 		return
 	}
@@ -188,6 +221,30 @@ func (h *IndexedHandler) publishDiscovered(rootID string) {
 			RootID:   rootID,
 		},
 	})
+}
+
+func (h *IndexedHandler) publishRefreshRequested(rootID string) {
+	if h.bus == nil || rootID == "" {
+		return
+	}
+	h.bus.Publish(bus.Event{
+		Type:    bus.EventMetadataRefreshRequested,
+		Payload: bus.MetadataRefreshRequestedPayload{Instance: h.name, RootID: rootID},
+	})
+}
+
+func (h *IndexedHandler) currentPrimaryNeedsRefresh(rootID, cleanPath string) bool {
+	if h.metadataFreshFor <= 0 {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	snapshot := h.rootSnapshots[rootID]
+	entry := h.roots[rootID]
+	if snapshot == nil || entry == nil || time.Since(snapshot.Published) < h.metadataFreshFor {
+		return false
+	}
+	return slices.Contains(entry.root.PrimaryMetadata, cleanPath)
 }
 
 func (h *IndexedHandler) reconcileMetadataTasks() {
@@ -285,7 +342,7 @@ func resolveSnapshotMetadata(snapshot *LiveSnapshot, target MetadataTarget) (Met
 	}
 	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
 		obj, ok := snapshot.Metadata[candidate]
-		if !ok {
+		if !ok || obj.StatusCode != 0 {
 			continue
 		}
 		if obj.Path == "" || obj.Path == candidate {

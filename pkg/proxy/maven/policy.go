@@ -2,9 +2,9 @@ package maven
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -51,12 +51,18 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: maven mode requires one upstream", plan.Name())
 	}
-	if _, err := url.Parse(block.Upstream); err != nil {
+	if err := config.ValidateHTTPUpstream(block.Upstream); err != nil {
 		return fmt.Errorf("instance %s: maven upstream URL is invalid: %w", plan.Name(), err)
 	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: maven transport: %w", plan.Name(), err)
+	}
 	applyDefaults(&block.Policy)
-	if err := validate(&block.Policy); err != nil {
+	if err := validatePolicy(&block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
@@ -69,7 +75,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Transport:    block.Transport,
 		BusyPolicy:   config.BusyPolicyJoin,
 		UpstreamGate: plan.UpstreamGate(),
-	}, plan.Store(), newResolver(&block.Policy), plan.Stats(), nil)
+	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats(), nil)
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: defaultCleanupInterval,
@@ -107,7 +113,7 @@ func applyDefaults(policy *Policy) {
 	}
 }
 
-func validate(policy *Policy) error {
+func validatePolicy(policy *Policy) error {
 	if !config.ValidPolicy(policy.ReleasePolicy) {
 		return fmt.Errorf("invalid maven release policy %q", policy.ReleasePolicy)
 	}
@@ -124,28 +130,26 @@ func validate(policy *Policy) error {
 		return fmt.Errorf("invalid maven checksum busy policy %q", policy.ChecksumBusyPolicy)
 	}
 	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
-		return fmt.Errorf("maven metadata fresh_for must be at least 1s")
+		return errors.New("maven metadata fresh_for must be at least 1s")
 	}
 	if policy.ChecksumFreshFor > 0 && policy.ChecksumFreshFor.Duration() < time.Second {
-		return fmt.Errorf("maven checksum fresh_for must be at least 1s")
+		return errors.New("maven checksum fresh_for must be at least 1s")
 	}
 	if policy.SnapshotFreshFor > 0 && policy.SnapshotFreshFor.Duration() < time.Second {
-		return fmt.Errorf("maven snapshot fresh_for must be at least 1s")
+		return errors.New("maven snapshot fresh_for must be at least 1s")
 	}
 	return nil
 }
 
 type resolver struct{ policy *Policy }
 
-func newResolver(policy *Policy) *resolver { return &resolver{policy: policy} }
-
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	lookupPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
 	if !httpcache.SafePath(lookupPath) {
-		return httpcache.Route{}, fmt.Errorf("invalid maven request path")
+		return httpcache.Route{}, errors.New("invalid maven request path")
 	}
 	if lookupPath == "." || lookupPath == "" {
-		return httpcache.Route{}, fmt.Errorf("path is required")
+		return httpcache.Route{}, errors.New("path is required")
 	}
 	route := httpcache.Route{
 		ObjectPath:   "maven/" + lookupPath,

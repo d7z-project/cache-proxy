@@ -18,7 +18,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *Handler) handle(ctx context.Context, req *http.Request) (*utils.ResponseWrapper, error) {
+func (h *Handler) handleRequest(ctx context.Context, req *http.Request) (*utils.ResponseWrapper, error) {
 	h.wait.Add(1)
 	defer h.wait.Done()
 	route, err := h.resolver.Resolve(req)
@@ -267,7 +267,7 @@ func (h *Handler) streamResponse(req *http.Request, route Route, status string, 
 
 	if parent := path.Dir(route.ObjectPath); parent != "." {
 		if err := h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
-			resp.Close()
+			_ = resp.Close()
 			return h.finishFlight(route.ObjectPath, flight, nil, err)
 		}
 	}

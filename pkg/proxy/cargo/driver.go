@@ -3,7 +3,6 @@ package cargo
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -47,11 +46,17 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: cargo mode requires one upstream", plan.Name())
 	}
-	if _, err := url.Parse(block.Upstream); err != nil {
+	if err := config.ValidateHTTPUpstream(block.Upstream); err != nil {
 		return fmt.Errorf("instance %s: cargo upstream URL is invalid: %w", plan.Name(), err)
+	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: cargo transport: %w", plan.Name(), err)
 	}
 	if err := validatePolicy(plan.Name(), &block.Policy); err != nil {
 		return err
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
@@ -66,7 +71,14 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		DefaultFreshFor: block.IndexFreshFor,
 		UpstreamGate:    plan.UpstreamGate(),
 	}
-	h := newHandler(plan.Name(), runtime, plan.Store(), newResolver(&block.Policy, plan.Store(), plan.Name()), plan.Stats())
+	h := httpcache.NewHandler(
+		plan.Name(),
+		runtime,
+		plan.Store(),
+		newResolver(&block.Policy, plan.Store(), plan.Name()),
+		plan.Stats(),
+		nil,
+	)
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: defaultCleanupInterval,
@@ -77,8 +89,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
 		Handler:      h,
-		Close:        func() error { h.base.Close(); return nil },
-		CloseContext: h.Stop,
+		Close:        func() error { h.Close(); return nil },
+		CloseContext: h.CloseContext,
 		CleanupFn:    h.Cleanup,
 	})
 }

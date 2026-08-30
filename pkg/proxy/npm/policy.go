@@ -2,8 +2,8 @@ package npm
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -46,8 +46,11 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if strings.TrimSpace(block.Upstream) == "" {
 		return fmt.Errorf("instance %s: npm mode requires one upstream", plan.Name())
 	}
-	if _, err := url.Parse(block.Upstream); err != nil {
+	if err := config.ValidateHTTPUpstream(block.Upstream); err != nil {
 		return fmt.Errorf("instance %s: npm upstream URL is invalid: %w", plan.Name(), err)
+	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: npm transport: %w", plan.Name(), err)
 	}
 	if block.MetadataPolicy == "" {
 		block.MetadataPolicy = config.PolicyRevalidate
@@ -61,8 +64,11 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.TarballPolicy == "" {
 		block.TarballPolicy = config.PolicyImmutable
 	}
-	if err := validate(&block.Policy); err != nil {
+	if err := validatePolicy(&block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
@@ -93,7 +99,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	})
 }
 
-func validate(policy *Policy) error {
+func validatePolicy(policy *Policy) error {
 	if !config.ValidPolicy(policy.MetadataPolicy) {
 		return fmt.Errorf("invalid npm metadata policy %q", policy.MetadataPolicy)
 	}
@@ -104,7 +110,7 @@ func validate(policy *Policy) error {
 		return fmt.Errorf("invalid npm metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
 	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
-		return fmt.Errorf("npm metadata fresh_for must be at least 1s")
+		return errors.New("npm metadata fresh_for must be at least 1s")
 	}
 	return nil
 }

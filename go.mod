@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/go-git/go-billy/v5 v5.9.0
-	github.com/go-git/go-git/v5 v5.19.1
+	github.com/go-git/go-git/v5 v5.19.2
 	github.com/google/go-containerregistry v0.21.7
 	github.com/klauspost/compress v1.18.6
 	github.com/prometheus/client_golang v1.23.2
@@ -46,7 +46,7 @@ require (
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )

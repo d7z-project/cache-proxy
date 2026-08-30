@@ -46,7 +46,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if err != nil {
 		return 0, "", 0, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotModified {
 		state, stateErr := h.readState(ctx, statePath)
 		if stateErr != nil {
@@ -83,10 +83,10 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		return 0, "", 0, err
 	}
 	_ = response.Body.Close()
-	defer tempFile.Close()
-	defer os.Remove(tempFile.Name())
+	defer func() { _ = tempFile.Close() }()
+	defer func() { _ = os.Remove(tempFile.Name()) }()
 	if size > maxManifestSize {
-		return 0, "", 0, fmt.Errorf("oci manifest exceeds size limit")
+		return 0, "", 0, errors.New("oci manifest exceeds size limit")
 	}
 
 	manifestDigest := response.Header.Get("Docker-Content-Digest")
@@ -178,12 +178,12 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		return 0, "", 0, err
 	}
 	if response.StatusCode != http.StatusOK {
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
 	if !h.client.UserAgentConfigured && utils.VariesByUserAgent(response.Header.Values("Vary")...) {
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
@@ -248,7 +248,7 @@ func (h *handler) readState(ctx context.Context, objectPath string) (refState, e
 	if err != nil {
 		return refState{}, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var state refState
 	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
 		return refState{}, err

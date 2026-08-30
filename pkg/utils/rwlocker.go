@@ -1,8 +1,6 @@
 package utils
 
-import (
-	"sync"
-)
+import "sync"
 
 const shardCount = 4096
 

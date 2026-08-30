@@ -41,7 +41,7 @@ func TestRequestUserAgentPrecedence(t *testing.T) {
 	nonBrowser := httptest.NewRequest(http.MethodGet, "/", nil)
 	nonBrowser.Header.Set("User-Agent", "curl/8.8.0")
 
-	client := DefaultHttpClientWrapper()
+	client := DefaultHTTPClientWrapper()
 	userAgent, forwarded := client.RequestUserAgent(browser)
 	require.Equal(t, browser.UserAgent(), userAgent)
 	require.True(t, forwarded)

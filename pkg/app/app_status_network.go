@@ -34,6 +34,7 @@ type networkSummary struct {
 	OldestAdmissionWaitMS  int64   `json:"oldest_admission_wait_ms"`
 	AdmissionActive        int     `json:"admission_active"`
 	AdmissionMaxActive     int     `json:"admission_max_active"`
+	AdmissionMinIntervalMS int64   `json:"admission_min_interval_ms"`
 	RateLimitedUpstreams   int     `json:"rate_limited_upstreams"`
 }
 
@@ -63,6 +64,7 @@ type networkUpstream struct {
 	AdmissionActive        int     `json:"admission_active"`
 	AdmissionQueued        int     `json:"admission_queued"`
 	AdmissionMaxActive     int     `json:"admission_max_active"`
+	AdmissionMinIntervalMS int64   `json:"admission_min_interval_ms"`
 	CooldownUntil          string  `json:"cooldown_until,omitempty"`
 }
 
@@ -136,8 +138,10 @@ func (s *appStatus) network(app *App) networkStatus {
 	status.Summary.OldestAdmissionWaitMS = admission.OldestWait.Milliseconds()
 	status.Summary.AdmissionActive = admission.Active
 	status.Summary.AdmissionMaxActive = admission.MaxActive
+	status.Summary.AdmissionMinIntervalMS = admission.MinInterval.Milliseconds()
 	for _, node := range upstreamNodes {
 		node.AdmissionMaxActive = admission.MaxActivePerHost
+		node.AdmissionMinIntervalMS = admission.MinInterval.Milliseconds()
 	}
 	for host, hostAdmission := range admission.Hosts {
 		key := "upstream:" + host
@@ -149,6 +153,7 @@ func (s *appStatus) network(app *App) networkStatus {
 		node.AdmissionActive = hostAdmission.Active
 		node.AdmissionQueued = hostAdmission.Queued
 		node.AdmissionMaxActive = hostAdmission.MaxActive
+		node.AdmissionMinIntervalMS = hostAdmission.MinInterval.Milliseconds()
 		if !hostAdmission.CooldownUntil.IsZero() {
 			node.CooldownUntil = hostAdmission.CooldownUntil.Format(time.RFC3339)
 			status.Summary.RateLimitedUpstreams++

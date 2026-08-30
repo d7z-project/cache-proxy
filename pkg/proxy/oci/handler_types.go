@@ -47,7 +47,7 @@ type handler struct {
 	policy       *Policy
 	store        *blobfs.Store
 	stats        *httpcache.Stats
-	client       *utils.HttpClientWrapper
+	client       *utils.HTTPClientWrapper
 	upstreamGate *httpcache.UpstreamGate
 	lifecycleCtx context.Context
 	cancel       context.CancelFunc

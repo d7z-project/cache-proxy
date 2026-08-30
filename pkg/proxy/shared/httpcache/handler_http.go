@@ -76,7 +76,7 @@ func rewriteNPMJSONValue(decoder *json.Decoder, dst io.Writer, upstreams []strin
 			}
 			key, ok := keyToken.(string)
 			if !ok {
-				return errors.New("JSON object key is not a string")
+				return errors.New("json object key is not a string")
 			}
 			encodedKey, err := json.Marshal(key)
 			if err != nil {
@@ -154,12 +154,8 @@ func publicBaseURL(req *http.Request) string {
 }
 
 func (h *Handler) openRemote(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
-	return h.openRemoteAdmitted(ctx, method, upstreamPath, options, headers)
-}
-
-func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	if options.TargetURL != "" {
-		return h.doTargetURL(ctx, method, options, headers)
+		return h.openTargetURL(ctx, method, options, headers)
 	}
 
 	pathPart, rawQuery, _ := strings.Cut(upstreamPath, "?")
@@ -181,12 +177,12 @@ func (h *Handler) openRemoteAdmitted(ctx context.Context, method, upstreamPath s
 		if len(h.config.Upstreams) > 0 {
 			return nil, fmt.Errorf("%w: no upstream is available", ErrUpstreamUnavailable)
 		}
-		return nil, fmt.Errorf("no upstream url configured")
+		return nil, errors.New("no upstream url configured")
 	}
 	return nil, lastErr
 }
 
-func (h *Handler) doTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
+func (h *Handler) openTargetURL(ctx context.Context, method string, options remoteOptions, headers map[string]string) (*utils.ResponseWrapper, error) {
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
 		return nil, err
 	}
@@ -233,7 +229,7 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 				h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 			}
 		}
-		h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
+		_ = h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
 	}
 	if options.Record && h.health != nil {
 		h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
@@ -248,10 +244,10 @@ func (h *Handler) doTargetURL(ctx context.Context, method string, options remote
 func (h *Handler) validateTargetURL(rawURL string, routeAllowed []string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("invalid target url")
+		return errors.New("invalid target url")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("target url must use http or https")
+		return errors.New("target url must use http or https")
 	}
 	allowed := append(h.parsedUpstreamHosts, h.config.AllowedTargetHosts...)
 	allowed = append(allowed, routeAllowed...)
@@ -343,13 +339,13 @@ func (h *Handler) tryUpstream(
 		if h.health != nil {
 			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 		}
-		h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
+		_ = h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
 	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)
 	if h.health != nil {
 		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
 	}
-	if options.AcceptErrors && shouldFailoverUpstreamStatus(response.StatusCode) {
+	if options.AcceptErrors && upstreamStatusIsFailure(response.StatusCode) {
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)
 		}
@@ -370,7 +366,7 @@ func (h *Handler) tryUpstream(
 		_ = response.Body.Close()
 		releaseAdmission()
 		release()
-		if shouldFailoverUpstreamStatus(response.StatusCode) {
+		if upstreamStatusIsFailure(response.StatusCode) {
 			err = fmt.Errorf("%w: upstream %s failed with %d", ErrUpstreamUnavailable, method, response.StatusCode)
 		} else {
 			err = fmt.Errorf("upstream %s failed with %d", method, response.StatusCode)
@@ -416,10 +412,6 @@ func statsUpstreamKey(rawURL string) string {
 		return rawURL
 	}
 	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
-}
-
-func shouldFailoverUpstreamStatus(status int) bool {
-	return upstreamStatusIsFailure(status)
 }
 
 func upstreamStatusIsFailure(status int) bool {

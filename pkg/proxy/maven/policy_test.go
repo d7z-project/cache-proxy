@@ -18,7 +18,7 @@ func TestResolverClassifiesReleaseAndSnapshotCompanions(t *testing.T) {
 		MetadataBusyPolicy: config.BusyPolicyStale,
 	}
 	applyDefaults(policy)
-	resolver := newResolver(policy)
+	resolver := &resolver{policy: policy}
 	tests := []struct {
 		path   string
 		policy string

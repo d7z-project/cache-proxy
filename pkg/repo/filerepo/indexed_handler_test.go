@@ -525,7 +525,7 @@ func TestDiscoverRootMergesExistingRepositoryDetails(t *testing.T) {
 	require.Equal(t, "amd64", statuses[0].Attributes[1].Value)
 }
 
-func TestExistingRootMetadataUpdatePublishesDiscoveryEvent(t *testing.T) {
+func TestExistingRootMetadataUpdateRequestsRefresh(t *testing.T) {
 	store := newTestStore(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "extra")
@@ -534,7 +534,7 @@ func TestExistingRootMetadataUpdatePublishesDiscoveryEvent(t *testing.T) {
 
 	handler := newTestHandler(t, store, []string{server.URL}, nil)
 	b := bus.New()
-	sub := b.Subscribe(bus.EventMetadataDiscovered)
+	sub := b.Subscribe(bus.EventMetadataRefreshRequested)
 	handler.SetBus(b)
 	handler.inspector = staticInspector(func(string) DiscoveryResult {
 		return DiscoveryResult{
@@ -552,14 +552,55 @@ func TestExistingRootMetadataUpdatePublishesDiscoveryEvent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/meta/extra.txt", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "1", rec.Header().Get("Retry-After"))
+	require.Equal(t, "gen1", rec.Header().Get("X-Cache-Generation"))
 
 	select {
 	case evt := <-sub:
-		payload := evt.Payload.(bus.MetadataDiscoveredPayload)
+		payload := evt.Payload.(bus.MetadataRefreshRequestedPayload)
 		require.Equal(t, "repo", payload.Instance)
 		require.Equal(t, "root", payload.RootID)
 	case <-time.After(time.Second):
-		require.FailNow(t, "expected discovery event for updated root")
+		require.FailNow(t, "expected refresh request for updated root")
+	}
+	handler.mu.RLock()
+	require.Len(t, handler.roots["root"].root.Targets, 2)
+	handler.mu.RUnlock()
+}
+
+func TestStalePrimaryMetadataServesCurrentAndRequestsRefresh(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "index")
+	}))
+	defer server.Close()
+	handler := newTestHandler(t, newTestStore(t), []string{server.URL}, func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
+		blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+		if err != nil {
+			return nil, err
+		}
+		return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
+	})
+	require.NoError(t, handler.RefreshRoot(ctx, "root"))
+	current := handler.rootSnapshot("root")
+	current.Published = time.Now().Add(-time.Hour)
+	handler.setRootSnapshot("root", current)
+	handler.SetMetadataFreshFor(config.Freshness(time.Minute))
+	b := bus.New()
+	sub := b.Subscribe(bus.EventMetadataRefreshRequested)
+	handler.SetBus(b)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "GENERATION", rec.Header().Get("X-Cache"))
+	require.Equal(t, "index", rec.Body.String())
+	select {
+	case evt := <-sub:
+		require.Equal(t, "root", evt.Payload.(bus.MetadataRefreshRequestedPayload).RootID)
+	case <-time.After(time.Second):
+		require.FailNow(t, "expected refresh request for stale primary metadata")
 	}
 }
 
@@ -683,7 +724,7 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	handler.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
-	handler.sh.AddResource("root", targetsToResourceTargets([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
+	handler.serviceHealth.AddResource("root", targetsToResourceTargets([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
 	handler.saveState(ctx)
 
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
@@ -694,7 +735,7 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	require.Equal(t, "root", statuses[0].ID)
 	require.False(t, statuses[0].HasCurrent)
 
-	info, ok := restored.sh.ResourceHealth("root")
+	info, ok := restored.serviceHealth.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, "root", info.Path)
 	require.Equal(t, []health.ResourceTarget{{Path: "meta/index.txt"}}, info.LastTargets)
@@ -884,7 +925,7 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	stats := handler.stats.Snapshot()
 	require.Equal(t, "ready", stats.Instances["repo"].MetadataState)
 
-	rh, ok := handler.sh.ResourceHealth("root")
+	rh, ok := handler.serviceHealth.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, health.RActive, rh.State)
 }
@@ -895,9 +936,9 @@ func TestRestoreGenerationsDoesNotOverwritePersistedBlockedState(t *testing.T) {
 
 	store := newTestStore(t)
 	original := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	rh, done, err := original.sh.TryStartRefresh("root", time.Now())
+	rh, done, err := original.serviceHealth.TryStartRefresh("root", time.Now())
 	require.NoError(t, err)
-	original.sh.FinishRefresh("root", rh.Generation, health.ErrResourceForbidden, nil)
+	original.serviceHealth.FinishRefresh("root", rh.Generation, health.ErrResourceForbidden, nil)
 	done()
 	original.saveState(ctx)
 
@@ -927,7 +968,7 @@ func TestRestoreGenerationsDoesNotOverwritePersistedBlockedState(t *testing.T) {
 	require.True(t, statuses[0].HasCurrent)
 	require.Equal(t, "blocked", statuses[0].State)
 
-	restoredHealth, ok := restored.sh.ResourceHealth("root")
+	restoredHealth, ok := restored.serviceHealth.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, health.RBlocked, restoredHealth.State)
 	require.Equal(t, []health.ResourceTarget{{Path: "meta/index.txt"}}, restoredHealth.LastTargets)
@@ -986,6 +1027,29 @@ func TestRestoreGenerationRejectsPersistedDigestMismatch(t *testing.T) {
 	require.False(t, restored.hasAnyRootSnapshot())
 }
 
+func TestRestoreGenerationRejectsOldSnapshotSchemaReferencedByCurrent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	original := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	snapshot := &LiveSnapshot{
+		RootID: "root", RootPath: "root", Generation: "gen1", Published: time.Now().UTC(),
+		Metadata: map[string]MetadataObject{"meta/index.txt": {Path: "meta/index.txt", Required: true}},
+	}
+	writeCurrentSnapshot(t, ctx, store, original, snapshot)
+	snapshot.Version = snapshotSchemaVersion - 1
+	data, err := yaml.Marshal(snapshot)
+	require.NoError(t, err)
+	_, err = store.Put(ctx, original.name, original.snapshotPath("root", "gen1"), bytes.NewReader(data), nil)
+	require.NoError(t, err)
+
+	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	restored.restoreGenerations(ctx)
+	require.False(t, restored.hasAnyRootSnapshot())
+	resource, ok := restored.serviceHealth.ResourceHealth("root")
+	require.True(t, ok)
+	require.Equal(t, health.RSuspect, resource.State)
+}
+
 func TestRestoreGenerationRejectsMissingPersistedObject(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -1000,7 +1064,7 @@ func TestRestoreGenerationRejectsMissingPersistedObject(t *testing.T) {
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	restored.restoreGenerations(ctx)
 	require.False(t, restored.hasAnyRootSnapshot())
-	resource, ok := restored.sh.ResourceHealth("root")
+	resource, ok := restored.serviceHealth.ResourceHealth("root")
 	require.True(t, ok)
 	require.Equal(t, health.RSuspect, resource.State)
 	require.Contains(t, resource.LastError, "invalid committed metadata generation")
@@ -1293,7 +1357,7 @@ func TestRefreshTransfersOnlyGatewayFailures(t *testing.T) {
 	}
 }
 
-func TestRefreshWaitsThroughMoreRequestsThanLegacyBurst(t *testing.T) {
+func TestRefreshCompletesThroughAdmissionQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1365,7 +1429,7 @@ func TestRefreshHeadPrecheckDoesNotUpdateUpstreamHealth(t *testing.T) {
 		require.False(t, skipped)
 	}
 
-	require.Equal(t, health.StateHealthy, handler.sh.AggregateState())
+	require.Equal(t, health.StateHealthy, handler.serviceHealth.AggregateState())
 	stats := handler.stats.Snapshot()
 	require.Equal(t, uint64(11), stats.Instances["repo"].UpstreamRequests)
 	require.Equal(t, uint64(10), stats.Instances["repo"].UpstreamStatus["500"])
@@ -1444,7 +1508,7 @@ func TestCleanupPreservesPersistedRepositoryRoots(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	handler.saveState(ctx)
-	_, err := store.Put(ctx, handler.name, path.Join(handler.objectRoot, "legacy.cache"), strings.NewReader("legacy"), nil)
+	_, err := store.Put(ctx, handler.name, path.Join(handler.objectRoot, "expired.cache"), strings.NewReader("expired"), nil)
 	require.NoError(t, err)
 
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
@@ -1454,8 +1518,137 @@ func TestCleanupPreservesPersistedRepositoryRoots(t *testing.T) {
 	handler.mu.Unlock()
 	handler.restoreRoots(ctx)
 	require.Equal(t, []string{"root"}, handler.currentRootIDs(), "restored roots must remain available to scheduler reconciliation")
-	_, err = store.StatObject(ctx, handler.name, path.Join(handler.objectRoot, "legacy.cache"))
+	_, err = store.StatObject(ctx, handler.name, path.Join(handler.objectRoot, "expired.cache"))
 	require.Error(t, err)
+}
+
+func TestCleanupTaskSchedulesShortContinuationWhenBatchIsTruncated(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	for i := range 3 {
+		objectPath := path.Join(handler.objectRoot, ".content", "artifacts", fmt.Sprintf("pool/pkg-%d.deb", i))
+		require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(objectPath)), 0o755))
+		_, err := store.Put(ctx, handler.name, objectPath, strings.NewReader("package"), map[string]string{
+			"fetched-at": time.Now().Add(-60 * 24 * time.Hour).Format(time.RFC3339),
+		})
+		require.NoError(t, err)
+	}
+	opts := config.DefaultCleanupConfig()
+	opts.BatchSize = 1
+	outcome, err := handler.CleanupTask(ctx, opts)
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+	require.Equal(t, "partial", outcome.Result)
+	require.Equal(t, "content_cleanup", outcome.ReasonCode)
+	require.WithinDuration(t, time.Now().Add(maintenanceContinuationDelay), retry.At, time.Second)
+	require.Equal(t, uint64(1), handler.stats.Snapshot().Instances[handler.name].Maintenance["content_cleanup.truncated"])
+}
+
+func TestMetadataGCTaskSchedulesShortContinuationWhenBatchIsTruncated(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	for i := range 2 {
+		objectPath := handler.generationMetadataPath("root", "old", fmt.Sprintf("meta/index-%d", i))
+		require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(objectPath)), 0o755))
+		_, err := store.Put(ctx, handler.name, objectPath, strings.NewReader("metadata"), nil)
+		require.NoError(t, err)
+	}
+	opts := config.DefaultCleanupConfig()
+	opts.BatchSize = 1
+	outcome, err := handler.CleanupRootTask(ctx, "root", opts)
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+	require.Equal(t, "partial", outcome.Result)
+	require.Equal(t, "metadata_gc", outcome.ReasonCode)
+	require.WithinDuration(t, time.Now().Add(maintenanceContinuationDelay), retry.At, time.Second)
+	require.Equal(t, uint64(1), handler.stats.Snapshot().Instances[handler.name].Maintenance["metadata_gc.truncated"])
+}
+
+func TestMetadataGCPreservesValidRefreshStagingGeneration(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	staging := refreshStagingState{
+		RootID: "root", Generation: "staging-gen", Upstream: "https://upstream.example", CreatedAt: time.Now().UTC(),
+		AnchorPath: "meta/index.txt", AnchorDigest: strings.Repeat("a", 64),
+	}
+	require.NoError(t, handler.saveRefreshStaging(ctx, staging))
+	objectPath := handler.generationMetadataPath("root", staging.Generation, "meta/partial")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(objectPath)), 0o755))
+	_, err := store.Put(ctx, handler.name, objectPath, strings.NewReader("partial"), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
+	_, err = store.StatObject(ctx, handler.name, objectPath)
+	require.NoError(t, err, "valid resumable staging must be pinned across metadata GC turns")
+}
+
+func TestCleanupFailsClosedWhenCurrentCleanupIndexIsMissing(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	handler.setRootSnapshot("root", &LiveSnapshot{RootID: "root", Generation: "current"})
+	objectPath := path.Join(handler.objectRoot, ".content", "artifacts", "pool/pkg.deb")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(objectPath)), 0o755))
+	_, err := store.Put(ctx, handler.name, objectPath, strings.NewReader("package"), map[string]string{
+		"fetched-at": time.Now().Add(-60 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+
+	outcome, err := handler.CleanupTask(ctx, config.DefaultCleanupConfig())
+	require.ErrorContains(t, err, "load cleanup index")
+	require.Nil(t, outcome)
+	_, err = store.StatObject(ctx, handler.name, objectPath)
+	require.NoError(t, err, "missing protection data must prevent deletion")
+	require.Equal(t, uint64(1), handler.stats.Snapshot().Instances[handler.name].Maintenance["content_cleanup.index_error"])
+}
+
+func TestInactiveRootRetirementRemovesGenerationIndexesAndState(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	snapshot := &LiveSnapshot{
+		RootID: "root", RootPath: "root", Generation: "gen1", Published: time.Now().Add(-2 * time.Hour).UTC(),
+		Metadata: map[string]MetadataObject{"meta/index.txt": {Path: "meta/index.txt", Required: true}},
+	}
+	writeCurrentSnapshot(t, ctx, store, handler, snapshot)
+	handler.setRootSnapshot("root", snapshot)
+	_, err := store.Put(ctx, handler.name, handler.cleanupIndexPath("root", "gen1"), strings.NewReader("pool/pkg.deb\n"), nil)
+	require.NoError(t, err)
+	artifactPath := path.Join(handler.objectRoot, ".content", "artifacts", "pool/pkg.deb")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(artifactPath)), 0o755))
+	_, err = store.Put(ctx, handler.name, artifactPath, strings.NewReader("package"), map[string]string{
+		"fetched-at": time.Now().Add(-60 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	handler.SetRootExpireAfter(config.Expiration(time.Hour))
+	handler.mu.Lock()
+	handler.roots["root"].lastSeenAt = time.Now().Add(-2 * time.Hour)
+	handler.mu.Unlock()
+
+	require.NoError(t, handler.beginRootRetirement(ctx, "root"))
+	_, err = handler.CleanupTask(ctx, config.DefaultCleanupConfig())
+	require.NoError(t, err)
+	_, err = store.StatObject(ctx, handler.name, artifactPath)
+	require.NoError(t, err, "retirement cleanup index must protect content until generation GC completes")
+
+	outcome, err := handler.CleanupRootTask(ctx, "root", config.DefaultCleanupConfig())
+	require.NoError(t, err)
+	require.Equal(t, "retired", outcome.Result)
+	require.Equal(t, "root_inactive", outcome.ReasonCode)
+	require.Empty(t, handler.currentRootIDs())
+	require.Empty(t, handler.loadState(ctx).Roots)
+	_, err = store.StatObject(ctx, handler.name, handler.cleanupIndexPath("root", "gen1"))
+	require.Error(t, err)
+	_, ok := handler.serviceHealth.ResourceHealth("root")
+	require.False(t, ok)
+	require.Equal(t, uint64(1), handler.stats.Snapshot().Instances[handler.name].Maintenance["root_retirement.complete"])
+	_, err = handler.CleanupTask(ctx, config.DefaultCleanupConfig())
+	require.NoError(t, err)
+	_, err = store.StatObject(ctx, handler.name, artifactPath)
+	require.Error(t, err, "content may be reclaimed only after root retirement completes")
 }
 
 func TestCleanupRootRetainsNewestPreviousAndRemovesOlderGeneration(t *testing.T) {
@@ -1588,6 +1781,16 @@ func TestResolveSnapshotMetadataDirectMatch(t *testing.T) {
 	require.Equal(t, "/store/path", obj.StorePath)
 }
 
+func TestResolveSnapshotMetadataSkipsNegativePrimaryForFallback(t *testing.T) {
+	snapshot := &LiveSnapshot{Metadata: map[string]MetadataObject{
+		"meta/InRelease": {Path: "meta/InRelease", StatusCode: http.StatusNotFound},
+		"meta/Release":   {Path: "meta/Release", StorePath: "/store/release", Required: true},
+	}}
+	obj, ok := resolveSnapshotMetadata(snapshot, MetadataTarget{URL: "meta/InRelease", Candidates: []string{"meta/Release"}})
+	require.True(t, ok)
+	require.Equal(t, "/store/release", obj.StorePath)
+}
+
 func TestResolveSnapshotMetadataResolvedPath(t *testing.T) {
 	snapshot := &LiveSnapshot{
 		Metadata: map[string]MetadataObject{
@@ -1600,17 +1803,17 @@ func TestResolveSnapshotMetadataResolvedPath(t *testing.T) {
 	require.Equal(t, "/store/path", obj.StorePath)
 }
 
-func TestMarkResourceActiveOnRemovedNoop(t *testing.T) {
+func TestMarkResourceActiveDoesNotRestoreRemovedResource(t *testing.T) {
 	healthCfg := health.DefaultConfig()
 	healthCfg.ResourceRemoveAge = 0
 	healthCfg.ResourceRemoveCount = 1
-	sh := health.New("test", "test", healthCfg, []string{"https://upstream.example"}, nil)
-	rh := sh.AddResource("root", nil, []string{"https://upstream.example"})
+	serviceHealth := health.New("test", "test", healthCfg, []string{"https://upstream.example"}, nil)
+	rh := serviceHealth.AddResource("root", nil, []string{"https://upstream.example"})
 	require.Equal(t, health.RPending, rh.State)
 
-	sh.FinishRefresh("root", rh.Generation, health.ErrResourceNotFound, nil)
-	sh.MarkResourceActive("root", nil)
-	_, ok := sh.ResourceHealth("root")
+	serviceHealth.FinishRefresh("root", rh.Generation, health.ErrResourceNotFound, nil)
+	serviceHealth.MarkResourceActive("root", nil)
+	_, ok := serviceHealth.ResourceHealth("root")
 	require.False(t, ok)
 }
 

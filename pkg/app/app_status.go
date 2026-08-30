@@ -372,7 +372,7 @@ func (s *appStatus) restore() {
 	if err != nil {
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var state persistedStatus
 	if err := json.NewDecoder(reader).Decode(&state); err != nil {
 		return

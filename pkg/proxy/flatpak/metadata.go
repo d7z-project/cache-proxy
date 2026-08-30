@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -59,8 +59,8 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 		refreshGen uint64
 		release    func()
 	)
-	if h.sh != nil {
-		rh, done, err := h.sh.TryStartRefresh("/", time.Now())
+	if h.serviceHealth != nil {
+		resource, done, err := h.serviceHealth.TryStartRefresh("/", time.Now())
 		if err != nil {
 			switch {
 			case errors.Is(err, health.ErrRefreshAlreadyRunning):
@@ -68,19 +68,19 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 			case errors.Is(err, health.ErrRefreshBlocked):
 				return nil, scheduler.ErrTaskSkipped
 			case errors.Is(err, health.ErrRefreshResourceRemoved):
-				h.sh.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
-				rh, done, err = h.sh.TryStartRefresh("/", time.Now())
+				h.serviceHealth.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
+				resource, done, err = h.serviceHealth.TryStartRefresh("/", time.Now())
 				if err != nil {
 					return nil, fmt.Errorf("restart flatpak metadata refresh: %w", err)
 				}
-				refreshGen = rh.Generation
+				refreshGen = resource.Generation
 				release = done
 				defer release()
 			default:
 				return nil, fmt.Errorf("start flatpak metadata refresh: %w", err)
 			}
 		} else {
-			refreshGen = rh.Generation
+			refreshGen = resource.Generation
 			release = done
 			defer release()
 		}
@@ -100,8 +100,8 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 				return nil, ctx.Err()
 			}
 			if !errors.Is(err, errMetadataMirrorRetry) {
-				if h.sh != nil && release != nil {
-					h.sh.FinishRefresh("/", refreshGen, flatpakRefreshHealthError(err), nil)
+				if h.serviceHealth != nil {
+					h.serviceHealth.FinishRefresh("/", refreshGen, flatpakRefreshHealthError(err), nil)
 				}
 				return nil, err
 			}
@@ -111,24 +111,24 @@ func (h *Handler) RefreshTask(ctx context.Context) (*scheduler.TaskOutcome, erro
 			continue
 		}
 		if !changed {
-			if h.sh != nil && release != nil {
-				h.sh.FinishRefresh("/", refreshGen, nil, []health.ResourceTarget{{Path: "summary"}})
+			if h.serviceHealth != nil {
+				h.serviceHealth.FinishRefresh("/", refreshGen, nil, []health.ResourceTarget{{Path: "summary"}})
 			}
 			return flatpakRefreshOutcome("unchanged", "same_as_current", next.Generation, upstream), nil
 		}
 		h.mu.Lock()
 		h.current = next
 		h.mu.Unlock()
-		if h.sh != nil && release != nil {
-			h.sh.FinishRefresh("/", refreshGen, nil, []health.ResourceTarget{{Path: "summary"}})
+		if h.serviceHealth != nil {
+			h.serviceHealth.FinishRefresh("/", refreshGen, nil, []health.ResourceTarget{{Path: "summary"}})
 		}
 		return flatpakRefreshOutcome("updated", "published", next.Generation, upstream), nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable
 	}
-	if h.sh != nil && release != nil {
-		h.sh.FinishRefresh("/", refreshGen, flatpakRefreshHealthError(firstErr), nil)
+	if h.serviceHealth != nil {
+		h.serviceHealth.FinishRefresh("/", refreshGen, flatpakRefreshHealthError(firstErr), nil)
 	}
 	return nil, firstErr
 }
@@ -156,7 +156,12 @@ func (h *Handler) CleanupMetadata(ctx context.Context) error {
 	if len(generations) <= metadataGenerations {
 		return nil
 	}
-	sortGenerations(generations)
+	slices.SortFunc(generations, func(left, right generationEntry) int {
+		if comparison := left.mod.Compare(right.mod); comparison != 0 {
+			return comparison
+		}
+		return strings.Compare(left.name, right.name)
+	})
 	current := h.currentSnapshot().Generation
 	for _, generation := range generations[:len(generations)-metadataGenerations] {
 		if ctx.Err() != nil {
@@ -205,7 +210,7 @@ func (h *Handler) serveCompanionMetadata(w http.ResponseWriter, req *http.Reques
 func (h *Handler) serveMetadataObject(w http.ResponseWriter, req *http.Request, objectPath string) {
 	reader, err := h.store.OpenObject(req.Context(), h.name, objectPath)
 	if err != nil {
-		httpcache.ErrorResponse(http.StatusInternalServerError, err).FlushClose(req, w)
+		_ = httpcache.ErrorResponse(http.StatusInternalServerError, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", http.StatusInternalServerError, 0)
 		return
 	}
@@ -305,8 +310,8 @@ func (h *Handler) fetchMetadata(
 	if err != nil {
 		release()
 		h.stats.RecordUpstreamRequest(h.name, config.ModeFlatpak, upstream, http.MethodGet, 0, latency, 0)
-		if h.sh != nil {
-			h.sh.RecordFailure(upstream, err)
+		if h.serviceHealth != nil {
+			h.serviceHealth.RecordFailure(upstream, err)
 		}
 		return nil, fmt.Errorf("%w: fetch flatpak metadata %s: %v", errMetadataMirrorRetry, cleanPath, err)
 	}
@@ -320,8 +325,8 @@ func (h *Handler) fetchMetadata(
 		latency,
 		flatpakContentLength(response),
 	)
-	if h.sh != nil {
-		h.sh.RecordResult(upstream, response.StatusCode, latency)
+	if h.serviceHealth != nil {
+		h.serviceHealth.RecordResult(upstream, response.StatusCode, latency)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
 		return nil, h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
@@ -389,7 +394,7 @@ func fileDigest(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	sum := sha256.New()
 	if _, err := io.Copy(sum, file); err != nil {
 		return "", err
@@ -402,7 +407,7 @@ func metadataFingerprint(objects map[string]*metadataDownload) string {
 	for name := range objects {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	sum := sha256.New()
 	for _, name := range names {
 		_, _ = io.WriteString(sum, name)
@@ -429,7 +434,7 @@ func validateSummary(item *metadataDownload) error {
 	if err != nil {
 		return fmt.Errorf("open flatpak summary: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	var first [1]byte
 	if _, err := file.Read(first[:]); err != nil {
 		return fmt.Errorf("read flatpak summary: %w", err)
@@ -442,7 +447,7 @@ func (h *Handler) putMetadata(ctx context.Context, generation, name string, item
 	if err != nil {
 		return fmt.Errorf("open flatpak metadata %s: %w", name, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	objectPath := path.Join(metadataRoot, generation, name)
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(objectPath)), 0o755); err != nil {
 		return fmt.Errorf("create flatpak metadata directory %s: %w", name, err)
@@ -511,7 +516,7 @@ func (h *Handler) restoreCurrent(ctx context.Context) error {
 	if err != nil {
 		return nil
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var current currentMetadata
 	if err := yaml.NewDecoder(reader).Decode(&current); err != nil {
 		return fmt.Errorf("decode flatpak current metadata: %w", err)
@@ -526,13 +531,4 @@ func (h *Handler) currentSnapshot() currentMetadata {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.current
-}
-
-func sortGenerations(items []generationEntry) {
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].mod.Equal(items[j].mod) {
-			return items[i].name < items[j].name
-		}
-		return items[i].mod.Before(items[j].mod)
-	})
 }

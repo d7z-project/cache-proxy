@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -61,6 +60,12 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	applyDefaults(&block.Config)
 	if err := validateBlock(block.Proxies, &block.Config); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: go transport: %w", plan.Name(), err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	expireAfter := block.ExpireAfter
 	if expireAfter.IsUnset() {
@@ -127,12 +132,8 @@ func validateBlock(proxies []string, cfg *Config) error {
 		return errors.New("go proxy requires at least one proxy")
 	}
 	for i, raw := range proxies {
-		u, err := url.Parse(strings.TrimSpace(raw))
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("go proxy %d must be a valid absolute URL", i)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("go proxy %d must use http or https", i)
+		if err := config.ValidateHTTPUpstream(raw); err != nil {
+			return fmt.Errorf("go proxy %d: %w", i, err)
 		}
 	}
 	if cfg.SumDB != nil && cfg.SumDB.Enabled {
@@ -143,13 +144,8 @@ func validateBlock(proxies []string, cfg *Config) error {
 		if strings.ContainsAny(name, "\r\n\t ") {
 			return errors.New("go sumdb name must not contain spaces or line breaks")
 		}
-		rawURL := strings.TrimSpace(cfg.SumDB.URL)
-		parsed, err := url.Parse(rawURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return errors.New("go sumdb upstream must be a valid absolute URL")
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return errors.New("go sumdb upstream must use http or https")
+		if err := config.ValidateHTTPUpstream(cfg.SumDB.URL); err != nil {
+			return fmt.Errorf("go sumdb upstream: %w", err)
 		}
 	}
 	for i, pattern := range cfg.GOPrivate {
@@ -172,10 +168,10 @@ func validateBlock(proxies []string, cfg *Config) error {
 		}
 	}
 	if cfg.ModuleFreshFor > 0 && cfg.ModuleFreshFor.Duration() < time.Second {
-		return fmt.Errorf("go module fresh_for must be at least 1s")
+		return errors.New("go module fresh_for must be at least 1s")
 	}
 	if cfg.SumDBFreshFor > 0 && cfg.SumDBFreshFor.Duration() < time.Second {
-		return fmt.Errorf("go sumdb fresh_for must be at least 1s")
+		return errors.New("go sumdb fresh_for must be at least 1s")
 	}
 	return nil
 }

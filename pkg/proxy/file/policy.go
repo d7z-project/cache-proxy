@@ -95,12 +95,23 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if len(upstreams) == 0 {
 		return fmt.Errorf("instance %s: file mode requires at least one upstream", plan.Name())
 	}
+	for _, upstream := range upstreams {
+		if err := config.ValidateHTTPUpstream(upstream); err != nil {
+			return fmt.Errorf("instance %s: file upstream URL is invalid: %w", plan.Name(), err)
+		}
+	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: file transport: %w", plan.Name(), err)
+	}
 	healthCfg := health.DefaultConfig()
 	if block.Transport != nil {
 		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
 	}
 	if err := health.ValidateConfig(healthCfg); err != nil {
 		return fmt.Errorf("health: %w", err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats())
 	sh.SetBus(plan.Bus())

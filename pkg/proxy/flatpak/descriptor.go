@@ -27,7 +27,7 @@ func (h *Handler) serveDescriptor(w http.ResponseWriter, req *http.Request, clea
 		MetadataBusyPolicy: config.BusyPolicyStale,
 	}, cleanPath)
 	if err != nil {
-		httpcache.ErrorResponse(http.StatusBadRequest, err).FlushClose(req, w)
+		_ = httpcache.ErrorResponse(http.StatusBadRequest, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", http.StatusBadRequest, 0)
 		return
 	}
@@ -43,7 +43,7 @@ func (h *Handler) serveDescriptor(w http.ResponseWriter, req *http.Request, clea
 			status = http.StatusServiceUnavailable
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
-		httpcache.ErrorResponse(status, err).FlushClose(req, w)
+		_ = httpcache.ErrorResponse(status, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", status, 0)
 		return
 	}
@@ -58,7 +58,7 @@ func (h *Handler) openFreshDescriptor(ctx context.Context, req *http.Request, ob
 	if err != nil {
 		return nil, nil, false
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	info := reader.Info()
 	if !httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
 		return nil, nil, false
@@ -140,7 +140,7 @@ func (h *Handler) fetchDescriptor(
 			return nil, nil, "", 0, fmt.Errorf("flatpak descriptor exceeds %d bytes", maxDescriptorSize)
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
-			h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
+			_ = h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
 			return body, headers, "BYPASS", response.StatusCode, nil
 		}
 		if response.StatusCode != http.StatusOK {

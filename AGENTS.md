@@ -12,20 +12,29 @@
 6. Flatpak/OSTree 模式使用专用 handler，metadata 使用 generation，objects / deltas 不绑定 generation
 7. 修改配置结构后，同步更新 `README.md`
 
+## Go 代码结构
+
+- 无附加行为的 HTTP mode 直接复用 `httpcache.Handler`，专用 handler 只承载协议或生命周期差异
+- helper 以实际复用或清晰的职责边界为准；短小的单次转发逻辑保持内联
+- 内部字段和跨函数状态使用完整领域名称，局部循环变量可使用 Go 惯用短名称
+- error 文本使用小写开头，并通过 `%w` 保留可判定的错误链
+- 重构保持协议、缓存键、持久化格式和调度时序稳定；行为变化必须独立说明并补测试
+
 ## YAML 与配置
 
 - YAML 字段使用 `snake_case`
 - `Block` 必填字段不加 `omitempty`
 - 复用 `config.Duration`、`config.Expiration`、`config.Freshness`
 - policy / busy policy 使用 `config.Policy*`、`config.BusyPolicy*` 常量
-- 已删除的配置不做兼容；配置解码保持严格模式
-- Linux 仓库模式不暴露 `metadata_policy` / `metadata_fresh_for` / `metadata_busy_policy`
+- 配置解码保持严格模式，未知字段必须报错
+- Linux 仓库 metadata freshness 和 busy policy 由 generation refresh 机制统一管理
 
 ## Linux 仓库元数据
 
 - 同一个 generation 内的 metadata、签名、校验文件必须来自同一个 upstream
 - refresh 先写 staging，全部必需文件校验通过后才能发布 current generation
 - 主元数据引用的每个 metadata 对象都必须下载并校验成功；只有外部伴生文件允许 `403` / `404` 缺失
+- Debian Release 的每个 SHA256 路径都是独立必需对象；不同压缩格式禁止互相别名，canonical 与 by-hash 仅能映射到同一份已通过大小和 SHA256 校验的字节
 - 客户端 metadata 请求只读取 current generation；没有 current 时才允许直连上游并触发后台刷新
 - 已有 current generation 时，清单中缺失的 metadata 请求必须返回 `503` 并触发刷新，禁止回源补齐
 - `current.yaml` 是唯一持久化提交标记；启动只能恢复其精确引用且完整校验通过的 snapshot，禁止回退选择最新 snapshot
@@ -38,6 +47,7 @@
 - metadata GC 必须保护内存 current、持久化 current 和活跃 reader generation，并保留宽限期内 generation 及至少一个最新 previous generation
 - metadata 下载、解压、解析必须走流式 reader 或临时文件，禁止对大 metadata 整体 `io.ReadAll`
 - 伴生文件获取里 `404` / `403` 视为非致命
+- 大型 Debian refresh 必须使用绑定签名 Release digest 的持久化 staging 分片续传；锚点变化或 staging 校验失败时必须整体废弃候选 generation
 
 ## 调度与清理
 
@@ -46,6 +56,7 @@
 - Linux 仓库模式额外注册 metadata refresh / metadata GC factory
 - 运行时清理参数统一来自 `plan.CleanupConfig()`
 - 静态清理与 blob GC 不持久化；metadata refresh / GC 持久化到调度状态
+- 清理达到 batch 上限必须短延迟续跑；inactive repository root 通过持久化 last-seen 和 generation GC 完整退役，禁止遗留 cleanup index 阻止退役
 - 客户端下载、metadata refresh、健康探测和 OCI token 请求必须共用按 upstream host 归一化的 admission / cooldown；只有真实上游 `429` 建立 cooldown，并且必须遵守 `Retry-After`
 - admission 同时限制 active body 和每 host 请求起始间隔；前台排队必须有界，refresh 在调度任务 context 内等待，健康探测无法立即取得预算时直接跳过
 - 本地 admission 等待、超时和 context 取消不得记为上游限流、健康失败或触发镜像回退；refresh 收到真实 `429` 后不得继续向其他镜像扩散请求
@@ -73,3 +84,4 @@
 - 存储测试优先用 `blobfs.Open(t.TempDir(), blobfs.DefaultConfig())`
 - 新增行为改动必须补对应测试；并发相关逻辑需覆盖 `-race`
 - 删除或重写旧实现时，同时清理失效测试和重复测试
+- 解析器、路径分类和非可信 metadata 变更应补有界 fuzz target；语料执行使用 `make test-fuzz`

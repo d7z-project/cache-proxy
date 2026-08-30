@@ -199,15 +199,15 @@ func parseModuleRequest(target string) (moduleRequest, error) {
 			}
 			if candidate.kind != moduleRequestList && candidate.kind != moduleRequestLatest {
 				if normalized := module.CanonicalVersion(version); normalized == "" || normalized != version {
-					return moduleRequest{}, unsupportedQueryError(version)
+					return moduleRequest{}, fmt.Errorf(
+						"go module query %q requires direct source resolution, which this proxy disables: %w",
+						version,
+						fs.ErrNotExist,
+					)
 				}
 			}
 			return moduleRequest{kind: candidate.kind, modulePath: unescapedModulePath, version: version, cacheKey: target}, nil
 		}
 	}
 	return moduleRequest{}, fs.ErrNotExist
-}
-
-func unsupportedQueryError(query string) error {
-	return fmt.Errorf("go module query %q requires direct source resolution, which this proxy disables: %w", query, fs.ErrNotExist)
 }

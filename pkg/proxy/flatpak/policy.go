@@ -2,8 +2,8 @@ package flatpak
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -56,12 +56,18 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return fmt.Errorf("instance %s: flatpak mode requires at least one upstream", plan.Name())
 	}
 	for _, upstream := range upstreams {
-		if _, err := url.Parse(upstream); err != nil {
+		if err := config.ValidateHTTPUpstream(upstream); err != nil {
 			return fmt.Errorf("instance %s: flatpak upstream URL is invalid: %w", plan.Name(), err)
 		}
 	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: flatpak transport: %w", plan.Name(), err)
+	}
 	if err := validatePolicy(&block.Policy, block.ExpireAfter); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 
 	expireAfter := block.ExpireAfter
@@ -83,8 +89,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := health.ValidateConfig(healthCfg); err != nil {
 		return fmt.Errorf("health: %w", err)
 	}
-	sh := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats())
-	sh.SetBus(plan.Bus())
+	serviceHealth := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats())
+	serviceHealth.SetBus(plan.Bus())
 
 	runtimeCfg := httpcache.RuntimeConfig{
 		Mode:            config.ModeFlatpak,
@@ -104,7 +110,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		&block.Policy,
 		plan.Store(),
 		plan.Stats(),
-		sh,
+		serviceHealth,
 		plan.UpstreamGate(),
 		runtimeCfg,
 	)
@@ -181,12 +187,12 @@ func validatePolicy(policy *Policy, expireAfter config.Expiration) error {
 		return fmt.Errorf("invalid flatpak metadata busy policy %q", policy.MetadataBusyPolicy)
 	}
 	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
-		return fmt.Errorf("flatpak metadata fresh_for must be at least 1s")
+		return errors.New("flatpak metadata fresh_for must be at least 1s")
 	}
 	if policy.CacheDeltas != nil && *policy.CacheDeltas {
 		deltaExpireAfter := resolveDeltaExpireAfter(policy, expireAfter)
 		if deltaExpireAfter.IsNever() {
-			return fmt.Errorf("flatpak delta_expire_after must be finite when cache_deltas is enabled")
+			return errors.New("flatpak delta_expire_after must be finite when cache_deltas is enabled")
 		}
 	}
 	return nil

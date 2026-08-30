@@ -155,29 +155,20 @@ func (c *blobfsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(stats.Bytes.StoredChunkBytes), "stored_chunk")
 	ch <- prometheus.MustNewConstMetric(c.gcRuns, prometheus.CounterValue, float64(stats.GC.Runs))
 	ch <- prometheus.MustNewConstMetric(c.gcLastEpoch, prometheus.GaugeValue, float64(stats.GC.LastEpoch))
-	ch <- prometheus.MustNewConstMetric(c.gcLastRunState, prometheus.GaugeValue, 1, labelOrNone(stats.GC.LastRunState))
-	ch <- prometheus.MustNewConstMetric(c.gcLastBackgroundAt, prometheus.GaugeValue, unixSeconds(stats.GC.LastBackgroundAt))
+	lastRunState := stats.GC.LastRunState
+	if lastRunState == "" {
+		lastRunState = "none"
+	}
+	ch <- prometheus.MustNewConstMetric(c.gcLastRunState, prometheus.GaugeValue, 1, lastRunState)
+	lastBackgroundAt := float64(0)
+	if !stats.GC.LastBackgroundAt.IsZero() {
+		lastBackgroundAt = float64(stats.GC.LastBackgroundAt.Unix())
+	}
+	ch <- prometheus.MustNewConstMetric(c.gcLastBackgroundAt, prometheus.GaugeValue, lastBackgroundAt)
 	ch <- prometheus.MustNewConstMetric(c.gcLastBackgroundEpoch, prometheus.GaugeValue, float64(stats.GC.LastBackgroundEpoch))
-	ch <- prometheus.MustNewConstMetric(c.gcLastBackgroundError, prometheus.GaugeValue, boolGauge(stats.GC.LastBackgroundError != ""))
-}
-
-func unixSeconds(value time.Time) float64 {
-	if value.IsZero() {
-		return 0
+	lastBackgroundError := float64(0)
+	if stats.GC.LastBackgroundError != "" {
+		lastBackgroundError = 1
 	}
-	return float64(value.Unix())
-}
-
-func boolGauge(value bool) float64 {
-	if value {
-		return 1
-	}
-	return 0
-}
-
-func labelOrNone(value string) string {
-	if value == "" {
-		return "none"
-	}
-	return value
+	ch <- prometheus.MustNewConstMetric(c.gcLastBackgroundError, prometheus.GaugeValue, lastBackgroundError)
 }

@@ -78,8 +78,8 @@ func waitForClone(t *testing.T, h *gitHandler) {
 func TestCloneAndServe(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
@@ -95,8 +95,8 @@ func TestCloneAndServe(t *testing.T) {
 func TestServeBeforeCloneReady(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 
 	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
 	rec := httptest.NewRecorder()
@@ -108,8 +108,8 @@ func TestServeBeforeCloneReady(t *testing.T) {
 func TestServeDuringSync(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	h.mu.Lock()
@@ -172,8 +172,8 @@ func TestSyncAfterClone(t *testing.T) {
 		upstream:       "file://" + source,
 		forceOverwrite: true,
 	})
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	h.mu.RLock()
@@ -194,7 +194,7 @@ func TestSyncAfterClone(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	h.doSync(context.Background())
+	h.syncRepository(context.Background())
 
 	h.mu.RLock()
 	headAfter, _ := h.repo.Head()
@@ -212,8 +212,8 @@ func TestSyncPrunesDeletedRefs(t *testing.T) {
 		upstream:       "file://" + source,
 		forceOverwrite: true,
 	})
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	h.mu.RLock()
@@ -221,7 +221,7 @@ func TestSyncPrunesDeletedRefs(t *testing.T) {
 	h.mu.RUnlock()
 	require.NoError(t, err)
 
-	h.doSync(context.Background())
+	h.syncRepository(context.Background())
 
 	h.mu.RLock()
 	headAfter, err := h.repo.Head()
@@ -239,8 +239,8 @@ func TestCloneRetryAndCtxCancel(t *testing.T) {
 		forceOverwrite: true,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	h.Start(ctx)
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(ctx))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 
 	time.Sleep(500 * time.Millisecond)
 
@@ -284,7 +284,7 @@ func TestClonePermanentErrorFailsImmediately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := h.doClone(ctx)
+	err := h.cloneRepository(ctx)
 	require.Error(t, err)
 	require.True(t, isPermanentCloneError(err))
 }
@@ -296,11 +296,11 @@ func TestClonePartialResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err := h.doClone(ctx)
+	err := h.cloneRepository(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, h.repo)
 
-	err = h.doClone(ctx)
+	err = h.cloneRepository(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, h.repo)
 }
@@ -313,7 +313,7 @@ func TestStopDuringClone(t *testing.T) {
 		upstream:       "http://127.0.0.1:1/repo.git",
 		forceOverwrite: true,
 	})
-	h.Start(context.Background())
+	require.NoError(t, h.Start(context.Background()))
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -334,7 +334,7 @@ func TestDoubleStartIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	err = h.Start(context.Background())
 	require.NoError(t, err)
-	defer h.Stop(context.Background())
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	h.mu.RLock()
@@ -345,10 +345,8 @@ func TestDoubleStartIdempotent(t *testing.T) {
 func TestStartStopAllowsNilContext(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	//lint:ignore SA1012 This test verifies nil context fallback behavior.
-	require.NoError(t, h.Start(nil))
-	//lint:ignore SA1012 This test verifies nil context fallback behavior.
-	require.NoError(t, h.Stop(nil))
+	require.NoError(t, h.Start(nil)) //nolint:staticcheck // Verifies the documented nil-context fallback.
+	require.NoError(t, h.Stop(nil))  //nolint:staticcheck // Verifies the documented nil-context fallback.
 }
 
 func TestEmptyUpstreamRepo(t *testing.T) {
@@ -357,8 +355,8 @@ func TestEmptyUpstreamRepo(t *testing.T) {
 	require.NoError(t, err)
 
 	h := newTestHandler(t, "file://"+emptyDir)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -383,8 +381,8 @@ func TestEmptyUpstreamRepo(t *testing.T) {
 func TestServeUnknownPath(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/unknown-path", nil)
@@ -396,8 +394,8 @@ func TestServeUnknownPath(t *testing.T) {
 func TestUploadPackEndpoint(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	req := httptest.NewRequest(http.MethodPost, "/git-upload-pack", strings.NewReader(""))
@@ -409,8 +407,8 @@ func TestUploadPackEndpoint(t *testing.T) {
 func TestInfoRefsWithoutServiceParam(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/info/refs", nil)
@@ -422,8 +420,8 @@ func TestInfoRefsWithoutServiceParam(t *testing.T) {
 func TestServeConcurrentRequests(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	done := make(chan struct{})
@@ -444,8 +442,8 @@ func TestServeConcurrentRequests(t *testing.T) {
 func TestSyncAndServeConcurrentRequests(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
-	h.Start(context.Background())
-	defer h.Stop(context.Background())
+	require.NoError(t, h.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
 	waitForClone(t, h)
 
 	var wg sync.WaitGroup
@@ -460,7 +458,7 @@ func TestSyncAndServeConcurrentRequests(t *testing.T) {
 			statuses <- rec.Code
 		}()
 	}
-	h.doSync(context.Background())
+	h.syncRepository(context.Background())
 	wg.Wait()
 	close(statuses)
 	for status := range statuses {
@@ -476,14 +474,14 @@ func TestBillyAdapterReadWrite(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.Write([]byte("hello world"))
 	require.NoError(t, err)
-	f.Close()
+	require.NoError(t, f.Close())
 
 	f, err = bfs.Open("test.txt")
 	require.NoError(t, err)
 	data, err := io.ReadAll(f)
 	require.NoError(t, err)
 	require.Equal(t, "hello world", string(data))
-	f.Close()
+	require.NoError(t, f.Close())
 
 	require.NotNil(t, filesystem.NewStorage(bfs, cache.NewObjectLRUDefault()))
 	require.NoError(t, bfs.MkdirAll("subdir", 0o755))
@@ -523,20 +521,20 @@ func TestBillyAdapterOpenFileCreate(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.Write([]byte("data"))
 	require.NoError(t, err)
-	f.Close()
+	require.NoError(t, f.Close())
 
 	f, err = bfs.Open("deep/nested/file.txt")
 	require.NoError(t, err)
 	data, err := io.ReadAll(f)
 	require.NoError(t, err)
 	require.Equal(t, "data", string(data))
-	f.Close()
+	require.NoError(t, f.Close())
 }
 
 func TestBillyAdapterReadDirEmpty(t *testing.T) {
 	afs := afero.NewMemMapFs()
 	bfs := newBillyAdapter(afs, "/root")
-	bfs.MkdirAll("emptydir", 0755)
+	require.NoError(t, bfs.MkdirAll("emptydir", 0o755))
 
 	entries, err := bfs.ReadDir("emptydir")
 	require.NoError(t, err)
@@ -589,10 +587,8 @@ func TestAuthBuilder(t *testing.T) {
 }
 
 func TestAuthEnvVarExpansion(t *testing.T) {
-	os.Setenv("TEST_GIT_USER", "myuser")
-	os.Setenv("TEST_GIT_TOKEN", "mytoken")
-	defer os.Unsetenv("TEST_GIT_USER")
-	defer os.Unsetenv("TEST_GIT_TOKEN")
+	t.Setenv("TEST_GIT_USER", "myuser")
+	t.Setenv("TEST_GIT_TOKEN", "mytoken")
 
 	auth, err := buildAuth(&AuthConfig{
 		Type:     "basic",

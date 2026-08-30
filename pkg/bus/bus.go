@@ -11,8 +11,9 @@ import (
 type EventType string
 
 const (
-	EventMetadataDiscovered EventType = "metadata_discovered"
-	EventMetadataRemoved    EventType = "metadata_removed"
+	EventMetadataDiscovered       EventType = "metadata_discovered"
+	EventMetadataRefreshRequested EventType = "metadata_refresh_requested"
+	EventMetadataRemoved          EventType = "metadata_removed"
 )
 
 type Event struct {
@@ -26,15 +27,20 @@ type MetadataDiscoveredPayload struct {
 	RootID   string
 }
 
+type MetadataRefreshRequestedPayload struct {
+	Instance string
+	RootID   string
+}
+
 type MetadataRemovedPayload struct {
 	Instance string
 	RootID   string
 }
 
 type Bus struct {
-	mu   sync.RWMutex
-	subs map[EventType][]chan Event
-	m    *metrics
+	mu      sync.RWMutex
+	subs    map[EventType][]chan Event
+	metrics *metrics
 }
 
 func New() *Bus {
@@ -42,7 +48,7 @@ func New() *Bus {
 }
 
 func NewWithRegisterer(reg prometheus.Registerer) *Bus {
-	return &Bus{subs: map[EventType][]chan Event{}, m: newMetrics(reg)}
+	return &Bus{subs: map[EventType][]chan Event{}, metrics: newMetrics(reg)}
 }
 
 func (b *Bus) Subscribe(types ...EventType) <-chan Event {
@@ -51,8 +57,8 @@ func (b *Bus) Subscribe(types ...EventType) <-chan Event {
 	defer b.mu.Unlock()
 	for _, t := range types {
 		b.subs[t] = append(b.subs[t], ch)
-		if b.m != nil {
-			b.m.subscribers.WithLabelValues(string(t)).Set(float64(len(b.subs[t])))
+		if b.metrics != nil {
+			b.metrics.subscribers.WithLabelValues(string(t)).Set(float64(len(b.subs[t])))
 		}
 	}
 	return ch
@@ -63,13 +69,13 @@ func (b *Bus) Publish(evt Event) {
 	defer b.mu.RUnlock()
 	evt.Timestamp = time.Now()
 	eventType := string(evt.Type)
-	if b.m != nil {
-		b.m.published.WithLabelValues(eventType).Inc()
+	if b.metrics != nil {
+		b.metrics.published.WithLabelValues(eventType).Inc()
 	}
 	subs := b.subs[evt.Type]
 	if len(subs) == 0 {
-		if b.m != nil {
-			b.m.dropped.WithLabelValues(eventType, "no_subscriber").Inc()
+		if b.metrics != nil {
+			b.metrics.dropped.WithLabelValues(eventType, "no_subscriber").Inc()
 		}
 		return
 	}
@@ -80,13 +86,13 @@ func (b *Bus) Publish(evt Event) {
 			delivered++
 		default:
 			slog.Debug("bus event dropped", "type", evt.Type, "reason", "subscriber full")
-			if b.m != nil {
-				b.m.dropped.WithLabelValues(eventType, "subscriber_full").Inc()
+			if b.metrics != nil {
+				b.metrics.dropped.WithLabelValues(eventType, "subscriber_full").Inc()
 			}
 		}
 	}
-	if b.m != nil {
-		b.m.delivered.WithLabelValues(eventType).Add(float64(delivered))
+	if b.metrics != nil {
+		b.metrics.delivered.WithLabelValues(eventType).Add(float64(delivered))
 	}
 }
 
@@ -105,8 +111,8 @@ func (b *Bus) Unsubscribe(ch <-chan Event) {
 		} else {
 			b.subs[t] = filtered
 		}
-		if b.m != nil {
-			b.m.subscribers.WithLabelValues(string(t)).Set(float64(len(filtered)))
+		if b.metrics != nil {
+			b.metrics.subscribers.WithLabelValues(string(t)).Set(float64(len(filtered)))
 		}
 	}
 }

@@ -119,11 +119,27 @@ func TestUpstreamGateHasNoRequestStartPacing(t *testing.T) {
 	require.Less(t, time.Since(start), 200*time.Millisecond)
 }
 
+func TestUpstreamGateEnforcesPerHostRequestStartSpacing(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{MinInterval: 60 * time.Millisecond})
+	firstStarted := time.Now()
+	release, err := gate.Acquire(context.Background(), "https://paced.example/one", AdmissionForeground)
+	require.NoError(t, err)
+	release()
+
+	second := acquireAsync(gate, context.Background(), "https://paced.example/two", AdmissionForeground)
+	require.Never(t, func() bool { return len(second) > 0 }, 30*time.Millisecond, 2*time.Millisecond)
+	result := <-second
+	require.NoError(t, result.err)
+	require.GreaterOrEqual(t, time.Since(firstStarted), 50*time.Millisecond)
+	result.release()
+}
+
 func TestUpstreamGateHostOverride(t *testing.T) {
 	gate := testUpstreamGate(UpstreamGateConfig{Hosts: map[string]UpstreamHostGateConfig{
-		"packages.example": {MaxActive: 8},
+		"packages.example": {MaxActive: 8, MinInterval: 25 * time.Millisecond},
 	}})
 	require.Equal(t, 8, gate.Snapshot().Hosts["packages.example"].MaxActive)
+	require.Equal(t, 25*time.Millisecond, gate.Snapshot().Hosts["packages.example"].MinInterval)
 }
 
 func TestUpstreamGateRateLimitKeepsForegroundQueued(t *testing.T) {

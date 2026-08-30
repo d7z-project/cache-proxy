@@ -83,6 +83,9 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if err != nil || tokenURL.Scheme == "" || tokenURL.Host == "" {
 		return "", time.Time{}, errors.New("invalid OCI token realm")
 	}
+	if tokenURL.Scheme != "http" && tokenURL.Scheme != "https" {
+		return "", time.Time{}, errors.New("oci token realm must use http or https")
+	}
 	query := tokenURL.Query()
 	for _, key := range []string{"service", "scope"} {
 		if value := challenge.params[key]; value != "" {
@@ -113,7 +116,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	}
 	response.Body = utils.NewRateLimitReader(response.Body)
 	if response.StatusCode != http.StatusOK {
-		return "", time.Time{}, errors.New("OCI token request failed")
+		return "", time.Time{}, errors.New("oci token request failed")
 	}
 	var payload struct {
 		Token       string `json:"token"`
@@ -131,7 +134,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 		token = payload.AccessToken
 	}
 	if token == "" {
-		return "", time.Time{}, errors.New("OCI token response is empty")
+		return "", time.Time{}, errors.New("oci token response is empty")
 	}
 	if payload.IssuedAt != "" {
 		if issuedAt, err := time.Parse(time.RFC3339, payload.IssuedAt); err == nil {

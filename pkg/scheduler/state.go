@@ -41,8 +41,8 @@ func (s *Scheduler) saveState() {
 
 func (s *Scheduler) saveStateLocked() {
 	if s.store == nil {
-		if s.m != nil {
-			s.m.stateSaves.WithLabelValues("success").Inc()
+		if s.metrics != nil {
+			s.metrics.stateSaves.WithLabelValues("success").Inc()
 		}
 		return
 	}
@@ -67,23 +67,23 @@ func (s *Scheduler) saveStateLocked() {
 	var buf bytes.Buffer
 	if err := yaml.NewEncoder(&buf).Encode(state); err != nil {
 		slog.Warn("scheduler state marshal failed", "err", err)
-		if s.m != nil {
-			s.m.stateSaves.WithLabelValues("failed").Inc()
+		if s.metrics != nil {
+			s.metrics.stateSaves.WithLabelValues("failed").Inc()
 		}
 		return
 	}
 	if err := s.store.MkdirAll(s.tenant+"/", 0o755); err != nil {
 		slog.Warn("scheduler state mkdir failed", "err", err)
-		if s.m != nil {
-			s.m.stateSaves.WithLabelValues("failed").Inc()
+		if s.metrics != nil {
+			s.metrics.stateSaves.WithLabelValues("failed").Inc()
 		}
 		return
 	}
 	tmpPath := fmt.Sprintf("tasks.yaml.tmp.%d", time.Now().UnixNano())
 	if _, err := s.store.Put(context.Background(), s.tenant, tmpPath, bytes.NewReader(buf.Bytes()), nil); err != nil {
 		slog.Warn("scheduler state write failed", "err", err)
-		if s.m != nil {
-			s.m.stateSaves.WithLabelValues("failed").Inc()
+		if s.metrics != nil {
+			s.metrics.stateSaves.WithLabelValues("failed").Inc()
 		}
 		return
 	}
@@ -92,14 +92,14 @@ func (s *Scheduler) saveStateLocked() {
 		if cleanupErr := s.store.DeleteObject(context.Background(), s.tenant, tmpPath); cleanupErr != nil {
 			slog.Debug("scheduler state temp cleanup failed", "path", tmpPath, "err", cleanupErr)
 		}
-		if s.m != nil {
-			s.m.stateSaves.WithLabelValues("failed").Inc()
+		if s.metrics != nil {
+			s.metrics.stateSaves.WithLabelValues("failed").Inc()
 		}
 		return
 	}
 	s.cleanStateTemps()
-	if s.m != nil {
-		s.m.stateSaves.WithLabelValues("success").Inc()
+	if s.metrics != nil {
+		s.metrics.stateSaves.WithLabelValues("success").Inc()
 	}
 }
 
@@ -108,21 +108,21 @@ func (s *Scheduler) restoreFromStore() {
 	if err != nil {
 		slog.Warn("scheduler state restore failed", "err", err)
 	}
-	if s.m != nil {
+	if s.metrics != nil {
 		switch {
 		case err != nil:
-			s.m.stateRestore.WithLabelValues("failed").Inc()
+			s.metrics.stateRestore.WithLabelValues("failed").Inc()
 		case len(data) == 0:
-			s.m.stateRestore.WithLabelValues("empty").Inc()
+			s.metrics.stateRestore.WithLabelValues("empty").Inc()
 		default:
-			s.m.stateRestore.WithLabelValues("success").Inc()
+			s.metrics.stateRestore.WithLabelValues("success").Inc()
 		}
 	}
 	for _, pt := range data {
 		factory := s.factories[pt.Instance]
 		if factory == nil {
-			if s.m != nil {
-				s.m.restoreSkipped.WithLabelValues(pt.Type, "factory_missing").Inc()
+			if s.metrics != nil {
+				s.metrics.restoreSkipped.WithLabelValues(pt.Type, "factory_missing").Inc()
 			}
 			continue
 		}
@@ -133,8 +133,8 @@ func (s *Scheduler) restoreFromStore() {
 		case TypeMetadataGC:
 			handler = factory.NewGC(pt.RootID)
 		default:
-			if s.m != nil {
-				s.m.restoreSkipped.WithLabelValues(pt.Type, "unknown_type").Inc()
+			if s.metrics != nil {
+				s.metrics.restoreSkipped.WithLabelValues(pt.Type, "unknown_type").Inc()
 			}
 			continue
 		}
@@ -155,8 +155,8 @@ func (s *Scheduler) restoreFromStore() {
 		}
 		s.tasks[key] = ts
 		s.metricInstances[key.Instance()] = struct{}{}
-		if s.m != nil {
-			s.m.restoredTasks.WithLabelValues(pt.Type).Inc()
+		if s.metrics != nil {
+			s.metrics.restoredTasks.WithLabelValues(pt.Type).Inc()
 		}
 		heap.Push(&s.heap, ts)
 	}
@@ -178,7 +178,7 @@ func loadTaskState(store *blobfs.Store, tenant string) ([]persistedTask, error) 
 		}
 		return nil, fmt.Errorf("open scheduler state: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	var state persistedState
 	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {

@@ -18,7 +18,7 @@ func TestCleanupContinuesFromInspectionCursor(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	fresh := time.Now().UTC().Format(time.RFC3339Nano)
 	for i := range 20 {

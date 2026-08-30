@@ -42,7 +42,7 @@ func (h *gitHandler) cloneAndSync(ctx context.Context) {
 	backoff := 10 * time.Second
 	for {
 		opCtx, cancel := h.operationContext(ctx)
-		err := h.doClone(opCtx)
+		err := h.cloneRepository(opCtx)
 		cancel()
 		if err == nil {
 			break
@@ -87,7 +87,7 @@ func (h *gitHandler) cloneAndSync(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.doSync(ctx)
+			h.syncRepository(ctx)
 		}
 	}
 }
@@ -99,7 +99,7 @@ func (h *gitHandler) operationContext(ctx context.Context) (context.Context, con
 	return context.WithTimeout(ctx, h.operationTimeout)
 }
 
-func (h *gitHandler) doClone(ctx context.Context) error {
+func (h *gitHandler) cloneRepository(ctx context.Context) error {
 	opts := &git.CloneOptions{
 		URL:          h.upstream,
 		Auth:         h.auth,
@@ -146,7 +146,7 @@ func (h *gitHandler) doClone(ctx context.Context) error {
 	return err
 }
 
-func (h *gitHandler) doSync(ctx context.Context) {
+func (h *gitHandler) syncRepository(ctx context.Context) {
 	h.mu.Lock()
 	if h.repo == nil || h.state != gitStateReady {
 		h.mu.Unlock()

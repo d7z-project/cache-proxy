@@ -95,7 +95,7 @@ func TestOCIRevalidatesTagManifestWithConditionalGet(t *testing.T) {
 	defer upstream.Close()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{Upstream: upstream.URL, Policy: Policy{
 		DefaultPolicy: config.PolicyRevalidate,
 		FreshFor:      config.Freshness(time.Nanosecond),
@@ -183,7 +183,7 @@ func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testi
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: registry.URL,
 		Policy:   Policy{DefaultPolicy: config.PolicyBypass},
@@ -223,7 +223,7 @@ func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	limiter := httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
 		MaxActive: 8, MaxActivePerHost: 8,
 	})
@@ -270,7 +270,7 @@ func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
 		Policy: Policy{
@@ -336,7 +336,7 @@ func TestOCIBlobCacheIsIndependentFromRefExpiry(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
@@ -393,7 +393,7 @@ func TestOCICachesDigestBlobWithoutActiveRef(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
@@ -432,7 +432,7 @@ func TestOCIBlobFetchClearsBusyStateOnUpstreamError(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
@@ -461,7 +461,7 @@ func TestOCIManifestDigestMismatchFails(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
@@ -495,7 +495,7 @@ func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
@@ -550,7 +550,7 @@ func TestOCIConcurrentManifestMissPublishesOneConsistentWriter(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
 		Policy: Policy{
@@ -586,7 +586,7 @@ func TestOCICleanupSkipsActiveRef(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{Upstream: "https://registry.example"}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	state := refState{
 		Repo:        "library/alpine",
@@ -612,7 +612,7 @@ func TestOCICleanupBlobsWithoutRefDirectory(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{Upstream: "https://registry.example"}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	body := "blob"
 	objectPath := handler.blobPath(sha256Digest(body))
@@ -640,7 +640,7 @@ func TestOCIRejectsOversizedManifest(t *testing.T) {
 	defer upstream.Close()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
 		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},

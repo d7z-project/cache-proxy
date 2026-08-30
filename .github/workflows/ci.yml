@@ -28,6 +28,9 @@ jobs:
       - name: Run tests
         run: go test -timeout 60s ./...
 
+      - name: Run fuzz smoke tests
+        run: make test-fuzz FUZZ_TIME=2s
+
   docker:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -83,7 +83,11 @@ func (h *ServiceHealth) RecordResult(url string, status int, latency time.Durati
 		return
 	}
 	if upstreamStatusIsFailure(status) {
-		uh.recordFailure(formatStatusError(status))
+		if status == 0 {
+			uh.recordFailure(errors.New("network error"))
+		} else {
+			uh.recordFailure(fmt.Errorf("http %d", status))
+		}
 	} else {
 		uh.recordSuccess(latency)
 	}
@@ -248,7 +252,7 @@ func (h *ServiceHealth) DashboardStatus() (color, label, extra string) {
 	case StateHealthy:
 		return "green", "healthy", ""
 	case StateDegraded:
-		return "yellow", degradedLabel(h.upstreams, h.resources), ""
+		return "yellow", degradedLabel(h.resources), ""
 	case StateUnhealthy:
 		return "red", "unhealthy", ""
 	default:
@@ -281,7 +285,7 @@ func (h *ServiceHealth) recomputeAggregateLocked() {
 func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) {
 	rh.LastError = err.Error()
 	switch {
-	case isResourceNotFound(err):
+	case errors.Is(err, ErrResourceNotFound):
 		rh.ConsecutiveNotFound++
 		if rh.FirstNotFoundAt.IsZero() {
 			rh.FirstNotFoundAt = time.Now()
@@ -303,10 +307,10 @@ func (h *ServiceHealth) applyResourceErrorLocked(rh *ResourceHealth, err error) 
 		} else {
 			rh.State = RSuspect
 		}
-	case isResourceForbidden(err):
+	case errors.Is(err, ErrResourceForbidden):
 		rh.ConsecutiveInvalid++
 		rh.State = RBlocked
-	case isResourceTransient(err):
+	case errors.Is(err, ErrResourceTransient):
 		rh.ConsecutiveTransient++
 		rh.State = RSuspect
 	default:
@@ -324,6 +328,20 @@ func (h *ServiceHealth) ResourceHealth(path string) (ResourceHealth, bool) {
 		return ResourceHealth{}, false
 	}
 	return rh.snapshot(), true
+}
+
+func (h *ServiceHealth) RemoveResource(path string) {
+	h.mu.Lock()
+	_, existed := h.resources[path]
+	delete(h.resources, path)
+	h.recomputeAggregateLocked()
+	h.mu.Unlock()
+	if existed && h.bus != nil {
+		h.bus.Publish(bus.Event{
+			Type:    bus.EventMetadataRemoved,
+			Payload: bus.MetadataRemovedPayload{Instance: h.name, RootID: path},
+		})
+	}
 }
 
 func (h *ServiceHealth) MarkResourceActive(path string, targets []ResourceTarget) {
@@ -357,7 +375,7 @@ func (h *ServiceHealth) emitUpstreamMetrics(uh *UpstreamHealth) {
 	h.stats.SetUpstreamObservation(h.name, h.mode, uh.URL, uh.window.errorRate(), uh.ewmaLatency.Seconds())
 }
 
-func degradedLabel(_ map[string]*UpstreamHealth, resources map[string]*ResourceHealth) string {
+func degradedLabel(resources map[string]*ResourceHealth) string {
 	n := 0
 	for _, rh := range resources {
 		if rh.State != RActive {
@@ -369,14 +387,3 @@ func degradedLabel(_ map[string]*UpstreamHealth, resources map[string]*ResourceH
 	}
 	return fmt.Sprintf("%d degraded", n)
 }
-
-func formatStatusError(status int) error {
-	if status == 0 {
-		return fmt.Errorf("network error")
-	}
-	return fmt.Errorf("HTTP %d", status)
-}
-
-func isResourceNotFound(err error) bool  { return err == ErrResourceNotFound }
-func isResourceForbidden(err error) bool { return err == ErrResourceForbidden }
-func isResourceTransient(err error) bool { return err == ErrResourceTransient }

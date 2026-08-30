@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 func TestParsePackagesBuildsCleanupPaths(t *testing.T) {
@@ -42,19 +45,35 @@ func TestParseSourcesBuildsCleanupPaths(t *testing.T) {
 	require.Contains(t, final, "pool/main/h/hello/hello_1.0.orig.tar.xz")
 }
 
-func TestReleaseIndexTargetsPreferXZOverGZAndPlain(t *testing.T) {
-	sums := map[string]string{
-		"main/binary-amd64/Packages":    "plain",
-		"main/binary-amd64/Packages.gz": "gz",
-		"main/binary-amd64/Packages.xz": "xz",
+func TestReleaseManifestKeepsCompressionVariantsDistinct(t *testing.T) {
+	plain := []byte("plain")
+	gz := []byte("gzip")
+	xz := []byte("xz")
+	manifest, err := parseReleaseManifest(strings.NewReader(releaseSHA256(map[string][]byte{
+		"main/binary-amd64/Packages":    plain,
+		"main/binary-amd64/Packages.gz": gz,
+		"main/binary-amd64/Packages.xz": xz,
+	})))
+	require.NoError(t, err)
+	require.Len(t, manifest.Entries, 3)
+	require.Equal(t, "main/binary-amd64/Packages", manifest.Entries[0].Path)
+	require.Equal(t, "main/binary-amd64/Packages.gz", manifest.Entries[1].Path)
+	require.Equal(t, "main/binary-amd64/Packages.xz", manifest.Entries[2].Path)
+	require.NotEqual(t, manifest.Entries[1].SHA256, manifest.Entries[2].SHA256)
+}
+
+func TestReleaseIndexSelectionParsesOnePreferredCompressionVariant(t *testing.T) {
+	entries := []releaseEntry{
+		{Path: "main/binary-amd64/Packages", Size: 100},
+		{Path: "main/binary-amd64/Packages.gz", Size: 50},
+		{Path: "main/binary-amd64/Packages.xz", Size: 25},
+		{Path: "main/source/Sources.gz", Size: 40},
 	}
-	targets := releaseIndexTargets("dists/bookworm/InRelease", sums)
-	require.Len(t, targets, 1)
-	require.Equal(t, "dists/bookworm/main/binary-amd64/Packages.xz", targets[0].URL)
-	require.Equal(t, []string{
-		"dists/bookworm/main/binary-amd64/Packages.gz",
-		"dists/bookworm/main/binary-amd64/Packages",
-	}, targets[0].Candidates)
+	targets, err := selectReleaseIndexes(entries)
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	require.Equal(t, "main/binary-amd64/Packages.xz", targets[0].entry.Path)
+	require.Equal(t, "main/source/Sources.gz", targets[1].entry.Path)
 }
 
 func TestDistributionRefreshRejectsGenerationWhenOneReleaseIndexIsMissing(t *testing.T) {
@@ -133,6 +152,271 @@ func TestDistributionRefreshFailsOnReleaseIndexChecksumMismatch(t *testing.T) {
 	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "SHA256 mismatch")
+	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+}
+
+func TestDistributionRefreshFailsOnReleaseIndexSizeMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	body := []byte("components")
+	sum := sha256.Sum256(body)
+	release := fmt.Sprintf("SHA256:\n %x %d main/dep11/Components-amd64.yml\n", sum, len(body)+1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/dep11/Components-amd64.yml":
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
+	require.ErrorContains(t, err, "size mismatch")
+	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+}
+
+func TestDistributionRefreshDoesNotSubstituteCompressionVariants(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	xzBody := []byte("expected xz bytes")
+	gzBody := []byte("different gzip bytes")
+	release := releaseSHA256(map[string][]byte{
+		"main/dep11/Components-amd64.yml.xz": xzBody,
+	})
+	var gzipRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/dep11/Components-amd64.yml.gz":
+			gzipRequests++
+			_, _ = w.Write(gzBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
+	require.ErrorContains(t, err, "Components-amd64.yml.xz")
+	require.Zero(t, gzipRequests, "a missing xz object must not fall back to gzip bytes")
+	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+}
+
+func TestDistributionRefreshKeepsReleaseFallbackServingIdentityExact(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	components := []byte("components")
+	release := releaseSHA256(map[string][]byte{"main/dep11/Components-amd64.yml": components})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/trixie/Release":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/dep11/Components-amd64.yml":
+			_, _ = w.Write(components)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	require.NoError(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"))
+	for requestPath, expected := range map[string]struct {
+		status int
+		body   []byte
+	}{
+		"/dists/trixie/InRelease":                       {status: http.StatusNotFound},
+		"/dists/trixie/Release":                         {status: http.StatusOK, body: []byte(release)},
+		"/dists/trixie/main/dep11/Components-amd64.yml": {status: http.StatusOK, body: components},
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		require.Equal(t, expected.status, rec.Code, requestPath)
+		require.Equal(t, "GENERATION", rec.Header().Get("X-Cache"), requestPath)
+		require.NotEmpty(t, rec.Header().Get("X-Cache-Generation"), requestPath)
+		require.Equal(t, expected.body, rec.Body.Bytes(), requestPath)
+	}
+}
+
+func TestDistributionReleaseCompanionsOnlyAllowForbiddenOrNotFound(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		status   int
+		succeeds bool
+	}{
+		{name: "forbidden companion is optional", status: http.StatusForbidden, succeeds: true},
+		{name: "unauthorized companion is fatal", status: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			components := []byte("components")
+			release := releaseSHA256(map[string][]byte{"main/dep11/Components-amd64.yml": components})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/dists/trixie/Release":
+					_, _ = io.WriteString(w, release)
+				case "/dists/trixie/Release.gpg", "/dists/trixie/Release.sig", "/dists/trixie/Release.asc":
+					w.WriteHeader(test.status)
+				case "/dists/trixie/main/dep11/Components-amd64.yml":
+					_, _ = w.Write(components)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			handler := newDebDistributionTestHandler(t, server.URL)
+			err := handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie")
+			if test.succeeds {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestDistributionGenerationServesExactCanonicalAndByHashMetadata(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	packagesPath := "main/binary-amd64/Packages.gz"
+	packages := gzipData(t, "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\n\n")
+	componentsPath := "main/dep11/Components-amd64.yml.gz"
+	components := gzipData(t, "components")
+	release := "Acquire-By-Hash: yes\n" + releaseSHA256(map[string][]byte{
+		packagesPath: packages, componentsPath: components,
+	})
+	bodies := map[string][]byte{packagesPath: packages, componentsPath: components}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dists/trixie/InRelease" {
+			_, _ = io.WriteString(w, release)
+			return
+		}
+		for relativePath, body := range bodies {
+			sum := sha256.Sum256(body)
+			byHash := "/dists/trixie/" + path.Dir(relativePath) + "/by-hash/SHA256/" + fmt.Sprintf("%x", sum)
+			if r.URL.Path == byHash {
+				_, _ = w.Write(body)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	require.NoError(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"))
+	for relativePath, body := range bodies {
+		canonical := "/dists/trixie/" + relativePath
+		sum := sha256.Sum256(body)
+		byHash := "/dists/trixie/" + path.Dir(relativePath) + "/by-hash/SHA256/" + fmt.Sprintf("%x", sum)
+		for _, requestPath := range []string{canonical, byHash} {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, requestPath, nil))
+			require.Equal(t, http.StatusOK, rec.Code, requestPath)
+			require.Equal(t, "GENERATION", rec.Header().Get("X-Cache"), requestPath)
+			require.NotEmpty(t, rec.Header().Get("X-Cache-Generation"), requestPath)
+			require.Equal(t, body, rec.Body.Bytes(), requestPath)
+		}
+	}
+}
+
+func TestDistributionRefreshResumesPersistedStagingInBoundedSlices(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	entries := make(map[string][]byte, 40)
+	for i := range 40 {
+		entries[fmt.Sprintf("main/dep11/item-%02d.yml", i)] = []byte(fmt.Sprintf("item-%02d", i))
+	}
+	release := releaseSHA256(entries)
+	requests := map[string]int{}
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleanPath := strings.TrimPrefix(r.URL.Path, "/dists/trixie/")
+		mu.Lock()
+		requests[cleanPath]++
+		mu.Unlock()
+		if cleanPath == "InRelease" {
+			_, _ = io.WriteString(w, release)
+			return
+		}
+		if body, ok := entries[cleanPath]; ok {
+			_, _ = w.Write(body)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	outcome, err := handler.RefreshRootTask(ctx, "deb_distribution:dists/trixie")
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+	require.Equal(t, "partial", outcome.Result)
+	require.Equal(t, "staging_continuation", outcome.ReasonCode)
+	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+
+	outcome, err = handler.RefreshRootTask(ctx, "deb_distribution:dists/trixie")
+	require.NoError(t, err)
+	require.Equal(t, "updated", outcome.Result)
+	require.True(t, handler.RepositoryStatuses()[0].HasCurrent)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, requests["InRelease"])
+	for cleanPath := range entries {
+		require.Equal(t, 1, requests[cleanPath], cleanPath)
+	}
+}
+
+func TestDistributionRefreshDiscardsStagingWhenReleaseAnchorChanges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	entries := make(map[string][]byte, 40)
+	for i := range 40 {
+		entries[fmt.Sprintf("main/dep11/item-%02d.yml", i)] = []byte(fmt.Sprintf("item-%02d", i))
+	}
+	release := releaseSHA256(entries)
+	var mu sync.RWMutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.RLock()
+		defer mu.RUnlock()
+		cleanPath := strings.TrimPrefix(r.URL.Path, "/dists/trixie/")
+		if cleanPath == "InRelease" {
+			_, _ = io.WriteString(w, release)
+			return
+		}
+		if body, ok := entries[cleanPath]; ok {
+			_, _ = w.Write(body)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	_, err := handler.RefreshRootTask(ctx, "deb_distribution:dists/trixie")
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+
+	mu.Lock()
+	entries["main/dep11/item-40.yml"] = []byte("item-40")
+	release = releaseSHA256(entries)
+	mu.Unlock()
+	outcome, err := handler.RefreshRootTask(ctx, "deb_distribution:dists/trixie")
+	require.ErrorAs(t, err, &retry)
+	require.Equal(t, "restarted", outcome.Result)
+	require.Equal(t, "staging_anchor_changed", outcome.ReasonCode)
 	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
 }
 

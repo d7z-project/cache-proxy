@@ -35,12 +35,12 @@ type Handler struct {
 	store            *blobfs.Store
 	stats            *httpcache.Stats
 	base             *httpcache.Handler
-	client           *utils.HttpClientWrapper
+	client           *utils.HTTPClientWrapper
 	upstreams        []string
 	expireAfter      config.Expiration
 	deltaExpireAfter config.Expiration
 	refreshInterval  time.Duration
-	sh               *health.ServiceHealth
+	serviceHealth    *health.ServiceHealth
 
 	mu            sync.RWMutex
 	refreshMu     sync.Mutex
@@ -71,12 +71,12 @@ func NewHandler(
 		expireAfter:      expireAfter,
 		deltaExpireAfter: resolveDeltaExpireAfter(policy, expireAfter),
 		refreshInterval:  refreshInterval,
-		sh:               svcHealth,
+		serviceHealth:    svcHealth,
 		rewriteDesc:      policy.DescriptorRewrite != nil && *policy.DescriptorRewrite,
 		verifyObjects:    policy.VerifyObjects != nil && *policy.VerifyObjects,
 		upstreamGate:     upstreamGate,
 	}
-	handler.client = utils.DefaultHttpClientWrapper()
+	handler.client = utils.DefaultHTTPClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, transport)
 	runtimeCfg.VerifyFunc = handler.verifyCacheObject
 	runtimeCfg.UpstreamGate = upstreamGate
@@ -109,15 +109,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *Handler) Start(ctx context.Context) error {
-	if h.sh != nil {
-		h.sh.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
+	if h.serviceHealth != nil {
+		h.serviceHealth.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
 	}
 	h.cleanCurrentTemp(ctx)
 	if err := h.restoreCurrent(ctx); err != nil {
 		return err
 	}
-	if h.sh != nil && h.currentSnapshot().Generation != "" {
-		h.sh.MarkResourceActive("/", []health.ResourceTarget{{Path: "summary"}})
+	if h.serviceHealth != nil && h.currentSnapshot().Generation != "" {
+		h.serviceHealth.MarkResourceActive("/", []health.ResourceTarget{{Path: "summary"}})
 	}
 	return nil
 }

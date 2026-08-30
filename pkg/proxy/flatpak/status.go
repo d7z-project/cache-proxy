@@ -9,10 +9,10 @@ import (
 
 // DashboardStatus reports aggregate Flatpak upstream health.
 func (h *Handler) DashboardStatus() (color, label, extra string) {
-	if h.sh == nil {
+	if h.serviceHealth == nil {
 		return "", "", ""
 	}
-	return h.sh.DashboardStatus()
+	return h.serviceHealth.DashboardStatus()
 }
 
 // RepositoryStatuses reports the published Flatpak metadata generation for the home page.
@@ -37,8 +37,8 @@ func (h *Handler) RepositoryStatuses() []proxyruntime.RepositoryStatus {
 	} else {
 		status.State = "pending"
 	}
-	if h.sh != nil {
-		if resource, ok := h.sh.ResourceHealth("/"); ok {
+	if h.serviceHealth != nil {
+		if resource, ok := h.serviceHealth.ResourceHealth("/"); ok {
 			status.State = resource.State.String()
 			status.Refreshing = resource.Refreshing
 			status.LastError = resource.LastError

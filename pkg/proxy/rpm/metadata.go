@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -84,7 +85,7 @@ func (inspector) ValidateSnapshot(_ context.Context, snapshot *filerepo.LiveSnap
 		}
 	}
 	if repomdCount == 0 {
-		return fmt.Errorf("RPM snapshot contains no repomd.xml")
+		return errors.New("rpm snapshot contains no repomd.xml")
 	}
 	return nil
 }
@@ -265,7 +266,7 @@ func buildRepomdItem(
 		_ = blobReader.Close()
 		return 0, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	return parsePrimary(reader, paths, repoRoot)
 }
 
@@ -281,7 +282,7 @@ func parseRepomd(blob filerepo.MetadataBlob) ([]repomdItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	return parseRepomdReader(reader)
 }
 
@@ -397,7 +398,7 @@ func verifyRepomdChecksum(path, sumType, expected string, blob filerepo.Metadata
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	return verifyRepomdChecksumReader(path, sumType, expected, reader)
 }
 

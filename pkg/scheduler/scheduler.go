@@ -117,10 +117,11 @@ type TaskFactory struct {
 
 type taskState struct {
 	TaskInfo
-	handler      TaskHandler
-	index        int
-	discoveredAt time.Time
-	firstRunDone bool
+	handler        TaskHandler
+	index          int
+	discoveredAt   time.Time
+	firstRunDone   bool
+	rerunRequested bool
 }
 
 type cmdKind int
@@ -159,7 +160,7 @@ type Scheduler struct {
 	storeMu sync.Mutex
 	startMu sync.Mutex
 	started bool
-	m       *metrics
+	metrics *metrics
 
 	preStartTasks map[TaskKey]TaskDef
 	runObserver   func(TaskRun)
@@ -173,7 +174,7 @@ func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler 
 	return &Scheduler{
 		cmdCh:           make(chan cmd, 16),
 		bus:             b,
-		busSub:          b.Subscribe(bus.EventMetadataDiscovered, bus.EventMetadataRemoved),
+		busSub:          b.Subscribe(bus.EventMetadataDiscovered, bus.EventMetadataRefreshRequested, bus.EventMetadataRemoved),
 		startGate:       make(chan struct{}),
 		done:            make(chan struct{}),
 		factories:       map[string]*TaskFactory{},
@@ -182,7 +183,7 @@ func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler 
 		heap:            taskHeap{},
 		store:           store,
 		tenant:          "_scheduler",
-		m:               newMetrics(reg),
+		metrics:         newMetrics(reg),
 		preStartTasks:   map[TaskKey]TaskDef{},
 	}
 }

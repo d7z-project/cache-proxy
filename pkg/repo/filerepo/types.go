@@ -18,10 +18,12 @@ import (
 )
 
 var (
-	errMetadataNotFound    = errors.New("metadata upstream not found")
-	errMetadataTransient   = errors.New("metadata upstream transient failure")
-	errMetadataForbidden   = errors.New("metadata upstream forbidden")
-	errMetadataMirrorRetry = errors.New("metadata upstream allows mirror retry")
+	errMetadataNotFound            = errors.New("metadata upstream not found")
+	errMetadataTransient           = errors.New("metadata upstream transient failure")
+	errMetadataForbidden           = errors.New("metadata upstream forbidden")
+	errMetadataMirrorRetry         = errors.New("metadata upstream allows mirror retry")
+	errMetadataRefreshContinuation = errors.New("metadata refresh slice is complete")
+	errMetadataAnchorChanged       = errors.New("metadata refresh anchor changed")
 )
 
 func ResolveMetadataRefreshInterval(value config.Duration, fallback time.Duration) time.Duration {
@@ -51,6 +53,8 @@ type MetadataBlob struct {
 	Path    string
 	temp    string
 	Headers map[string]string
+	Size    int64
+	Digest  string
 }
 
 func (b MetadataBlob) Open() (io.ReadSeekCloser, error) {
@@ -60,17 +64,13 @@ func (b MetadataBlob) Open() (io.ReadSeekCloser, error) {
 	return os.Open(b.temp)
 }
 
-func (b MetadataBlob) Close() {
-	if b.temp != "" {
-		_ = os.Remove(b.temp)
-	}
-}
-
 type MetadataObject struct {
 	Path         string `yaml:"path"`
 	Required     bool   `yaml:"required"`
+	StatusCode   int    `yaml:"status_code,omitempty"`
 	StorePath    string `yaml:"store_path,omitempty"`
 	Digest       string `yaml:"digest,omitempty"`
+	Size         int64  `yaml:"size,omitempty"`
 	ChecksumType string `yaml:"checksum_type,omitempty"`
 	Checksum     string `yaml:"checksum,omitempty"`
 }
@@ -161,12 +161,18 @@ func (b *PathIndexBuilder) Finalize() []string {
 }
 
 type RefreshSession struct {
-	handler    *IndexedHandler
-	rootID     string
-	upstream   string
-	generation string
-	blobs      map[string]*MetadataBlob
-	targets    []MetadataTarget
+	handler              *IndexedHandler
+	rootID               string
+	upstream             string
+	generation           string
+	blobs                map[string]*MetadataBlob
+	targets              []MetadataTarget
+	maxTransfers         int
+	transfers            int
+	anchorPath           string
+	anchorDigest         string
+	expectedAnchorPath   string
+	expectedAnchorDigest string
 }
 
 func (s *RefreshSession) Targets() []MetadataTarget {
@@ -191,13 +197,27 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		blob, err := s.handler.fetchMetadataObject(ctx, s.rootID, s.generation, s.upstream, candidate)
+		if err := s.reserveTransfer(); err != nil {
+			return MetadataBlob{}, err
+		}
+		blob, err := s.handler.fetchMetadataObject(ctx, metadataFetchRequest{
+			rootID: s.rootID, generation: s.generation, upstream: s.upstream,
+			requestPath: candidate, objectPath: candidate,
+		})
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		for _, key := range candidates {
 			s.blobs[key] = &blob
+		}
+		if s.anchorPath == "" {
+			s.anchorPath = blob.Path
+			s.anchorDigest = blob.Digest
+			if s.expectedAnchorPath != "" && s.expectedAnchorPath != blob.Path ||
+				s.expectedAnchorDigest != "" && !strings.EqualFold(s.expectedAnchorDigest, blob.Digest) {
+				return MetadataBlob{}, errMetadataAnchorChanged
+			}
 		}
 		return blob, nil
 	}
@@ -209,6 +229,53 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 		lastErr = mfe.Err
 	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: lastErr}
+}
+
+// FetchVerified downloads requestPath but persists it under objectPath only after the
+// declared size and SHA256 have been verified. It is used for content-addressed
+// repository metadata such as Debian by-hash resources.
+func (s *RefreshSession) FetchVerified(
+	ctx context.Context,
+	requestPath, objectPath string,
+	expectedSize int64,
+	expectedSHA256 string,
+) (MetadataBlob, error) {
+	requestPath = strings.TrimPrefix(path.Clean("/"+requestPath), "/")
+	objectPath = strings.TrimPrefix(path.Clean("/"+objectPath), "/")
+	if requestPath == "." || objectPath == "." || !httpcache.SafePath(requestPath) || !httpcache.SafePath(objectPath) {
+		return MetadataBlob{}, errors.New("invalid verified metadata path")
+	}
+	if expectedSize < 0 || len(expectedSHA256) != sha256.Size*2 {
+		return MetadataBlob{}, errors.New("invalid verified metadata declaration")
+	}
+	if blob, ok := s.blobs[objectPath]; ok {
+		return *blob, nil
+	}
+	if blob, ok := s.handler.openVerifiedStagingObject(ctx, s.rootID, s.generation, objectPath, expectedSize, expectedSHA256); ok {
+		s.blobs[objectPath] = &blob
+		return blob, nil
+	}
+	if err := s.reserveTransfer(); err != nil {
+		return MetadataBlob{}, err
+	}
+	blob, err := s.handler.fetchMetadataObject(ctx, metadataFetchRequest{
+		rootID: s.rootID, generation: s.generation, upstream: s.upstream,
+		requestPath: requestPath, objectPath: objectPath,
+		verify: true, expectedSize: expectedSize, expectedSHA256: expectedSHA256,
+	})
+	if err != nil {
+		return MetadataBlob{}, err
+	}
+	s.blobs[objectPath] = &blob
+	return blob, nil
+}
+
+func (s *RefreshSession) reserveTransfer() error {
+	if s.maxTransfers > 0 && s.transfers >= s.maxTransfers {
+		return errMetadataRefreshContinuation
+	}
+	s.transfers++
+	return nil
 }
 
 func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (MetadataObject, error) {

@@ -21,7 +21,7 @@ func TempFileFromReader(src io.Reader) (*os.File, int64, error) {
 		if closeErr := tmp.Close(); closeErr != nil {
 			operationErr = errors.Join(operationErr, fmt.Errorf("close temp file: %w", closeErr))
 		}
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return nil, 0, operationErr
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
@@ -29,7 +29,7 @@ func TempFileFromReader(src io.Reader) (*os.File, int64, error) {
 		if closeErr := tmp.Close(); closeErr != nil {
 			operationErr = errors.Join(operationErr, fmt.Errorf("close temp file: %w", closeErr))
 		}
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return nil, 0, operationErr
 	}
 	return tmp, written, nil
@@ -49,6 +49,6 @@ func CleanStaleTempFiles(maxAge time.Duration) {
 		if err != nil || info.ModTime().After(cutoff) {
 			continue
 		}
-		os.Remove(filepath.Join(os.TempDir(), entry.Name()))
+		_ = os.Remove(filepath.Join(os.TempDir(), entry.Name()))
 	}
 }

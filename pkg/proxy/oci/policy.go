@@ -64,8 +64,14 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.BusyPolicy == "" {
 		block.BusyPolicy = config.BusyPolicyJoin
 	}
-	if err := validate(block.Upstream, &block.Policy); err != nil {
+	if err := validateConfig(block.Upstream, &block.Policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: oci transport: %w", plan.Name(), err)
+	}
+	if !plan.Enabled() {
+		return nil
 	}
 	expireAfter := config.DefaultExpireAfter
 	if !block.ExpireAfter.IsUnset() {
@@ -86,7 +92,10 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	return plan.BindAddr(block.Bind, expireAfter, handler)
 }
 
-func validate(upstream string, policy *Policy) error {
+func validateConfig(upstream string, policy *Policy) error {
+	if err := config.ValidateHTTPUpstream(upstream); err != nil {
+		return fmt.Errorf("oci upstream URL is invalid: %w", err)
+	}
 	host := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(upstream, "https://"), "http://"))
 	if host != "" {
 		host = strings.Split(host, "/")[0]
@@ -101,7 +110,7 @@ func validate(upstream string, policy *Policy) error {
 		return fmt.Errorf("invalid oci busy policy %q", policy.BusyPolicy)
 	}
 	if policy.FreshFor > 0 && policy.FreshFor.Duration() < time.Second {
-		return fmt.Errorf("oci fresh_for must be at least 1s")
+		return errors.New("oci fresh_for must be at least 1s")
 	}
 	for i, rule := range policy.Rules {
 		if strings.TrimSpace(rule.Match) == "" {

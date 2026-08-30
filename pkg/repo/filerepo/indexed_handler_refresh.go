@@ -1,7 +1,6 @@
 package filerepo
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,112 +9,16 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"path"
 	"strconv"
-	"strings"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
-
-const metadataGenerationRetention = 15 * time.Minute
-
-func (h *IndexedHandler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
-	keep, err := h.currentCleanupPaths(ctx)
-	if err != nil {
-		return err
-	}
-	deleted := 0
-	return fs.WalkDir(h.store.TenantFS(h.name), h.objectRoot, func(objectPath string, entry fs.DirEntry, err error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
-			return fs.SkipAll
-		}
-		if err != nil || entry.IsDir() || objectPath == h.statePath() || strings.Contains(objectPath, "/.roots/") {
-			return nil
-		}
-		if cleanPath, class, ok := h.contentObject(objectPath); ok {
-			if _, current := keep[cleanPath]; current || h.base.Busy(objectPath) {
-				return nil
-			}
-			expireAfter := h.policy.AuxiliaryExpireAfter
-			if class == ResourceArtifact {
-				expireAfter = h.policy.ArtifactExpireAfter
-			}
-			if expireAfter.IsNever() || expireAfter.IsUnset() {
-				return nil
-			}
-			info, statErr := h.store.StatObject(ctx, h.name, objectPath)
-			if statErr != nil {
-				return nil
-			}
-			fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
-			if parseErr == nil && time.Since(fetchedAt) <= expireAfter.Duration() {
-				return nil
-			}
-		}
-		if opts.DryRun {
-			deleted++
-			slog.Info("indexed cleanup dry-run delete", "instance", h.name, "path", objectPath)
-			return nil
-		}
-		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Info("indexed cleanup delete failed", "instance", h.name, "path", objectPath, "err", err)
-		} else {
-			deleted++
-		}
-		return nil
-	})
-}
-
-func (h *IndexedHandler) currentCleanupPaths(ctx context.Context) (map[string]struct{}, error) {
-	h.mu.RLock()
-	snapshots := make([]*LiveSnapshot, 0, len(h.rootSnapshots))
-	for _, snapshot := range h.rootSnapshots {
-		if snapshot != nil {
-			copySnapshot := *snapshot
-			snapshots = append(snapshots, &copySnapshot)
-		}
-	}
-	h.mu.RUnlock()
-	keep := map[string]struct{}{}
-	for _, snapshot := range snapshots {
-		paths, err := h.loadCleanupPathSet(ctx, snapshot.RootID, snapshot.Generation)
-		if err != nil {
-			return nil, err
-		}
-		for cleanPath := range paths {
-			keep[cleanPath] = struct{}{}
-		}
-	}
-	return keep, nil
-}
-
-func (h *IndexedHandler) contentObject(objectPath string) (string, ResourceClass, bool) {
-	prefix := path.Join(h.objectRoot, ".content") + "/"
-	rel := strings.TrimPrefix(objectPath, prefix)
-	if rel == objectPath {
-		return "", ResourceUnknown, false
-	}
-	parts := strings.SplitN(rel, "/", 2)
-	if len(parts) != 2 || !httpcache.SafePath(parts[1]) {
-		return "", ResourceUnknown, false
-	}
-	switch parts[0] {
-	case "artifacts":
-		return parts[1], ResourceArtifact, true
-	case "sidecars":
-		return parts[1], ResourceSidecar, true
-	default:
-		return "", ResourceUnknown, false
-	}
-}
 
 func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 	_, err := h.RefreshRootTask(ctx, rootID)
@@ -125,17 +28,33 @@ func (h *IndexedHandler) RefreshRoot(ctx context.Context, rootID string) error {
 func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*scheduler.TaskOutcome, error) {
 	h.mu.RLock()
 	entry, ok := h.roots[rootID]
+	var root RepositoryRoot
+	if ok && entry != nil {
+		root = entry.root
+		root.Targets = append([]MetadataTarget(nil), entry.root.Targets...)
+		root.PrimaryMetadata = append([]string(nil), entry.root.PrimaryMetadata...)
+		root.Attributes = append([]RepositoryAttribute(nil), entry.root.Attributes...)
+		root.Components = append([]string(nil), entry.root.Components...)
+		root.Architectures = append([]string(nil), entry.root.Architectures...)
+	}
 	h.mu.RUnlock()
-	if !ok || entry == nil || len(entry.root.Targets) == 0 {
+	if !ok || len(root.Targets) == 0 {
 		return nil, fmt.Errorf("root %s not found or has no targets", rootID)
 	}
-	targets := append([]MetadataTarget(nil), entry.root.Targets...)
+	if h.rootRetired(rootID) || h.rootNeedsRetirement(rootID, time.Now()) {
+		if err := h.beginRootRetirement(ctx, rootID); err != nil {
+			return nil, err
+		}
+		h.stats.RecordRepositoryMaintenance(h.name, h.mode, "root_retirement", "started", nil)
+		return repositoryRefreshOutcome("retired", "root_inactive", "", ""), scheduler.ErrTaskSkipped
+	}
+	targets := append([]MetadataTarget(nil), root.Targets...)
 	var (
 		refreshGen uint64
 		release    func()
 	)
-	if h.sh != nil {
-		rh, done, err := h.sh.TryStartRefresh(rootID, time.Now())
+	if h.serviceHealth != nil {
+		rh, done, err := h.serviceHealth.TryStartRefresh(rootID, time.Now())
 		if err != nil {
 			switch {
 			case errors.Is(err, health.ErrRefreshAlreadyRunning):
@@ -163,7 +82,28 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 	if len(upstreams) == 0 {
 		return nil, errors.New("no upstreams available")
 	}
+	staging, hasStaging := h.loadRefreshStaging(ctx, rootID)
+	if hasStaging {
+		found := false
+		ordered := []string{staging.Upstream}
+		for _, upstream := range upstreams {
+			if upstream == staging.Upstream {
+				found = true
+				continue
+			}
+			ordered = append(ordered, upstream)
+		}
+		if found {
+			upstreams = ordered
+		} else {
+			h.discardRefreshStaging(ctx, staging)
+			hasStaging = false
+		}
+	}
 	generation := strconv.FormatInt(time.Now().UnixNano(), 36)
+	if hasStaging {
+		generation = staging.Generation
+	}
 	var firstErr error
 	for _, upstream := range upstreams {
 		if current := h.rootSnapshot(rootID); current != nil && current.Upstream == upstream {
@@ -195,11 +135,12 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 				continue
 			}
 			if unchanged {
-				if h.sh != nil {
-					h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToResourceTargets(current.Targets))
+				if hasStaging {
+					h.discardRefreshStaging(ctx, staging)
 				}
-				h.saveState(context.Background())
-				h.reportMetadataState()
+				outcome := h.completeSuccessfulRefresh(
+					rootID, refreshGen, current, "unchanged", "same_as_current", upstream,
+				)
 				slog.Debug(
 					"repository refresh skipped unchanged metadata",
 					"instance", h.name,
@@ -207,19 +148,69 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 					"root_id", rootID,
 					"upstream", upstream,
 				)
-				return repositoryRefreshOutcome("unchanged", "same_as_current", current.Generation, upstream), nil
+				return outcome, nil
 			}
 		}
-		snapshot, cleanupPaths, err := h.buildSnapshot(ctx, entry.root, generation, upstream)
+		if !hasStaging || staging.Upstream != upstream {
+			if hasStaging {
+				h.discardRefreshStaging(ctx, staging)
+			}
+			generation = strconv.FormatInt(time.Now().UnixNano(), 36)
+			staging = refreshStagingState{RootID: rootID, Generation: generation, Upstream: upstream, CreatedAt: time.Now().UTC()}
+			hasStaging = h.mode == config.ModeDEB
+			if hasStaging {
+				if err := h.saveRefreshStaging(ctx, staging); err != nil {
+					return nil, err
+				}
+			}
+		}
+		attemptCtx := ctx
+		cancelAttempt := func() {}
+		if h.mode == config.ModeDEB {
+			attemptCtx, cancelAttempt = context.WithTimeout(ctx, refreshSliceDuration)
+		}
+		snapshot, cleanupPaths, anchorPath, anchorDigest, transfers, err := h.buildSnapshot(
+			attemptCtx, root, generation, upstream, staging.AnchorPath, staging.AnchorDigest,
+		)
+		attemptDeadline := attemptCtx.Err()
+		cancelAttempt()
 		if err != nil {
-			h.cleanupFailedGeneration(rootID, generation)
+			if errors.Is(err, errMetadataAnchorChanged) {
+				h.discardRefreshStaging(ctx, staging)
+				h.stats.RecordRepositoryMaintenance(h.name, h.mode, "metadata_refresh", "anchor_changed", nil)
+				return &scheduler.TaskOutcome{
+					Result: "restarted", ReasonCode: "staging_anchor_changed",
+					Detail: fmt.Sprintf("old=%s new=%s", staging.AnchorDigest, anchorDigest),
+				}, scheduler.RetryAt(time.Now().Add(maintenanceContinuationDelay))
+			}
+			if h.mode == config.ModeDEB && ctx.Err() == nil &&
+				(errors.Is(err, errMetadataRefreshContinuation) || errors.Is(attemptDeadline, context.DeadlineExceeded)) {
+				staging.AnchorPath = anchorPath
+				staging.AnchorDigest = anchorDigest
+				if saveErr := h.saveRefreshStaging(ctx, staging); saveErr != nil {
+					return nil, saveErr
+				}
+				h.stats.RecordRepositoryMaintenance(h.name, h.mode, "metadata_refresh", "continuation", map[string]int{"transfers": transfers})
+				return &scheduler.TaskOutcome{
+					Result: "partial", ReasonCode: "staging_continuation",
+					Detail: fmt.Sprintf("generation=%s upstream=%s transfers=%d", generation, upstream, transfers),
+				}, scheduler.RetryAt(time.Now().Add(maintenanceContinuationDelay))
+			}
 			var limited *httpcache.UpstreamRateLimitError
 			if errors.As(err, &limited) {
+				if hasStaging {
+					staging.AnchorPath = anchorPath
+					staging.AnchorDigest = anchorDigest
+					_ = h.saveRefreshStaging(ctx, staging)
+				}
 				if !limited.RetryAfter.IsZero() {
 					return nil, scheduler.RetryAt(limited.RetryAfter)
 				}
 				return nil, err
 			}
+			h.cleanupFailedGeneration(rootID, generation)
+			_ = h.deleteRefreshStaging(ctx, rootID)
+			hasStaging = false
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -238,14 +229,18 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 			)
 			continue
 		}
-		if current := h.rootSnapshot(rootID); h.canReuseCurrentSnapshot(ctx, current) &&
-			snapshotsMetadataEqual(current, snapshot) {
+		current := h.rootSnapshot(rootID)
+		cleanupIndexExists := false
+		if current != nil && current.RootID != "" && current.Generation != "" {
+			_, err := h.store.StatObject(ctx, h.name, h.cleanupIndexPath(current.RootID, current.Generation))
+			cleanupIndexExists = err == nil
+		}
+		if cleanupIndexExists && snapshotsMetadataEqual(current, snapshot) {
 			h.cleanupFailedGeneration(rootID, generation)
-			if h.sh != nil {
-				h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToResourceTargets(current.Targets))
-			}
-			h.saveState(context.Background())
-			h.reportMetadataState()
+			_ = h.deleteRefreshStaging(ctx, rootID)
+			outcome := h.completeSuccessfulRefresh(
+				rootID, refreshGen, current, "unchanged", "same_as_current", upstream,
+			)
 			slog.Debug(
 				"repository refresh skipped identical metadata",
 				"instance", h.name,
@@ -253,21 +248,22 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 				"root_id", rootID,
 				"upstream", upstream,
 			)
-			return repositoryRefreshOutcome("unchanged", "same_as_current", current.Generation, upstream), nil
+			return outcome, nil
 		}
 		if err := h.publishSnapshot(ctx, snapshot, cleanupPaths); err != nil {
 			h.cleanupFailedGeneration(rootID, generation)
+			_ = h.deleteRefreshStaging(ctx, rootID)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
 		h.setRootSnapshot(rootID, snapshot)
-		if h.sh != nil {
-			h.sh.FinishRefresh(rootID, refreshGen, nil, targetsToResourceTargets(snapshot.Targets))
-		}
-		h.saveState(context.Background())
-		h.reportMetadataState()
+		_ = h.deleteRefreshStaging(ctx, rootID)
+		outcome := h.completeSuccessfulRefresh(
+			rootID, refreshGen, snapshot, "updated", "published", upstream,
+		)
+		h.stats.RecordRepositoryMaintenance(h.name, h.mode, "metadata_refresh", "published", map[string]int{"transfers": transfers})
 		slog.Debug(
 			"repository refresh succeeded",
 			"instance", h.name,
@@ -275,19 +271,38 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 			"root_id", rootID,
 			"upstream", upstream,
 		)
-		return repositoryRefreshOutcome("updated", "published", snapshot.Generation, upstream), nil
+		return outcome, nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataTransient
 	}
-	if h.sh != nil {
-		h.sh.FinishRefresh(rootID, refreshGen, refreshHealthError(firstErr), nil)
-		if _, ok := h.sh.ResourceHealth(rootID); !ok {
+	if h.serviceHealth != nil {
+		h.serviceHealth.FinishRefresh(rootID, refreshGen, refreshHealthError(firstErr), nil)
+		if _, ok := h.serviceHealth.ResourceHealth(rootID); !ok {
 			h.removeRoot(rootID)
 		}
 	}
 	h.saveState(context.Background())
 	return nil, firstErr
+}
+
+func (h *IndexedHandler) completeSuccessfulRefresh(
+	rootID string,
+	refreshGeneration uint64,
+	snapshot *LiveSnapshot,
+	result, reasonCode, upstream string,
+) *scheduler.TaskOutcome {
+	if h.serviceHealth != nil {
+		h.serviceHealth.FinishRefresh(
+			rootID,
+			refreshGeneration,
+			nil,
+			targetsToResourceTargets(snapshot.Targets),
+		)
+	}
+	h.saveState(context.Background())
+	h.reportMetadataState()
+	return repositoryRefreshOutcome(result, reasonCode, snapshot.Generation, upstream)
 }
 
 func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
@@ -312,167 +327,11 @@ func (h *IndexedHandler) cleanupFailedGeneration(rootID, generation string) {
 	}
 }
 
-func (h *IndexedHandler) CleanupRoot(ctx context.Context, rootID string, opts config.CleanupConfig) error {
-	rootBase := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID))
-	rootDir := path.Join(rootBase, "generations")
-	retained, err := h.retainedMetadataGenerations(ctx, rootID)
-	if err != nil {
-		return err
-	}
-	deleted := 0
-	var toDelete []string
-	if err := fs.WalkDir(h.store.TenantFS(h.name), rootDir, func(objectPath string, entry fs.DirEntry, err error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if opts.BatchSize > 0 && deleted+len(toDelete) >= opts.BatchSize {
-			return fs.SkipAll
-		}
-		if err != nil || entry.IsDir() {
-			return nil
-		}
-		rel := strings.TrimPrefix(objectPath, rootDir+"/")
-		parts := strings.SplitN(rel, "/", 3)
-		if len(parts) == 0 {
-			return nil
-		}
-		if _, keep := retained[parts[0]]; !keep && !h.metadataGenerationInUse(rootID, parts[0]) {
-			toDelete = append(toDelete, objectPath)
-			return nil
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	for _, item := range toDelete {
-		if opts.DryRun {
-			deleted++
-			slog.Info("metadata gc dry-run delete", "instance", h.name, "root_id", rootID, "path", item)
-			continue
-		}
-		if err := h.store.DeleteObject(ctx, h.name, item); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Debug("metadata gc failed", "path", item, "err", err)
-			continue
-		}
-		deleted++
-	}
-	if opts.BatchSize > 0 && deleted >= opts.BatchSize {
-		return nil
-	}
-	snapshotDir := path.Join(rootBase, "snapshots")
-	err = fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
-			return fs.SkipAll
-		}
-		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
-			return nil
-		}
-		generation := strings.TrimSuffix(entry.Name(), ".yaml")
-		if _, keep := retained[generation]; generation == "" || keep || h.metadataGenerationInUse(rootID, generation) {
-			return nil
-		}
-		hasFiles, err := h.generationHasFiles(ctx, path.Join(rootDir, generation))
-		if err != nil || hasFiles {
-			return err
-		}
-		if opts.DryRun {
-			deleted++
-			slog.Info("metadata gc dry-run delete snapshot", "instance", h.name, "root_id", rootID, "path", objectPath)
-			return nil
-		}
-		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Debug("metadata snapshot gc failed", "path", objectPath, "err", err)
-			return nil
-		}
-		deleted++
-		return nil
-	})
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-func (h *IndexedHandler) retainedMetadataGenerations(ctx context.Context, rootID string) (map[string]struct{}, error) {
-	retained := map[string]struct{}{}
-	if generation := h.currentGeneration(rootID); generation != "" {
-		retained[generation] = struct{}{}
-	}
-	if generation, ok := h.durableCurrentGeneration(ctx, rootID); ok {
-		retained[generation] = struct{}{}
-	}
-	hasCurrent := len(retained) > 0
-
-	snapshotDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "snapshots")
-	cutoff := time.Now().Add(-metadataGenerationRetention)
-	var newestPrevious *LiveSnapshot
-	err := fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if errors.Is(walkErr, fs.ErrNotExist) {
-				return fs.SkipAll
-			}
-			return walkErr
-		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
-			return nil
-		}
-		snapshot, ok := h.loadSnapshot(ctx, objectPath)
-		if !ok || snapshot.RootID != rootID || snapshot.Generation == "" {
-			return nil
-		}
-		if _, current := retained[snapshot.Generation]; current {
-			return nil
-		}
-		if hasCurrent && snapshot.Published.After(cutoff) {
-			retained[snapshot.Generation] = struct{}{}
-		}
-		if newestPrevious == nil || snapshot.Published.After(newestPrevious.Published) ||
-			snapshot.Published.Equal(newestPrevious.Published) && snapshot.Generation > newestPrevious.Generation {
-			newestPrevious = snapshot
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("scan metadata snapshots for root %s: %w", rootID, err)
-	}
-	if hasCurrent && newestPrevious != nil {
-		retained[newestPrevious.Generation] = struct{}{}
-	}
-	return retained, nil
-}
-
-func (h *IndexedHandler) generationHasFiles(ctx context.Context, generationDir string) (bool, error) {
-	hasFiles := false
-	err := fs.WalkDir(h.store.TenantFS(h.name), generationDir, func(_ string, entry fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if walkErr != nil {
-			if errors.Is(walkErr, fs.ErrNotExist) {
-				return fs.SkipAll
-			}
-			return walkErr
-		}
-		if !entry.IsDir() {
-			hasFiles = true
-			return fs.SkipAll
-		}
-		return nil
-	})
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	return hasFiles, err
-}
-
 func (h *IndexedHandler) buildSnapshot(
 	ctx context.Context,
 	root RepositoryRoot,
-	generation, upstream string,
-) (*LiveSnapshot, []string, error) {
+	generation, upstream, expectedAnchorPath, expectedAnchorDigest string,
+) (*LiveSnapshot, []string, string, string, int, error) {
 	session := &RefreshSession{
 		handler:    h,
 		rootID:     root.ID,
@@ -481,14 +340,20 @@ func (h *IndexedHandler) buildSnapshot(
 		blobs:      map[string]*MetadataBlob{},
 		targets:    append([]MetadataTarget(nil), root.Targets...),
 	}
+	if h.mode == config.ModeDEB {
+		session.maxTransfers = refreshSliceTransfers
+		session.expectedAnchorPath = expectedAnchorPath
+		session.expectedAnchorDigest = expectedAnchorDigest
+	}
 	defer session.Close()
 	indexBuilder := &PathIndexBuilder{}
 	snapshot, err := h.build(ctx, session, indexBuilder)
+	anchorPath, anchorDigest := session.anchorPath, session.anchorDigest
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, anchorPath, anchorDigest, session.transfers, err
 	}
 	if snapshot == nil {
-		return nil, nil, errors.New("metadata refresh produced no snapshot")
+		return nil, nil, anchorPath, anchorDigest, session.transfers, errors.New("metadata refresh produced no snapshot")
 	}
 	if snapshot.Metadata == nil {
 		snapshot.Metadata = map[string]MetadataObject{}
@@ -501,34 +366,77 @@ func (h *IndexedHandler) buildSnapshot(
 	snapshot.Published = time.Now().UTC()
 	snapshot.Targets = append([]MetadataTarget(nil), root.Targets...)
 	cleanupPaths := indexBuilder.Finalize()
+	digests := map[string]string{}
 	for pathKey, obj := range snapshot.Metadata {
 		if obj.Path == "" {
 			obj.Path = pathKey
 		}
-		obj.StorePath = h.generationMetadataPath(root.ID, generation, obj.Path)
-		if _, err := h.store.StatObject(ctx, h.name, obj.StorePath); err != nil {
-			if obj.Required {
-				return nil, nil, fmt.Errorf("%s: required metadata missing", obj.Path)
+		if obj.StatusCode != 0 {
+			if obj.StatusCode != http.StatusForbidden && obj.StatusCode != http.StatusNotFound {
+				return nil, nil, anchorPath, anchorDigest, session.transfers, fmt.Errorf("%s: unsupported persisted metadata status %d", pathKey, obj.StatusCode)
 			}
 			snapshot.Metadata[pathKey] = obj
 			continue
 		}
-		digest, err := h.metadataObjectDigest(ctx, obj.StorePath)
+		obj.StorePath = h.generationMetadataPath(root.ID, generation, obj.Path)
+		info, err := h.store.StatObject(ctx, h.name, obj.StorePath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("hash metadata %s: %w", obj.Path, err)
+			if obj.Required {
+				return nil, nil, anchorPath, anchorDigest, session.transfers, fmt.Errorf("%s: required metadata missing", obj.Path)
+			}
+			snapshot.Metadata[pathKey] = obj
+			continue
+		}
+		obj.Size = info.Size
+		digest, ok := digests[obj.StorePath]
+		if !ok {
+			digest, err = h.metadataObjectDigest(ctx, obj.StorePath)
+			if err != nil {
+				return nil, nil, anchorPath, anchorDigest, session.transfers, fmt.Errorf("hash metadata %s: %w", obj.Path, err)
+			}
+			digests[obj.StorePath] = digest
 		}
 		obj.Digest = digest
 		snapshot.Metadata[pathKey] = obj
 	}
 	if err := h.validateSnapshot(ctx, snapshot, false); err != nil {
-		return nil, nil, err
+		return nil, nil, anchorPath, anchorDigest, session.transfers, err
 	}
-	return snapshot, cleanupPaths, nil
+	if err := h.pruneUnreferencedGenerationMetadata(ctx, snapshot); err != nil {
+		return nil, nil, anchorPath, anchorDigest, session.transfers, err
+	}
+	return snapshot, cleanupPaths, anchorPath, anchorDigest, session.transfers, nil
+}
+
+func (h *IndexedHandler) pruneUnreferencedGenerationMetadata(ctx context.Context, snapshot *LiveSnapshot) error {
+	keep := map[string]struct{}{}
+	for _, object := range snapshot.Metadata {
+		if object.StatusCode == 0 && object.StorePath != "" {
+			keep[object.StorePath] = struct{}{}
+		}
+	}
+	dir := h.generationMetadataPath(snapshot.RootID, snapshot.Generation, "")
+	err := fs.WalkDir(h.store.TenantFS(h.name), dir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		if _, ok := keep[objectPath]; ok {
+			return nil
+		}
+		return h.store.DeleteObject(ctx, h.name, objectPath)
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func (h *IndexedHandler) validateSnapshot(ctx context.Context, snapshot *LiveSnapshot, requireCleanupIndex bool) error {
 	if snapshot == nil || snapshot.Version != snapshotSchemaVersion {
-		return fmt.Errorf("unsupported metadata snapshot version")
+		return errors.New("unsupported metadata snapshot version")
 	}
 	if snapshot.RootID == "" || snapshot.Generation == "" || len(snapshot.Metadata) == 0 {
 		return errors.New("metadata snapshot identity or manifest is empty")
@@ -548,6 +456,13 @@ func (h *IndexedHandler) validateSnapshot(ctx context.Context, snapshot *LiveSna
 		if obj.Required {
 			required++
 		}
+		if obj.StatusCode != 0 {
+			if obj.Required || obj.Path != cleanPath || obj.StorePath != "" || obj.Digest != "" || obj.Size != 0 ||
+				(obj.StatusCode != http.StatusForbidden && obj.StatusCode != http.StatusNotFound) {
+				return fmt.Errorf("metadata %s has invalid negative manifest entry", cleanPath)
+			}
+			continue
+		}
 		if obj.Path != cleanPath {
 			actual, ok := snapshot.Metadata[obj.Path]
 			if !ok {
@@ -563,6 +478,13 @@ func (h *IndexedHandler) validateSnapshot(ctx context.Context, snapshot *LiveSna
 		}
 		if obj.Digest == "" {
 			return fmt.Errorf("metadata %s has no persisted digest", cleanPath)
+		}
+		info, err := h.store.StatObject(ctx, h.name, obj.StorePath)
+		if err != nil {
+			return fmt.Errorf("validate metadata %s: %w", cleanPath, err)
+		}
+		if obj.Size > 0 && info.Size != obj.Size {
+			return fmt.Errorf("metadata %s persisted size mismatch", cleanPath)
 		}
 		digest, ok := digests[obj.StorePath]
 		if !ok {
@@ -607,20 +529,12 @@ func (h *IndexedHandler) metadataObjectDigest(ctx context.Context, objectPath st
 	if err != nil {
 		return "", err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	sum := sha256.New()
 	if _, err := io.Copy(sum, reader); err != nil {
 		return "", err
 	}
 	return "sha256:" + hex.EncodeToString(sum.Sum(nil)), nil
-}
-
-func (h *IndexedHandler) canReuseCurrentSnapshot(ctx context.Context, current *LiveSnapshot) bool {
-	if current == nil || current.RootID == "" || current.Generation == "" {
-		return false
-	}
-	_, err := h.store.StatObject(ctx, h.name, h.cleanupIndexPath(current.RootID, current.Generation))
-	return err == nil
 }
 
 func snapshotsMetadataEqual(current, next *LiveSnapshot) bool {
@@ -634,7 +548,9 @@ func snapshotsMetadataEqual(current, next *LiveSnapshot) bool {
 		}
 		if currentObject.Path != nextObject.Path ||
 			currentObject.Required != nextObject.Required ||
+			currentObject.StatusCode != nextObject.StatusCode ||
 			currentObject.Digest != nextObject.Digest ||
+			currentObject.Size != nextObject.Size ||
 			currentObject.ChecksumType != nextObject.ChecksumType ||
 			currentObject.Checksum != nextObject.Checksum {
 			return false
@@ -649,30 +565,4 @@ func repositoryRefreshOutcome(result, reasonCode, generation, upstream string) *
 		ReasonCode: reasonCode,
 		Detail:     fmt.Sprintf("generation=%s upstream=%s", generation, upstream),
 	}
-}
-
-func (h *IndexedHandler) loadCleanupPathSet(
-	ctx context.Context,
-	rootID, generation string,
-) (map[string]struct{}, error) {
-	reader, err := h.store.OpenObject(ctx, h.name, h.cleanupIndexPath(rootID, generation))
-	if err != nil {
-		return nil, fmt.Errorf("load cleanup index for root %s generation %s: %w", rootID, generation, err)
-	}
-	defer reader.Close()
-
-	paths := map[string]struct{}{}
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		cleanPath := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(scanner.Text())), "/")
-		if cleanPath == "." || cleanPath == "" || !httpcache.SafePath(cleanPath) {
-			continue
-		}
-		paths[cleanPath] = struct{}{}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return paths, nil
 }

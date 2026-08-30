@@ -96,7 +96,7 @@ func verifyAndStore(parent context.Context, filename string, cfg StreamConfig) e
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	storeCtx, cancel := context.WithTimeout(parent, cacheStoreTimeout)
 	defer cancel()
 	return cfg.StoreFn(storeCtx, file)

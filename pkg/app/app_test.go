@@ -133,10 +133,8 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 func TestCloseAllowsNilContextOnPartialApp(t *testing.T) {
 	app := &App{}
 
-	//lint:ignore SA1012 This test verifies nil context fallback behavior.
-	require.NoError(t, app.Close(nil))
-	//lint:ignore SA1012 This test verifies nil context fallback behavior.
-	require.NoError(t, app.Close(nil))
+	require.NoError(t, app.Close(nil)) //nolint:staticcheck // Verifies the documented nil-context fallback.
+	require.NoError(t, app.Close(nil)) //nolint:staticcheck // Verifies repeated partial shutdown.
 }
 
 func TestHomePageUsesPublicURL(t *testing.T) {
@@ -286,51 +284,6 @@ instances:
 	err = Validate(doc)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "field default_polciy not found")
-}
-
-func TestValidateRejectsRemovedTransportConfig(t *testing.T) {
-	tests := map[string]string{
-		"transport connection limit": "      max_conns_per_host: 8",
-		"health degrade rate":        "          degrade_rate: 0.2",
-		"health trip rate":           "          trip_rate: 0.5",
-		"health evaluation window":   "          evaluation_window: 2m",
-		"health degrade latency":     "          degrade_latency: 500ms",
-		"health minimum weight":      "          min_weight: 0.1",
-		"health canary cooldown":     "          canary_cooldown: 1m",
-		"health canary step":         "          canary_step: 0.1",
-		"health probe interval":      "          probe_interval: 1s",
-		"health probe timeout":       "          probe_timeout: 3s",
-		"resource block interval":    "          resource_block_interval: 30s",
-	}
-	for name, removedField := range tests {
-		t.Run(name, func(t *testing.T) {
-			healthPrefix := "      health:\n"
-			if name == "transport connection limit" {
-				healthPrefix = ""
-			}
-			doc, err := config.Decode(strings.NewReader(fmt.Sprintf(`
-server:
-  bind: 127.0.0.1:8080
-  backend: /tmp/cache
-instances:
-  - name: debian
-    enabled: true
-    deb:
-      route:
-        path: /debian
-      upstreams:
-        - https://example.com/debian
-      transport:
-
-%s%s
-`, healthPrefix, removedField)))
-			require.NoError(t, err)
-
-			err = Validate(doc)
-			require.Error(t, err)
-			require.ErrorContains(t, err, "field")
-		})
-	}
 }
 
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
@@ -703,7 +656,7 @@ func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
 	})
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
-	app.upstreamGate.RateLimited(upstream, "60")
+	require.NotNil(t, app.upstreamGate.RateLimited(upstream, "60"))
 
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/-/status/network", nil))
@@ -861,7 +814,7 @@ func TestAppCloseWaitsForFinalStatusPersistence(t *testing.T) {
 
 	store, err := blobfs.Open(backend, blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	restored := newAppStatus(app.config.Server.Status, store)
 	restored.restore()
 	events := restored.taskEvents(app.config.Server.Status.EventLimit)

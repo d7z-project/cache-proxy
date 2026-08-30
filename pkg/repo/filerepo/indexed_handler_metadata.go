@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,59 +21,83 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, generation, upstream, cleanPath string) (MetadataBlob, error) {
-	targetURL := strings.TrimRight(upstream, "/") + "/" + httpcache.EscapePath(cleanPath)
+type metadataFetchRequest struct {
+	rootID         string
+	generation     string
+	upstream       string
+	requestPath    string
+	objectPath     string
+	verify         bool
+	expectedSize   int64
+	expectedSHA256 string
+}
+
+func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, spec metadataFetchRequest) (MetadataBlob, error) {
+	targetURL := strings.TrimRight(spec.upstream, "/") + "/" + httpcache.EscapePath(spec.requestPath)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return MetadataBlob{}, err
 	}
 	request.Header.Set("User-Agent", h.client.UserAgent)
 
-	release, err := h.upstreamGate.Acquire(ctx, upstream, httpcache.AdmissionRefresh)
+	release, err := h.upstreamGate.Acquire(ctx, spec.upstream, httpcache.AdmissionRefresh)
 	if err != nil {
-		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: err}
+		return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: err}
 	}
 	start := time.Now()
 	response, err := h.client.Do(request)
 	latency := time.Since(start)
 	if err != nil {
 		release()
-		h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodGet, 0, latency, 0)
-		if h.sh != nil {
-			h.sh.RecordFailure(upstream, err)
+		h.stats.RecordUpstreamRequest(h.name, h.mode, spec.upstream, http.MethodGet, 0, latency, 0)
+		if ctx.Err() != nil {
+			return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: ctx.Err()}
 		}
-		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("%w: fetch %s: %v", errMetadataMirrorRetry, targetURL, err)}
+		if h.serviceHealth != nil {
+			h.serviceHealth.RecordFailure(spec.upstream, err)
+		}
+		return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: fmt.Errorf("%w: fetch %s: %v", errMetadataMirrorRetry, targetURL, err)}
 	}
-	defer func() { _ = response.Body.Close(); release() }()
+	released := false
+	releaseTransport := func() {
+		if released {
+			return
+		}
+		released = true
+		_ = response.Body.Close()
+		release()
+	}
+	defer releaseTransport()
 	response.Body = utils.NewContextReadCloser(ctx, h.client.WrapBody(response.Body))
 	h.stats.RecordUpstreamRequest(
 		h.name,
 		h.mode,
-		upstream,
+		spec.upstream,
 		http.MethodGet,
 		response.StatusCode,
 		latency,
 		metadataContentLength(response),
 	)
-	if h.sh != nil {
-		h.sh.RecordResult(upstream, response.StatusCode, latency)
+	if h.serviceHealth != nil {
+		h.serviceHealth.RecordResult(spec.upstream, response.StatusCode, latency)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))}
+		return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: h.upstreamGate.RateLimited(spec.upstream, response.Header.Get("Retry-After"))}
 	}
 	if response.StatusCode != http.StatusOK {
 		switch response.StatusCode {
-		case http.StatusNotFound, http.StatusGone:
-			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataNotFound}
-		case http.StatusUnauthorized, http.StatusForbidden:
-			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: errMetadataForbidden}
+		case http.StatusNotFound:
+			return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: errMetadataNotFound}
+		case http.StatusForbidden:
+			return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: errMetadataForbidden}
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("%w: HTTP %d", errMetadataMirrorRetry, response.StatusCode)}
+			return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: fmt.Errorf("%w: HTTP %d", errMetadataMirrorRetry, response.StatusCode)}
 		default:
-			return MetadataBlob{}, MetadataFetchError{Path: cleanPath, Err: fmt.Errorf("HTTP %d from upstream: %w", response.StatusCode, errMetadataTransient)}
+			return MetadataBlob{}, MetadataFetchError{Path: spec.requestPath, Err: fmt.Errorf("http %d from upstream: %w", response.StatusCode, errMetadataTransient)}
 		}
 	}
 	tempFile, size, err := utils.TempFileFromReader(io.LimitReader(utils.NewRateLimitReader(response.Body), maxMetadataObjectSize+1))
+	releaseTransport()
 	if err != nil {
 		return MetadataBlob{}, err
 	}
@@ -86,7 +112,23 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 		}
 	}()
 	if size > maxMetadataObjectSize {
-		return MetadataBlob{}, fmt.Errorf("%s: metadata object exceeds %d bytes", cleanPath, maxMetadataObjectSize)
+		return MetadataBlob{}, fmt.Errorf("%s: metadata object exceeds %d bytes", spec.requestPath, maxMetadataObjectSize)
+	}
+	if spec.verify && size != spec.expectedSize {
+		return MetadataBlob{}, fmt.Errorf("%s: metadata size mismatch: got %d, want %d", spec.requestPath, size, spec.expectedSize)
+	}
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		return MetadataBlob{}, err
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, tempFile); err != nil {
+		return MetadataBlob{}, err
+	}
+	actual := hex.EncodeToString(sum.Sum(nil))
+	if spec.expectedSHA256 != "" {
+		if !strings.EqualFold(actual, spec.expectedSHA256) {
+			return MetadataBlob{}, fmt.Errorf("%s: metadata SHA256 mismatch", spec.requestPath)
+		}
 	}
 	headers := map[string]string{}
 	for key, value := range response.Header {
@@ -94,14 +136,60 @@ func (h *IndexedHandler) fetchMetadataObject(ctx context.Context, rootID, genera
 			headers[http.CanonicalHeaderKey(key)] = value[0]
 		}
 	}
-	if err := h.putMetadataObject(ctx, rootID, generation, cleanPath, tempFile, size, headers); err != nil {
+	if err := h.putMetadataObject(ctx, spec.rootID, spec.generation, spec.objectPath, tempFile, size, headers); err != nil {
 		return MetadataBlob{}, err
 	}
 	if err := tempFile.Close(); err != nil {
 		return MetadataBlob{}, err
 	}
 	cleanupTemp = false
-	return MetadataBlob{Path: cleanPath, temp: tempPath, Headers: headers}, nil
+	return MetadataBlob{Path: spec.objectPath, temp: tempPath, Headers: headers, Size: size, Digest: actual}, nil
+}
+
+func (h *IndexedHandler) openVerifiedStagingObject(
+	ctx context.Context,
+	rootID, generation, objectPath string,
+	expectedSize int64,
+	expectedSHA256 string,
+) (MetadataBlob, bool) {
+	storePath := h.generationMetadataPath(rootID, generation, objectPath)
+	reader, err := h.store.OpenObject(ctx, h.name, storePath)
+	if err != nil {
+		return MetadataBlob{}, false
+	}
+	info := reader.Info()
+	if info.Size != expectedSize {
+		_ = reader.Close()
+		_ = h.store.DeleteObject(ctx, h.name, storePath)
+		return MetadataBlob{}, false
+	}
+	tempFile, size, err := utils.TempFileFromReader(reader)
+	_ = reader.Close()
+	if err != nil {
+		return MetadataBlob{}, false
+	}
+	tempPath := tempFile.Name()
+	valid := false
+	defer func() {
+		_ = tempFile.Close()
+		if !valid {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		return MetadataBlob{}, false
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, tempFile); err != nil {
+		return MetadataBlob{}, false
+	}
+	digest := hex.EncodeToString(sum.Sum(nil))
+	if !strings.EqualFold(digest, expectedSHA256) {
+		_ = h.store.DeleteObject(ctx, h.name, storePath)
+		return MetadataBlob{}, false
+	}
+	valid = true
+	return MetadataBlob{Path: objectPath, temp: tempPath, Size: size, Digest: digest}, true
 }
 
 func metadataContentLength(response *http.Response) uint64 {

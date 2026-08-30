@@ -2,8 +2,10 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -49,6 +51,33 @@ func ValidPolicy(v string) bool {
 
 func ValidBusyPolicy(v string) bool {
 	return v == "" || v == BusyPolicyBypass || v == BusyPolicyJoin || v == BusyPolicyStale
+}
+
+func ValidateHTTPURL(raw string) error {
+	_, err := parseHTTPURL(raw)
+	return err
+}
+
+func parseHTTPURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return nil, errors.New("must be a valid absolute URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("must use http or https")
+	}
+	return parsed, nil
+}
+
+func ValidateHTTPUpstream(raw string) error {
+	parsed, err := parseHTTPURL(raw)
+	if err != nil {
+		return err
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("must not contain a query or fragment")
+	}
+	return nil
 }
 
 const DefaultExpireAfter Expiration = Expiration(720 * time.Hour)
@@ -97,11 +126,13 @@ type CleanupConfig struct {
 type DownloadConfig struct {
 	MaxActive        int                           `yaml:"max_active"`
 	MaxActivePerHost int                           `yaml:"max_active_per_host"`
+	MinInterval      Duration                      `yaml:"min_interval"`
 	Hosts            map[string]DownloadHostConfig `yaml:"hosts,omitempty"`
 }
 
 type DownloadHostConfig struct {
-	MaxActive int `yaml:"max_active,omitempty"`
+	MaxActive   int      `yaml:"max_active,omitempty"`
+	MinInterval Duration `yaml:"min_interval,omitempty"`
 }
 
 func DefaultCleanupConfig() CleanupConfig {
@@ -138,6 +169,40 @@ type TransportConfig struct {
 	MaxRequestDuration Duration            `yaml:"max_request_duration,omitempty"`
 	MaxIdleConns       int                 `yaml:"max_idle_conns,omitempty"`
 	Health             *health.ConfigPatch `yaml:"health,omitempty"`
+}
+
+func ValidateTransport(transport *TransportConfig) error {
+	if transport == nil {
+		return nil
+	}
+	if rawProxy := strings.TrimSpace(transport.Proxy); rawProxy != "" {
+		parsed, err := url.Parse(rawProxy)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return errors.New("proxy must be a valid absolute URL")
+		}
+		switch parsed.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("proxy scheme %q is not supported", parsed.Scheme)
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value Duration
+	}{
+		{name: "dial_timeout", value: transport.DialTimeout},
+		{name: "header_timeout", value: transport.HeaderTimeout},
+		{name: "idle_body_timeout", value: transport.IdleBodyTimeout},
+		{name: "max_request_duration", value: transport.MaxRequestDuration},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("%s must not be negative", field.name)
+		}
+	}
+	if transport.MaxIdleConns < 0 {
+		return errors.New("max_idle_conns must not be negative")
+	}
+	return nil
 }
 
 type SelectedMode struct {
@@ -228,10 +293,20 @@ func LoadFile(path string) (*Document, error) {
 }
 
 func Decode(r io.Reader) (*Document, error) {
+	if r == nil {
+		return nil, errors.New("configuration reader is nil")
+	}
 	var doc Document
 	decoder := yaml.NewDecoder(r)
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&doc); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("configuration must contain exactly one YAML document")
+		}
 		return nil, err
 	}
 	for _, inst := range doc.Instances {
@@ -297,24 +372,17 @@ func (e *Expiration) UnmarshalYAML(value *yaml.Node) error {
 		*e = 0
 		return nil
 	}
-	return e.unmarshal(value.Value)
-}
-
-func (e *Expiration) unmarshal(text string) error {
-	switch text {
-	case "":
-		*e = 0
-		return nil
+	switch value.Value {
 	case "never", "0", "none", "infinite":
 		*e = ExpirationNever
 		return nil
 	}
-	parsed, err := time.ParseDuration(text)
+	parsed, err := time.ParseDuration(value.Value)
 	if err != nil {
-		return fmt.Errorf("invalid expiration %q: %w", text, err)
+		return fmt.Errorf("invalid expiration %q: %w", value.Value, err)
 	}
 	if parsed < 0 {
-		return fmt.Errorf("expiration must not be negative: %q", text)
+		return fmt.Errorf("expiration must not be negative: %q", value.Value)
 	}
 	*e = Expiration(parsed)
 	return nil
@@ -353,24 +421,17 @@ func (f *Freshness) UnmarshalYAML(value *yaml.Node) error {
 		*f = 0
 		return nil
 	}
-	return f.unmarshal(value.Value)
-}
-
-func (f *Freshness) unmarshal(text string) error {
-	switch text {
-	case "":
-		*f = 0
-		return nil
+	switch value.Value {
 	case "forever", "0", "always", "infinite":
 		*f = FreshnessForever
 		return nil
 	}
-	parsed, err := time.ParseDuration(text)
+	parsed, err := time.ParseDuration(value.Value)
 	if err != nil {
-		return fmt.Errorf("invalid freshness %q: %w", text, err)
+		return fmt.Errorf("invalid freshness %q: %w", value.Value, err)
 	}
 	if parsed < 0 {
-		return fmt.Errorf("freshness must not be negative: %q", text)
+		return fmt.Errorf("freshness must not be negative: %q", value.Value)
 	}
 	*f = Freshness(parsed)
 	return nil

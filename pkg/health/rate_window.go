@@ -1,8 +1,6 @@
 package health
 
-import (
-	"time"
-)
+import "time"
 
 type rateBucket struct {
 	successes int

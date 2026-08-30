@@ -40,7 +40,7 @@ func TestArtifactPreferredOriginIsStableDespitePassiveFailures(t *testing.T) {
 
 	handler := newTestHandler(t, newTestStore(t), []string{other.URL, preferred.URL}, nil)
 	for range 10 {
-		handler.sh.RecordResult(preferred.URL, http.StatusServiceUnavailable, time.Millisecond)
+		handler.serviceHealth.RecordResult(preferred.URL, http.StatusServiceUnavailable, time.Millisecond)
 	}
 	artifactPath := setArtifactGenerationOrigin(handler, preferred.URL)
 	rec := httptest.NewRecorder()

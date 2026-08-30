@@ -80,7 +80,7 @@ func TestStripInternal(t *testing.T) {
 }
 
 func TestConfigureClientTransportTimeouts(t *testing.T) {
-	client := utils.DefaultHttpClientWrapper()
+	client := utils.DefaultHTTPClientWrapper()
 	ConfigureClientTransport(client, "test", &config.TransportConfig{
 		DialTimeout:        config.Duration(2 * time.Second),
 		HeaderTimeout:      config.Duration(3 * time.Second),
@@ -102,7 +102,7 @@ func TestConfigureClientTransportTimeouts(t *testing.T) {
 }
 
 func TestConfigureClientTransportUserAgentOverride(t *testing.T) {
-	client := utils.DefaultHttpClientWrapper()
+	client := utils.DefaultHTTPClientWrapper()
 	ConfigureClientTransport(client, "test", &config.TransportConfig{UserAgent: "custom-client/2"})
 
 	require.Equal(t, "custom-client/2", client.UserAgent)
@@ -123,7 +123,7 @@ func TestUserAgentVaryResponsesAreNotStored(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:        "test",
 		ExpireAfter: config.Expiration(time.Hour),
@@ -165,9 +165,9 @@ func TestBrowserRequestRefreshesUnreviewedCacheObject(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	require.NoError(t, store.MkdirAll("test/test", 0o755))
-	_, err = store.Put(context.Background(), "test", "test/browser", strings.NewReader("legacy"), map[string]string{
+	_, err = store.Put(context.Background(), "test", "test/browser", strings.NewReader("unreviewed"), map[string]string{
 		"fetched-at": time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestUserAgentFallbackAndConfiguredOverride(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	resolver := &staticResolver{route: Route{Policy: config.PolicyBypass}}
 	defaultHandler := NewHandler("default", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
 	forcedHandler := NewHandler("forced", RuntimeConfig{
@@ -231,7 +231,7 @@ func TestConfiguredUserAgentCachesSingleVaryRepresentation(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:        "test",
 		ExpireAfter: config.Expiration(time.Hour),
@@ -271,7 +271,7 @@ func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/object",
@@ -331,7 +331,7 @@ func TestCacheDebugHeadersOnRevalidateFresh(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/revalidate",
@@ -380,7 +380,7 @@ func TestCacheDebugHeadersOnBypass(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/bypass",
@@ -414,7 +414,7 @@ func TestPassthroughStripsInternalHeaders(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/object",
@@ -453,7 +453,7 @@ func TestHeadRequestStripsInternalHeaders(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/head-obj",
@@ -530,7 +530,7 @@ func TestTargetURLRejectsForeignHostWithoutFallback(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -560,7 +560,7 @@ func TestTargetURLAllowsRouteHost(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{Mode: "test"}, store, &staticResolver{route: Route{
 		ObjectPath:         "test/object",
@@ -639,7 +639,7 @@ func TestTargetURLReturnsClientErrorWithoutFallback(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, &staticResolver{route: Route{
 		ObjectPath:         "test/object",
@@ -671,7 +671,7 @@ func TestTargetURLDoesNotFallbackOnGatewayStatus(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, &staticResolver{route: Route{
 		ObjectPath:         "test/object",
@@ -703,7 +703,7 @@ func TestTargetURLReturnsClientErrorWithoutUpstreamFallback(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, &staticResolver{route: Route{
 		ObjectPath:         "test/object",
@@ -733,7 +733,7 @@ func TestTargetURLReturnsClientErrorWithoutFallbackPath(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, literalResolver{route: Route{
 		ObjectPath:         "test/object",
@@ -764,7 +764,7 @@ func TestFailoverDoesNotRetryInternalServerError(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -806,7 +806,7 @@ func TestFailoverDoesNotRetryClientErrors(t *testing.T) {
 
 			store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 			require.NoError(t, err)
-			defer store.Close()
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 			handler := NewHandler("test", RuntimeConfig{
 				Mode:      "test",
@@ -838,7 +838,7 @@ func TestFailoverDoesNotRetryNotFound(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -874,7 +874,7 @@ func TestFailoverReturnsFirstClientError(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -1017,7 +1017,7 @@ func TestStaleCacheOnValidationError(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/stale-obj",
@@ -1048,7 +1048,7 @@ func TestConditionalGet304AdvancesFreshness(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = store.Put(ctx, "test", "object", strings.NewReader("cached"), map[string]string{
 		"etag":                       `"v1"`,
 		"content-length":             "6",
@@ -1083,7 +1083,7 @@ func TestConditionalGetReplacesStaleContentWithOneRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = store.Put(ctx, "test", "object", strings.NewReader("old"), map[string]string{
 		"etag":                       `"v1"`,
 		"content-length":             "3",
@@ -1157,7 +1157,7 @@ func TestRateLimitCooldownQueuesNextForegroundRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	for _, instance := range []string{"arch", "alpine"} {
 		_, err = store.Put(ctx, instance, "object", strings.NewReader(instance), map[string]string{
 			"content-length":        strconv.Itoa(len(instance)),
@@ -1195,7 +1195,7 @@ func TestStaleValidationFailureDoesNotFailOver(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = store.Put(ctx, "test", "object", strings.NewReader("stale"), map[string]string{
 		"content-length":        "5",
 		"fetched-at":            time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
@@ -1267,7 +1267,7 @@ func TestErrorResponseHidesInternalDetails(t *testing.T) {
 func TestStreamDownloadCompletesFlightOnRemoteError(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -1294,7 +1294,7 @@ func TestStreamDownloadCompletesFlightOnRemoteError(t *testing.T) {
 func TestStreamDownloadCompletesFlightOnNonOK(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -1387,7 +1387,7 @@ func TestStreamToCacheContinuesAfterClientReaderCloses(t *testing.T) {
 func TestRetryJoinsDetachedFillAfterFirstClientCloses(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	verifyStarted := make(chan struct{})
 	releaseVerify := make(chan struct{})
 	var requests atomic.Int64
@@ -1432,7 +1432,7 @@ func TestRetryJoinsDetachedFillAfterFirstClientCloses(t *testing.T) {
 func TestBusyBypassStartsIndependentRequest(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	var requests atomic.Int64
 	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://upstream.example"}}, store, literalResolver{}, NewStats(prometheus.NewRegistry()), nil)
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -1466,7 +1466,7 @@ func TestAllUpstreamsUnavailableReturns503(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
@@ -1521,7 +1521,7 @@ func TestConcurrentNPMMetadataMissIsFetchedOnceAndRewritten(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := NewHandler("npm", RuntimeConfig{
 		Mode:            config.ModeNPM,
 		Upstreams:       []string{upstream.URL},
@@ -1579,7 +1579,7 @@ func TestHandlerCountsActuallyStreamedResponseBytes(t *testing.T) {
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
-	defer store.Close()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stats := NewStats(prometheus.NewRegistry())
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",

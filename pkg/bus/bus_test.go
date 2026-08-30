@@ -174,10 +174,10 @@ func TestBusMetrics(t *testing.T) {
 	b.Publish(Event{Type: EventMetadataDiscovered, Payload: MetadataDiscoveredPayload{Instance: "x"}})
 	b.Publish(Event{Type: EventMetadataRemoved, Payload: MetadataRemovedPayload{Instance: "x"}})
 
-	require.Equal(t, float64(1), metricValue(t, b.m.published.WithLabelValues(string(EventMetadataDiscovered))))
-	require.Equal(t, float64(1), metricValue(t, b.m.delivered.WithLabelValues(string(EventMetadataDiscovered))))
-	require.Equal(t, float64(1), metricValue(t, b.m.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
-	require.Equal(t, float64(1), metricValue(t, b.m.dropped.WithLabelValues(string(EventMetadataRemoved), "no_subscriber")))
+	require.Equal(t, float64(1), metricValue(t, b.metrics.published.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.metrics.delivered.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.metrics.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.metrics.dropped.WithLabelValues(string(EventMetadataRemoved), "no_subscriber")))
 }
 
 func TestBusUnsubscribe(t *testing.T) {
@@ -203,11 +203,11 @@ func TestBusUnsubscribeWithMetrics(t *testing.T) {
 	b := NewWithRegisterer(reg)
 	ch := b.Subscribe(EventMetadataDiscovered)
 
-	require.Equal(t, float64(1), metricValue(t, b.m.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(1), metricValue(t, b.metrics.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
 
 	b.Unsubscribe(ch)
 
-	require.Equal(t, float64(0), metricValue(t, b.m.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
+	require.Equal(t, float64(0), metricValue(t, b.metrics.subscribers.WithLabelValues(string(EventMetadataDiscovered))))
 }
 
 func TestBusUnsubscribeIdempotent(t *testing.T) {

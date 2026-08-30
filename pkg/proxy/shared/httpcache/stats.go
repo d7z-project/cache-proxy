@@ -17,12 +17,14 @@ type metricsCollector struct {
 	metadataRefreshTotal  *prometheus.CounterVec
 	metadataRefreshTime   *prometheus.HistogramVec
 	metadataSnapshotReady *prometheus.GaugeVec
+	repositoryMaintenance *prometheus.CounterVec
+	repositoryObjects     *prometheus.CounterVec
 	upstreamErrorRate     *prometheus.GaugeVec
 	upstreamLatency       *prometheus.GaugeVec
 }
 
 func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
-	mc := &metricsCollector{
+	metrics := &metricsCollector{
 		requestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "cache_proxy_requests_total",
 			Help: "Total proxy requests by instance, mode, method, cache result and status.",
@@ -52,6 +54,14 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 			Name: "cache_proxy_metadata_snapshot_ready",
 			Help: "Whether the instance currently has at least one successfully loaded metadata snapshot.",
 		}, []string{"instance", "mode"}),
+		repositoryMaintenance: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_repository_maintenance_total",
+			Help: "Total repository maintenance operations by instance, mode, operation, and result.",
+		}, []string{"instance", "mode", "operation", "result"}),
+		repositoryObjects: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cache_proxy_repository_maintenance_objects_total",
+			Help: "Repository objects processed by maintenance operation and disposition.",
+		}, []string{"instance", "mode", "operation", "disposition"}),
 		upstreamErrorRate: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cache_proxy_upstream_error_rate",
 			Help: "Sliding-window error rate for the upstream (0-1).",
@@ -61,8 +71,8 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 			Help: "EWMA latency for the upstream in seconds.",
 		}, []string{"instance", "mode", "upstream"}),
 	}
-	reg.MustRegister(mc.requestsTotal, mc.responseBytesTotal, mc.upstreamRequestsTotal, mc.activeDownloads, mc.metadataRefreshTotal, mc.metadataRefreshTime, mc.metadataSnapshotReady, mc.upstreamErrorRate, mc.upstreamLatency)
-	return mc
+	reg.MustRegister(metrics.requestsTotal, metrics.responseBytesTotal, metrics.upstreamRequestsTotal, metrics.activeDownloads, metrics.metadataRefreshTotal, metrics.metadataRefreshTime, metrics.metadataSnapshotReady, metrics.repositoryMaintenance, metrics.repositoryObjects, metrics.upstreamErrorRate, metrics.upstreamLatency)
+	return metrics
 }
 
 type instanceEntry struct {
@@ -72,7 +82,7 @@ type instanceEntry struct {
 
 type Stats struct {
 	instances sync.Map // string -> *instanceEntry
-	mc        *metricsCollector
+	metrics   *metricsCollector
 
 	totalRequests      atomic.Uint64
 	totalErrors        atomic.Uint64
@@ -92,6 +102,7 @@ type Stats struct {
 	totalLastRefreshAt time.Time
 	totalCache         map[string]uint64
 	totalUpstreamSt    map[string]uint64
+	totalMaintenance   map[string]uint64
 }
 
 type StatsSnapshot struct {
@@ -120,6 +131,7 @@ type InstanceStats struct {
 	LastRefreshAt     time.Time                `json:"lastRefreshAt,omitempty"`
 	LastRefreshOKAt   time.Time                `json:"lastRefreshOkAt,omitempty"`
 	LastStateChangeAt time.Time                `json:"lastStateChangeAt,omitempty"`
+	Maintenance       map[string]uint64        `json:"maintenance,omitempty"`
 }
 
 type UpstreamStats struct {
@@ -138,9 +150,10 @@ type UpstreamStats struct {
 
 func NewStats(reg prometheus.Registerer) *Stats {
 	return &Stats{
-		mc:              newMetricsCollector(reg),
-		totalCache:      map[string]uint64{},
-		totalUpstreamSt: map[string]uint64{},
+		metrics:          newMetricsCollector(reg),
+		totalCache:       map[string]uint64{},
+		totalUpstreamSt:  map[string]uint64{},
+		totalMaintenance: map[string]uint64{},
 	}
 }
 
@@ -152,9 +165,9 @@ func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, 
 		cache = "UNKNOWN"
 	}
 	statusText := strconv.Itoa(status)
-	s.mc.requestsTotal.WithLabelValues(instance, mode, method, cache, statusText).Inc()
+	s.metrics.requestsTotal.WithLabelValues(instance, mode, method, cache, statusText).Inc()
 	if bytes > 0 {
-		s.mc.responseBytesTotal.WithLabelValues(instance, mode, cache).Add(float64(bytes))
+		s.metrics.responseBytesTotal.WithLabelValues(instance, mode, cache).Add(float64(bytes))
 	}
 
 	entry := s.getOrCreateEntry(instance, mode)
@@ -195,7 +208,8 @@ func (s *Stats) RecordUpstreamRequest(
 	if status == 0 {
 		statusText = "error"
 	}
-	s.mc.upstreamRequestsTotal.WithLabelValues(instance, mode, method, statusText).Inc()
+	failed := upstreamStatusIsFailure(status)
+	s.metrics.upstreamRequestsTotal.WithLabelValues(instance, mode, method, statusText).Inc()
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
@@ -203,7 +217,7 @@ func (s *Stats) RecordUpstreamRequest(
 	entry.data.UpstreamRequests++
 	entry.data.UpstreamStatus[statusText]++
 	entry.data.UpstreamBytes += bytes
-	if upstreamStatusIsFailure(status) {
+	if failed {
 		entry.data.UpstreamErrors++
 	}
 	if upstream != "" {
@@ -220,7 +234,7 @@ func (s *Stats) RecordUpstreamRequest(
 		upstreamStats.LastStatus = statusText
 		upstreamStats.LastUsedAt = time.Now()
 		upstreamStats.LatencySeconds = latency.Seconds()
-		if upstreamStatusIsFailure(status) {
+		if failed {
 			upstreamStats.Errors++
 			upstreamStats.LastError = statusText
 		} else {
@@ -233,7 +247,7 @@ func (s *Stats) RecordUpstreamRequest(
 	s.totalUpstreamReqs.Add(1)
 	s.totalUpstreamBytes.Add(bytes)
 	s.incrTotalUpstreamStatus(statusText)
-	if upstreamStatusIsFailure(status) {
+	if failed {
 		s.totalUpstreamErrs.Add(1)
 	}
 }
@@ -283,7 +297,7 @@ func (s *Stats) AddActiveDownload(instance, mode string, delta int64) {
 	if s == nil {
 		return
 	}
-	s.mc.activeDownloads.WithLabelValues(instance, mode).Add(float64(delta))
+	s.metrics.activeDownloads.WithLabelValues(instance, mode).Add(float64(delta))
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
@@ -300,13 +314,13 @@ func (s *Stats) RecordMetadataRefresh(instance, mode, result string, duration ti
 	if result == "" {
 		result = "unknown"
 	}
-	s.mc.metadataRefreshTotal.WithLabelValues(instance, mode, result).Inc()
-	s.mc.metadataRefreshTime.WithLabelValues(instance, mode).Observe(duration.Seconds())
+	s.metrics.metadataRefreshTotal.WithLabelValues(instance, mode, result).Inc()
+	s.metrics.metadataRefreshTime.WithLabelValues(instance, mode).Observe(duration.Seconds())
 	readyVal := float64(0)
 	if ready {
 		readyVal = 1
 	}
-	s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(readyVal)
+	s.metrics.metadataSnapshotReady.WithLabelValues(instance, mode).Set(readyVal)
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
@@ -343,7 +357,7 @@ func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
 	if ready {
 		readyVal = 1
 	}
-	s.mc.metadataSnapshotReady.WithLabelValues(instance, mode).Set(readyVal)
+	s.metrics.metadataSnapshotReady.WithLabelValues(instance, mode).Set(readyVal)
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
@@ -360,12 +374,43 @@ func (s *Stats) SetMetadataState(instance, mode, state string, ready bool) {
 	s.totalMu.Unlock()
 }
 
+func (s *Stats) RecordRepositoryMaintenance(instance, mode, operation, result string, counts map[string]int) {
+	if s == nil {
+		return
+	}
+	if result == "" {
+		result = "unknown"
+	}
+	s.metrics.repositoryMaintenance.WithLabelValues(instance, mode, operation, result).Inc()
+	entry := s.getOrCreateEntry(instance, mode)
+	entry.mu.Lock()
+	ensureStatsMaps(&entry.data)
+	entry.data.Maintenance[operation+"."+result]++
+	for disposition, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		s.metrics.repositoryObjects.WithLabelValues(instance, mode, operation, disposition).Add(float64(count))
+		entry.data.Maintenance[operation+"."+disposition] += uint64(count)
+	}
+	entry.mu.Unlock()
+
+	s.totalMu.Lock()
+	s.totalMaintenance[operation+"."+result]++
+	for disposition, count := range counts {
+		if count > 0 {
+			s.totalMaintenance[operation+"."+disposition] += uint64(count)
+		}
+	}
+	s.totalMu.Unlock()
+}
+
 func (s *Stats) SetUpstreamObservation(instance, mode, upstream string, errorRate, latencySecs float64) {
 	if s == nil {
 		return
 	}
-	s.mc.upstreamErrorRate.WithLabelValues(instance, mode, upstream).Set(errorRate)
-	s.mc.upstreamLatency.WithLabelValues(instance, mode, upstream).Set(latencySecs)
+	s.metrics.upstreamErrorRate.WithLabelValues(instance, mode, upstream).Set(errorRate)
+	s.metrics.upstreamLatency.WithLabelValues(instance, mode, upstream).Set(latencySecs)
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
@@ -406,6 +451,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	total.LastRefreshAt = s.totalLastRefreshAt
 	total.Cache = cloneMap(s.totalCache)
 	total.UpstreamStatus = cloneMap(s.totalUpstreamSt)
+	total.Maintenance = cloneMap(s.totalMaintenance)
 	s.totalMu.Unlock()
 
 	result := StatsSnapshot{Total: total, Instances: map[string]InstanceStats{}}
@@ -425,15 +471,17 @@ func (s *Stats) RemoveInstance(name string) {
 	}
 	s.instances.Delete(name)
 	label := prometheus.Labels{"instance": name}
-	s.mc.requestsTotal.DeletePartialMatch(label)
-	s.mc.responseBytesTotal.DeletePartialMatch(label)
-	s.mc.upstreamRequestsTotal.DeletePartialMatch(label)
-	s.mc.activeDownloads.DeletePartialMatch(label)
-	s.mc.metadataRefreshTotal.DeletePartialMatch(label)
-	s.mc.metadataRefreshTime.DeletePartialMatch(label)
-	s.mc.metadataSnapshotReady.DeletePartialMatch(label)
-	s.mc.upstreamErrorRate.DeletePartialMatch(label)
-	s.mc.upstreamLatency.DeletePartialMatch(label)
+	s.metrics.requestsTotal.DeletePartialMatch(label)
+	s.metrics.responseBytesTotal.DeletePartialMatch(label)
+	s.metrics.upstreamRequestsTotal.DeletePartialMatch(label)
+	s.metrics.activeDownloads.DeletePartialMatch(label)
+	s.metrics.metadataRefreshTotal.DeletePartialMatch(label)
+	s.metrics.metadataRefreshTime.DeletePartialMatch(label)
+	s.metrics.metadataSnapshotReady.DeletePartialMatch(label)
+	s.metrics.repositoryMaintenance.DeletePartialMatch(label)
+	s.metrics.repositoryObjects.DeletePartialMatch(label)
+	s.metrics.upstreamErrorRate.DeletePartialMatch(label)
+	s.metrics.upstreamLatency.DeletePartialMatch(label)
 }
 
 func (s *Stats) getOrCreateEntry(name, mode string) *instanceEntry {
@@ -468,6 +516,7 @@ func cloneInstanceStats(item InstanceStats) InstanceStats {
 	clone.Cache = cloneMap(item.Cache)
 	clone.UpstreamStatus = cloneMap(item.UpstreamStatus)
 	clone.Upstreams = cloneUpstreams(item.Upstreams)
+	clone.Maintenance = cloneMap(item.Maintenance)
 	return clone
 }
 
@@ -477,6 +526,7 @@ func emptyInstanceStats(mode string) InstanceStats {
 		Cache:          map[string]uint64{},
 		UpstreamStatus: map[string]uint64{},
 		Upstreams:      map[string]UpstreamStats{},
+		Maintenance:    map[string]uint64{},
 	}
 }
 
@@ -489,6 +539,9 @@ func ensureStatsMaps(item *InstanceStats) {
 	}
 	if item.Upstreams == nil {
 		item.Upstreams = map[string]UpstreamStats{}
+	}
+	if item.Maintenance == nil {
+		item.Maintenance = map[string]uint64{}
 	}
 }
 

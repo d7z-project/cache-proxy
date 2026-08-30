@@ -18,6 +18,7 @@ type RepoBlock struct {
 	Upstreams       []string                `yaml:"upstreams"`
 	RefreshInterval config.Duration         `yaml:"refresh_interval,omitempty"`
 	CleanupInterval config.Duration         `yaml:"cleanup_interval,omitempty"`
+	RootExpireAfter config.Expiration       `yaml:"root_expire_after,omitempty"`
 	Policy          BasicPolicy             `yaml:",inline"`
 }
 
@@ -36,6 +37,14 @@ func PlanRepoMode(
 	upstreams := CollectUpstreams(block.Upstreams, nil)
 	if len(upstreams) == 0 {
 		return fmt.Errorf("instance %s: %s mode requires at least one upstream", plan.Name(), mode)
+	}
+	for _, upstream := range upstreams {
+		if err := config.ValidateHTTPUpstream(upstream); err != nil {
+			return fmt.Errorf("instance %s: %s upstream URL is invalid: %w", plan.Name(), mode, err)
+		}
+	}
+	if err := config.ValidateTransport(block.Transport); err != nil {
+		return fmt.Errorf("instance %s: %s transport: %w", plan.Name(), mode, err)
 	}
 	policy := block.Policy.AsPolicy()
 	ApplyDefaults(policy)
@@ -56,8 +65,11 @@ func PlanRepoMode(
 	if err := health.ValidateConfig(healthCfg); err != nil {
 		return fmt.Errorf("health: %w", err)
 	}
-	sh := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats())
-	sh.SetBus(plan.Bus())
+	if !plan.Enabled() {
+		return nil
+	}
+	serviceHealth := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats())
+	serviceHealth.SetBus(plan.Bus())
 	handler := NewIndexedHandler(
 		plan.Name(),
 		mode,
@@ -70,19 +82,28 @@ func PlanRepoMode(
 		build,
 		plan.Store(),
 		plan.Stats(),
-		sh,
+		serviceHealth,
 		plan.UpstreamGate(),
 	)
 	handler.SetBus(plan.Bus())
+	handler.SetMetadataFreshFor(defaultFreshFor)
+	rootExpireAfter := block.RootExpireAfter
+	if rootExpireAfter.IsUnset() {
+		rootExpireAfter = config.DefaultExpireAfter
+	}
+	handler.SetRootExpireAfter(rootExpireAfter)
 
 	sched := plan.Scheduler()
 
-	cleanupInterval := defaultCleanupInterval(block.CleanupInterval)
+	cleanupInterval := block.CleanupInterval.Duration()
+	if cleanupInterval <= 0 {
+		cleanupInterval = 6 * time.Hour
+	}
 	sched.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: cleanupInterval,
 		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
+			return handler.CleanupTask(ctx, plan.CleanupConfig())
 		},
 	})
 
@@ -97,7 +118,7 @@ func PlanRepoMode(
 		},
 		NewGC: func(rootID string) scheduler.TaskHandler {
 			return func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-				return nil, handler.CleanupRoot(ctx, rootID, plan.CleanupConfig())
+				return handler.CleanupRootTask(ctx, rootID, plan.CleanupConfig())
 			}
 		},
 		CurrentRoots: handler.currentRootIDs,
@@ -105,11 +126,4 @@ func PlanRepoMode(
 
 	plan.SetHomeSnippet(plan.RenderSnippet())
 	return plan.BindPath(block.Route.Path, expireAfter, handler)
-}
-
-func defaultCleanupInterval(cfg config.Duration) time.Duration {
-	if cfg > 0 {
-		return cfg.Duration()
-	}
-	return 6 * time.Hour
 }

@@ -35,7 +35,7 @@ func TestHomePageShowsStatsAfterRequests(t *testing.T) {
 	defer cancel()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	}))
 	defer upstream.Close()
 

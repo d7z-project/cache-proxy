@@ -19,6 +19,7 @@ type currentViewEntry struct {
 	Generation        string
 	Class             ResourceClass
 	StorePath         string
+	StatusCode        int
 	PreferredUpstream string
 }
 
@@ -184,6 +185,7 @@ func (h *IndexedHandler) rebuildCurrentViewLocked() {
 				Generation:        snapshot.Generation,
 				Class:             ResourceMetadata,
 				StorePath:         storePath,
+				StatusCode:        item.StatusCode,
 				PreferredUpstream: snapshot.Upstream,
 			}
 		}
@@ -203,8 +205,11 @@ func (h *IndexedHandler) setRootSnapshot(rootID string, snapshot *LiveSnapshot) 
 		return
 	}
 	h.rootSnapshots[rootID] = snapshot
-	if entry, ok := h.roots[rootID]; ok && len(entry.root.Targets) == 0 && len(snapshot.Targets) > 0 {
-		entry.root.Targets = append([]MetadataTarget(nil), snapshot.Targets...)
+	if entry, ok := h.roots[rootID]; ok {
+		entry.retirementCleanupGeneration = ""
+		if len(entry.root.Targets) == 0 && len(snapshot.Targets) > 0 {
+			entry.root.Targets = append([]MetadataTarget(nil), snapshot.Targets...)
+		}
 	}
 	h.rebuildCurrentViewLocked()
 }
@@ -218,10 +223,18 @@ func (h *IndexedHandler) removeRoot(rootID string) {
 }
 
 func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.Request, current currentViewEntry, release func()) {
+	if current.StatusCode != 0 {
+		release()
+		w.Header().Set("X-Cache", "GENERATION")
+		w.Header().Set("X-Cache-Generation", current.Generation)
+		w.WriteHeader(current.StatusCode)
+		h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", current.StatusCode, 0)
+		return
+	}
 	reader, err := h.store.OpenObject(req.Context(), h.name, current.StorePath)
 	if err != nil {
 		release()
-		httpcache.ErrorResponse(http.StatusInternalServerError, err).FlushClose(req, w)
+		_ = httpcache.ErrorResponse(http.StatusInternalServerError, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusInternalServerError, 0)
 		return
 	}
@@ -234,8 +247,9 @@ func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.R
 		headers[httpcache.HeaderName(key)] = value
 	}
 	httpcache.StripInternal(headers)
+	headers["X-Cache-Generation"] = current.Generation
 	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: &generationReadCloser{ReadCloser: reader, release: release}}
-	result.FlushClose(req, w)
+	_ = result.FlushClose(req, w)
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
 }
 
@@ -261,14 +275,6 @@ func refreshHealthError(err error) error {
 	default:
 		return err
 	}
-}
-
-func cleanRequestPath(target string) string {
-	cleanPath := strings.TrimPrefix(path.Clean("/"+target), "/")
-	if cleanPath == "." {
-		return ""
-	}
-	return cleanPath
 }
 
 func (h *IndexedHandler) generationMetadataPath(rootID, generation, cleanPath string) string {
