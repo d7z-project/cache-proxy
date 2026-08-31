@@ -12,8 +12,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -23,7 +25,12 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-const maxManifestSize = 50 << 20
+const (
+	maxManifestSize          = 50 << 20
+	ociRefStateSchemaVersion = 1
+)
+
+var ociStateTempSequence atomic.Uint64
 
 func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
 	h.stats.AddActiveDownload(h.name, config.ModeOCI, 1)
@@ -33,13 +40,13 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	userAgent, _ := h.client.RequestUserAgent(req)
 	requestHeaders := map[string]string{"Accept": manifestAccept}
 	statePath := h.refStatePath(resolved.repo, resolved.ref)
-	manifestPath := h.refManifestPath(resolved.repo, resolved.ref)
-	if info, statErr := h.store.StatObject(ctx, h.name, manifestPath); statErr == nil && info.Options["source-upstream"] == h.upstream {
-		if etag := info.Options["etag"]; etag != "" {
-			requestHeaders["If-None-Match"] = etag
+	previousState, previousStateErr := h.readState(ctx, statePath)
+	if previousStateErr == nil {
+		if previousState.ETag != "" {
+			requestHeaders["If-None-Match"] = previousState.ETag
 		}
-		if modified := info.Options["last-modified"]; modified != "" {
-			requestHeaders["If-Modified-Since"] = modified
+		if previousState.LastModified != "" {
+			requestHeaders["If-Modified-Since"] = previousState.LastModified
 		}
 	}
 	response, err := h.remoteRequest(req.Context(), h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, requestHeaders)
@@ -49,25 +56,16 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	defer func() { _ = response.Body.Close() }()
 	cacheCtx := h.lifecycleCtx
 	if response.StatusCode == http.StatusNotModified {
-		state, stateErr := h.readState(cacheCtx, statePath)
-		if stateErr != nil {
-			return 0, "", 0, stateErr
+		if previousStateErr != nil {
+			return 0, "", 0, previousStateErr
 		}
-		state.FetchedAt = time.Now().UTC()
-		if stateErr = h.writeState(cacheCtx, state); stateErr != nil {
-			return 0, "", 0, stateErr
+		previousState.FetchedAt = time.Now().UTC()
+		if stateErr := h.writeState(cacheCtx, previousState); stateErr != nil {
+			slog.Warn("oci revalidation state update failed; serving committed manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", stateErr)
+			status, bytes, serveErr := h.serveManifestState(ctx, w, req, previousState, "STALE")
+			return status, "STALE", bytes, serveErr
 		}
-		if info, statErr := h.store.StatObject(cacheCtx, h.name, manifestPath); statErr == nil {
-			options := make(map[string]string, len(info.Options))
-			for key, value := range info.Options {
-				options[key] = value
-			}
-			options["fetched-at"] = state.FetchedAt.Format(time.RFC3339Nano)
-			if _, updateErr := h.store.UpdateMetadata(cacheCtx, h.name, manifestPath, options); updateErr != nil {
-				return 0, "", 0, updateErr
-			}
-		}
-		status, bytes, serveErr := h.serveCachedObject(ctx, w, req, manifestPath, "REVALIDATED")
+		status, bytes, serveErr := h.serveManifestState(ctx, w, req, previousState, "REVALIDATED")
 		return status, "REVALIDATED", bytes, serveErr
 	}
 	if response.StatusCode != http.StatusOK {
@@ -114,52 +112,63 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if isSHA256Digest(resolved.ref) {
 		expireAfter = config.ExpirationNever
 	}
+	fetchedAt := time.Now().UTC()
 	state := refState{
+		Version:        ociRefStateSchemaVersion,
+		SourceUpstream: h.upstream,
 		Repo:           resolved.repo,
 		Ref:            resolved.ref,
-		FetchedAt:      time.Now().UTC(),
+		FetchedAt:      fetchedAt,
 		ExpireAfter:    expireAfter,
 		ManifestDigest: manifestDigest,
+		ContentType:    response.Header.Get("Content-Type"),
+		ContentLength:  size,
+		ETag:           response.Header.Get("ETag"),
+		LastModified:   response.Header.Get("Last-Modified"),
+		Vary:           strings.Join(response.Header.Values("Vary"), ", "),
 	}
 
 	meta := map[string]string{
-		"content-type":                    response.Header.Get("Content-Type"),
+		"content-type":                    state.ContentType,
 		"content-length":                  strconv.FormatInt(size, 10),
-		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
+		"fetched-at":                      fetchedAt.Format(time.RFC3339Nano),
 		"docker-content-digest":           manifestDigest,
-		"source-upstream":                 h.upstream,
 		httpcache.UserAgentReviewedOption: "true",
 	}
-	if v := response.Header.Get("ETag"); v != "" {
-		meta["etag"] = v
-	}
-	if v := response.Header.Get("Last-Modified"); v != "" {
-		meta["last-modified"] = v
-	}
-	if v := strings.Join(response.Header.Values("Vary"), ", "); v != "" {
-		meta["vary"] = v
-	}
-	if err := h.storeObject(cacheCtx, h.refManifestPath(resolved.repo, resolved.ref), tempFile, meta); err != nil {
-		return 0, "", 0, err
+	manifestPath := h.manifestPath(manifestDigest)
+	info, statErr := h.store.StatObject(cacheCtx, h.name, manifestPath)
+	if statErr != nil || info.Options["docker-content-digest"] != manifestDigest {
+		if storeErr := h.storeObject(cacheCtx, manifestPath, tempFile, meta); storeErr != nil {
+			slog.Warn("oci manifest cache write failed; serving verified upstream response", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", storeErr)
+			if _, seekErr := tempFile.Seek(0, io.SeekStart); seekErr != nil {
+				return 0, "", 0, errors.Join(storeErr, seekErr)
+			}
+			return h.writeManifestTemp(w, req, state, tempFile, "BYPASS")
+		}
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return 0, "", 0, err
 	}
 
 	if err := h.writeState(cacheCtx, state); err != nil {
-		return 0, "", 0, err
+		slog.Warn("oci manifest state commit failed; serving verified upstream response", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", err)
+		return h.writeManifestTemp(w, req, state, tempFile, "BYPASS")
 	}
+	return h.writeManifestTemp(w, req, state, tempFile, "MISS")
+}
 
+func (h *handler) writeManifestTemp(w http.ResponseWriter, req *http.Request, state refState, tempFile io.Reader, cache string) (int, string, uint64, error) {
 	headers := map[string]string{
-		"Content-Type":          response.Header.Get("Content-Type"),
-		"Content-Length":        strconv.FormatInt(size, 10),
-		"ETag":                  response.Header.Get("ETag"),
-		"Last-Modified":         response.Header.Get("Last-Modified"),
-		"X-Cache":               "MISS",
-		"Docker-Content-Digest": manifestDigest,
+		"Content-Type":          state.ContentType,
+		"Content-Length":        strconv.FormatInt(state.ContentLength, 10),
+		"ETag":                  state.ETag,
+		"Last-Modified":         state.LastModified,
+		"Vary":                  state.Vary,
+		"X-Cache":               cache,
+		"Docker-Content-Digest": state.ManifestDigest,
 	}
 	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, tempFile)
-	return status, "MISS", bytes, err
+	return status, cache, bytes, err
 }
 
 func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, ready chan struct{}) (int, string, uint64, error) {
@@ -255,15 +264,38 @@ func (h *handler) readState(ctx context.Context, objectPath string) (refState, e
 	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
 		return refState{}, err
 	}
+	if !h.validRefState(state) {
+		return refState{}, errors.New("invalid oci ref state")
+	}
 	return state, nil
 }
 
 func (h *handler) writeState(ctx context.Context, state refState) error {
+	state.Version = ociRefStateSchemaVersion
+	state.SourceUpstream = h.upstream
+	if !h.validRefState(state) {
+		return errors.New("invalid oci ref state")
+	}
 	data, err := yaml.Marshal(&state)
 	if err != nil {
 		return err
 	}
-	return h.storeObject(ctx, h.refStatePath(state.Repo, state.Ref), bytes.NewReader(data), map[string]string{"content-type": "application/yaml"})
+	statePath := h.refStatePath(state.Repo, state.Ref)
+	tempPath := statePath + ".tmp." + strconv.FormatUint(ociStateTempSequence.Add(1), 36)
+	if err := h.storeObject(ctx, tempPath, bytes.NewReader(data), map[string]string{"content-type": "application/yaml"}); err != nil {
+		return fmt.Errorf("write oci ref state staging object: %w", err)
+	}
+	if err := h.store.Rename(path.Join(h.name, tempPath), path.Join(h.name, statePath)); err != nil {
+		_ = h.store.DeleteObject(context.Background(), h.name, tempPath)
+		return fmt.Errorf("publish oci ref state: %w", err)
+	}
+	return nil
+}
+
+func (h *handler) validRefState(state refState) bool {
+	return state.Version == ociRefStateSchemaVersion && state.SourceUpstream == h.upstream &&
+		state.Repo != "" && state.Ref != "" && !state.FetchedAt.IsZero() &&
+		isSHA256Digest(state.ManifestDigest) && state.ContentLength >= 0
 }
 
 func (h *handler) stateExpired(state refState) bool {

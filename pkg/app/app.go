@@ -308,9 +308,6 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 }
 
 func (a *App) Close(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 	if a.closed.Load() {

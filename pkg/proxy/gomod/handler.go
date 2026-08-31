@@ -89,10 +89,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.Header.Get(disableModuleFetchHeader) != "" && h.policy.DisableModuleFetchHeader {
-		if _, err := h.store.OpenObject(req.Context(), h.name, route.ObjectPath); err != nil {
+		reader, err := h.store.OpenObject(req.Context(), h.name, route.ObjectPath)
+		if err != nil {
 			http.NotFound(w, req)
 			return
 		}
+		_ = reader.Close()
 	}
 	h.base.ServeHTTP(w, req)
 }

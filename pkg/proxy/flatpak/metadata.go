@@ -219,20 +219,11 @@ func (h *Handler) CleanupMetadata(ctx context.Context) error {
 func (h *Handler) serveSummary(w http.ResponseWriter, req *http.Request) {
 	current := h.currentSnapshot()
 	if current.Generation == "" {
-		refreshCtx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
-		err := h.Refresh(refreshCtx)
-		cancel()
-		if err != nil {
-			h.serveMetadataUnavailable(w, req, err)
-			return
-		}
-		current = h.currentSnapshot()
+		h.requestRefresh()
+		h.base.ProxyPassthrough(w, req, "summary", "")
+		return
 	} else if time.Since(current.Published) >= h.refreshInterval {
 		h.requestRefresh()
-	}
-	if current.Generation == "" {
-		h.serveMetadataUnavailable(w, req, errMetadataUnavailable)
-		return
 	}
 	h.serveCommittedMetadata(w, req, current, "summary")
 }
@@ -240,7 +231,7 @@ func (h *Handler) serveSummary(w http.ResponseWriter, req *http.Request) {
 func (h *Handler) serveCompanionMetadata(w http.ResponseWriter, req *http.Request, cleanPath string) {
 	current := h.currentSnapshot()
 	if current.Generation == "" {
-		h.serveMetadataUnavailable(w, req, errMetadataUnavailable)
+		h.base.ProxyPassthrough(w, req, cleanPath, "")
 		return
 	}
 	h.serveCommittedMetadata(w, req, current, cleanPath)

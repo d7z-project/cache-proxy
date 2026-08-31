@@ -1,13 +1,18 @@
 package utils
 
 import (
+	"context"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestWaitGroupContextAllowsNilContext(t *testing.T) {
+func TestWaitGroupContextReturnsCancellation(t *testing.T) {
 	var wg sync.WaitGroup
-	require.NoError(t, WaitGroupContext(nil, &wg)) //nolint:staticcheck // Verifies the documented nil-context fallback.
+	wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, WaitGroupContext(ctx, &wg), context.Canceled)
+	wg.Done()
 }

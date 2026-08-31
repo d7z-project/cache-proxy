@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
@@ -164,13 +165,15 @@ func (h *Handler) fetchDescriptor(
 			"cache":                           "MISS",
 			httpcache.UserAgentReviewedOption: "true",
 		}
+		cacheStatus := "BYPASS"
 		if err := h.store.MkdirAll(path.Join(h.name, path.Dir(route.ObjectPath)), 0o755); err != nil {
-			return nil, nil, "", 0, fmt.Errorf("create flatpak descriptor directory: %w", err)
+			slog.Warn("flatpak descriptor cache directory creation failed", "instance", h.name, "path", route.ObjectPath, "err", err)
+		} else if _, err := h.store.Put(ctx, h.name, route.ObjectPath, bytes.NewReader(body), meta); err != nil {
+			slog.Warn("flatpak descriptor cache store failed", "instance", h.name, "path", route.ObjectPath, "err", err)
+		} else {
+			cacheStatus = "MISS"
 		}
-		if _, err := h.store.Put(ctx, h.name, route.ObjectPath, bytes.NewReader(body), meta); err != nil {
-			return nil, nil, "", 0, fmt.Errorf("store flatpak descriptor: %w", err)
-		}
-		return body, headers, "MISS", http.StatusOK, nil
+		return body, headers, cacheStatus, http.StatusOK, nil
 	}
 	if firstErr == nil {
 		firstErr = errMetadataUnavailable

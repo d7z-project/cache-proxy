@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -22,6 +23,9 @@ import (
 )
 
 var (
+	// ErrMetadataClosurePending tells IndexedHandler that discovery has not yet
+	// produced a protocol closure that is safe to publish as current.
+	ErrMetadataClosurePending      = errors.New("metadata closure is pending discovery")
 	errMetadataNotFound            = errors.New("metadata upstream not found")
 	errMetadataTransient           = errors.New("metadata upstream transient failure")
 	errMetadataForbidden           = errors.New("metadata upstream forbidden")
@@ -408,14 +412,31 @@ func (s *RefreshSession) FetchVerified(
 	return blob, nil
 }
 
-// MaterializeVerifiedEmpty persists an explicitly declared empty metadata object.
-// Callers may use it only after all upstream representations returned 403/404.
-func (s *RefreshSession) MaterializeVerifiedEmpty(ctx context.Context, objectPath, expectedSHA256 string) (MetadataBlob, error) {
-	emptySum := sha256.Sum256(nil)
-	if !strings.EqualFold(expectedSHA256, hex.EncodeToString(emptySum[:])) {
-		return MetadataBlob{}, errors.New("empty metadata declaration has invalid SHA256")
+// MaterializeVerified persists locally derived metadata only after validating
+// it against a signed size and SHA256 declaration.
+func (s *RefreshSession) MaterializeVerified(
+	ctx context.Context,
+	objectPath string,
+	source io.Reader,
+	expectedSize int64,
+	expectedSHA256 string,
+) (MetadataBlob, error) {
+	objectPath = strings.TrimPrefix(path.Clean("/"+objectPath), "/")
+	if objectPath == "." || !httpcache.SafePath(objectPath) || expectedSize < 0 || expectedSize > maxMetadataObjectSize ||
+		len(expectedSHA256) != sha256.Size*2 {
+		return MetadataBlob{}, errors.New("invalid derived metadata declaration")
 	}
-	tempFile, err := os.CreateTemp("", "cache-proxy-empty-metadata-*")
+	if _, err := hex.DecodeString(expectedSHA256); err != nil {
+		return MetadataBlob{}, errors.New("invalid derived metadata SHA256")
+	}
+	if blob, ok := s.blobs[objectPath]; ok {
+		return *blob, nil
+	}
+	if blob, ok := s.handler.openVerifiedStagingObject(ctx, s.rootID, s.generation, objectPath, expectedSize, expectedSHA256); ok {
+		s.blobs[objectPath] = &blob
+		return blob, nil
+	}
+	tempFile, err := os.CreateTemp("", "cache-proxy-derived-metadata-*")
 	if err != nil {
 		return MetadataBlob{}, err
 	}
@@ -427,13 +448,25 @@ func (s *RefreshSession) MaterializeVerifiedEmpty(ctx context.Context, objectPat
 			_ = os.Remove(tempPath)
 		}
 	}()
-	if err := s.handler.putMetadataObject(ctx, s.rootID, s.generation, objectPath, tempFile, 0, nil); err != nil {
+	hash := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tempFile, hash), io.LimitReader(source, maxMetadataObjectSize+1))
+	if err != nil {
 		return MetadataBlob{}, err
 	}
-	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+	if size != expectedSize {
+		return MetadataBlob{}, fmt.Errorf("%s: derived metadata size mismatch: got %d, want %d", objectPath, size, expectedSize)
+	}
+	actualSHA256 := hex.EncodeToString(hash.Sum(nil))
+	if !strings.EqualFold(actualSHA256, expectedSHA256) {
+		return MetadataBlob{}, fmt.Errorf("%s: derived metadata SHA256 mismatch", objectPath)
+	}
+	if err := s.handler.putMetadataObject(ctx, s.rootID, s.generation, objectPath, tempFile, size, nil); err != nil {
 		return MetadataBlob{}, err
 	}
-	blob := MetadataBlob{Path: objectPath, temp: tempPath, Size: 0, Digest: expectedSHA256}
+	if err := tempFile.Close(); err != nil {
+		return MetadataBlob{}, err
+	}
+	blob := MetadataBlob{Path: objectPath, temp: tempPath, Size: size, Digest: actualSHA256}
 	s.blobs[objectPath] = &blob
 	cleanup = false
 	return blob, nil
@@ -539,12 +572,12 @@ func (s *RefreshSession) ConfirmAnchors(ctx context.Context) ([]MetadataAnchor, 
 			rootID: s.rootID, generation: s.generation, upstream: s.upstream,
 			requestPath: expected.Path, objectPath: expected.Path,
 		})
+		if blob.temp != "" {
+			_ = os.Remove(blob.temp)
+		}
 		if expected.State == MetadataPresent {
 			if fetchErr != nil || blob.Size != expected.Size || !strings.EqualFold(blob.Digest, expected.Digest) {
 				return initial, initialDigest, errMetadataAnchorChanged
-			}
-			if blob.temp != "" {
-				_ = os.Remove(blob.temp)
 			}
 			continue
 		}

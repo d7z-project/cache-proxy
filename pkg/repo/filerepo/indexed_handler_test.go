@@ -3,12 +3,15 @@ package filerepo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path"
 	goruntime "runtime"
 	"runtime/debug"
@@ -71,6 +74,182 @@ func newTestHandler(t *testing.T, store *blobfs.Store, upstreams []string, build
 
 func noopSchedulerTask(context.Context) (*scheduler.TaskOutcome, error) {
 	return nil, nil
+}
+
+func TestMaterializeVerifiedOwnsTemporaryFilesAndPersistsValidatedBytes(t *testing.T) {
+	store := newTestStore(t)
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
+	handler := newTestHandler(t, store, nil, nil)
+	payload := []byte("derived metadata")
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:])
+	session := &RefreshSession{
+		handler: handler, rootID: "root", generation: "generation", blobs: map[string]*MetadataBlob{},
+	}
+
+	blob, err := session.MaterializeVerified(
+		context.Background(), "metadata/index", bytes.NewReader(payload), int64(len(payload)), digest,
+	)
+	require.NoError(t, err)
+	require.Equal(t, digest, blob.Digest)
+	stored, err := store.OpenObject(context.Background(), handler.name, handler.generationMetadataPath("root", "generation", "metadata/index"))
+	require.NoError(t, err)
+	data, err := io.ReadAll(stored)
+	require.NoError(t, err)
+	require.NoError(t, stored.Close())
+	require.Equal(t, payload, data)
+	session.Close()
+	resumed := &RefreshSession{
+		handler: handler, rootID: "root", generation: "generation", blobs: map[string]*MetadataBlob{},
+	}
+	resumedBlob, err := resumed.MaterializeVerified(
+		context.Background(), "metadata/index", strings.NewReader("must not be read"), int64(len(payload)), digest,
+	)
+	require.NoError(t, err)
+	require.Equal(t, digest, resumedBlob.Digest)
+	resumed.Close()
+
+	failing := &RefreshSession{
+		handler: handler, rootID: "root", generation: "invalid", blobs: map[string]*MetadataBlob{},
+	}
+	_, err = failing.MaterializeVerified(
+		context.Background(), "metadata/index", strings.NewReader("wrong"), int64(len(payload)), digest,
+	)
+	require.ErrorContains(t, err, "size mismatch")
+	failing.Close()
+	entries, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestConfirmAnchorsCleansResponseWhenAbsentAnchorAppears(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		_, _ = io.WriteString(w, "new anchor")
+	}))
+	defer server.Close()
+
+	handler := newTestHandler(t, newTestStore(t), []string{server.URL}, nil)
+	session := &RefreshSession{
+		handler: handler, rootID: "root", upstream: server.URL, generation: "generation",
+		blobs: map[string]*MetadataBlob{}, anchors: map[string]MetadataAnchor{}, expectedAnchors: map[string]MetadataAnchor{},
+	}
+	defer session.Close()
+	object, err := session.FetchOptionalAnchor(context.Background(), "meta/index.sig")
+	require.NoError(t, err)
+	require.Equal(t, MetadataNotFound, object.State)
+
+	_, _, err = session.ConfirmAnchors(context.Background())
+	require.ErrorIs(t, err, errMetadataAnchorChanged)
+	entries, err := os.ReadDir(tempDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestPendingMetadataClosureLeavesNoCurrentOrStagingState(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"},
+		func(context.Context, *RefreshSession, *PathIndexBuilder) (*LiveSnapshot, error) {
+			return nil, ErrMetadataClosurePending
+		},
+	)
+	handler.mode = config.ModeDEB
+
+	outcome, err := handler.RefreshRootTask(context.Background(), "root")
+	require.ErrorIs(t, err, scheduler.ErrTaskSkipped)
+	require.Equal(t, "metadata_closure_pending", outcome.ReasonCode)
+	require.Nil(t, handler.rootSnapshot("root"))
+	_, current := handler.durableCurrentGeneration(context.Background(), "root")
+	require.False(t, current)
+	_, err = store.StatObject(context.Background(), handler.name, handler.stagingStatePath("root"))
+	require.Error(t, err)
+	requireGenerationDirCount(t, store, handler.name, handler.objectRoot, "root", 0)
+	entries, err := os.ReadDir(tempDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestRefreshDoesNotPublishSnapshotFromChangedRootClosure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, path.Base(r.URL.Path))
+	}))
+	defer server.Close()
+
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var builds atomic.Int32
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{server.URL},
+		func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
+			metadata := make(map[string]MetadataObject, len(session.Targets()))
+			for _, target := range session.Targets() {
+				blob, err := session.FetchAnchor(ctx, target)
+				if err != nil {
+					return nil, err
+				}
+				metadata[blob.Path] = MetadataObject{Path: blob.Path, Required: true}
+			}
+			if builds.Add(1) == 1 {
+				close(started)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-unblock:
+				}
+			}
+			return &LiveSnapshot{Metadata: metadata}, nil
+		},
+	)
+
+	type refreshResult struct {
+		outcome *scheduler.TaskOutcome
+		err     error
+	}
+	result := make(chan refreshResult, 1)
+	go func() {
+		outcome, err := handler.RefreshRootTask(context.Background(), "root")
+		result <- refreshResult{outcome: outcome, err: err}
+	}()
+	<-started
+	expanded := testRepositoryRoot("root", "meta/index.txt")
+	expanded.Targets = append(expanded.Targets, MetadataTarget{URL: "meta/extra.txt"})
+	handler.AddRepository(expanded)
+	close(unblock)
+
+	first := <-result
+	require.ErrorIs(t, first.err, scheduler.ErrTaskSkipped)
+	require.Equal(t, "root_closure_changed", first.outcome.ReasonCode)
+	require.Nil(t, handler.rootSnapshot("root"))
+	_, current := handler.durableCurrentGeneration(context.Background(), "root")
+	require.False(t, current)
+	var currentTemps []string
+	err := fs.WalkDir(store.TenantFS(handler.name), handler.objectRoot, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr == nil && !entry.IsDir() && strings.HasPrefix(path.Base(objectPath), "current.yaml.tmp.") {
+			currentTemps = append(currentTemps, objectPath)
+		}
+		return walkErr
+	})
+	require.NoError(t, err)
+	require.Empty(t, currentTemps)
+
+	outcome, err := handler.RefreshRootTask(context.Background(), "root")
+	require.NoError(t, err)
+	require.Equal(t, "published", outcome.ReasonCode)
+	snapshot := handler.rootSnapshot("root")
+	require.NotNil(t, snapshot)
+	require.Contains(t, snapshot.Metadata, "meta/index.txt")
+	require.Contains(t, snapshot.Metadata, "meta/extra.txt")
+	_, current = handler.durableCurrentGeneration(context.Background(), "root")
+	require.True(t, current)
 }
 
 type staticInspector func(string) DiscoveryResult
@@ -568,6 +747,94 @@ func TestExistingRootMetadataUpdateRequestsRefresh(t *testing.T) {
 	handler.mu.RLock()
 	require.Len(t, handler.roots["root"].root.Targets, 2)
 	handler.mu.RUnlock()
+}
+
+func TestExistingRootMetadataCreateExpandsClosureBeforeRefresh(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, path.Base(r.URL.Path))
+	}))
+	defer server.Close()
+
+	handler := newTestHandler(t, newTestStore(t), []string{server.URL}, func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
+		metadata := make(map[string]MetadataObject, len(session.Targets()))
+		for _, target := range session.Targets() {
+			blob, err := session.FetchAnchor(ctx, target)
+			if err != nil {
+				return nil, err
+			}
+			metadata[blob.Path] = MetadataObject{Path: blob.Path, Required: true}
+		}
+		return &LiveSnapshot{Metadata: metadata}, nil
+	})
+	handler.inspector = staticInspector(func(cleanPath string) DiscoveryResult {
+		root := testRepositoryRoot("root", "meta/index.txt")
+		root.Targets = append(root.Targets, MetadataTarget{URL: cleanPath})
+		return DiscoveryResult{Class: ResourceMetadata, Role: DiscoveryCreateRoot, Root: root}
+	})
+	handler.setRootSnapshot("root", &LiveSnapshot{
+		Version: snapshotSchemaVersion, RootID: "root", RootPath: "meta", Generation: "gen1",
+		Metadata: map[string]MetadataObject{"meta/index.txt": {Path: "meta/index.txt", Required: true}},
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/meta/extra.txt", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+
+	handler.mu.RLock()
+	require.Equal(t, []MetadataTarget{{URL: "meta/index.txt"}, {URL: "meta/extra.txt"}}, handler.roots["root"].root.Targets)
+	handler.mu.RUnlock()
+	require.NoError(t, handler.RefreshRoot(context.Background(), "root"))
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/meta/extra.txt", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "GENERATION", recorder.Header().Get("X-Cache"))
+	require.Equal(t, "extra.txt", recorder.Body.String())
+}
+
+func TestUndiscoveredCompanionMetadataPassesThroughWithoutDiscovery(t *testing.T) {
+	var upstreamRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upstreamRequests.Add(1)
+		switch req.URL.Path {
+		case "/repo/index.sig":
+			_, _ = io.WriteString(w, "signature")
+		case "/repo/forbidden.sig":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	handler := NewIndexedHandler(
+		"repo", "test", "repo",
+		staticInspector(func(string) DiscoveryResult {
+			return DiscoveryResult{Class: ResourceMetadata, Role: DiscoveryIgnore}
+		}),
+		[]string{server.URL}, nil, config.Expiration(time.Hour), &Policy{}, nil, store, stats,
+		health.New("repo", "test", health.DefaultConfig(), []string{server.URL}, stats), nil,
+	)
+	refreshes := atomic.Int64{}
+	handler.SetRefreshTrigger(func(string) { refreshes.Add(1) })
+
+	for _, test := range []struct {
+		requestPath string
+		status      int
+	}{
+		{requestPath: "/repo/index.sig", status: http.StatusOK},
+		{requestPath: "/repo/forbidden.sig", status: http.StatusForbidden},
+		{requestPath: "/repo/missing.sig", status: http.StatusNotFound},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, test.requestPath, nil))
+		require.Equal(t, test.status, recorder.Code)
+	}
+	require.Equal(t, int64(3), upstreamRequests.Load())
+	require.Zero(t, refreshes.Load())
+	require.Empty(t, handler.currentRootIDs())
 }
 
 func TestStalePrimaryMetadataServesCurrentAndRequestsRefresh(t *testing.T) {

@@ -28,8 +28,10 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 	h.mu.RLock()
 	entry, ok := h.roots[rootID]
 	var root RepositoryRoot
+	var closureRevision uint64
 	if ok && entry != nil {
 		root = entry.root
+		closureRevision = entry.closureRevision
 		root.Targets = append([]MetadataTarget(nil), entry.root.Targets...)
 		root.PrimaryMetadata = append([]string(nil), entry.root.PrimaryMetadata...)
 		root.Attributes = append([]RepositoryAttribute(nil), entry.root.Attributes...)
@@ -121,6 +123,21 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 		attemptDeadline := attemptCtx.Err()
 		cancelAttempt()
 		if err != nil {
+			if errors.Is(err, ErrMetadataClosurePending) {
+				if cleanupIndex != nil {
+					_ = cleanupIndex.Close()
+				}
+				if cleanupErr := errors.Join(
+					h.removeCandidateGeneration(rootID, generation),
+					h.deleteRefreshStaging(ctx, rootID),
+				); cleanupErr != nil {
+					return nil, cleanupErr
+				}
+				return &scheduler.TaskOutcome{
+					Result: "waiting", ReasonCode: "metadata_closure_pending",
+					Detail: fmt.Sprintf("root=%s closure_revision=%d", rootID, closureRevision),
+				}, scheduler.ErrTaskSkipped
+			}
 			if errors.Is(err, errMetadataAnchorChanged) {
 				if cleanupIndex != nil {
 					_ = cleanupIndex.Close()
@@ -248,7 +265,8 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 			)
 			return outcome, nil
 		}
-		if err := h.publishSnapshot(ctx, snapshot, cleanupIndex); err != nil {
+		publication, err := h.prepareSnapshotPublication(ctx, snapshot, cleanupIndex)
+		if err != nil {
 			_ = cleanupIndex.Close()
 			if cleanupErr := errors.Join(
 				h.removeCandidateGeneration(rootID, generation),
@@ -262,7 +280,35 @@ func (h *IndexedHandler) RefreshRootTask(ctx context.Context, rootID string) (*s
 			continue
 		}
 		_ = cleanupIndex.Close()
-		h.setRootSnapshot(rootID, snapshot)
+		committed, err := h.commitPreparedSnapshot(publication, snapshot, closureRevision)
+		if err != nil {
+			if cleanupErr := errors.Join(
+				h.removeCandidateGeneration(rootID, generation),
+				h.deleteRefreshStaging(ctx, rootID),
+			); cleanupErr != nil {
+				return nil, errors.Join(err, cleanupErr)
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !committed {
+			cleanupErr := h.store.DeleteObject(ctx, h.name, publication.tempPath)
+			if errors.Is(cleanupErr, fs.ErrNotExist) {
+				cleanupErr = nil
+			}
+			if !hasStaging {
+				cleanupErr = errors.Join(cleanupErr, h.removeCandidateGeneration(rootID, generation))
+			}
+			if cleanupErr != nil {
+				return nil, cleanupErr
+			}
+			return &scheduler.TaskOutcome{
+				Result: "restarted", ReasonCode: "root_closure_changed",
+				Detail: fmt.Sprintf("root=%s captured_revision=%d", rootID, closureRevision),
+			}, scheduler.ErrTaskSkipped
+		}
 		if err := h.deleteRefreshStaging(ctx, rootID); err != nil {
 			return nil, err
 		}

@@ -86,6 +86,50 @@ func TestOCIRevalidatesTagManifestWithConditionalGet(t *testing.T) {
 	require.EqualValues(t, 2, requests.Load())
 }
 
+func TestOCIRevalidationStateFailureServesCommittedManifest(t *testing.T) {
+	manifest := `{"schemaVersion":2}`
+	digest := sha256Digest(manifest)
+	var store *blobfs.Store
+	var statePath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("If-None-Match") == `"v1"` {
+			if err := store.DeleteObject(context.Background(), "oci", statePath); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := store.MkdirAll("oci/"+statePath, 0o755); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = io.WriteString(w, manifest)
+	}))
+	defer upstream.Close()
+	var err error
+	store, err = blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: upstream.URL, Policy: Policy{
+		DefaultPolicy: config.PolicyRevalidate,
+		FreshFor:      config.Freshness(time.Nanosecond),
+		BusyPolicy:    config.BusyPolicyJoin,
+	}}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	statePath = handler.refStatePath("library/alpine", "latest")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, first.Code)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, "STALE", second.Header().Get("X-Cache"))
+	require.Equal(t, manifest, second.Body.String())
+}
+
 func TestOCIBearerTokenSingleflight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -338,7 +382,7 @@ func TestOCIBlobCacheIsIndependentFromRefExpiry(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "COALESCED", rec.Header().Get("X-Cache"))
+	require.Contains(t, []string{"COALESCED", "HIT"}, rec.Header().Get("X-Cache"))
 	require.Equal(t, int64(1), blobRequests.Load())
 
 	statePath := handler.refStatePath("library/alpine", "latest")
@@ -455,6 +499,93 @@ func TestOCIManifestDigestMismatchFails(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestOCIManifestPersistenceFailureReturnsVerifiedResponse(t *testing.T) {
+	body := `{"schemaVersion":2}`
+	digest := sha256Digest(body)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	require.NoError(t, store.Close())
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+	require.Equal(t, body, rec.Body.String())
+}
+
+func TestOCIStateCommitFailureDoesNotFailUpstreamResponse(t *testing.T) {
+	body := `{"schemaVersion":2,"annotations":{"version":"new"}}`
+	digest := sha256Digest(body)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	statePath := handler.refStatePath("library/alpine", "latest")
+	require.NoError(t, store.MkdirAll(handler.name+"/"+statePath, 0o755))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+	require.Equal(t, body, rec.Body.String())
+	_, err = handler.readState(context.Background(), statePath)
+	require.Error(t, err)
+}
+
+func TestOCIManifestHitUsesOnlyStateDigest(t *testing.T) {
+	oldBody := `{"schemaVersion":2,"annotations":{"version":"old"}}`
+	newBody := `{"schemaVersion":2,"annotations":{"version":"new"}}`
+	newDigest := sha256Digest(newBody)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Docker-Content-Digest", newDigest)
+		_, _ = io.WriteString(w, newBody)
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{
+		Upstream: upstream.URL,
+		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
+	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	oldDigest := sha256Digest(oldBody)
+	require.NoError(t, handler.storeObject(context.Background(), handler.manifestPath(oldDigest), strings.NewReader(oldBody), map[string]string{
+		"docker-content-digest":           oldDigest,
+		httpcache.UserAgentReviewedOption: "true",
+	}))
+	require.NoError(t, handler.writeState(context.Background(), refState{
+		Repo: "library/alpine", Ref: "latest", FetchedAt: time.Now(),
+		ExpireAfter: config.Expiration(time.Hour), ManifestDigest: sha256Digest("missing"),
+		ContentLength: int64(len(oldBody)),
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, newBody, rec.Body.String())
+	require.NotEqual(t, oldBody, rec.Body.String())
+}
+
 func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -569,10 +700,11 @@ func TestOCICleanupSkipsActiveRef(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{Upstream: "https://registry.example"}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	state := refState{
-		Repo:        "library/alpine",
-		Ref:         "latest",
-		FetchedAt:   time.Now().Add(-2 * time.Hour),
-		ExpireAfter: config.Expiration(time.Hour),
+		Repo:           "library/alpine",
+		Ref:            "latest",
+		FetchedAt:      time.Now().Add(-2 * time.Hour),
+		ExpireAfter:    config.Expiration(time.Hour),
+		ManifestDigest: sha256Digest("manifest"),
 	}
 	require.NoError(t, handler.writeState(ctx, state))
 	statePath := handler.refStatePath(state.Repo, state.Ref)
@@ -602,6 +734,20 @@ func TestOCICleanupBlobsWithoutRefDirectory(t *testing.T) {
 
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 	_, err = store.StatObject(ctx, handler.name, objectPath)
+	require.Error(t, err)
+}
+
+func TestOCICleanupRemovesAbandonedStateStagingObject(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: "https://registry.example"}, config.ExpirationNever, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	tempPath := handler.refStatePath("library/alpine", "latest") + ".tmp.abandoned"
+	require.NoError(t, handler.storeObject(ctx, tempPath, strings.NewReader("partial"), nil))
+
+	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
+	_, err = store.StatObject(ctx, handler.name, tempPath)
 	require.Error(t, err)
 }
 

@@ -130,11 +130,11 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, `data-lang="fr"`)
 }
 
-func TestCloseAllowsNilContextOnPartialApp(t *testing.T) {
+func TestCloseIsIdempotentOnPartialApp(t *testing.T) {
 	app := &App{}
 
-	require.NoError(t, app.Close(nil)) //nolint:staticcheck // Verifies the documented nil-context fallback.
-	require.NoError(t, app.Close(nil)) //nolint:staticcheck // Verifies repeated partial shutdown.
+	require.NoError(t, app.Close(context.Background()))
+	require.NoError(t, app.Close(context.Background()))
 }
 
 func TestHomePageUsesPublicURL(t *testing.T) {

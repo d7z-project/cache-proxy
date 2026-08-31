@@ -18,12 +18,13 @@ func FuzzDebianMetadataParsers(f *testing.F) {
 	f.Add(uint8(2), "Package: hello\nDirectory: pool/main/h/hello\nChecksums-Sha256:\n abc 1 hello.dsc\n\n")
 	f.Add(uint8(0), "SHA256:\n invalid entry\n")
 	f.Add(uint8(2), "Directory:0\n .\nChecksums-Sha256:0 0 0")
+	f.Add(uint8(3), "dists/trixie-updates/main/Contents-all.gz")
 
 	f.Fuzz(func(t *testing.T, kind uint8, input string) {
 		if len(input) > 256<<10 {
 			t.Skip()
 		}
-		switch kind % 3 {
+		switch kind % 4 {
 		case 0:
 			manifest, err := parseReleaseManifest(strings.NewReader(input))
 			if err != nil {
@@ -43,7 +44,7 @@ func FuzzDebianMetadataParsers(f *testing.F) {
 			paths := &filerepo.PathIndexBuilder{}
 			defer func() { _ = paths.Close() }()
 			var err error
-			if kind%3 == 1 {
+			if kind%4 == 1 {
 				_, err = parsePackages(strings.NewReader(input), paths, 0)
 			} else {
 				_, err = parseSources(strings.NewReader(input), paths, 0)
@@ -53,6 +54,16 @@ func FuzzDebianMetadataParsers(f *testing.F) {
 					require.True(t, httpcache.SafePath(item))
 				}
 			}
+		case 3:
+			logicalPath, priority, compressed := splitReleaseCompression(input)
+			if !compressed {
+				require.Equal(t, input, logicalPath)
+				require.Equal(t, 4, priority)
+				return
+			}
+			require.Less(t, len(logicalPath), len(input))
+			require.GreaterOrEqual(t, priority, 0)
+			require.LessOrEqual(t, priority, 3)
 		}
 	})
 }

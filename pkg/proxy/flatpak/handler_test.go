@@ -95,7 +95,7 @@ func TestRefreshTaskReportsUnchangedWithoutPublishingGeneration(t *testing.T) {
 	require.Equal(t, current.Generation, handler.currentSnapshot().Generation)
 }
 
-func TestSummarySigRequestDoesNotCreateGeneration(t *testing.T) {
+func TestSummarySigRequestPassesThroughWithoutCreatingGeneration(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/summary.sig", r.URL.Path)
 		_, _ = w.Write([]byte("signature-data"))
@@ -108,10 +108,45 @@ func TestSummarySigRequestDoesNotCreateGeneration(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "signature-data", rec.Body.String())
 	require.Empty(t, handler.currentSnapshot().Generation)
 	_, err := store.StatObject(context.Background(), "flatpak-test", currentMetadataObject)
 	require.Error(t, err)
+}
+
+func TestSummaryBootstrapDoesNotWaitForRefreshLock(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/summary", r.URL.Path)
+		_, _ = io.WriteString(w, "summary-data")
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(t, openTestStore(t), []string{upstream.URL})
+	refreshTriggered := make(chan struct{}, 1)
+	handler.SetRefreshTrigger(func() { refreshTriggered <- struct{}{} })
+	handler.refreshMu.Lock()
+	defer handler.refreshMu.Unlock()
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/summary", nil))
+		done <- recorder
+	}()
+
+	select {
+	case recorder := <-done:
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.Equal(t, "summary-data", recorder.Body.String())
+	case <-time.After(time.Second):
+		require.FailNow(t, "bootstrap summary waited for metadata refresh")
+	}
+	select {
+	case <-refreshTriggered:
+	default:
+		require.FailNow(t, "bootstrap summary did not request background refresh")
+	}
 }
 
 func TestCommittedMissingCompanionDoesNotReachUpstream(t *testing.T) {
@@ -551,6 +586,26 @@ func TestFlatpakRepoDescriptorRewrite(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "Url=http://cache.local/flathub\n")
 	require.Contains(t, rec.Body.String(), "GPGKey=abc\n")
+}
+
+func TestFlatpakDescriptorCacheFailurePreservesRewrittenResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "[Flatpak Repo]\nTitle=Test\nUrl=https://dl.example/repo\n")
+	}))
+	defer upstream.Close()
+
+	store := openTestStore(t)
+	_, err := store.Put(context.Background(), "flatpak-test", "flatpak", strings.NewReader("blocks descriptor directory"), nil)
+	require.NoError(t, err)
+	handler := newTestHandler(t, store, []string{upstream.URL})
+	req := httptest.NewRequest(http.MethodGet, "/test.flatpakrepo", nil)
+	req.Host = "cache.local"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "BYPASS", recorder.Header().Get("X-Cache"))
+	require.Contains(t, recorder.Body.String(), "Url=http://cache.local\n")
 }
 
 func TestFlatpakDescriptorRateLimitPreservesUpstreamResponse(t *testing.T) {

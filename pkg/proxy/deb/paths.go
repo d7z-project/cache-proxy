@@ -13,6 +13,30 @@ var debPackageSidecarSuffixes = []string{".gpg", ".sig", ".asc", ".sha256", ".sh
 type inspector struct{}
 
 func (inspector) FinalizeRoot(root filerepo.RepositoryRoot) filerepo.RepositoryRoot {
+	if root.Layout == filerepo.LayoutDebDistribution {
+		addTarget := func(target filerepo.MetadataTarget) {
+			for _, current := range root.Targets {
+				if current.URL == target.URL {
+					return
+				}
+			}
+			root.Targets = append(root.Targets, target)
+		}
+		for _, component := range root.Components {
+			for _, arch := range root.Architectures {
+				addTarget(filerepo.MetadataTarget{
+					URL:  path.Join(root.Path, component, "binary-"+arch, "Packages"),
+					Kind: "packages",
+				})
+			}
+			if root.Source {
+				addTarget(filerepo.MetadataTarget{
+					URL:  path.Join(root.Path, component, "source", "Sources"),
+					Kind: "sources",
+				})
+			}
+		}
+	}
 	repoPath := root.Path
 	if repoPath == "" {
 		repoPath = "/"
@@ -88,16 +112,36 @@ func analyzeDistributionMetadataPath(cleanPath string) (filerepo.DiscoveryResult
 				return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
 			}
 			root = debDistributionRoot(rootPath, suite, []string{component}, []string{arch}, false)
+			root.Targets = append(root.Targets, filerepo.MetadataTarget{URL: trimmed, Kind: "packages"})
 			return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryUpdateRoot, Root: root}, true
 		case segment == "source" && strings.HasPrefix(fileName, "Sources"):
 			if component == "" {
 				return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
 			}
 			root = debDistributionRoot(rootPath, suite, []string{component}, nil, true)
+			root.Targets = append(root.Targets, filerepo.MetadataTarget{URL: trimmed, Kind: "sources"})
 			return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryUpdateRoot, Root: root}, true
 		}
 	}
 	if foundDistribution {
+		for i := len(parts) - 3; i >= 0; i-- {
+			if parts[i] != "dists" || parts[i+1] == "" || i+2 >= len(parts) {
+				continue
+			}
+			for _, part := range parts[i+2:] {
+				if part == "by-hash" {
+					return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
+				}
+			}
+			fileName := path.Base(trimmed)
+			if fileName == "Release.gpg" || fileName == "Release.sig" || fileName == "Release.asc" {
+				return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
+			}
+			rootPath := strings.Join(parts[:i+2], "/")
+			root := debDistributionRoot(rootPath, parts[i+1], []string{parts[i+2]}, nil, false)
+			root.Targets = append(root.Targets, filerepo.MetadataTarget{URL: trimmed, Kind: "metadata"})
+			return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryUpdateRoot, Root: root}, true
+		}
 		return filerepo.DiscoveryResult{Class: filerepo.ResourceMetadata, Role: filerepo.DiscoveryIgnore}, true
 	}
 	return filerepo.DiscoveryResult{}, false

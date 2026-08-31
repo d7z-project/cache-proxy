@@ -19,7 +19,7 @@ type RepoBlock struct {
 	RefreshInterval config.Duration         `yaml:"refresh_interval,omitempty"`
 	CleanupInterval config.Duration         `yaml:"cleanup_interval,omitempty"`
 	RootExpireAfter config.Expiration       `yaml:"root_expire_after,omitempty"`
-	Policy          BasicPolicy             `yaml:",inline"`
+	Policy          Policy                  `yaml:",inline"`
 }
 
 func PlanRepoMode(
@@ -46,9 +46,9 @@ func PlanRepoMode(
 	if err := config.ValidateTransport(block.Transport); err != nil {
 		return fmt.Errorf("instance %s: %s transport: %w", plan.Name(), mode, err)
 	}
-	policy := block.Policy.AsPolicy()
-	ApplyDefaults(policy)
-	if err := Validate(mode, policy); err != nil {
+	policy := &block.Policy
+	ApplyPolicyDefaults(policy)
+	if err := ValidatePackagePolicy(mode, policy); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
 	expireAfter := block.ExpireAfter

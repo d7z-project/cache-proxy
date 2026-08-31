@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,11 +29,30 @@ type releaseManifest struct {
 	Entries       []releaseEntry
 }
 
+var releaseCompressions = []struct {
+	suffix   string
+	priority int
+}{
+	{suffix: ".xz", priority: 1},
+	{suffix: ".zst", priority: 2},
+	{suffix: ".zstd", priority: 2},
+	{suffix: ".gz", priority: 3},
+	{suffix: ".bz2"},
+	{suffix: ".lz4"},
+}
+
 func (inspector) ValidateSnapshot(_ context.Context, snapshot *filerepo.LiveSnapshot, open filerepo.SnapshotObjectOpener) error {
+	anchorPaths := make(map[string]struct{}, len(snapshot.Anchors))
+	for _, anchor := range snapshot.Anchors {
+		anchorPaths[anchor.Path] = struct{}{}
+	}
 	validated := map[string]struct{}{}
 	for _, rootTarget := range snapshot.Targets {
 		if !isDistributionReleasePath(rootTarget.URL) {
 			continue
+		}
+		if !hasDistributionClosureTarget(snapshot.Targets, rootTarget.URL) {
+			return errors.New("debian distribution snapshot has no selected metadata target")
 		}
 		release, ok := resolveManifestTarget(snapshot, rootTarget)
 		if !ok || !release.Required || !isDistributionReleasePath(release.Path) {
@@ -53,20 +74,43 @@ func (inspector) ValidateSnapshot(_ context.Context, snapshot *filerepo.LiveSnap
 		if closeErr != nil {
 			return closeErr
 		}
+		entries := make(map[string]releaseEntry, len(manifest.Entries))
 		for _, entry := range manifest.Entries {
 			canonicalPath := releaseEntryPath(release.Path, entry.Path)
-			metadata, ok := snapshot.Metadata[canonicalPath]
-			if !ok || !metadata.Required {
-				return fmt.Errorf("%s: required Release index is absent from manifest", canonicalPath)
+			entries[canonicalPath] = entry
+		}
+		for requestPath, metadata := range snapshot.Metadata {
+			if metadata.State != filerepo.MetadataPresent {
+				continue
+			}
+			entry, declared := entries[metadata.Path]
+			if !declared {
+				if requestPath != metadata.Path {
+					return fmt.Errorf("%s: alias targets metadata absent from Release", requestPath)
+				}
+				if _, anchored := anchorPaths[metadata.Path]; !anchored {
+					return fmt.Errorf("%s: selected metadata is not signed by Release", metadata.Path)
+				}
+				continue
 			}
 			if metadata.ChecksumType != "sha256" || !strings.EqualFold(metadata.Checksum, entry.SHA256) || metadata.Size != entry.Size {
-				return fmt.Errorf("%s: Release size or checksum declaration differs from manifest", canonicalPath)
+				return fmt.Errorf("%s: Release size or checksum declaration differs from manifest", requestPath)
 			}
-			indexReader, err := open(canonicalPath)
+			if requestPath != metadata.Path {
+				if !manifest.AcquireByHash || requestPath != releaseByHashPath(metadata.Path, entry.SHA256) {
+					return fmt.Errorf("%s: invalid Release metadata alias", requestPath)
+				}
+				continue
+			}
+			if _, ok := validated[metadata.Path]; ok {
+				continue
+			}
+			validated[metadata.Path] = struct{}{}
+			indexReader, err := open(metadata.Path)
 			if err != nil {
 				return err
 			}
-			verifyErr := verifyReleaseEntryReader(canonicalPath, entry, indexReader)
+			verifyErr := verifyReleaseEntryReader(metadata.Path, entry, indexReader)
 			closeErr := indexReader.Close()
 			if verifyErr != nil {
 				return verifyErr
@@ -75,11 +119,30 @@ func (inspector) ValidateSnapshot(_ context.Context, snapshot *filerepo.LiveSnap
 				return closeErr
 			}
 			if manifest.AcquireByHash {
-				byHashPath := releaseByHashPath(canonicalPath, entry.SHA256)
+				byHashPath := releaseByHashPath(metadata.Path, entry.SHA256)
 				alias, ok := snapshot.Metadata[byHashPath]
 				if !ok || alias.Path != metadata.Path || alias.Checksum != entry.SHA256 || alias.Size != entry.Size {
 					return fmt.Errorf("%s: by-hash mapping is absent or inconsistent", byHashPath)
 				}
+			}
+		}
+		for _, target := range snapshot.Targets {
+			if isDistributionReleasePath(target.URL) {
+				continue
+			}
+			if !strings.HasPrefix(target.URL, path.Dir(release.Path)+"/") {
+				continue
+			}
+			metadata, ok := snapshot.Metadata[target.URL]
+			if !ok {
+				return fmt.Errorf("%s: selected metadata target is absent from manifest", target.URL)
+			}
+			_, declared := entries[target.URL]
+			if metadata.State == filerepo.MetadataPresent && !declared {
+				return fmt.Errorf("%s: selected metadata target is absent from Release", target.URL)
+			}
+			if metadata.State != filerepo.MetadataPresent && declared {
+				return fmt.Errorf("%s: signed metadata target is incorrectly marked absent", target.URL)
 			}
 		}
 	}
@@ -90,6 +153,16 @@ func isDistributionReleasePath(cleanPath string) bool {
 	base := path.Base(cleanPath)
 	return (base == "Release" || base == "InRelease") &&
 		(strings.HasPrefix(cleanPath, "dists/") || strings.Contains(cleanPath, "/dists/"))
+}
+
+func hasDistributionClosureTarget(targets []filerepo.MetadataTarget, releasePath string) bool {
+	prefix := path.Dir(releasePath) + "/"
+	for _, target := range targets {
+		if !isDistributionReleasePath(target.URL) && strings.HasPrefix(target.URL, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveManifestTarget(snapshot *filerepo.LiveSnapshot, target filerepo.MetadataTarget) (filerepo.MetadataObject, bool) {
@@ -109,6 +182,20 @@ func resolveManifestTarget(snapshot *filerepo.LiveSnapshot, target filerepo.Meta
 func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths *filerepo.PathIndexBuilder) (*filerepo.LiveSnapshot, error) {
 	snapshot := &filerepo.LiveSnapshot{
 		Metadata: map[string]filerepo.MetadataObject{},
+	}
+	for _, target := range session.Targets() {
+		if target.Kind != "release" || !isDistributionReleasePath(target.URL) {
+			continue
+		}
+		if !hasDistributionClosureTarget(session.Targets(), target.URL) {
+			return nil, filerepo.ErrMetadataClosurePending
+		}
+		artifactCount, err := buildReleaseTarget(ctx, session, snapshot, target, paths, 0)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.ArtifactCount = artifactCount
+		return snapshot, nil
 	}
 	artifactCount := 0
 	for _, target := range session.Targets() {
@@ -298,113 +385,210 @@ func fetchReleaseEntries(
 	if len(manifest.Entries) == 0 {
 		return artifactCount, fmt.Errorf("%s: Release SHA256 section contains no metadata", releasePath)
 	}
-	parseTargets, err := selectReleaseIndexes(manifest.Entries)
-	if err != nil {
-		return artifactCount, err
-	}
+	entries := make(map[string]releaseEntry, len(manifest.Entries))
+	entriesByLogicalPath := make(map[string][]releaseEntry)
 	for _, entry := range manifest.Entries {
 		canonicalPath := releaseEntryPath(releasePath, entry.Path)
-		requestPath := canonicalPath
-		byHashPath := ""
-		if manifest.AcquireByHash {
-			byHashPath = releaseByHashPath(canonicalPath, entry.SHA256)
-			requestPath = byHashPath
+		entries[canonicalPath] = entry
+		logicalPath, _, _ := splitReleaseCompression(canonicalPath)
+		entriesByLogicalPath[logicalPath] = append(entriesByLogicalPath[logicalPath], entry)
+	}
+
+	type targetGroup struct {
+		logicalPath string
+		kind        string
+		requested   []string
+	}
+	groups := map[string]*targetGroup{}
+	for _, target := range session.Targets() {
+		if isDistributionReleasePath(target.URL) || !strings.HasPrefix(target.URL, path.Dir(releasePath)+"/") {
+			continue
 		}
-		_, err := session.FetchVerified(ctx, requestPath, canonicalPath, entry.Size, entry.SHA256)
-		if err != nil && byHashPath != "" && filerepo.IsMetadataAbsent(err) {
-			_, err = session.FetchVerified(ctx, canonicalPath, canonicalPath, entry.Size, entry.SHA256)
+		logicalPath, _, _ := splitReleaseCompression(target.URL)
+		group := groups[logicalPath]
+		if group == nil {
+			kind := target.Kind
+			if kind == "" {
+				kind = "metadata"
+			}
+			group = &targetGroup{logicalPath: logicalPath, kind: kind}
+			groups[logicalPath] = group
 		}
-		emptyDigest := sha256.Sum256(nil)
-		if err != nil && filerepo.IsMetadataAbsent(err) && entry.Size == 0 &&
-			strings.EqualFold(entry.SHA256, hex.EncodeToString(emptyDigest[:])) {
-			_, err = session.MaterializeVerifiedEmpty(ctx, canonicalPath, entry.SHA256)
+		if (group.kind == "" || group.kind == "metadata") && target.Kind != "" && target.Kind != "metadata" {
+			group.kind = target.Kind
 		}
-		if err != nil {
-			return artifactCount, err
+		if !slices.Contains(group.requested, target.URL) {
+			group.requested = append(group.requested, target.URL)
 		}
-		addExactMetadata(snapshot, canonicalPath, true, entry.Size, entry.SHA256)
-		if byHashPath != "" {
-			snapshot.Metadata[byHashPath] = filerepo.MetadataObject{
-				Path: canonicalPath, Size: entry.Size,
-				ChecksumType: "sha256", Checksum: entry.SHA256,
+	}
+	orderedGroups := make([]*targetGroup, 0, len(groups))
+	for _, group := range groups {
+		sort.Strings(group.requested)
+		orderedGroups = append(orderedGroups, group)
+	}
+	sort.Slice(orderedGroups, func(i, j int) bool { return orderedGroups[i].logicalPath < orderedGroups[j].logicalPath })
+
+	for _, group := range orderedGroups {
+		var parseBlob filerepo.MetadataBlob
+		parsePriority := 5
+		declaredTarget := false
+		for _, requestedPath := range group.requested {
+			entry, declared := entries[requestedPath]
+			if !declared {
+				snapshot.Metadata[requestedPath] = filerepo.MetadataObject{
+					Path: requestedPath, State: filerepo.MetadataNotFound,
+				}
+				continue
+			}
+			declaredTarget = true
+			blob, err := acquireReleaseEntry(
+				ctx, session, snapshot, releasePath, manifest, entry,
+				entriesByLogicalPath[group.logicalPath], group.requested,
+			)
+			if err != nil {
+				return artifactCount, err
+			}
+			_, priority, _ := splitReleaseCompression(requestedPath)
+			if group.kind != "metadata" && priority > 0 && priority < parsePriority {
+				parseBlob = blob
+				parsePriority = priority
 			}
 		}
-		session.Release(filerepo.MetadataTarget{URL: canonicalPath})
-	}
-	for _, target := range parseTargets {
-		canonicalPath := releaseEntryPath(releasePath, target.entry.Path)
-		blob, err := session.FetchVerified(ctx, canonicalPath, canonicalPath, target.entry.Size, target.entry.SHA256)
-		if err != nil {
-			return artifactCount, err
+		if group.kind != "metadata" && declaredTarget {
+			if parseBlob.Path == "" {
+				return artifactCount, fmt.Errorf("%s: no supported representation for cleanup index", group.logicalPath)
+			}
+			var err error
+			artifactCount, err = parseIndexBlob(parseBlob, group.kind, paths, artifactCount)
+			if err != nil {
+				return artifactCount, err
+			}
 		}
-		artifactCount, err = parseIndexBlob(blob, target.kind, paths, artifactCount)
-		session.Release(filerepo.MetadataTarget{URL: canonicalPath})
-		if err != nil {
-			return artifactCount, err
+		for _, entry := range entriesByLogicalPath[group.logicalPath] {
+			session.Release(filerepo.MetadataTarget{URL: releaseEntryPath(releasePath, entry.Path)})
 		}
 	}
 	return artifactCount, nil
 }
 
-type releaseParseTarget struct {
-	entry    releaseEntry
-	kind     string
-	priority int
+func acquireReleaseEntry(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	snapshot *filerepo.LiveSnapshot,
+	releasePath string,
+	manifest releaseManifest,
+	entry releaseEntry,
+	siblings []releaseEntry,
+	requestedPaths []string,
+) (filerepo.MetadataBlob, error) {
+	canonicalPath := releaseEntryPath(releasePath, entry.Path)
+	blob, err := fetchReleaseEntry(ctx, session, canonicalPath, entry, manifest.AcquireByHash)
+	if err == nil {
+		addReleaseEntry(snapshot, canonicalPath, entry, manifest.AcquireByHash)
+		return blob, nil
+	}
+	if !filerepo.IsMetadataAbsent(err) {
+		return filerepo.MetadataBlob{}, err
+	}
+	_, _, compressed := splitReleaseCompression(canonicalPath)
+	if compressed {
+		return filerepo.MetadataBlob{}, err
+	}
+	emptyDigest := sha256.Sum256(nil)
+	if entry.Size == 0 && strings.EqualFold(entry.SHA256, hex.EncodeToString(emptyDigest[:])) {
+		blob, materializeErr := session.MaterializeVerified(ctx, canonicalPath, strings.NewReader(""), entry.Size, entry.SHA256)
+		if materializeErr != nil {
+			return filerepo.MetadataBlob{}, materializeErr
+		}
+		addReleaseEntry(snapshot, canonicalPath, entry, manifest.AcquireByHash)
+		return blob, nil
+	}
+
+	sort.Slice(siblings, func(i, j int) bool {
+		leftPath := releaseEntryPath(releasePath, siblings[i].Path)
+		rightPath := releaseEntryPath(releasePath, siblings[j].Path)
+		leftRequested := slices.Contains(requestedPaths, leftPath)
+		rightRequested := slices.Contains(requestedPaths, rightPath)
+		if leftRequested != rightRequested {
+			return leftRequested
+		}
+		_, left, _ := splitReleaseCompression(siblings[i].Path)
+		_, right, _ := splitReleaseCompression(siblings[j].Path)
+		if left == right {
+			return siblings[i].Path < siblings[j].Path
+		}
+		return left < right
+	})
+	for _, sibling := range siblings {
+		siblingPath := releaseEntryPath(releasePath, sibling.Path)
+		if siblingPath == canonicalPath {
+			continue
+		}
+		_, priority, siblingCompressed := splitReleaseCompression(siblingPath)
+		if !siblingCompressed || priority == 0 {
+			continue
+		}
+		compressedBlob, fetchErr := fetchReleaseEntry(ctx, session, siblingPath, sibling, manifest.AcquireByHash)
+		if fetchErr != nil {
+			if filerepo.IsMetadataAbsent(fetchErr) {
+				continue
+			}
+			return filerepo.MetadataBlob{}, fetchErr
+		}
+		addReleaseEntry(snapshot, siblingPath, sibling, manifest.AcquireByHash)
+		reader, openErr := compressedBlob.Open()
+		if openErr != nil {
+			return filerepo.MetadataBlob{}, openErr
+		}
+		decoded, openErr := filerepo.OpenCompressed(reader, siblingPath)
+		if openErr != nil {
+			return filerepo.MetadataBlob{}, openErr
+		}
+		blob, materializeErr := session.MaterializeVerified(ctx, canonicalPath, decoded, entry.Size, entry.SHA256)
+		closeErr := decoded.Close()
+		if materializeErr != nil || closeErr != nil {
+			return filerepo.MetadataBlob{}, errors.Join(materializeErr, closeErr)
+		}
+		addReleaseEntry(snapshot, canonicalPath, entry, manifest.AcquireByHash)
+		return blob, nil
+	}
+	return filerepo.MetadataBlob{}, err
 }
 
-func selectReleaseIndexes(entries []releaseEntry) ([]releaseParseTarget, error) {
-	selected := map[string]releaseParseTarget{}
-	unsupported := map[string]string{}
-	compressions := []struct {
-		suffix   string
-		priority int
-	}{
-		{suffix: ".xz", priority: 1},
-		{suffix: ".zst", priority: 2},
-		{suffix: ".zstd", priority: 2},
-		{suffix: ".gz", priority: 3},
-		{suffix: ".bz2"},
-		{suffix: ".lz4"},
-	}
-	for _, entry := range entries {
-		logicalPath := entry.Path
-		priority := 4
-		for _, compression := range compressions {
-			if strings.HasSuffix(logicalPath, compression.suffix) {
-				logicalPath = strings.TrimSuffix(logicalPath, compression.suffix)
-				priority = compression.priority
-				break
-			}
-		}
-		var kind string
-		switch path.Base(logicalPath) {
-		case "Packages":
-			kind = "packages"
-		case "Sources":
-			kind = "sources"
-		default:
-			continue
-		}
-		if priority == 0 {
-			unsupported[logicalPath] = entry.Path
-			continue
-		}
-		current, exists := selected[logicalPath]
-		if !exists || priority < current.priority {
-			selected[logicalPath] = releaseParseTarget{entry: entry, kind: kind, priority: priority}
+func fetchReleaseEntry(
+	ctx context.Context,
+	session *filerepo.RefreshSession,
+	canonicalPath string,
+	entry releaseEntry,
+	acquireByHash bool,
+) (filerepo.MetadataBlob, error) {
+	if acquireByHash {
+		blob, err := session.FetchVerified(ctx, releaseByHashPath(canonicalPath, entry.SHA256), canonicalPath, entry.Size, entry.SHA256)
+		if err == nil || !filerepo.IsMetadataAbsent(err) {
+			return blob, err
 		}
 	}
-	for logicalPath, sourcePath := range unsupported {
-		if _, ok := selected[logicalPath]; !ok {
-			return nil, fmt.Errorf("%s: no supported representation for cleanup index (%s)", logicalPath, sourcePath)
+	return session.FetchVerified(ctx, canonicalPath, canonicalPath, entry.Size, entry.SHA256)
+}
+
+func addReleaseEntry(snapshot *filerepo.LiveSnapshot, canonicalPath string, entry releaseEntry, acquireByHash bool) {
+	addExactMetadata(snapshot, canonicalPath, true, entry.Size, entry.SHA256)
+	if acquireByHash {
+		byHashPath := releaseByHashPath(canonicalPath, entry.SHA256)
+		snapshot.Metadata[byHashPath] = filerepo.MetadataObject{
+			Path: canonicalPath, Size: entry.Size,
+			ChecksumType: "sha256", Checksum: entry.SHA256,
 		}
 	}
-	result := make([]releaseParseTarget, 0, len(selected))
-	for _, target := range selected {
-		result = append(result, target)
+}
+
+func splitReleaseCompression(cleanPath string) (string, int, bool) {
+	for _, compression := range releaseCompressions {
+		if strings.HasSuffix(cleanPath, compression.suffix) {
+			return strings.TrimSuffix(cleanPath, compression.suffix), compression.priority, true
+		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].entry.Path < result[j].entry.Path })
-	return result, nil
+	return cleanPath, 4, false
 }
 
 func releaseEntryPath(releasePath, entryPath string) string {

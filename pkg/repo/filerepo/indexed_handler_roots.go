@@ -40,6 +40,9 @@ func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool, boo
 	switch {
 	case exists:
 		changed = h.mergeAndFinalizeRoot(&entry.root, root)
+		if changed {
+			entry.closureRevision++
+		}
 		if entry.retired || entry.lastSeenSavedAt.IsZero() || now.Sub(entry.lastSeenSavedAt) >= persistInterval {
 			seenChanged = true
 		}
@@ -49,7 +52,7 @@ func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool, boo
 			entry.lastSeenSavedAt = now
 		}
 	case result.Role == DiscoveryCreateRoot:
-		h.roots[rootID] = &rootEntry{root: root, lastSeenAt: now, lastSeenSavedAt: now}
+		h.roots[rootID] = &rootEntry{root: root, closureRevision: 1, lastSeenAt: now, lastSeenSavedAt: now}
 		created = true
 		changed = true
 	}
@@ -206,12 +209,14 @@ func (h *IndexedHandler) AddRepository(root RepositoryRoot) {
 	root = h.finalizeRoot(root)
 	h.mu.Lock()
 	if entry, ok := h.roots[root.ID]; ok {
-		h.mergeAndFinalizeRoot(&entry.root, root)
+		if h.mergeAndFinalizeRoot(&entry.root, root) {
+			entry.closureRevision++
+		}
 		h.mu.Unlock()
 		return
 	}
 	now := time.Now().UTC()
-	h.roots[root.ID] = &rootEntry{root: root, lastSeenAt: now}
+	h.roots[root.ID] = &rootEntry{root: root, closureRevision: 1, lastSeenAt: now}
 	h.mu.Unlock()
 }
 

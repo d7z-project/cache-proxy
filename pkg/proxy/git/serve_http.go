@@ -1,9 +1,12 @@
 package git
 
 import (
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/storer"
@@ -26,6 +29,68 @@ func serveGitHTTP(w http.ResponseWriter, r *http.Request, svr transport.Transpor
 		handleUploadPack(w, r, svr, name)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (h *gitHandler) proxyBootstrap(w http.ResponseWriter, request *http.Request) {
+	validRequest := (request.Method == http.MethodGet && request.URL.Path == "/info/refs" && request.URL.Query().Get("service") == "git-upload-pack") ||
+		(request.Method == http.MethodPost && request.URL.Path == "/git-upload-pack")
+	if !validRequest {
+		http.NotFound(w, request)
+		return
+	}
+	upstreamURL, err := url.Parse(h.upstream)
+	if err != nil || (upstreamURL.Scheme != "http" && upstreamURL.Scheme != "https") {
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		return
+	}
+	upstreamURL.Path = strings.TrimRight(upstreamURL.Path, "/") + request.URL.Path
+	upstreamURL.RawQuery = request.URL.RawQuery
+	proxyRequest, err := http.NewRequestWithContext(request.Context(), request.Method, upstreamURL.String(), request.Body)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		return
+	}
+	for key, values := range request.Header {
+		if isGitHopHeader(key) {
+			continue
+		}
+		for _, value := range values {
+			proxyRequest.Header.Add(key, value)
+		}
+	}
+	if auth, ok := h.auth.(interface{ SetAuth(*http.Request) }); ok {
+		auth.SetAuth(proxyRequest)
+	}
+	response, err := h.bootstrapClient.Do(proxyRequest)
+	if err != nil {
+		if !errors.Is(err, request.Context().Err()) {
+			slog.Warn("git bootstrap proxy failed", "instance", h.name, "upstream", h.redactedUpstream(), "err", err)
+		}
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = response.Body.Close() }()
+	for key, values := range response.Header {
+		if isGitHopHeader(key) {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(response.StatusCode)
+	if request.Method != http.MethodHead {
+		_, _ = io.Copy(w, response.Body)
+	}
+}
+
+func isGitHopHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -216,6 +216,10 @@ func (h *IndexedHandler) rebuildCurrentViewLocked() {
 func (h *IndexedHandler) setRootSnapshot(rootID string, snapshot *LiveSnapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.setRootSnapshotLocked(rootID, snapshot)
+}
+
+func (h *IndexedHandler) setRootSnapshotLocked(rootID string, snapshot *LiveSnapshot) {
 	if h.currentView == nil {
 		h.currentView = map[string]currentViewEntry{}
 	}
@@ -231,6 +235,7 @@ func (h *IndexedHandler) setRootSnapshot(rootID string, snapshot *LiveSnapshot) 
 		entry.lastValidatedAt = snapshot.Published
 		if len(entry.root.Targets) == 0 && len(snapshot.Targets) > 0 {
 			entry.root.Targets = append([]MetadataTarget(nil), snapshot.Targets...)
+			entry.closureRevision++
 		}
 	}
 	h.rebuildCurrentViewLocked()

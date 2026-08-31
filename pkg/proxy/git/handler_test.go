@@ -19,6 +19,8 @@ import (
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
+
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 )
 
 func createTestSourceRepo(t *testing.T) string {
@@ -92,17 +94,21 @@ func TestCloneAndServe(t *testing.T) {
 	require.True(t, strings.Contains(body, "HEAD"))
 }
 
-func TestServeBeforeCloneReady(t *testing.T) {
-	source := createTestSourceRepo(t)
-	h := newTestHandler(t, "file://"+source)
-	require.NoError(t, h.Start(context.Background()))
-	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
+func TestServeBeforeCloneReadyPassesThroughSmartHTTP(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "/repo.git/info/refs", request.URL.Path)
+		require.Equal(t, "git-upload-pack", request.URL.Query().Get("service"))
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+		_, _ = io.WriteString(w, "bootstrap advertisement")
+	}))
+	defer upstream.Close()
+	h := newTestHandler(t, upstream.URL+"/repo.git")
 
-	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	require.Equal(t, "10", rec.Header().Get("Retry-After"))
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "bootstrap advertisement", recorder.Body.String())
+	require.Equal(t, "application/x-git-upload-pack-advertisement", recorder.Header().Get("Content-Type"))
 }
 
 func TestServeDuringSync(t *testing.T) {
@@ -119,8 +125,7 @@ func TestServeDuringSync(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	require.Equal(t, "5", rec.Header().Get("Retry-After"))
+	require.Equal(t, http.StatusOK, rec.Code)
 
 	h.mu.Lock()
 	h.state = gitStateReady
@@ -149,9 +154,10 @@ func TestDashboardStatusDuringSync(t *testing.T) {
 	require.Empty(t, extra)
 }
 
-func TestServeFailedStateResponse(t *testing.T) {
+func TestServeCurrentGenerationDespiteFailedRefreshState(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
+	require.NoError(t, h.refreshRepository(context.Background()))
 
 	h.mu.Lock()
 	h.state = gitStateFailed
@@ -160,7 +166,7 @@ func TestServeFailedStateResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestSyncAfterClone(t *testing.T) {
@@ -177,7 +183,7 @@ func TestSyncAfterClone(t *testing.T) {
 	waitForClone(t, h)
 
 	h.mu.RLock()
-	headBefore, err := h.repo.Head()
+	headBefore, err := h.current.repo.Head()
 	h.mu.RUnlock()
 	require.NoError(t, err)
 
@@ -197,7 +203,7 @@ func TestSyncAfterClone(t *testing.T) {
 	h.syncRepository(context.Background())
 
 	h.mu.RLock()
-	headAfter, _ := h.repo.Head()
+	headAfter, _ := h.current.repo.Head()
 	h.mu.RUnlock()
 	require.NotEqual(t, headBefore.Hash(), headAfter.Hash(), "sync should have fetched new commit")
 }
@@ -217,14 +223,14 @@ func TestSyncPrunesDeletedRefs(t *testing.T) {
 	waitForClone(t, h)
 
 	h.mu.RLock()
-	headBefore, err := h.repo.Head()
+	headBefore, err := h.current.repo.Head()
 	h.mu.RUnlock()
 	require.NoError(t, err)
 
 	h.syncRepository(context.Background())
 
 	h.mu.RLock()
-	headAfter, err := h.repo.Head()
+	headAfter, err := h.current.repo.Head()
 	h.mu.RUnlock()
 	require.NoError(t, err)
 	require.Equal(t, headBefore.Hash(), headAfter.Hash(), "sync with no changes should keep HEAD unchanged")
@@ -261,7 +267,7 @@ func TestCloneRetryAndCtxCancel(t *testing.T) {
 			h.mu.RLock()
 			s := h.state
 			h.mu.RUnlock()
-			if s == gitStateFailed {
+			if s != gitStateCloning {
 				return
 			}
 		}
@@ -284,25 +290,99 @@ func TestClonePermanentErrorFailsImmediately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := h.cloneRepository(ctx)
+	err := h.refreshRepository(ctx)
 	require.Error(t, err)
 	require.True(t, isPermanentCloneError(err))
 }
 
-func TestClonePartialResume(t *testing.T) {
+func TestRefreshPublishesDistinctGeneration(t *testing.T) {
 	source := createTestSourceRepo(t)
 	h := newTestHandler(t, "file://"+source)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err := h.cloneRepository(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, h.repo)
+	require.NoError(t, h.refreshRepository(ctx))
+	first := h.current.name
+	require.NoError(t, h.refreshRepository(ctx))
+	require.NotEqual(t, first, h.current.name)
+}
 
-	err = h.cloneRepository(ctx)
+func TestRestoreUsesExactCommittedGeneration(t *testing.T) {
+	source := createTestSourceRepo(t)
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	first := newGitHandler(gitConfig{
+		name: "first", billyFs: bfs, upstream: "file://" + source, forceOverwrite: true,
+	})
+	require.NoError(t, first.refreshRepository(context.Background()))
+	committed := first.current.name
+
+	restored := newGitHandler(gitConfig{
+		name: "restored", billyFs: bfs, upstream: "file://" + source, forceOverwrite: true,
+	})
+	require.NoError(t, restored.restoreCurrent())
+	require.NotNil(t, restored.current)
+	require.Equal(t, committed, restored.current.name)
+}
+
+func TestRestoreDoesNotFallBackToUncommittedGeneration(t *testing.T) {
+	source := createTestSourceRepo(t)
+	bfs := newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), "")
+	first := newGitHandler(gitConfig{
+		name: "first", billyFs: bfs, upstream: "file://" + source, forceOverwrite: true,
+	})
+	require.NoError(t, first.refreshRepository(context.Background()))
+	require.NoError(t, afero.WriteFile(bfs.fs, "current.yaml", []byte("version: 1\ngeneration: missing\n"), 0o644))
+
+	restored := newGitHandler(gitConfig{
+		name: "restored", billyFs: bfs, upstream: "file://" + source, forceOverwrite: true,
+	})
+	require.NoError(t, restored.restoreCurrent())
+	require.Nil(t, restored.current)
+	_, err := bfs.Stat("current.yaml")
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestCleanupProtectsCurrentReadersAndPreviousGeneration(t *testing.T) {
+	bfs := newBillyAdapter(afero.NewMemMapFs(), "")
+	for _, generation := range []string{"a", "b", "c", "d"} {
+		require.NoError(t, bfs.MkdirAll("generations/"+generation, 0o755))
+	}
+	h := newGitHandler(gitConfig{name: "cleanup", billyFs: bfs})
+	h.current = &gitGeneration{name: "d"}
+	h.readers["c"] = 1
+
+	require.NoError(t, h.Cleanup(context.Background(), config.CleanupConfig{}))
+	_, err := bfs.Stat("generations/a")
+	require.ErrorIs(t, err, os.ErrNotExist)
+	for _, generation := range []string{"b", "c", "d"} {
+		_, err := bfs.Stat("generations/" + generation)
+		require.NoError(t, err)
+	}
+	require.NoError(t, bfs.MkdirAll("objects/pack", 0o755))
+	legacyHead, err := bfs.Create("HEAD")
 	require.NoError(t, err)
-	require.NotNil(t, h.repo)
+	require.NoError(t, legacyHead.Close())
+	require.NoError(t, h.Cleanup(context.Background(), config.CleanupConfig{}))
+	for _, legacyPath := range []string{"HEAD", "objects"} {
+		_, err := bfs.Stat(legacyPath)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+}
+
+func TestCleanupRemovesLegacyBareRepositoryWithoutGenerations(t *testing.T) {
+	bfs := newBillyAdapter(afero.NewMemMapFs(), "")
+	require.NoError(t, bfs.MkdirAll("objects/pack", 0o755))
+	legacyHead, err := bfs.Create("HEAD")
+	require.NoError(t, err)
+	require.NoError(t, legacyHead.Close())
+	h := newGitHandler(gitConfig{name: "cleanup", billyFs: bfs})
+
+	require.NoError(t, h.Cleanup(context.Background(), config.CleanupConfig{}))
+	for _, legacyPath := range []string{"HEAD", "objects"} {
+		_, err := bfs.Stat(legacyPath)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
 }
 
 func TestStopDuringClone(t *testing.T) {
@@ -323,7 +403,7 @@ func TestStopDuringClone(t *testing.T) {
 	require.NoError(t, err)
 
 	h.mu.RLock()
-	require.Equal(t, gitStateFailed, h.state)
+	require.Nil(t, h.current)
 	h.mu.RUnlock()
 }
 
@@ -340,13 +420,6 @@ func TestDoubleStartIdempotent(t *testing.T) {
 	h.mu.RLock()
 	require.Equal(t, gitStateReady, h.state)
 	h.mu.RUnlock()
-}
-
-func TestStartStopAllowsNilContext(t *testing.T) {
-	source := createTestSourceRepo(t)
-	h := newTestHandler(t, "file://"+source)
-	require.NoError(t, h.Start(nil)) //nolint:staticcheck // Verifies the documented nil-context fallback.
-	require.NoError(t, h.Stop(nil))  //nolint:staticcheck // Verifies the documented nil-context fallback.
 }
 
 func TestEmptyUpstreamRepo(t *testing.T) {
@@ -462,7 +535,7 @@ func TestSyncAndServeConcurrentRequests(t *testing.T) {
 	wg.Wait()
 	close(statuses)
 	for status := range statuses {
-		require.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, status)
+		require.Equal(t, http.StatusOK, status)
 	}
 }
 

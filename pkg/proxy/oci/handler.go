@@ -32,18 +32,19 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 	httpcache.ConfigureClientTransport(client, name, block.Transport)
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	return &handler{
-		name:         name,
-		upstream:     strings.TrimRight(block.Upstream, "/"),
-		expireAfter:  expireAfter,
-		policy:       &block.Policy,
-		store:        store,
-		stats:        stats,
-		client:       client,
-		upstreamGate: upstreamGate,
-		lifecycleCtx: lifecycleCtx,
-		cancel:       cancel,
-		auth:         authHandler{tokens: map[string]ociToken{}},
-		refLocks:     utils.NewRWLockGroup(),
+		name:            name,
+		upstream:        strings.TrimRight(block.Upstream, "/"),
+		expireAfter:     expireAfter,
+		policy:          &block.Policy,
+		store:           store,
+		stats:           stats,
+		client:          client,
+		upstreamGate:    upstreamGate,
+		lifecycleCtx:    lifecycleCtx,
+		cancel:          cancel,
+		auth:            authHandler{tokens: map[string]ociToken{}},
+		refLocks:        utils.NewRWLockGroup(),
+		manifestReaders: map[string]int{},
 	}
 }
 
@@ -104,6 +105,8 @@ func (h *handler) beginOperation() bool {
 
 func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
 	deleted := 0
+	referencedManifests := make(map[string]struct{})
+	refsBusy := false
 	err := fs.WalkDir(h.store.TenantFS(h.name), "oci/refs", func(current string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -114,32 +117,99 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || path.Base(current) != "state.yaml" {
+		if entry.IsDir() {
+			return nil
+		}
+		baseName := path.Base(current)
+		if strings.HasPrefix(baseName, "state.yaml.tmp.") {
+			statePath := path.Join(path.Dir(current), "state.yaml")
+			lock := h.refLocks.Get(statePath)
+			if !lock.TryLock() {
+				refsBusy = true
+				return nil
+			}
+			defer lock.Unlock()
+			if opts.DryRun {
+				deleted++
+				slog.Info("oci cleanup dry-run delete abandoned state", "instance", h.name, "path", current)
+				return nil
+			}
+			if deleteErr := h.store.DeleteObject(ctx, h.name, current); deleteErr != nil {
+				return fmt.Errorf("delete abandoned OCI ref state %s: %w", current, deleteErr)
+			}
+			deleted++
+			return nil
+		}
+		if baseName != "state.yaml" {
 			return nil
 		}
 		lock := h.refLocks.Get(current)
 		if !lock.TryLock() {
+			refsBusy = true
 			return nil
 		}
-		defer lock.Unlock()
 		state, readErr := h.readState(ctx, current)
-		if readErr != nil || h.stateExpired(state) {
-			if opts.DryRun {
-				deleted++
-				slog.Info("oci cleanup dry-run delete", "instance", h.name, "prefix", path.Dir(current))
-				return nil
-			}
-			if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil {
-				return fmt.Errorf("delete expired OCI ref %s: %w", path.Dir(current), removeErr)
+		expired := readErr != nil || h.stateExpired(state)
+		if !expired {
+			referencedManifests[h.manifestPath(state.ManifestDigest)] = struct{}{}
+			lock.Unlock()
+			return nil
+		}
+		if opts.DryRun {
+			if readErr == nil {
+				referencedManifests[h.manifestPath(state.ManifestDigest)] = struct{}{}
 			}
 			deleted++
+			slog.Info("oci cleanup dry-run delete", "instance", h.name, "prefix", path.Dir(current))
+			lock.Unlock()
+			return nil
 		}
+		if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil {
+			lock.Unlock()
+			return fmt.Errorf("delete expired OCI ref %s: %w", path.Dir(current), removeErr)
+		}
+		deleted++
+		lock.Unlock()
 		return nil
 	})
 	if errors.Is(err, fs.ErrNotExist) {
 		err = nil
 	}
-	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) || h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
+	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) || refsBusy || h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
+		return err
+	}
+	err = fs.WalkDir(h.store.TenantFS(h.name), "oci/manifests", func(current string, entry fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+			return fs.SkipAll
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if _, referenced := referencedManifests[current]; referenced {
+			return nil
+		}
+		h.manifestMu.Lock()
+		active := h.manifestReaders[current] > 0
+		h.manifestMu.Unlock()
+		if active {
+			return nil
+		}
+		removed, cleanupErr := h.cleanupExpiredObject(ctx, current, "manifest", opts)
+		if removed {
+			deleted++
+		}
+		return cleanupErr
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) {
 		return err
 	}
 	err = fs.WalkDir(h.store.TenantFS(h.name), "oci/blobs", func(current string, entry fs.DirEntry, walkErr error) error {
@@ -158,29 +228,35 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		if _, busy := h.downloads.Load(current); busy {
 			return nil
 		}
-		info, statErr := h.store.StatObject(ctx, h.name, current)
-		if statErr != nil {
-			return statErr
-		}
-		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
-		if parseErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
-			return nil
-		}
-		if opts.DryRun {
+		removed, cleanupErr := h.cleanupExpiredObject(ctx, current, "blob", opts)
+		if removed {
 			deleted++
-			slog.Info("oci cleanup dry-run delete blob", "instance", h.name, "path", current)
-			return nil
 		}
-		if deleteErr := h.store.DeleteObject(ctx, h.name, current); deleteErr != nil {
-			return fmt.Errorf("delete expired OCI blob %s: %w", current, deleteErr)
-		}
-		deleted++
-		return nil
+		return cleanupErr
 	})
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKind string, opts config.CleanupConfig) (bool, error) {
+	info, err := h.store.StatObject(ctx, h.name, objectPath)
+	if err != nil {
+		return false, err
+	}
+	fetchedAt, fetchedAtErr := utils.ParseFetchedAt(info.Options["fetched-at"])
+	if fetchedAtErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
+		return false, nil
+	}
+	if opts.DryRun {
+		slog.Info("oci cleanup dry-run delete", "instance", h.name, "kind", objectKind, "path", objectPath)
+		return true, nil
+	}
+	if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil {
+		return false, fmt.Errorf("delete expired oci %s %s: %w", objectKind, objectPath, err)
+	}
+	return true, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -241,7 +317,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	statePath := h.refStatePath(resolved.repo, resolved.ref)
 	state, err := h.readState(ctx, statePath)
 	if err == nil && h.manifestFresh(resolved, state) {
-		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "HIT"); cacheErr == nil {
+		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
 			slog.Debug("oci manifest cache hit", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 			return status, "HIT", bytes, nil
 		}
@@ -251,7 +327,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	lock := h.refLocks.Get(statePath)
 	if !lock.TryLock() {
 		if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
-			if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "STALE"); cacheErr == nil {
+			if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, staleState, "STALE"); cacheErr == nil {
 				return status, "STALE", bytes, nil
 			}
 		}
@@ -264,7 +340,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 
 	state, err = h.readState(ctx, statePath)
 	if err == nil && h.manifestFresh(resolved, state) {
-		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "HIT"); cacheErr == nil {
+		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
 			return status, "HIT", bytes, nil
 		}
 	}
@@ -278,11 +354,47 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 	if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
 		slog.Debug("oci manifest fetch failed, serving stale", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", fetchErr)
-		if staleStatus, staleBytes, cacheErr := h.serveCachedObject(ctx, w, req, h.refManifestPath(resolved.repo, resolved.ref), "STALE"); cacheErr == nil {
+		if staleStatus, staleBytes, cacheErr := h.serveManifestState(ctx, w, req, staleState, "STALE"); cacheErr == nil {
 			return staleStatus, "STALE", staleBytes, nil
 		}
 	}
 	return 0, "", 0, fetchErr
+}
+
+func (h *handler) serveManifestState(ctx context.Context, w http.ResponseWriter, req *http.Request, state refState, cache string) (int, uint64, error) {
+	objectPath := h.manifestPath(state.ManifestDigest)
+	h.manifestMu.Lock()
+	h.manifestReaders[objectPath]++
+	h.manifestMu.Unlock()
+	defer func() {
+		h.manifestMu.Lock()
+		h.manifestReaders[objectPath]--
+		if h.manifestReaders[objectPath] == 0 {
+			delete(h.manifestReaders, objectPath)
+		}
+		h.manifestMu.Unlock()
+	}()
+
+	reader, err := h.store.OpenObject(ctx, h.name, objectPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = reader.Close() }()
+	info := reader.Info()
+	if info.Options["docker-content-digest"] != state.ManifestDigest ||
+		!httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
+		return 0, 0, errors.New("cached OCI manifest does not match committed state")
+	}
+	headers := map[string]string{
+		"Content-Length":        strconv.FormatInt(state.ContentLength, 10),
+		"Content-Type":          state.ContentType,
+		"ETag":                  state.ETag,
+		"Last-Modified":         state.LastModified,
+		"Vary":                  state.Vary,
+		"X-Cache":               cache,
+		"Docker-Content-Digest": state.ManifestDigest,
+	}
+	return h.writeResponse(w, req.Method, http.StatusOK, headers, reader)
 }
 
 func (h *handler) manifestFresh(resolved request, state refState) bool {
@@ -393,8 +505,9 @@ func (h *handler) refStatePath(repo, ref string) string {
 	return path.Join(h.refDir(repo, ref), "state.yaml")
 }
 
-func (h *handler) refManifestPath(repo, ref string) string {
-	return path.Join(h.refDir(repo, ref), "manifest")
+func (h *handler) manifestPath(digest string) string {
+	algorithm, encoded, _ := strings.Cut(digest, ":")
+	return path.Join("oci/manifests", algorithm, encoded)
 }
 
 func (h *handler) blobPath(digest string) string {

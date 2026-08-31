@@ -16,6 +16,8 @@
 
 - 无附加行为的 HTTP mode 直接复用 `httpcache.Handler`，专用 handler 只承载协议或生命周期差异
 - helper 以实际复用或清晰的职责边界为准；短小的单次转发逻辑保持内联
+- 配置结构与运行时结构字段完全一致时复用同一领域类型，避免仅用于搬运字段的镜像类型
+- 调用链始终传递有效的 `context.Context`，生命周期入口使用调用方 context 派生取消与超时
 - 内部字段和跨函数状态使用完整领域名称，局部循环变量可使用 Go 惯用短名称
 - error 文本使用小写开头，并通过 `%w` 保留可判定的错误链
 - 重构保持协议、缓存键、持久化格式和调度时序稳定；行为变化必须独立说明并补测试
@@ -33,10 +35,15 @@
 
 - 同一个 generation 内的 metadata、签名、校验文件必须来自同一个 upstream
 - refresh 先写 staging，全部必需文件校验通过后才能发布 current generation
-- 主元数据引用的每个 metadata 对象都必须下载并校验成功；只有外部伴生文件允许 `403` / `404` 缺失
-- Debian Release 的每个 SHA256 路径都是独立必需对象；不同压缩格式禁止互相别名，canonical 与 by-hash 仅能映射到同一份已通过大小和 SHA256 校验的字节
+- 主元数据选定闭包内的每个 metadata 对象都必须获取并校验成功；只有外部伴生文件和主元数据明确未列出的请求目标允许提交 `403` / `404` 状态
+- Debian Release SHA256 条目是签名校验描述，不代表每个路径都能直接下载；generation 只获取持久化 root targets 对应的逻辑闭包，禁止全量抓取无关组件、架构和辅助索引
+- Debian 未压缩索引缺失时，只能从同一 Release 声明且已独立校验的完整压缩表示流式重建，并再次校验未压缩大小和 SHA256；不同压缩格式禁止互相别名，canonical 与 by-hash 仅能映射到同一份已验证字节
+- Debian distribution 只有 Release anchor 时禁止发布 current generation；bootstrap metadata 保持直通，直到至少一个非 Release target 的完整闭包通过校验
+- generation 提交 current 前必须确认 root closure revision 未变化；并发发现新 target 时禁止发布旧 target 子集，必须基于扩展后的 closure 重试
 - 客户端 metadata 请求只读取 current generation；没有 current 时才允许直连上游并触发后台刷新
 - 已有 current generation 时，清单中缺失的 metadata 请求必须返回 `503` 并触发刷新，禁止回源补齐
+- 已有 root 的同 root metadata 发现必须扩展持久化 target 闭包，不得因 discovery create/update 角色差异形成永久 `503`
+- 没有 current 时，不能识别 root 的 metadata 伴生文件必须直通且不得创建 root 或触发 refresh
 - `current.yaml` 是唯一持久化提交标记；启动只能恢复其精确引用且完整校验通过的 snapshot，禁止回退选择最新 snapshot
 - 自动发现只允许由主元数据请求触发；伴生文件请求不能创建或识别新仓库
 - artifact / package sidecar 下载不能依赖包索引命中，也不能因为 refresh 失败被阻断
@@ -48,6 +55,9 @@
 - metadata 下载、解压、解析必须走流式 reader 或临时文件，禁止对大 metadata 整体 `io.ReadAll`
 - 伴生文件获取里 `404` / `403` 视为非致命
 - 大型 Debian refresh 必须使用绑定签名 Release digest 的持久化 staging 分片续传；锚点变化或 staging 校验失败时必须整体废弃候选 generation
+- Flatpak 没有 current generation 时 summary 和伴生 metadata 直通；只有 summary 触发后台 generation refresh，前台请求不得等待 refresh 锁
+- Git 使用不可变 generation 和唯一 `current.yaml` 提交标记；同步期间及同步失败后持续服务旧 current，尚无 current 时仅直通 Git smart HTTP
+- OCI manifest 按 digest 不可变存储，ref `state.yaml` 是唯一原子提交标记；命中只能读取 state 精确引用的 digest 对象
 
 ## 调度与清理
 
@@ -72,9 +82,11 @@
 - 同一缓存对象的并发 miss / refresh 必须合并为一次上游传输，客户端断开不能取消已开始的后台缓存填充
 - busy policy 语义固定为：`join` 合并传输，`stale` 优先旧对象且无旧对象时 join，`bypass` 独立回源
 - `TargetURL` 校验统一由 `httpcache` 负责，不允许各 resolver 自行放行未知 host
+- Cargo 下载模板只能携带路由信息，目标 host 必须来自显式 `allowed_crate_hosts` 或实例 upstream，元数据不得为自身目标授权
 - 已知 SHA256 / digest 的对象必须校验通过后才能写入缓存
 - Flatpak/OSTree objects 必须在写入 immutable 缓存前完成校验
 - Flatpak static deltas 可作为 opaque blob 按路径缓存，不做服务端语义校验；必须使用有限过期时间、路径安全校验，并在文档中说明依赖客户端校验
+- 完整读取并验证后的前台上游响应不能因 best-effort 缓存写入或引用提交失败转成下游错误；可安全返回临时表示时使用 `BYPASS`
 - 启动时保留 `utils.CleanStaleTempFiles(24h)`
 
 ## 测试

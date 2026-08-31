@@ -18,7 +18,7 @@ func TestPackageSidecarUsesStableImmutableRoute(t *testing.T) {
 		},
 	}
 	policy := &Policy{}
-	ApplyDefaults(policy)
+	ApplyPolicyDefaults(policy)
 	resolver := &generationResolver{handler: handler, policy: policy}
 	req, err := http.NewRequest(http.MethodGet, "http://cache.example/core/os/x86_64/linux-1-1-x86_64.pkg.tar.zst.sig", nil)
 	require.NoError(t, err)
@@ -32,4 +32,14 @@ func TestPackageSidecarUsesStableImmutableRoute(t *testing.T) {
 	next, err := resolver.Resolve(req)
 	require.NoError(t, err)
 	require.Equal(t, route.ObjectPath, next.ObjectPath)
+}
+
+func TestValidatePackagePolicyReportsFieldsInDeclarationOrder(t *testing.T) {
+	policy := &Policy{
+		ArtifactPolicy:  "invalid-artifact",
+		AuxiliaryPolicy: "invalid-auxiliary",
+	}
+
+	err := ValidatePackagePolicy(config.ModeDEB, policy)
+	require.EqualError(t, err, `artifact: invalid deb policy "invalid-artifact"`)
 }

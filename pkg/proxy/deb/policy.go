@@ -9,10 +9,6 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-type Config = filerepo.BasicPolicy
-type Policy = Config
-type Block = filerepo.RepoBlock
-
 type Driver struct{}
 
 func NewDriver() proxyruntime.ModeDriver { return Driver{} }

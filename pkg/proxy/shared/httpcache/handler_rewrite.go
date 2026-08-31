@@ -2,8 +2,10 @@ package httpcache
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	stdpath "path"
@@ -11,23 +13,87 @@ import (
 	"strings"
 )
 
-type CargoConfig struct {
-	DL           string `json:"dl"`
-	AuthRequired bool   `json:"auth-required,omitempty"`
+const maxCargoDownloadTemplateSize = 8 << 10
+
+var cargoTemplatePlaceholders = []string{
+	"{crate}", "{version}", "{prefix}", "{lowerprefix}", "{sha256-checksum}",
 }
 
 func rewriteCargoConfig(req *http.Request, data []byte, authRequired bool) ([]byte, error) {
-	cfg := CargoConfig{}
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &cfg); err != nil {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	if payload == nil {
+		return nil, errors.New("cargo config must be a JSON object")
+	}
+	var downloadTemplate string
+	if raw, ok := payload["dl"]; ok {
+		if err := json.Unmarshal(raw, &downloadTemplate); err != nil {
 			return nil, err
 		}
 	}
-	cfg.DL = joinBaseAndPath(externalBaseURL(req), "/api/v1/crates/{crate}/{version}/download")
-	if authRequired {
-		cfg.AuthRequired = true
+	if token, needsChecksum, err := EncodeCargoDownloadTemplate(downloadTemplate); err == nil {
+		downloadURL := joinBaseAndPath(externalBaseURL(req), "/api/v1/crates/{crate}/{version}/download/"+token)
+		if needsChecksum {
+			downloadURL += "/{sha256-checksum}"
+		}
+		payload["dl"], _ = json.Marshal(downloadURL)
 	}
-	return json.Marshal(cfg)
+	if authRequired {
+		payload["auth-required"] = json.RawMessage("true")
+	}
+	return json.Marshal(payload)
+}
+
+// EncodeCargoDownloadTemplate validates and encodes an upstream Cargo download
+// template for transport in a proxy-owned URL path.
+func EncodeCargoDownloadTemplate(raw string) (string, bool, error) {
+	template, needsChecksum, err := validateCargoDownloadTemplate(raw)
+	if err != nil {
+		return "", false, err
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(template)), needsChecksum, nil
+}
+
+// DecodeCargoDownloadTemplate decodes a proxy route token and repeats the
+// validation performed before the token was advertised.
+func DecodeCargoDownloadTemplate(token string) (string, bool, error) {
+	if token == "" || len(token) > base64.RawURLEncoding.EncodedLen(maxCargoDownloadTemplateSize) {
+		return "", false, errors.New("invalid cargo download template token")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return "", false, errors.New("invalid cargo download template token")
+	}
+	return validateCargoDownloadTemplate(string(decoded))
+}
+
+func validateCargoDownloadTemplate(raw string) (string, bool, error) {
+	template := strings.TrimSpace(raw)
+	if template == "" || len(template) > maxCargoDownloadTemplateSize {
+		return "", false, errors.New("invalid cargo download template")
+	}
+	hasPlaceholder := false
+	for _, placeholder := range cargoTemplatePlaceholders {
+		hasPlaceholder = hasPlaceholder || strings.Contains(template, placeholder)
+	}
+	if !hasPlaceholder {
+		template = strings.TrimRight(template, "/") + "/{crate}/{version}/download"
+	}
+	parsed, err := url.Parse(template)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.User != nil || parsed.Fragment != "" || strings.ContainsAny(parsed.Host, "{}") {
+		return "", false, errors.New("invalid cargo download template")
+	}
+	resolved := template
+	for _, placeholder := range cargoTemplatePlaceholders {
+		resolved = strings.ReplaceAll(resolved, placeholder, "x")
+	}
+	if strings.ContainsAny(resolved, "{}") {
+		return "", false, errors.New("unsupported cargo download template placeholder")
+	}
+	return template, strings.Contains(template, "{sha256-checksum}"), nil
 }
 
 func rewritePyPISimple(req *http.Request, upstreams []string, route Route, headers map[string]string, data []byte) ([]byte, map[string]string, error) {

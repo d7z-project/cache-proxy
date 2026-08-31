@@ -2,6 +2,7 @@ package git
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -30,9 +31,9 @@ func (b *billyAdapter) Create(name string) (billy.File, error) {
 	}
 	f, err := b.fs.Create(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create temporary file %q: %w", name, err)
 	}
-	return &billyFile{File: f}, nil
+	return &billyFile{File: f, name: name}, nil
 }
 
 func (b *billyAdapter) Open(name string) (billy.File, error) {
@@ -40,7 +41,7 @@ func (b *billyAdapter) Open(name string) (billy.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &billyFile{File: f}, nil
+	return &billyFile{File: f, name: name}, nil
 }
 
 func (b *billyAdapter) OpenFile(name string, flag int, perm os.FileMode) (billy.File, error) {
@@ -53,7 +54,7 @@ func (b *billyAdapter) OpenFile(name string, flag int, perm os.FileMode) (billy.
 	if err != nil {
 		return nil, err
 	}
-	return &billyFile{File: f}, nil
+	return &billyFile{File: f, name: name}, nil
 }
 
 func (b *billyAdapter) Stat(name string) (os.FileInfo, error) {
@@ -82,14 +83,14 @@ func (b *billyAdapter) Base(name string) string {
 
 func (b *billyAdapter) TempFile(dir, prefix string) (billy.File, error) {
 	if err := b.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create temporary directory %q: %w", dir, err)
 	}
 	name := path.Join(dir, prefix+strconv.FormatUint(tempSeq.Add(1), 36))
 	f, err := b.fs.Create(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create temporary file %q: %w", name, err)
 	}
-	return &billyFile{File: f}, nil
+	return &billyFile{File: f, name: name}, nil
 }
 
 func (b *billyAdapter) ReadDir(name string) ([]os.FileInfo, error) {
@@ -130,8 +131,10 @@ func (b *billyAdapter) Root() string {
 
 type billyFile struct {
 	afero.File
+	name string
 }
 
+func (f *billyFile) Name() string  { return f.name }
 func (f *billyFile) Lock() error   { return nil }
 func (f *billyFile) Unlock() error { return nil }
 

@@ -176,9 +176,6 @@ func formatRootStateColor(state string) string {
 
 func collectTenantUsage(ctx context.Context, tenants []string, store *blobfs.Store) map[string]int64 {
 	usage := make(map[string]int64)
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if store == nil {
 		return usage
 	}

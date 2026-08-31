@@ -22,11 +22,18 @@ type authHandler struct {
 }
 
 type refState struct {
+	Version        int               `yaml:"version"`
+	SourceUpstream string            `yaml:"source_upstream"`
 	Repo           string            `yaml:"repo"`
 	Ref            string            `yaml:"ref"`
 	FetchedAt      time.Time         `yaml:"fetched_at"`
 	ExpireAfter    config.Expiration `yaml:"expire_after"`
-	ManifestDigest string            `yaml:"manifest_digest,omitempty"`
+	ManifestDigest string            `yaml:"manifest_digest"`
+	ContentType    string            `yaml:"content_type,omitempty"`
+	ContentLength  int64             `yaml:"content_length"`
+	ETag           string            `yaml:"etag,omitempty"`
+	LastModified   string            `yaml:"last_modified,omitempty"`
+	Vary           string            `yaml:"vary,omitempty"`
 }
 
 type ociToken struct {
@@ -41,20 +48,22 @@ type ociChallenge struct {
 }
 
 type handler struct {
-	name         string
-	upstream     string
-	expireAfter  config.Expiration
-	policy       *Policy
-	store        *blobfs.Store
-	stats        *httpcache.Stats
-	client       *utils.HTTPClientWrapper
-	upstreamGate *httpcache.UpstreamGate
-	lifecycleCtx context.Context
-	cancel       context.CancelFunc
-	wait         sync.WaitGroup
-	closeMu      sync.Mutex
-	closing      bool
-	auth         authHandler
-	downloads    sync.Map
-	refLocks     *utils.RWLockGroup
+	name            string
+	upstream        string
+	expireAfter     config.Expiration
+	policy          *Policy
+	store           *blobfs.Store
+	stats           *httpcache.Stats
+	client          *utils.HTTPClientWrapper
+	upstreamGate    *httpcache.UpstreamGate
+	lifecycleCtx    context.Context
+	cancel          context.CancelFunc
+	wait            sync.WaitGroup
+	closeMu         sync.Mutex
+	closing         bool
+	auth            authHandler
+	downloads       sync.Map
+	refLocks        *utils.RWLockGroup
+	manifestMu      sync.Mutex
+	manifestReaders map[string]int
 }

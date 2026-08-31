@@ -303,9 +303,6 @@ func (s *Scheduler) Start(ctx context.Context) {
 	if s.stopped.Load() {
 		return
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	s.startMu.Lock()
 	if s.stopped.Load() {
 		s.startMu.Unlock()
@@ -328,9 +325,6 @@ func (s *Scheduler) SetRunObserver(fn func(TaskRun)) {
 }
 
 func (s *Scheduler) Stop(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if s.stopped.CompareAndSwap(false, true) {
 		s.startMu.Lock()
 		started := s.started

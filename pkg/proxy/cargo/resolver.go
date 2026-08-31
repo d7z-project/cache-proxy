@@ -1,44 +1,35 @@
 package cargo
 
 import (
-	"bufio"
-	"context"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 
-	"gopkg.d7z.net/blobfs"
-
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
+const maxCargoRouteValueSize = 256
+
 type resolver struct {
 	policy *Policy
-	store  *blobfs.Store
-	name   string
 }
 
-const maxCargoIndexLineSize = 2 << 20
-
-func newResolver(policy *Policy, store *blobfs.Store, name string) *resolver {
-	return &resolver{policy: policy, store: store, name: name}
+func newResolver(policy *Policy) *resolver {
+	return &resolver{policy: policy}
 }
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
-	lookupPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
-	if !httpcache.SafePath(lookupPath) {
+	lookupPath := strings.TrimPrefix(req.URL.Path, "/")
+	if lookupPath != "" && !httpcache.SafePath(lookupPath) {
 		return httpcache.Route{}, errors.New("invalid cargo request path")
 	}
-	if lookupPath == "." || lookupPath == "" {
+	if lookupPath == "" {
 		lookupPath = "config.json"
 	}
-	switch {
-	case lookupPath == "config.json":
+	if lookupPath == "config.json" {
 		return httpcache.Route{
 			ObjectPath:   "cargo/index/config.json",
 			UpstreamPath: "config.json",
@@ -48,100 +39,99 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 			RewriteKind:  "cargo-config",
 			AuthRequired: r.policy.AuthRequired,
 		}, nil
-	case strings.HasPrefix(lookupPath, "api/v1/crates/") && strings.HasSuffix(lookupPath, "/download"):
-		objectPath := "cargo/crates/" + strings.TrimPrefix(lookupPath, "api/v1/crates/")
-		targetURL := r.crateTargetURL(req.Context(), lookupPath)
-		var allowedTargetHosts []string
-		if parsed, err := url.Parse(targetURL); err == nil && parsed.Host != "" {
-			allowedTargetHosts = []string{parsed.Host}
-		}
-		return httpcache.Route{
-			ObjectPath:         objectPath,
-			UpstreamPath:       lookupPath,
-			TargetURL:          targetURL,
-			AllowedTargetHosts: allowedTargetHosts,
-			Policy:             r.policy.CratePolicy,
-			BusyPolicy:         config.BusyPolicyJoin,
-		}, nil
-	default:
-		return httpcache.Route{
-			ObjectPath:   "cargo/index/" + lookupPath,
-			UpstreamPath: lookupPath,
-			Policy:       config.PolicyRevalidate,
-			FreshFor:     r.policy.IndexFreshFor,
-			BusyPolicy:   r.policy.IndexBusyPolicy,
-		}, nil
 	}
+	if strings.HasPrefix(lookupPath, "api/v1/crates/") {
+		return r.resolveCrateDownload(lookupPath)
+	}
+	return httpcache.Route{
+		ObjectPath:   "cargo/index/" + lookupPath,
+		UpstreamPath: lookupPath,
+		Policy:       config.PolicyRevalidate,
+		FreshFor:     r.policy.IndexFreshFor,
+		BusyPolicy:   r.policy.IndexBusyPolicy,
+	}, nil
 }
 
-func (r *resolver) crateTargetURL(ctx context.Context, upstreamPath string) string {
-	reader, err := r.store.OpenObject(ctx, r.name, "cargo/index/config.json")
+func (r *resolver) resolveCrateDownload(lookupPath string) (httpcache.Route, error) {
+	parts := strings.Split(strings.TrimPrefix(lookupPath, "api/v1/crates/"), "/")
+	if len(parts) < 4 || len(parts) > 5 || parts[2] != "download" ||
+		!validCargoRouteValue(parts[0], false) || !validCargoRouteValue(parts[1], true) {
+		return httpcache.Route{}, errors.New("invalid cargo crate download route")
+	}
+	template, needsChecksum, err := httpcache.DecodeCargoDownloadTemplate(parts[3])
 	if err != nil {
-		return ""
+		return httpcache.Route{}, err
 	}
-	defer func() { _ = reader.Close() }()
-	var cfg httpcache.CargoConfig
-	if err := json.NewDecoder(reader).Decode(&cfg); err != nil || strings.TrimSpace(cfg.DL) == "" {
-		return ""
-	}
-	parts := strings.SplitN(strings.TrimPrefix(upstreamPath, "api/v1/crates/"), "/", 3)
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "download" {
-		return ""
-	}
-	downloadURL := strings.TrimRight(strings.TrimSpace(cfg.DL), "/")
-	if !strings.Contains(downloadURL, "{crate}") &&
-		!strings.Contains(downloadURL, "{version}") &&
-		!strings.Contains(downloadURL, "{prefix}") &&
-		!strings.Contains(downloadURL, "{lowerprefix}") &&
-		!strings.Contains(downloadURL, "{sha256-checksum}") {
-		downloadURL += "/{crate}/{version}/download"
+	checksum := ""
+	if needsChecksum {
+		if len(parts) != 5 || !validCargoChecksum(parts[4]) {
+			return httpcache.Route{}, errors.New("invalid cargo crate checksum")
+		}
+		checksum = parts[4]
+	} else if len(parts) != 4 {
+		return httpcache.Route{}, errors.New("unexpected cargo crate checksum")
 	}
 	prefix := cratePrefix(parts[0])
-	checksum := ""
-	if strings.Contains(downloadURL, "{sha256-checksum}") {
-		checksum = r.crateChecksum(ctx, parts[0], parts[1])
-		if checksum == "" {
-			return ""
-		}
-	}
+	templatePath, templateQuery, hasQuery := strings.Cut(template, "?")
 	targetURL := strings.NewReplacer(
 		"{crate}", parts[0],
 		"{version}", parts[1],
 		"{prefix}", prefix,
 		"{lowerprefix}", strings.ToLower(prefix),
 		"{sha256-checksum}", checksum,
-	).Replace(downloadURL)
-	if strings.Contains(targetURL, "{") || config.ValidateHTTPURL(targetURL) != nil {
-		return ""
+	).Replace(templatePath)
+	if hasQuery {
+		targetURL += "?" + strings.NewReplacer(
+			"{crate}", url.QueryEscape(parts[0]),
+			"{version}", url.QueryEscape(parts[1]),
+			"{prefix}", url.QueryEscape(prefix),
+			"{lowerprefix}", url.QueryEscape(strings.ToLower(prefix)),
+			"{sha256-checksum}", url.QueryEscape(checksum),
+		).Replace(templateQuery)
 	}
-	return targetURL
+	if strings.ContainsAny(targetURL, "{}") {
+		return httpcache.Route{}, errors.New("unresolved cargo download template placeholder")
+	}
+	parsed, err := url.Parse(targetURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return httpcache.Route{}, errors.New("invalid cargo crate target URL")
+	}
+	return httpcache.Route{
+		ObjectPath:   path.Join("cargo/crates", strings.ToLower(parts[0]), parts[1], httpcache.HashKey(targetURL)+".crate"),
+		UpstreamPath: lookupPath,
+		TargetURL:    targetURL,
+		Policy:       r.policy.CratePolicy,
+		BusyPolicy:   config.BusyPolicyJoin,
+	}, nil
 }
 
-func (r *resolver) crateChecksum(ctx context.Context, crate, version string) string {
-	objectPath := path.Join("cargo/index", strings.ToLower(cratePrefix(crate)), strings.ToLower(crate))
-	reader, err := r.store.OpenObject(ctx, r.name, objectPath)
-	if err != nil {
-		return ""
+func validCargoRouteValue(value string, allowVersionPunctuation bool) bool {
+	if value == "" || len(value) > maxCargoRouteValueSize || value == "." || value == ".." {
+		return false
 	}
-	defer func() { _ = reader.Close() }()
-
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), maxCargoIndexLineSize)
-	for scanner.Scan() {
-		var entry struct {
-			Version  string `json:"vers"`
-			Checksum string `json:"cksum"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.Version != version {
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' ||
+			allowVersionPunctuation && (character == '.' || character == '+') {
 			continue
 		}
-		digest, err := hex.DecodeString(entry.Checksum)
-		if err == nil && len(digest) == 32 {
-			return strings.ToLower(entry.Checksum)
-		}
-		return ""
+		return false
 	}
-	return ""
+	return true
+}
+
+func validCargoChecksum(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func cratePrefix(name string) string {

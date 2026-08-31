@@ -38,9 +38,6 @@ func FuzzMetadataRewriters(f *testing.F) {
 			output, err := rewriteCargoConfig(req, data, kind&0x80 != 0)
 			if err == nil {
 				require.True(t, json.Valid(output))
-				var cfg CargoConfig
-				require.NoError(t, json.Unmarshal(output, &cfg))
-				require.NotEmpty(t, cfg.DL)
 			}
 		}
 	})

@@ -46,9 +46,6 @@ func (h *IndexedHandler) statePath() string {
 }
 
 func (h *IndexedHandler) saveState(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -307,7 +304,7 @@ func (h *IndexedHandler) restoreGenerations(ctx context.Context) error {
 			h.roots[snapshot.RootID] = &rootEntry{root: RepositoryRoot{
 				ID: snapshot.RootID, Path: snapshot.RootPath, DisplayName: snapshot.RootPath,
 				PrimaryMetadata: primary, Targets: append([]MetadataTarget(nil), snapshot.Targets...),
-			}, lastSeenAt: now, lastValidatedAt: snapshot.Published}
+			}, closureRevision: 1, lastSeenAt: now, lastValidatedAt: snapshot.Published}
 		}
 		h.mu.Unlock()
 		h.reportMetadataState()

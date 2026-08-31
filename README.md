@@ -216,7 +216,7 @@ oci:
       expire_after: 168h
 ```
 
-Use this mode for a dedicated registry listener. Clients point Docker or other OCI tooling at the bound address. Cache publication is serialized per repository reference so a manifest and its persisted state are updated together. Canonical SHA256 blobs are verified and stored by digest independently from mutable tag state, so the same blob is reused across tags and repositories.
+Use this mode for a dedicated registry listener. Clients point Docker or other OCI tooling at the bound address. Verified manifests are stored as immutable digest objects; an atomically replaced ref `state.yaml` is the only publication marker and contains the exact digest and response metadata used by cache hits. A failed local content or state write leaves the previous ref visible and returns the verified upstream response as `BYPASS`. Canonical SHA256 blobs remain independent from mutable tag state and are reused across tags and repositories.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -353,9 +353,11 @@ cargo:
   index_fresh_for: 5m
   index_busy_policy: stale
   auth_required: false
+  allowed_crate_hosts:
+    - static.crates.io
 ```
 
-Use this mode for Cargo sparse index traffic and crate downloads. Download URLs are read from the latest cached `config.json`; legacy base URLs and the standard `{crate}`, `{version}`, `{prefix}`, `{lowerprefix}`, and `{sha256-checksum}` templates are supported. Checksum templates are resolved from the bounded, line-streamed cached sparse index entry for the requested crate version.
+Use this mode for Cargo sparse index traffic and crate downloads. A validated upstream download template is encoded into each rewritten proxy download URL, so a crate request does not depend on asynchronous `config.json` or index cache publication. Legacy base URLs and the standard `{crate}`, `{version}`, `{prefix}`, `{lowerprefix}`, and `{sha256-checksum}` templates are supported; Cargo supplies checksum template values in the generated request URL. External download hosts must be listed in `allowed_crate_hosts`. Unsafe templates remain unchanged so Cargo downloads them directly.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -366,6 +368,7 @@ Use this mode for Cargo sparse index traffic and crate downloads. Download URLs 
 | `index_fresh_for` | freshness | — | Freshness for sparse index entries |
 | `index_busy_policy` | busy policy | `stale` | Busy policy for sparse index entries |
 | `auth_required` | bool | `false` | Return `auth-required: true` in generated config |
+| `allowed_crate_hosts` | `[]host[:port]` | — | Explicit external hosts permitted for crate downloads |
 
 </details>
 
@@ -429,7 +432,7 @@ flatpak:
   delta_expire_after: 720h
 ```
 
-Use this mode for Flatpak repositories backed by OSTree. `summary`, `summary.sig`, and `config` are refreshed as metadata generations from one upstream. OSTree objects are cached outside generations and verified before immutable cache writes. Static deltas are cached as finite-lifetime opaque files by path and are validated by Flatpak/OSTree clients when applied.
+Use this mode for Flatpak repositories backed by OSTree. `summary`, `summary.sig`, and `config` are refreshed as metadata generations from one upstream. Before a current generation exists these metadata requests pass through immediately; a summary request starts the serialized background refresh without waiting for it. Descriptor rewriting is returned as `BYPASS` if best-effort persistence fails. OSTree objects are cached outside generations and verified before immutable cache writes. Static deltas are cached as finite-lifetime opaque files by path and are validated by Flatpak/OSTree clients when applied.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -497,11 +500,22 @@ deb:
 Use this mode for Debian-style repositories discovered from `Release`, `InRelease`, `Packages*`, and `Sources*`
 metadata requests. Both standard `dists/<suite>/...` layouts and flat repositories are supported.
 
-For distribution repositories, every path in the signed Release `SHA256` section is an independent required
-metadata object. Compression variants never substitute for one another. With `Acquire-By-Hash: yes`, refresh
-prefers the exact `by-hash/SHA256/<digest>` URI and publishes the canonical and by-hash paths only after the
-download matches both the declared size and SHA256. DEP-11, Translations, Contents, installer indexes, and other
-Release-listed metadata are generation-bound just like Packages and Sources.
+For distribution repositories, the signed Release `SHA256` section is a verification catalog. Refresh acquires
+only the logical metadata closure selected by persisted package, source, and auxiliary request targets; unrelated
+architectures, components, Contents, Translations, installer indexes, and DEP-11 data are not mirrored implicitly.
+With `Acquire-By-Hash: yes`, an exact object prefers its `by-hash/SHA256/<digest>` URI and falls back only to the
+same canonical path. Compression variants remain independent objects and never alias one another. Debian Release
+files can declare an uncompressed index that is not directly published; in that case cache-proxy may fetch a full
+compressed representation declared by the same Release, verify it, stream-decompress it, and publish a separate
+uncompressed object only after its own declared size and SHA256 also match. A target absent from the signed catalog
+is committed as generation-bound not-found metadata and is never fetched as unsigned content.
+
+A newly discovered distribution remains in bootstrap passthrough while its root contains only the Release anchor.
+The proxy does not publish an anchor-only current generation, so the first requested Packages, Sources, Contents,
+or other selected metadata retains the upstream response while registering the target for refresh. Publication also
+checks that the root target closure did not change during construction. A transient 503 is reserved for a new metadata
+path that is absent from an already usable current generation; that path cannot bypass the committed Release and is
+available after the expanded generation is atomically published.
 
 Standard apt sources use `deb <proxy-url> <suite> <component>`. Flat repositories use
 `deb [trusted=yes] <proxy-url> ./`. In both cases, `<proxy-url>` is the cache-proxy HTTP(S) URL, not a
@@ -566,7 +580,7 @@ git:
   force_overwrite: true
 ```
 
-Use this mode for a single upstream Git repository mirrored behind an HTTP path.
+Use this mode for a single upstream Git repository mirrored behind an HTTP path. Each clone or fetch builds a separate immutable generation and atomically publishes `current.yaml`; readers keep serving the previous generation throughout synchronization and after failed refreshes. On a cold cache, supported Git smart HTTP requests pass through to an HTTP(S) upstream while the initial clone is built in the background.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |

@@ -9,16 +9,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
+	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
@@ -64,18 +67,324 @@ func TestReleaseManifestKeepsCompressionVariantsDistinct(t *testing.T) {
 	require.NotEqual(t, manifest.Entries[1].SHA256, manifest.Entries[2].SHA256)
 }
 
-func TestReleaseIndexSelectionParsesOnePreferredCompressionVariant(t *testing.T) {
-	entries := []releaseEntry{
-		{Path: "main/binary-amd64/Packages", Size: 100},
-		{Path: "main/binary-amd64/Packages.gz", Size: 50},
-		{Path: "main/binary-amd64/Packages.xz", Size: 25},
-		{Path: "main/source/Sources.gz", Size: 40},
+func TestDistributionRefreshReconstructsSignedUncompressedIndex(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	contents := []byte("usr/bin/example main/example\n")
+	compressed := gzipData(t, string(contents))
+	unrelated := []byte("unrelated")
+	release := "Acquire-By-Hash: yes\n" + releaseSHA256(map[string][]byte{
+		"main/Contents-all":                  contents,
+		"main/Contents-all.gz":               compressed,
+		"main/dep11/Components-amd64.yml.gz": unrelated,
+	})
+	var unrelatedRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/Contents-all":
+			http.NotFound(w, r)
+		case "/dists/trixie/main/Contents-all.gz":
+			_, _ = w.Write(compressed)
+		case "/dists/trixie/main/dep11/Components-amd64.yml.gz":
+			unrelatedRequests.Add(1)
+			_, _ = w.Write(unrelated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/Contents-all", Kind: "metadata"},
+	)
+	require.NoError(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"))
+	require.Zero(t, unrelatedRequests.Load())
+
+	contentsDigest := sha256.Sum256(contents)
+	compressedDigest := sha256.Sum256(compressed)
+	for requestPath, expected := range map[string][]byte{
+		"/dists/trixie/main/Contents-all":                                          contents,
+		"/dists/trixie/main/Contents-all.gz":                                       compressed,
+		"/dists/trixie/main/by-hash/SHA256/" + fmt.Sprintf("%x", contentsDigest):   contents,
+		"/dists/trixie/main/by-hash/SHA256/" + fmt.Sprintf("%x", compressedDigest): compressed,
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		require.Equal(t, http.StatusOK, recorder.Code, requestPath)
+		require.Equal(t, "GENERATION", recorder.Header().Get("X-Cache"), requestPath)
+		require.Equal(t, expected, recorder.Body.Bytes(), requestPath)
 	}
-	targets, err := selectReleaseIndexes(entries)
+}
+
+func TestDistributionReconstructionRejectsChangedReleaseAnchor(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+
+	firstContents := []byte("first contents\n")
+	secondContents := []byte("second contents\n")
+	compressed := gzipData(t, string(firstContents))
+	firstRelease := releaseSHA256(map[string][]byte{
+		"main/Contents-all": firstContents, "main/Contents-all.gz": compressed,
+	})
+	secondRelease := releaseSHA256(map[string][]byte{
+		"main/Contents-all": secondContents, "main/Contents-all.gz": gzipData(t, string(secondContents)),
+	})
+	var releaseRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			if releaseRequests.Add(1) == 1 {
+				_, _ = io.WriteString(w, firstRelease)
+				return
+			}
+			_, _ = io.WriteString(w, secondRelease)
+		case "/dists/trixie/main/Contents-all.gz":
+			_, _ = w.Write(compressed)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/Contents-all", Kind: "metadata"},
+	)
+	outcome, err := handler.RefreshRootTask(context.Background(), "deb_distribution:dists/trixie")
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+	require.Equal(t, "restarted", outcome.Result)
+	require.Equal(t, "staging_anchor_changed", outcome.ReasonCode)
+	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+	entries, err := os.ReadDir(tempDir)
 	require.NoError(t, err)
-	require.Len(t, targets, 2)
-	require.Equal(t, "main/binary-amd64/Packages.xz", targets[0].entry.Path)
-	require.Equal(t, "main/source/Sources.gz", targets[1].entry.Path)
+	require.Empty(t, entries)
+}
+
+func TestDistributionRefreshRejectsInvalidReconstructedIndex(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		expectedContents   []byte
+		declaredCompressed []byte
+		servedCompressed   []byte
+		errorText          string
+	}{
+		{
+			name: "compressed checksum mismatch", expectedContents: []byte("contents"),
+			declaredCompressed: gzipData(t, "contents"), errorText: "metadata SHA256 mismatch",
+		},
+		{
+			name: "decompression failure", expectedContents: []byte("contents"),
+			declaredCompressed: []byte("not-gzip"), servedCompressed: []byte("not-gzip"), errorText: "EOF",
+		},
+		{
+			name: "decompressed size mismatch", expectedContents: []byte("contents-longer"),
+			declaredCompressed: gzipData(t, "contents"), errorText: "derived metadata size mismatch",
+		},
+		{
+			name: "decompressed digest mismatch", expectedContents: []byte("expected"),
+			declaredCompressed: gzipData(t, "differnt"), errorText: "derived metadata SHA256 mismatch",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			servedCompressed := test.servedCompressed
+			if servedCompressed == nil {
+				servedCompressed = append([]byte(nil), test.declaredCompressed...)
+			}
+			if test.name == "compressed checksum mismatch" {
+				servedCompressed[0] ^= 0xff
+			}
+			release := releaseSHA256(map[string][]byte{
+				"main/Contents-all":    test.expectedContents,
+				"main/Contents-all.gz": test.declaredCompressed,
+			})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/dists/trixie/InRelease":
+					_, _ = io.WriteString(w, release)
+				case "/dists/trixie/main/Contents-all.gz":
+					_, _ = w.Write(servedCompressed)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			handler := newDebDistributionTestHandler(t, server.URL,
+				filerepo.MetadataTarget{URL: "dists/trixie/main/Contents-all", Kind: "metadata"},
+			)
+			err := handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie")
+			require.ErrorContains(t, err, test.errorText)
+			require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+		})
+	}
+}
+
+func TestDistributionRefreshCommitsUnlistedTargetAsNotFound(t *testing.T) {
+	release := releaseSHA256(map[string][]byte{"main/Contents-amd64.gz": gzipData(t, "contents")})
+	var targetRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dists/trixie/InRelease" {
+			_, _ = io.WriteString(w, release)
+			return
+		}
+		if r.URL.Path == "/dists/trixie/main/Contents-all" {
+			targetRequests.Add(1)
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/Contents-all", Kind: "metadata"},
+	)
+	require.NoError(t, handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie"))
+	require.Zero(t, targetRequests.Load())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Equal(t, "GENERATION", recorder.Header().Get("X-Cache"))
+}
+
+func TestDistributionBootstrapPassesThroughBeforePublishingSelectedClosure(t *testing.T) {
+	contentsAll := []byte("usr/bin/example main/example\n")
+	contentsAMD64 := []byte("usr/bin/amd64 main/example\n")
+	release := releaseSHA256(map[string][]byte{
+		"main/Contents-all": contentsAll, "main/Contents-amd64": contentsAMD64,
+	})
+	var upstreamRequests atomic.Int32
+	var amd64Requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequests.Add(1)
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/Contents-all":
+			_, _ = w.Write(contentsAll)
+		case "/dists/trixie/main/Contents-amd64":
+			amd64Requests.Add(1)
+			_, _ = w.Write(contentsAMD64)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	outcome, err := handler.RefreshRootTask(context.Background(), "deb_distribution:dists/trixie")
+	require.ErrorIs(t, err, scheduler.ErrTaskSkipped)
+	require.Equal(t, "metadata_closure_pending", outcome.ReasonCode)
+	require.Zero(t, upstreamRequests.Load())
+	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, contentsAll, recorder.Body.Bytes())
+	require.NotEqual(t, "GENERATION", recorder.Header().Get("X-Cache"))
+	require.Empty(t, recorder.Header().Get("X-Cache-Generation"))
+
+	require.NoError(t, handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie"))
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "GENERATION", recorder.Header().Get("X-Cache"))
+	require.Equal(t, contentsAll, recorder.Body.Bytes())
+
+	beforeExpansion := amd64Requests.Load()
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-amd64", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, "1", recorder.Header().Get("Retry-After"))
+	require.Equal(t, beforeExpansion, amd64Requests.Load(), "usable generations must not bypass missing metadata")
+
+	require.NoError(t, handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie"))
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-amd64", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "GENERATION", recorder.Header().Get("X-Cache"))
+	require.Equal(t, contentsAMD64, recorder.Body.Bytes())
+}
+
+func TestDistributionRootAttributesInferPackageClosure(t *testing.T) {
+	packages := []byte("Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\n\n")
+	compressed := gzipData(t, string(packages))
+	unusedXZ := []byte("unused xz representation")
+	release := releaseSHA256(map[string][]byte{
+		"main/binary-amd64/Packages":    packages,
+		"main/binary-amd64/Packages.gz": compressed,
+		"main/binary-amd64/Packages.xz": unusedXZ,
+	})
+	var xzRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/binary-amd64/Packages.gz":
+			_, _ = w.Write(compressed)
+		case "/dists/trixie/main/binary-amd64/Packages.xz":
+			xzRequests.Add(1)
+			_, _ = w.Write(unusedXZ)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL)
+	root := debDistributionRoot("dists/trixie", "trixie", []string{"main"}, []string{"amd64"}, false)
+	root.Targets = append(root.Targets, filerepo.MetadataTarget{
+		URL: "dists/trixie/main/binary-amd64/Packages.gz", Kind: "packages",
+	})
+	handler.AddRepository(root)
+	require.NoError(t, handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie"))
+	require.Zero(t, xzRequests.Load())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/binary-amd64/Packages", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, packages, recorder.Body.Bytes())
+}
+
+func TestDistributionRefreshFailurePreservesCurrentGeneration(t *testing.T) {
+	oldContents := []byte("old contents\n")
+	newContents := []byte("new contents\n")
+	release := releaseSHA256(map[string][]byte{"main/Contents-all": oldContents})
+	serveContents := true
+	var mu sync.RWMutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.RLock()
+		defer mu.RUnlock()
+		switch r.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/Contents-all":
+			if serveContents {
+				_, _ = w.Write(oldContents)
+				return
+			}
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/Contents-all", Kind: "metadata"},
+	)
+	require.NoError(t, handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie"))
+	mu.Lock()
+	release = releaseSHA256(map[string][]byte{"main/Contents-all": newContents})
+	serveContents = false
+	mu.Unlock()
+	require.ErrorContains(t, handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie"), "Contents-all")
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, oldContents, recorder.Body.Bytes())
 }
 
 func TestDistributionRefreshRejectsGenerationWhenOneReleaseIndexIsMissing(t *testing.T) {
@@ -100,7 +409,10 @@ func TestDistributionRefreshRejectsGenerationWhenOneReleaseIndexIsMissing(t *tes
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/binary-amd64/Packages.gz", Kind: "packages"},
+		filerepo.MetadataTarget{URL: "dists/trixie/main/binary-arm64/Packages.gz", Kind: "packages"},
+	)
 	require.ErrorContains(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"), "binary-arm64/Packages.gz")
 
 	statuses := handler.RepositoryStatuses()
@@ -124,7 +436,9 @@ func TestDistributionRefreshFailsWhenAllReleaseIndexesAreMissing(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/binary-arm64/Packages.gz", Kind: "packages"},
+	)
 	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "binary-arm64/Packages.gz")
@@ -150,7 +464,9 @@ func TestDistributionRefreshFailsOnReleaseIndexChecksumMismatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/binary-amd64/Packages.gz", Kind: "packages"},
+	)
 	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "SHA256 mismatch")
@@ -176,7 +492,9 @@ func TestDistributionRefreshFailsOnReleaseIndexSizeMismatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/dep11/Components-amd64.yml", Kind: "metadata"},
+	)
 	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
 	require.ErrorContains(t, err, "size mismatch")
 	require.False(t, handler.RepositoryStatuses()[0].HasCurrent)
@@ -205,7 +523,9 @@ func TestDistributionRefreshDoesNotSubstituteCompressionVariants(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/dep11/Components-amd64.yml.xz", Kind: "metadata"},
+	)
 	err := handler.RefreshRoot(ctx, "deb_distribution:dists/trixie")
 	require.ErrorContains(t, err, "Components-amd64.yml.xz")
 	require.Zero(t, gzipRequests, "a missing xz object must not fall back to gzip bytes")
@@ -230,7 +550,9 @@ func TestDistributionRefreshKeepsReleaseFallbackServingIdentityExact(t *testing.
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/main/dep11/Components-amd64.yml", Kind: "metadata"},
+	)
 	require.NoError(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"))
 	for requestPath, expected := range map[string]struct {
 		status int
@@ -275,7 +597,9 @@ func TestDistributionReleaseCompanionsOnlyAllowForbiddenOrNotFound(t *testing.T)
 			}))
 			defer server.Close()
 
-			handler := newDebDistributionTestHandler(t, server.URL)
+			handler := newDebDistributionTestHandler(t, server.URL,
+				filerepo.MetadataTarget{URL: "dists/trixie/main/dep11/Components-amd64.yml", Kind: "metadata"},
+			)
 			err := handler.RefreshRoot(context.Background(), "deb_distribution:dists/trixie")
 			if test.succeeds {
 				require.NoError(t, err)
@@ -315,7 +639,10 @@ func TestDistributionGenerationServesExactCanonicalAndByHashMetadata(t *testing.
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	handler := newDebDistributionTestHandler(t, server.URL,
+		filerepo.MetadataTarget{URL: "dists/trixie/" + packagesPath, Kind: "packages"},
+		filerepo.MetadataTarget{URL: "dists/trixie/" + componentsPath, Kind: "metadata"},
+	)
 	require.NoError(t, handler.RefreshRoot(ctx, "deb_distribution:dists/trixie"))
 	for relativePath, body := range bodies {
 		canonical := "/dists/trixie/" + relativePath
@@ -360,7 +687,11 @@ func TestDistributionRefreshResumesPersistedStagingInBoundedSlices(t *testing.T)
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	targets := make([]filerepo.MetadataTarget, 0, len(entries))
+	for cleanPath := range entries {
+		targets = append(targets, filerepo.MetadataTarget{URL: "dists/trixie/" + cleanPath, Kind: "metadata"})
+	}
+	handler := newDebDistributionTestHandler(t, server.URL, targets...)
 	outcome, err := handler.RefreshRootTask(ctx, "deb_distribution:dists/trixie")
 	var retry scheduler.RetryAtError
 	require.ErrorAs(t, err, &retry)
@@ -406,7 +737,11 @@ func TestDistributionRefreshDiscardsStagingWhenReleaseAnchorChanges(t *testing.T
 	}))
 	defer server.Close()
 
-	handler := newDebDistributionTestHandler(t, server.URL)
+	targets := make([]filerepo.MetadataTarget, 0, len(entries))
+	for cleanPath := range entries {
+		targets = append(targets, filerepo.MetadataTarget{URL: "dists/trixie/" + cleanPath, Kind: "metadata"})
+	}
+	handler := newDebDistributionTestHandler(t, server.URL, targets...)
 	_, err := handler.RefreshRootTask(ctx, "deb_distribution:dists/trixie")
 	var retry scheduler.RetryAtError
 	require.ErrorAs(t, err, &retry)
@@ -428,7 +763,11 @@ func TestDEBSnapshotValidatorRejectsMissingReleaseIndex(t *testing.T) {
 	indexPath := "dists/trixie/main/binary-amd64/Packages.gz"
 	release := releaseSHA256(map[string][]byte{"main/binary-amd64/Packages.gz": index})
 	snapshot := &filerepo.LiveSnapshot{
-		Targets: []filerepo.MetadataTarget{{URL: releasePath, Candidates: []string{"dists/trixie/Release"}}},
+		Targets: []filerepo.MetadataTarget{
+			{URL: releasePath, Candidates: []string{"dists/trixie/Release"}, Kind: "release"},
+			{URL: indexPath, Kind: "packages"},
+		},
+		Anchors: []filerepo.MetadataAnchor{{Path: releasePath, State: filerepo.MetadataPresent}},
 		Metadata: map[string]filerepo.MetadataObject{
 			releasePath: {Path: releasePath, State: filerepo.MetadataPresent, Required: true},
 		},
@@ -440,6 +779,125 @@ func TestDEBSnapshotValidatorRejectsMissingReleaseIndex(t *testing.T) {
 		return nil, fmt.Errorf("missing %s", cleanPath)
 	}
 	require.ErrorContains(t, (inspector{}).ValidateSnapshot(context.Background(), snapshot, opener), indexPath)
+}
+
+func TestRestoreRejectsAnchorOnlyDistributionCurrent(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	handler := filerepo.NewIndexedHandler(
+		"deb-test", config.ModeDEB, config.ModeDEB, inspector{}, []string{"https://upstream.example"}, nil,
+		config.Expiration(time.Hour), &filerepo.Policy{}, buildSnapshot, store, stats,
+		health.New("deb-test", config.ModeDEB, health.DefaultConfig(), []string{"https://upstream.example"}, stats), nil,
+	)
+	root := debDistributionRoot("dists/trixie", "trixie", nil, nil, false)
+	handler.AddRepository(root)
+
+	rootID := root.ID
+	generation := "anchor-only"
+	releasePath := "dists/trixie/InRelease"
+	release := []byte(releaseSHA256(map[string][]byte{"main/Contents-all": []byte("contents")}))
+	releaseSum := sha256.Sum256(release)
+	releaseDigest := fmt.Sprintf("%x", releaseSum)
+	anchors := []filerepo.MetadataAnchor{{
+		Path: releasePath, State: filerepo.MetadataPresent, Size: int64(len(release)), Digest: releaseDigest,
+	}}
+	anchorData, err := yaml.Marshal(anchors)
+	require.NoError(t, err)
+	anchorSetSum := sha256.Sum256(anchorData)
+	cleanupSum := sha256.Sum256(nil)
+	snapshot := filerepo.LiveSnapshot{
+		Version: 3, RootID: rootID, RootPath: root.Path, Generation: generation,
+		Upstream: "https://upstream.example", Published: time.Now().UTC(),
+		AnchorSetDigest: "sha256:" + fmt.Sprintf("%x", anchorSetSum), Anchors: anchors,
+		Metadata: map[string]filerepo.MetadataObject{
+			releasePath: {
+				Path: releasePath, State: filerepo.MetadataPresent, Required: true,
+				Digest: "sha256:" + releaseDigest, Size: int64(len(release)),
+			},
+		},
+		Targets: root.Targets, CleanupIndexDigest: "sha256:" + fmt.Sprintf("%x", cleanupSum),
+	}
+	snapshotData, err := yaml.Marshal(snapshot)
+	require.NoError(t, err)
+	snapshotSum := sha256.Sum256(snapshotData)
+	rootSum := sha256.Sum256([]byte(rootID))
+	rootKey := fmt.Sprintf("%x", rootSum)
+	basePath := path.Join(config.ModeDEB, ".roots", rootKey)
+	metadataPath := path.Join(basePath, "generations", generation, "metadata", releasePath)
+	cleanupPath := path.Join(basePath, "generations", generation, "cleanup", "paths.txt")
+	snapshotPath := path.Join(basePath, "snapshots", generation+".yaml")
+	currentPath := path.Join(basePath, "current.yaml")
+	for objectPath, data := range map[string][]byte{
+		metadataPath: release,
+		cleanupPath:  {},
+		snapshotPath: snapshotData,
+	} {
+		require.NoError(t, store.MkdirAll(path.Join("deb-test", path.Dir(objectPath)), 0o755))
+		_, err = store.Put(ctx, "deb-test", objectPath, bytes.NewReader(data), nil)
+		require.NoError(t, err)
+	}
+	currentData, err := yaml.Marshal(struct {
+		Version            int    `yaml:"version"`
+		RootID             string `yaml:"root_id"`
+		Generation         string `yaml:"generation"`
+		SnapshotDigest     string `yaml:"snapshot_sha256"`
+		CleanupIndexDigest string `yaml:"cleanup_index_sha256"`
+	}{
+		Version: 2, RootID: rootID, Generation: generation,
+		SnapshotDigest:     "sha256:" + fmt.Sprintf("%x", snapshotSum),
+		CleanupIndexDigest: snapshot.CleanupIndexDigest,
+	})
+	require.NoError(t, err)
+	_, err = store.Put(ctx, "deb-test", currentPath, bytes.NewReader(currentData), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, handler.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, handler.Stop(stopCtx))
+	})
+	statuses := handler.RepositoryStatuses()
+	require.Len(t, statuses, 1)
+	require.False(t, statuses[0].HasCurrent)
+	_, err = store.StatObject(ctx, "deb-test", currentPath)
+	require.Error(t, err)
+}
+
+func TestDEBSnapshotValidatorRejectsMissingSelectedByHashAlias(t *testing.T) {
+	index := gzipData(t, "Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\n\n")
+	digest := sha256.Sum256(index)
+	releasePath := "dists/trixie/InRelease"
+	indexPath := "dists/trixie/main/binary-amd64/Packages.gz"
+	release := "Acquire-By-Hash: yes\n" + releaseSHA256(map[string][]byte{"main/binary-amd64/Packages.gz": index})
+	snapshot := &filerepo.LiveSnapshot{
+		Targets: []filerepo.MetadataTarget{
+			{URL: releasePath, Candidates: []string{"dists/trixie/Release"}, Kind: "release"},
+			{URL: indexPath, Kind: "packages"},
+		},
+		Anchors: []filerepo.MetadataAnchor{{Path: releasePath, State: filerepo.MetadataPresent}},
+		Metadata: map[string]filerepo.MetadataObject{
+			releasePath: {Path: releasePath, State: filerepo.MetadataPresent, Required: true},
+			indexPath: {
+				Path: indexPath, State: filerepo.MetadataPresent, Required: true,
+				Size: int64(len(index)), ChecksumType: "sha256", Checksum: fmt.Sprintf("%x", digest),
+			},
+		},
+	}
+	opener := func(cleanPath string) (io.ReadCloser, error) {
+		switch cleanPath {
+		case releasePath:
+			return io.NopCloser(strings.NewReader(release)), nil
+		case indexPath:
+			return io.NopCloser(bytes.NewReader(index)), nil
+		default:
+			return nil, fmt.Errorf("missing %s", cleanPath)
+		}
+	}
+	require.ErrorContains(t, (inspector{}).ValidateSnapshot(context.Background(), snapshot, opener), "by-hash mapping")
 }
 
 func TestAnalyzerCreatesRootFromReleaseUnderPrefix(t *testing.T) {
@@ -461,6 +919,9 @@ func TestAnalyzerTreatsPackagesAsUpdateOnly(t *testing.T) {
 	require.Equal(t, "deb_distribution:proxmox/debian/pve/dists/trixie", result.Root.ID)
 	require.Equal(t, []string{"pve-no-subscription"}, result.Root.Components)
 	require.Equal(t, []string{"amd64"}, result.Root.Architectures)
+	require.Contains(t, result.Root.Targets, filerepo.MetadataTarget{
+		URL: "proxmox/debian/pve/dists/trixie/pve-no-subscription/binary-amd64/Packages.gz", Kind: "packages",
+	})
 }
 
 func TestAnalyzerTreatsSourcesAsUpdateOnly(t *testing.T) {
@@ -470,6 +931,22 @@ func TestAnalyzerTreatsSourcesAsUpdateOnly(t *testing.T) {
 	require.Equal(t, "deb_distribution:proxmox/debian/pve/dists/trixie", result.Root.ID)
 	require.Equal(t, []string{"pve-no-subscription"}, result.Root.Components)
 	require.True(t, result.Root.Source)
+	require.Contains(t, result.Root.Targets, filerepo.MetadataTarget{
+		URL: "proxmox/debian/pve/dists/trixie/pve-no-subscription/source/Sources.xz", Kind: "sources",
+	})
+}
+
+func TestAnalyzerTreatsAuxiliaryMetadataAsExactUpdateTarget(t *testing.T) {
+	result := (inspector{}).InspectPath("dists/trixie/main/Contents-all")
+	require.Equal(t, filerepo.ResourceMetadata, result.Class)
+	require.Equal(t, filerepo.DiscoveryUpdateRoot, result.Role)
+	require.Contains(t, result.Root.Targets, filerepo.MetadataTarget{
+		URL: "dists/trixie/main/Contents-all", Kind: "metadata",
+	})
+
+	byHash := (inspector{}).InspectPath("dists/trixie/main/by-hash/SHA256/abcdef")
+	require.Equal(t, filerepo.DiscoveryIgnore, byHash.Role)
+	require.Empty(t, byHash.Root.ID)
 }
 
 func TestAnalyzerCreatesFlatRootFromPackagesAtRepositoryRoot(t *testing.T) {
@@ -492,6 +969,46 @@ func TestAnalyzerCreatesFlatRootFromNestedSources(t *testing.T) {
 	require.Equal(t, []string{"local/repo/Sources.xz"}, result.Root.PrimaryMetadata[:1])
 }
 
+func TestDebianFlatSourcesExpandsCommittedPackagesRoot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/Packages":
+			_, _ = io.WriteString(w, "Package: binary\nVersion: 1\nFilename: pool/binary.deb\n\n")
+		case "/Sources":
+			_, _ = io.WriteString(w, "Package: source\nDirectory: pool/source\nFiles:\n abc 1 source.dsc\n\n")
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stats := httpcache.NewStats(prometheus.NewRegistry())
+	handler := filerepo.NewIndexedHandler(
+		"deb-test", config.ModeDEB, config.ModeDEB, inspector{}, []string{server.URL}, nil,
+		config.Expiration(time.Hour), &filerepo.Policy{}, buildSnapshot, store, stats,
+		health.New("deb-test", config.ModeDEB, health.DefaultConfig(), []string{server.URL}, stats), nil,
+	)
+	rootID := filerepo.RepositoryID(filerepo.LayoutDebFlat, "")
+	handler.AddRepository(filerepo.RepositoryRoot{
+		ID: rootID, Layout: filerepo.LayoutDebFlat,
+		PrimaryMetadata: []string{"Packages"},
+		Targets:         []filerepo.MetadataTarget{{URL: "Packages", Kind: "packages"}},
+	})
+	require.NoError(t, handler.RefreshRoot(context.Background(), rootID))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/Sources", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.NoError(t, handler.RefreshRoot(context.Background(), rootID))
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/Sources", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "GENERATION", recorder.Header().Get("X-Cache"))
+}
+
 func TestAnalyzerClassifiesPrefixedArtifactPath(t *testing.T) {
 	result := (inspector{}).InspectPath("proxmox/debian/pve/pool/main/p/pkg/pkg_1.0_amd64.deb")
 	require.Equal(t, filerepo.ResourceArtifact, result.Class)
@@ -504,7 +1021,7 @@ func TestAnalyzerClassifiesMetadataWithoutCreatingRoot(t *testing.T) {
 	require.Equal(t, filerepo.DiscoveryIgnore, result.Role)
 }
 
-func newDebDistributionTestHandler(t *testing.T, upstream string) *filerepo.IndexedHandler {
+func newDebDistributionTestHandler(t *testing.T, upstream string, targets ...filerepo.MetadataTarget) *filerepo.IndexedHandler {
 	t.Helper()
 
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
@@ -527,7 +1044,9 @@ func newDebDistributionTestHandler(t *testing.T, upstream string) *filerepo.Inde
 		health.New("deb-test", config.ModeDEB, health.DefaultConfig(), []string{upstream}, stats),
 		nil,
 	)
-	handler.AddRepository(debDistributionRoot("dists/trixie", "trixie", nil, nil, false))
+	root := debDistributionRoot("dists/trixie", "trixie", nil, nil, false)
+	root.Targets = append(root.Targets, targets...)
+	handler.AddRepository(root)
 	return handler
 }
 

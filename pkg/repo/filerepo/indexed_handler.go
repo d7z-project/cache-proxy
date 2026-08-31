@@ -24,6 +24,7 @@ const snapshotSchemaVersion = 3
 
 type rootEntry struct {
 	root                        RepositoryRoot
+	closureRevision             uint64
 	lastSeenAt                  time.Time
 	lastValidatedAt             time.Time
 	lastSeenSavedAt             time.Time
@@ -71,7 +72,7 @@ type IndexedHandler struct {
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, upstreamGate *httpcache.UpstreamGate) *IndexedHandler {
-	ApplyDefaults(policy)
+	ApplyPolicyDefaults(policy)
 	handler := &IndexedHandler{
 		name:            name,
 		mode:            mode,
@@ -152,7 +153,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if class == ResourceMetadata {
 		if rootID, snapshot, known := h.matchRepository(cleanPath); known {
 			if snapshot != nil {
-				if analysis.Role == DiscoveryUpdateRoot && analysis.Root.ID == rootID {
+				if analysis.Role != DiscoveryIgnore && analysis.Root.ID == rootID {
 					h.registerRoot(analysis)
 				}
 				h.triggerMetadataRefresh(rootID)
@@ -172,8 +173,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if analysis.Role == DiscoveryIgnore {
-			_ = httpcache.ErrorResponse(http.StatusNotFound, fmt.Errorf("metadata repository for %s is not discovered", cleanPath)).FlushClose(req, w)
-			h.stats.RecordRequest(h.name, h.mode, req.Method, "ERROR", http.StatusNotFound, 0)
+			h.base.ProxyPassthrough(w, req, cleanPath, "")
 			return
 		}
 		status := h.base.ProxyPassthroughStatus(w, req, cleanPath, "")

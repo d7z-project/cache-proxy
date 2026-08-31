@@ -228,65 +228,84 @@ func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootID, generati
 	return err
 }
 
-func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnapshot, cleanupIndex *PathIndexBuilder) error {
+type preparedSnapshotPublication struct {
+	currentPath string
+	tempPath    string
+}
+
+func (h *IndexedHandler) prepareSnapshotPublication(ctx context.Context, snapshot *LiveSnapshot, cleanupIndex *PathIndexBuilder) (preparedSnapshotPublication, error) {
 	if cleanupIndex == nil {
-		return errors.New("metadata cleanup index is nil")
+		return preparedSnapshotPublication{}, errors.New("metadata cleanup index is nil")
 	}
 	snapshotPath := h.snapshotPath(snapshot.RootID, snapshot.Generation)
 	cleanupPath := h.cleanupIndexPath(snapshot.RootID, snapshot.Generation)
 	currentPath := h.currentPath(snapshot.RootID)
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(snapshotPath)), 0o755); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(cleanupPath)), 0o755); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(currentPath)), 0o755); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	cleanupReader, err := cleanupIndex.rewind()
 	if err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	cleanupHash := sha256.New()
 	if _, err := io.Copy(cleanupHash, cleanupReader); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	snapshot.CleanupIndexDigest = "sha256:" + hex.EncodeToString(cleanupHash.Sum(nil))
 	data, err := yaml.Marshal(snapshot)
 	if err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	snapshotDigest := digestBytes(data)
 	cleanupReader, err = cleanupIndex.rewind()
 	if err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	if _, err = h.store.Put(ctx, h.name, cleanupPath, cleanupReader, map[string]string{
 		"content-type": "text/plain; charset=utf-8",
 		"mode":         h.mode,
 	}); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	if _, err = h.store.Put(ctx, h.name, snapshotPath, bytes.NewReader(data), map[string]string{
 		"content-type": "application/yaml",
 		"mode":         h.mode,
 	}); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	refData, err := yaml.Marshal(currentReference{
 		Version: 2, RootID: snapshot.RootID, Generation: snapshot.Generation,
 		SnapshotDigest: snapshotDigest, CleanupIndexDigest: snapshot.CleanupIndexDigest,
 	})
 	if err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
 	tmpPath := currentPath + ".tmp." + snapshot.Generation
 	if _, err = h.store.Put(ctx, h.name, tmpPath, bytes.NewReader(refData), map[string]string{
 		"content-type": "application/yaml",
 		"mode":         h.mode,
 	}); err != nil {
-		return err
+		return preparedSnapshotPublication{}, err
 	}
-	return h.store.Rename(path.Join(h.name, tmpPath), path.Join(h.name, currentPath))
+	return preparedSnapshotPublication{currentPath: currentPath, tempPath: tmpPath}, nil
+}
+
+func (h *IndexedHandler) commitPreparedSnapshot(publication preparedSnapshotPublication, snapshot *LiveSnapshot, closureRevision uint64) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry := h.roots[snapshot.RootID]
+	if entry == nil || entry.retired || entry.closureRevision != closureRevision {
+		return false, nil
+	}
+	if err := h.store.Rename(path.Join(h.name, publication.tempPath), path.Join(h.name, publication.currentPath)); err != nil {
+		return false, err
+	}
+	h.setRootSnapshotLocked(snapshot.RootID, snapshot)
+	return true, nil
 }

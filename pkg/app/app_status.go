@@ -103,9 +103,6 @@ func newAppStatus(cfg config.ServerStatusConfig, store *blobfs.Store) *appStatus
 }
 
 func (s *appStatus) start(ctx context.Context, app *App) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	s.ctx = ctx
 	s.restore()
 	s.wg.Add(1)
