@@ -3,15 +3,17 @@ package filerepo
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"path"
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
@@ -62,30 +64,38 @@ func (h *IndexedHandler) cleanupContent(ctx context.Context, opts config.Cleanup
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err != nil || entry.IsDir() || objectPath == h.statePath() || strings.Contains(objectPath, "/.roots/") {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return err
+		}
+		if entry.IsDir() || objectPath == h.statePath() || strings.Contains(objectPath, "/.roots/") {
+			return nil
+		}
+		cleanPath, class, ok := h.contentObject(objectPath)
+		if !ok {
 			return nil
 		}
 		result.Scanned++
-		if cleanPath, class, ok := h.contentObject(objectPath); ok {
-			if _, current := keep[cleanPath]; current || h.base.Busy(objectPath) {
-				result.Protected++
-				return nil
-			}
-			expireAfter := h.policy.AuxiliaryExpireAfter
-			if class == ResourceArtifact {
-				expireAfter = h.policy.ArtifactExpireAfter
-			}
-			if expireAfter.IsNever() || expireAfter.IsUnset() {
-				return nil
-			}
-			info, statErr := h.store.StatObject(ctx, h.name, objectPath)
-			if statErr != nil {
-				return nil
-			}
-			fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
-			if parseErr == nil && time.Since(fetchedAt) <= expireAfter.Duration() {
-				return nil
-			}
+		if _, current := keep[cleanPath]; current || h.base.Busy(objectPath) {
+			result.Protected++
+			return nil
+		}
+		expireAfter := h.policy.AuxiliaryExpireAfter
+		if class == ResourceArtifact {
+			expireAfter = h.policy.ArtifactExpireAfter
+		}
+		if expireAfter.IsNever() || expireAfter.IsUnset() {
+			return nil
+		}
+		info, statErr := h.store.StatObject(ctx, h.name, objectPath)
+		if statErr != nil {
+			return statErr
+		}
+		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
+		if parseErr == nil && time.Since(fetchedAt) <= expireAfter.Duration() {
+			return nil
 		}
 		if opts.BatchSize > 0 && result.Deleted >= opts.BatchSize {
 			result.Truncated = true
@@ -96,11 +106,10 @@ func (h *IndexedHandler) cleanupContent(ctx context.Context, opts config.Cleanup
 			slog.Info("indexed cleanup dry-run delete", "instance", h.name, "path", objectPath)
 			return nil
 		}
-		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Info("indexed cleanup delete failed", "instance", h.name, "path", objectPath, "err", err)
-		} else {
-			result.Deleted++
+		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil {
+			return fmt.Errorf("delete content object %s: %w", objectPath, err)
 		}
+		result.Deleted++
 		return nil
 	})
 	return result, err
@@ -111,24 +120,30 @@ func (h *IndexedHandler) currentCleanupPaths(ctx context.Context) (map[string]st
 	type cleanupReference struct {
 		rootID     string
 		generation string
+		digest     string
 	}
 	references := make(map[string]cleanupReference, len(h.rootSnapshots))
 	for _, snapshot := range h.rootSnapshots {
 		if snapshot != nil {
 			key := snapshot.RootID + "\x00" + snapshot.Generation
-			references[key] = cleanupReference{rootID: snapshot.RootID, generation: snapshot.Generation}
+			references[key] = cleanupReference{rootID: snapshot.RootID, generation: snapshot.Generation, digest: snapshot.CleanupIndexDigest}
 		}
 	}
 	for rootID, entry := range h.roots {
 		if entry != nil && entry.retirementCleanupGeneration != "" {
 			key := rootID + "\x00" + entry.retirementCleanupGeneration
-			references[key] = cleanupReference{rootID: rootID, generation: entry.retirementCleanupGeneration}
+			digest := entry.retirementCleanupDigest
+			snapshot := h.rootSnapshots[rootID]
+			if snapshot != nil && snapshot.Generation == entry.retirementCleanupGeneration {
+				digest = snapshot.CleanupIndexDigest
+			}
+			references[key] = cleanupReference{rootID: rootID, generation: entry.retirementCleanupGeneration, digest: digest}
 		}
 	}
 	h.mu.RUnlock()
 	keep := map[string]struct{}{}
 	for _, reference := range references {
-		paths, err := h.loadCleanupPathSet(ctx, reference.rootID, reference.generation)
+		paths, err := h.loadCleanupPathSet(ctx, reference.rootID, reference.generation, reference.digest)
 		if err != nil {
 			return nil, err
 		}
@@ -207,11 +222,6 @@ func (h *IndexedHandler) finishRootRetirement(ctx context.Context, rootID string
 		return false, err
 	}
 	h.removeRoot(rootID)
-	if h.serviceHealth != nil {
-		h.serviceHealth.RemoveResource(rootID)
-	} else if h.bus != nil {
-		h.bus.Publish(bus.Event{Type: bus.EventMetadataRemoved, Payload: bus.MetadataRemovedPayload{Instance: h.name, RootID: rootID}})
-	}
 	h.saveState(context.Background())
 	return true, nil
 }
@@ -229,7 +239,10 @@ func (h *IndexedHandler) cleanupRoot(ctx context.Context, rootID string, opts co
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err != nil || entry.IsDir() {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		result.Scanned++
@@ -257,9 +270,8 @@ func (h *IndexedHandler) cleanupRoot(ctx context.Context, rootID string, opts co
 			slog.Info("metadata gc dry-run delete", "instance", h.name, "root_id", rootID, "path", item)
 			continue
 		}
-		if err := h.store.DeleteObject(ctx, h.name, item); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Debug("metadata gc failed", "path", item, "err", err)
-			continue
+		if err := h.store.DeleteObject(ctx, h.name, item); err != nil {
+			return result, fmt.Errorf("delete metadata generation object %s: %w", item, err)
 		}
 		result.Deleted++
 	}
@@ -271,7 +283,10 @@ func (h *IndexedHandler) cleanupRoot(ctx context.Context, rootID string, opts co
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			return nil
 		}
 		result.Scanned++
@@ -297,9 +312,8 @@ func (h *IndexedHandler) cleanupRoot(ctx context.Context, rootID string, opts co
 		if err := h.store.DeleteObject(ctx, h.name, cleanupIndex); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("delete cleanup index for root %s generation %s: %w", rootID, generation, err)
 		}
-		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Debug("metadata snapshot gc failed", "path", objectPath, "err", err)
-			return nil
+		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil {
+			return fmt.Errorf("delete metadata snapshot %s: %w", objectPath, err)
 		}
 		result.Deleted++
 		return nil
@@ -333,7 +347,11 @@ func (h *IndexedHandler) recordCleanupMaintenance(operation string, result clean
 
 func (h *IndexedHandler) retainedMetadataGenerations(ctx context.Context, rootID string) (map[string]struct{}, error) {
 	retained := map[string]struct{}{}
-	if staging, ok := h.loadRefreshStaging(ctx, rootID); ok {
+	staging, ok, err := h.loadRefreshStaging(ctx, rootID)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		retained[staging.Generation] = struct{}{}
 	}
 	if generation := h.currentGeneration(rootID); generation != "" {
@@ -347,7 +365,7 @@ func (h *IndexedHandler) retainedMetadataGenerations(ctx context.Context, rootID
 	snapshotDir := path.Join(h.objectRoot, ".roots", pathEscapeKey(rootID), "snapshots")
 	cutoff := time.Now().Add(-metadataGenerationRetention)
 	var newestPrevious *LiveSnapshot
-	err := fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(h.store.TenantFS(h.name), snapshotDir, func(objectPath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				return fs.SkipAll
@@ -408,8 +426,11 @@ func (h *IndexedHandler) generationHasFiles(ctx context.Context, generationDir s
 
 func (h *IndexedHandler) loadCleanupPathSet(
 	ctx context.Context,
-	rootID, generation string,
+	rootID, generation, expectedDigest string,
 ) (map[string]struct{}, error) {
+	if expectedDigest == "" {
+		return nil, fmt.Errorf("load cleanup index for root %s generation %s: missing committed digest", rootID, generation)
+	}
 	reader, err := h.store.OpenObject(ctx, h.name, h.cleanupIndexPath(rootID, generation))
 	if err != nil {
 		return nil, fmt.Errorf("load cleanup index for root %s generation %s: %w", rootID, generation, err)
@@ -417,7 +438,8 @@ func (h *IndexedHandler) loadCleanupPathSet(
 	defer func() { _ = reader.Close() }()
 
 	paths := map[string]struct{}{}
-	scanner := bufio.NewScanner(reader)
+	digest := sha256.New()
+	scanner := bufio.NewScanner(io.TeeReader(reader, digest))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		cleanPath := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(scanner.Text())), "/")
@@ -428,6 +450,10 @@ func (h *IndexedHandler) loadCleanupPathSet(
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	actualDigest := "sha256:" + hex.EncodeToString(digest.Sum(nil))
+	if !strings.EqualFold(actualDigest, expectedDigest) {
+		return nil, fmt.Errorf("load cleanup index for root %s generation %s: digest mismatch", rootID, generation)
 	}
 	return paths, nil
 }

@@ -107,6 +107,6 @@ func TestPacmanCurrentGenerationDoesNotFallbackForMissingMetadata(t *testing.T) 
 	requestsBeforeMissingMetadata := upstreamRequests.Load()
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/"+path.Join(repoRoot, "core.files"), nil))
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
 	require.Equal(t, requestsBeforeMissingMetadata, upstreamRequests.Load())
 }

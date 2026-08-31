@@ -20,6 +20,7 @@ func FuzzParseIndex(f *testing.F) {
 			t.Skip()
 		}
 		paths := &filerepo.PathIndexBuilder{}
+		defer func() { _ = paths.Close() }()
 		_, err := parseIndex("v3.20/main/x86_64", strings.NewReader(input), paths)
 		if err == nil {
 			for _, item := range paths.Finalize() {

@@ -9,8 +9,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.d7z.net/blobfs"
-
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 type TaskType string
@@ -27,6 +25,7 @@ type TaskStatus string
 const (
 	StatusIdle    TaskStatus = "idle"
 	StatusRunning TaskStatus = "running"
+	StatusStuck   TaskStatus = "stuck"
 	StatusDone    TaskStatus = "done"
 	StatusFailed  TaskStatus = "failed"
 )
@@ -78,9 +77,10 @@ func (k TaskKey) Type() TaskType   { return k.typ }
 func (k TaskKey) RootID() string   { return k.rootID }
 
 type TaskDef struct {
-	Key      TaskKey
-	Interval time.Duration
-	Handler  TaskHandler
+	Key            TaskKey
+	Interval       time.Duration
+	RunImmediately bool
+	Handler        TaskHandler
 }
 
 type TaskInfo struct {
@@ -132,6 +132,7 @@ const (
 	cmdUnregister
 	cmdInfo
 	cmdSnapshot
+	cmdTrigger
 )
 
 type cmd struct {
@@ -144,8 +145,6 @@ type cmd struct {
 
 type Scheduler struct {
 	cmdCh           chan cmd
-	bus             *bus.Bus
-	busSub          <-chan bus.Event
 	startGate       chan struct{}
 	done            chan struct{}
 	doneOnce        sync.Once
@@ -165,16 +164,15 @@ type Scheduler struct {
 	preStartTasks map[TaskKey]TaskDef
 	runObserver   func(TaskRun)
 	observerMu    sync.RWMutex
+	taskTimeout   func(time.Duration) time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler {
+func New(store *blobfs.Store, reg prometheus.Registerer) *Scheduler {
 	return &Scheduler{
 		cmdCh:           make(chan cmd, 16),
-		bus:             b,
-		busSub:          b.Subscribe(bus.EventMetadataDiscovered, bus.EventMetadataRefreshRequested, bus.EventMetadataRemoved),
 		startGate:       make(chan struct{}),
 		done:            make(chan struct{}),
 		factories:       map[string]*TaskFactory{},
@@ -185,6 +183,16 @@ func New(b *bus.Bus, store *blobfs.Store, reg prometheus.Registerer) *Scheduler 
 		tenant:          "_scheduler",
 		metrics:         newMetrics(reg),
 		preStartTasks:   map[TaskKey]TaskDef{},
+		taskTimeout: func(interval time.Duration) time.Duration {
+			deadline := interval / 2
+			if deadline < time.Minute {
+				return time.Minute
+			}
+			if deadline > 30*time.Minute {
+				return 30 * time.Minute
+			}
+			return deadline
+		},
 	}
 }
 
@@ -225,6 +233,17 @@ func (s *Scheduler) Unregister(key TaskKey) {
 	}
 	respCh := make(chan any, 1)
 	s.submit(cmd{kind: cmdUnregister, key: key, respCh: respCh})
+}
+
+// Trigger advances a task to run as soon as the current serial task completes.
+// Metadata factory tasks are reconciled before the trigger is applied.
+func (s *Scheduler) Trigger(key TaskKey) bool {
+	if s.stopped.Load() {
+		return false
+	}
+	respCh := make(chan any, 1)
+	value, ok := s.submit(cmd{kind: cmdTrigger, key: key, respCh: respCh})
+	return ok && value.(bool)
 }
 
 func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
@@ -323,7 +342,6 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 		if !started {
 			s.finish()
 		}
-		s.bus.Unsubscribe(s.busSub)
 	}
 	select {
 	case <-s.done:

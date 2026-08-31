@@ -100,15 +100,11 @@ func buildSnapshot(ctx context.Context, session *filerepo.RefreshSession, paths 
 	}
 	artifactCount := 0
 	for _, target := range session.Targets() {
-		count, found, err := buildDatabaseTarget(ctx, session, snapshot, target, paths)
+		count, _, err := buildDatabaseTarget(ctx, session, snapshot, target, paths)
 		if err != nil {
 			return nil, err
 		}
 		artifactCount += count
-		if !found {
-			snapshot.ArtifactCount = artifactCount
-			return snapshot, nil
-		}
 	}
 	snapshot.ArtifactCount = artifactCount
 	return snapshot, nil
@@ -121,7 +117,7 @@ func buildDatabaseTarget(
 	target filerepo.MetadataTarget,
 	paths *filerepo.PathIndexBuilder,
 ) (int, bool, error) {
-	blob, err := session.Fetch(ctx, target)
+	blob, err := session.FetchAnchor(ctx, target)
 	if err != nil {
 		return 0, false, err
 	}
@@ -205,7 +201,7 @@ func addDerivedMetadata(
 	snapshot *filerepo.LiveSnapshot,
 	metadataPath string,
 ) error {
-	companion, err := session.FetchDerived(ctx, metadataPath)
+	companion, err := session.FetchOptionalAnchor(ctx, metadataPath)
 	if err != nil {
 		return err
 	}

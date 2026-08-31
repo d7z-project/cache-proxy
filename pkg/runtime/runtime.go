@@ -14,7 +14,6 @@ import (
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
@@ -24,7 +23,6 @@ type Instance interface {
 	http.Handler
 	Start(context.Context) error
 	Stop(context.Context) error
-	Cleanup(context.Context, config.CleanupConfig) error
 }
 
 // StatusSource allows an Instance to provide custom dashboard status
@@ -64,9 +62,7 @@ type RepositoryStatusSource interface {
 
 type HandlerInstance struct {
 	Handler      http.Handler
-	Close        func() error
 	CloseContext func(context.Context) error
-	CleanupFn    func(context.Context, config.CleanupConfig) error
 }
 
 func (h HandlerInstance) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -78,16 +74,6 @@ func (h HandlerInstance) Start(context.Context) error { return nil }
 func (h HandlerInstance) Stop(ctx context.Context) error {
 	if h.CloseContext != nil {
 		return h.CloseContext(ctx)
-	}
-	if h.Close != nil {
-		return h.Close()
-	}
-	return nil
-}
-
-func (h HandlerInstance) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
-	if h.CleanupFn != nil {
-		return h.CleanupFn(ctx, opts)
 	}
 	return nil
 }
@@ -133,7 +119,6 @@ type PlanContext struct {
 	reservedPathPrefixes map[string]string
 	bindOwners           map[string]string
 	scheduler            *scheduler.Scheduler
-	bus                  *bus.Bus
 }
 
 type InstancePlan struct {
@@ -144,6 +129,8 @@ type InstancePlan struct {
 	bound    bool
 }
 
+const httpCacheCleanupInterval = 6 * time.Hour
+
 func NewPlanContext(
 	store *blobfs.Store,
 	stats *httpcache.Stats,
@@ -152,7 +139,6 @@ func NewPlanContext(
 	mainBind string,
 	metricsPath string,
 	sched *scheduler.Scheduler,
-	b *bus.Bus,
 ) *PlanContext {
 	return &PlanContext{
 		store:                store,
@@ -166,7 +152,6 @@ func NewPlanContext(
 		reservedPathPrefixes: map[string]string{},
 		bindOwners:           map[string]string{mainBind: "main"},
 		scheduler:            sched,
-		bus:                  b,
 	}
 }
 
@@ -215,7 +200,6 @@ func (p *PlanContext) Stats() *httpcache.Stats               { return p.stats }
 func (p *PlanContext) UpstreamGate() *httpcache.UpstreamGate { return p.upstreamGate }
 func (p *PlanContext) CleanupConfig() config.CleanupConfig   { return p.cleanup }
 func (p *PlanContext) Scheduler() *scheduler.Scheduler       { return p.scheduler }
-func (p *PlanContext) Bus() *bus.Bus                         { return p.bus }
 
 func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
 	if normalized := normalizeRoutePath(pathValue); normalized != "" && normalized != "/" {
@@ -231,7 +215,6 @@ func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.sta
 func (i *InstancePlan) UpstreamGate() *httpcache.UpstreamGate { return i.ctx.upstreamGate }
 func (i *InstancePlan) CleanupConfig() config.CleanupConfig   { return i.ctx.cleanup }
 func (i *InstancePlan) Scheduler() *scheduler.Scheduler       { return i.ctx.scheduler }
-func (i *InstancePlan) Bus() *bus.Bus                         { return i.ctx.bus }
 
 func (i *InstancePlan) Decode(target any) error {
 	if i.selected.Block == nil {
@@ -248,6 +231,23 @@ func (i *InstancePlan) BindPath(pathValue string, expireAfter config.Expiration,
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
+}
+
+// BindHTTPPath binds a plain httpcache handler and registers its periodic
+// expiration cleanup. Modes with additional lifecycle behavior should use
+// BindPath directly.
+func (i *InstancePlan) BindHTTPPath(pathValue string, expireAfter config.Expiration, handler *httpcache.Handler) error {
+	i.ctx.scheduler.Register(scheduler.TaskDef{
+		Key:      scheduler.NewTaskKey(i.entry.Name, scheduler.TypeExpireCleanup, ""),
+		Interval: httpCacheCleanupInterval,
+		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+			return nil, handler.Cleanup(ctx, i.ctx.cleanup)
+		},
+	})
+	return i.BindPath(pathValue, expireAfter, HandlerInstance{
+		Handler:      handler,
+		CloseContext: handler.CloseContext,
+	})
 }
 
 func (i *InstancePlan) BindAddr(addr string, expireAfter config.Expiration, runtime Instance) error {

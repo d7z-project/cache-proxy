@@ -480,7 +480,7 @@ func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
 		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
 	})
 
-	_, err := Open(ctx, doc, "")
+	_, err := Open(ctx, doc)
 	require.ErrorContains(t, err, "boom")
 	first := runs.Load()
 	time.Sleep(200 * time.Millisecond)
@@ -499,7 +499,7 @@ func TestOpenRejectsFileModeWithoutUpstreams(t *testing.T) {
 		})},
 	}})
 
-	_, err := Open(ctx, doc, "")
+	_, err := Open(ctx, doc)
 	require.ErrorContains(t, err, "file mode requires at least one upstream")
 }
 
@@ -824,7 +824,7 @@ func TestAppCloseWaitsForFinalStatusPersistence(t *testing.T) {
 
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
 	t.Helper()
-	app, err := Open(ctx, doc, "")
+	app, err := Open(ctx, doc)
 	require.NoError(t, err)
 	app.ready.Store(true)
 	return app
@@ -906,9 +906,8 @@ func closeApp(t *testing.T, app *App) {
 
 type blockingInstance struct{}
 
-func (blockingInstance) ServeHTTP(http.ResponseWriter, *http.Request)        {}
-func (blockingInstance) Start(context.Context) error                         { return nil }
-func (blockingInstance) Cleanup(context.Context, config.CleanupConfig) error { return nil }
+func (blockingInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (blockingInstance) Start(context.Context) error                  { return nil }
 func (blockingInstance) Stop(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()
@@ -918,9 +917,8 @@ type startContextInstance struct {
 	onStart func(context.Context) error
 }
 
-func (s startContextInstance) ServeHTTP(http.ResponseWriter, *http.Request)        {}
-func (s startContextInstance) Cleanup(context.Context, config.CleanupConfig) error { return nil }
-func (s startContextInstance) Stop(context.Context) error                          { return nil }
+func (s startContextInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (s startContextInstance) Stop(context.Context) error                   { return nil }
 func (s startContextInstance) Start(ctx context.Context) error {
 	if s.onStart != nil {
 		return s.onStart(ctx)
@@ -933,8 +931,7 @@ type cleanupContextInstance struct {
 	stopped atomic.Bool
 }
 
-func (s *cleanupContextInstance) ServeHTTP(http.ResponseWriter, *http.Request)        {}
-func (s *cleanupContextInstance) Cleanup(context.Context, config.CleanupConfig) error { return nil }
+func (s *cleanupContextInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
 func (s *cleanupContextInstance) Start(ctx context.Context) error {
 	s.ctx = ctx
 	return nil

@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.d7z.net/blobfs"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -38,32 +37,28 @@ const (
 
 type App struct {
 	config       *config.Document
-	configPath   string
 	store        *blobfs.Store
 	stats        *httpcache.Stats
 	upstreamGate *httpcache.UpstreamGate
 	metricsReg   *prometheus.Registry
 
 	scheduler *scheduler.Scheduler
-	bus       *bus.Bus
 	status    *appStatus
 
-	entries       map[string]*proxyruntime.Entry
-	handlers      []proxyruntime.Instance
-	routesMu      sync.RWMutex
-	pathHandlers  map[string]http.Handler
-	pathPrefixes  []string
-	bindHandlers  map[string]http.Handler
-	bindServers   map[string]*http.Server
-	bindListeners map[string]net.Listener
-	mainServer    *http.Server
-	mainListener  net.Listener
-	lifecycleMu   sync.Mutex
-	lifecycleCtx  context.Context
-	stopRuntime   context.CancelFunc
-	started       bool
-	ready         atomic.Bool
-	closed        atomic.Bool
+	entries      map[string]*proxyruntime.Entry
+	handlers     []proxyruntime.Instance
+	routesMu     sync.RWMutex
+	pathHandlers map[string]http.Handler
+	pathPrefixes []string
+	bindHandlers map[string]http.Handler
+	bindServers  map[string]*http.Server
+	mainServer   *http.Server
+	lifecycleMu  sync.Mutex
+	lifecycleCtx context.Context
+	stopRuntime  context.CancelFunc
+	started      bool
+	ready        atomic.Bool
+	closed       atomic.Bool
 
 	tenantUsageMu         sync.Mutex
 	tenantUsageCachedAt   time.Time
@@ -109,10 +104,6 @@ func (a *App) refreshTenantUsage(parent context.Context, tenants []string) {
 	}()
 }
 
-func Load(path string) (*config.Document, error) {
-	return config.LoadFile(path)
-}
-
 func Validate(doc *config.Document) error {
 	if doc == nil {
 		return errors.New("config document is nil")
@@ -139,17 +130,16 @@ func Validate(doc *config.Document) error {
 	stats := httpcache.NewStats(registry)
 	upstreamGate := httpcache.NewUpstreamGate(upstreamGateConfig(docCopy.Storage.Download))
 
-	b := bus.NewWithRegisterer(registry)
-	sched := scheduler.New(b, store, registry)
+	sched := scheduler.New(store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
-	_, err = planEntries(context.Background(), &docCopy, store, stats, upstreamGate, sched, b)
+	_, err = planEntries(context.Background(), &docCopy, store, stats, upstreamGate, sched)
 	sched.Start(validateCtx)
 	defer validateCancel()
 	defer func() { _ = sched.Stop(validateCtx) }()
 	return err
 }
 
-func Open(ctx context.Context, doc *config.Document, configPath string) (*App, error) {
+func Open(ctx context.Context, doc *config.Document) (*App, error) {
 	if doc == nil {
 		return nil, errors.New("config document is nil")
 	}
@@ -171,8 +161,7 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 	stats := httpcache.NewStats(metricsReg)
 	upstreamGate := httpcache.NewUpstreamGate(upstreamGateConfig(doc.Storage.Download))
 
-	b := bus.NewWithRegisterer(metricsReg)
-	sched := scheduler.New(b, store, metricsReg)
+	sched := scheduler.New(store, metricsReg)
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
 	status := newAppStatus(doc.Server.Status, store)
 	sched.SetRunObserver(status.observeTaskRun)
@@ -185,29 +174,26 @@ func Open(ctx context.Context, doc *config.Document, configPath string) (*App, e
 		_ = store.Close()
 	}
 
-	entries, err := planEntries(ctx, doc, store, stats, upstreamGate, sched, b)
+	entries, err := planEntries(ctx, doc, store, stats, upstreamGate, sched)
 	if err != nil {
 		cleanupOpenFailure()
 		return nil, err
 	}
 
 	app := &App{
-		config:        doc,
-		configPath:    configPath,
-		store:         store,
-		stats:         stats,
-		upstreamGate:  upstreamGate,
-		metricsReg:    metricsReg,
-		scheduler:     sched,
-		bus:           b,
-		status:        status,
-		entries:       entries,
-		pathHandlers:  map[string]http.Handler{},
-		bindHandlers:  map[string]http.Handler{},
-		bindServers:   map[string]*http.Server{},
-		bindListeners: map[string]net.Listener{},
-		lifecycleCtx:  lifecycleCtx,
-		stopRuntime:   stopRuntime,
+		config:       doc,
+		store:        store,
+		stats:        stats,
+		upstreamGate: upstreamGate,
+		metricsReg:   metricsReg,
+		scheduler:    sched,
+		status:       status,
+		entries:      entries,
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		bindServers:  map[string]*http.Server{},
+		lifecycleCtx: lifecycleCtx,
+		stopRuntime:  stopRuntime,
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
 		cleanupOpenFailure()
@@ -279,19 +265,17 @@ func (a *App) Start() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", a.config.Server.Bind, err)
 	}
-	a.mainListener = mainListener
-	prepared := make(map[string]net.Listener, len(a.bindHandlers))
+	bindListeners := make(map[string]net.Listener, len(a.bindHandlers))
 	for addr := range a.bindHandlers {
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
 			_ = mainListener.Close()
-			for _, item := range prepared {
+			for _, item := range bindListeners {
 				_ = item.Close()
 			}
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
-		prepared[addr] = listener
-		a.bindListeners[addr] = listener
+		bindListeners[addr] = listener
 	}
 
 	a.started = true
@@ -301,7 +285,7 @@ func (a *App) Start() error {
 			slog.Error("main server error", "addr", a.config.Server.Bind, "err", err)
 		}
 	}()
-	for addr, listener := range prepared {
+	for addr, listener := range bindListeners {
 		server := newHTTPServer(addr, bindDispatchHandler{app: a, addr: addr})
 		a.bindServers[addr] = server
 		go func(server *http.Server, listener net.Listener) {
@@ -333,10 +317,6 @@ func (a *App) Close(ctx context.Context) error {
 		return nil
 	}
 	a.ready.Store(false)
-	if a.stopRuntime != nil {
-		a.stopRuntime()
-	}
-
 	var joined error
 	drained := true
 	if a.scheduler != nil {
@@ -356,6 +336,9 @@ func (a *App) Close(ctx context.Context) error {
 			joined = errors.Join(joined, err)
 			drained = false
 		}
+	}
+	if a.stopRuntime != nil {
+		a.stopRuntime()
 	}
 	a.routesMu.RLock()
 	handlers := make([]proxyruntime.Instance, len(a.handlers))

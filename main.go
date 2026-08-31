@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/app"
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -25,7 +26,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	doc, err := app.Load(*configPath)
+	doc, err := config.LoadFile(*configPath)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -38,7 +39,7 @@ func main() {
 		return
 	}
 
-	runtime, err := app.Open(context.Background(), doc, *configPath)
+	runtime, err := app.Open(context.Background(), doc)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

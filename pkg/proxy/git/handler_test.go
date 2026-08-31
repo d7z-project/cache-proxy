@@ -466,6 +466,20 @@ func TestSyncAndServeConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestDrainRequestsCancellationAllowsLaterDrain(t *testing.T) {
+	h := &gitHandler{activeRequests: 1, requestsIdle: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, h.drainRequests(ctx), context.Canceled)
+
+	h.requestMu.Lock()
+	require.False(t, h.requestDraining)
+	h.activeRequests = 0
+	close(h.requestsIdle)
+	h.requestMu.Unlock()
+	require.NoError(t, h.drainRequests(context.Background()))
+}
+
 func TestBillyAdapterReadWrite(t *testing.T) {
 	afs := afero.NewMemMapFs()
 	bfs := newBillyAdapter(afs, "/root")

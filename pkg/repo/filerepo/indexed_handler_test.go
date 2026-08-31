@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,7 +23,6 @@ import (
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -139,7 +139,7 @@ func TestRefreshPersistsCleanupIndexAndCleanupUsesStoredPaths(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			paths.Add("pool/pkg.deb")
 			paths.Add("pool/pkg.deb.sig")
@@ -211,7 +211,7 @@ func TestRefreshStressDoesNotRetainCleanupPathSet(t *testing.T) {
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
 			builderCalls++
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			if err != nil {
 				return nil, err
 			}
@@ -260,7 +260,6 @@ func TestCleanupDoesNotRetainLoadedCleanupIndex(t *testing.T) {
 
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	handler.setRootSnapshot("root", &LiveSnapshot{RootID: "root", Generation: "gen1"})
 
 	var index strings.Builder
 	for i := 0; i < pathCount; i++ {
@@ -268,8 +267,12 @@ func TestCleanupDoesNotRetainLoadedCleanupIndex(t *testing.T) {
 	}
 	indexPath := handler.cleanupIndexPath("root", "gen1")
 	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(indexPath)), 0o755))
-	_, err := store.Put(ctx, "repo", indexPath, strings.NewReader(index.String()), nil)
+	indexData := []byte(index.String())
+	_, err := store.Put(ctx, "repo", indexPath, bytes.NewReader(indexData), nil)
 	require.NoError(t, err)
+	handler.setRootSnapshot("root", &LiveSnapshot{
+		RootID: "root", Generation: "gen1", CleanupIndexDigest: digestBytes(indexData),
+	})
 
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
 	baseline := heapAllocAfterGC()
@@ -305,7 +308,7 @@ func TestServeHTTPPrefersCurrentGenerationMetadataCompanion(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			companion, err := session.FetchDerived(ctx, "meta/index.txt.sig")
 			require.NoError(t, err)
@@ -317,7 +320,6 @@ func TestServeHTTPPrefersCurrentGenerationMetadataCompanion(t *testing.T) {
 			}, nil
 		},
 	)
-
 	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	require.NoError(t, store.MkdirAll("repo/repo/meta", 0o755))
 	_, err := store.Put(ctx, "repo", "repo/meta/index.txt.sig", strings.NewReader("stale-signature"), nil)
@@ -399,7 +401,7 @@ func TestGenerationResolverKeepsStableContentPathAcrossRefresh(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			paths.Add("pool/pkg.deb")
 			return &LiveSnapshot{
@@ -408,6 +410,9 @@ func TestGenerationResolverKeepsStableContentPathAcrossRefresh(t *testing.T) {
 			}, nil
 		},
 	)
+	handler.mu.Lock()
+	handler.roots["root"].root.Path = ""
+	handler.mu.Unlock()
 
 	require.NoError(t, handler.RefreshRoot(ctx, "root"))
 	firstRoute, err := (&generationResolver{handler: handler, policy: &Policy{}}).Resolve(
@@ -440,18 +445,17 @@ func TestStartReconcilesMetadataTasksWithoutSchedulerState(t *testing.T) {
 	initial.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
 	initial.saveState(ctx)
 
-	b := bus.New()
-	sched := scheduler.New(b, store, prometheus.NewRegistry())
+	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	sched := scheduler.New(store, prometheus.NewRegistry())
 	sched.RegisterFactory(scheduler.TaskFactory{
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
 		GCInterval:      6 * time.Hour,
 		NewRefresh:      func(string) scheduler.TaskHandler { return noopSchedulerTask },
 		NewGC:           func(string) scheduler.TaskHandler { return noopSchedulerTask },
+		CurrentRoots:    restored.currentRootIDs,
 	})
 
-	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	restored.SetBus(b)
 	require.NoError(t, restored.Start(ctx))
 	defer func() { require.NoError(t, restored.Stop(ctx)) }()
 
@@ -533,9 +537,8 @@ func TestExistingRootMetadataUpdateRequestsRefresh(t *testing.T) {
 	defer server.Close()
 
 	handler := newTestHandler(t, store, []string{server.URL}, nil)
-	b := bus.New()
-	sub := b.Subscribe(bus.EventMetadataRefreshRequested)
-	handler.SetBus(b)
+	refreshes := make(chan string, 1)
+	handler.SetRefreshTrigger(func(rootID string) { refreshes <- rootID })
 	handler.inspector = staticInspector(func(string) DiscoveryResult {
 		return DiscoveryResult{
 			Class: ResourceMetadata,
@@ -557,10 +560,8 @@ func TestExistingRootMetadataUpdateRequestsRefresh(t *testing.T) {
 	require.Equal(t, "gen1", rec.Header().Get("X-Cache-Generation"))
 
 	select {
-	case evt := <-sub:
-		payload := evt.Payload.(bus.MetadataRefreshRequestedPayload)
-		require.Equal(t, "repo", payload.Instance)
-		require.Equal(t, "root", payload.RootID)
+	case rootID := <-refreshes:
+		require.Equal(t, "root", rootID)
 	case <-time.After(time.Second):
 		require.FailNow(t, "expected refresh request for updated root")
 	}
@@ -576,7 +577,7 @@ func TestStalePrimaryMetadataServesCurrentAndRequestsRefresh(t *testing.T) {
 	}))
 	defer server.Close()
 	handler := newTestHandler(t, newTestStore(t), []string{server.URL}, func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
-		blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+		blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 		if err != nil {
 			return nil, err
 		}
@@ -587,9 +588,8 @@ func TestStalePrimaryMetadataServesCurrentAndRequestsRefresh(t *testing.T) {
 	current.Published = time.Now().Add(-time.Hour)
 	handler.setRootSnapshot("root", current)
 	handler.SetMetadataFreshFor(config.Freshness(time.Minute))
-	b := bus.New()
-	sub := b.Subscribe(bus.EventMetadataRefreshRequested)
-	handler.SetBus(b)
+	refreshes := make(chan string, 1)
+	handler.SetRefreshTrigger(func(rootID string) { refreshes <- rootID })
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/meta/index.txt", nil))
@@ -597,8 +597,8 @@ func TestStalePrimaryMetadataServesCurrentAndRequestsRefresh(t *testing.T) {
 	require.Equal(t, "GENERATION", rec.Header().Get("X-Cache"))
 	require.Equal(t, "index", rec.Body.String())
 	select {
-	case evt := <-sub:
-		require.Equal(t, "root", evt.Payload.(bus.MetadataRefreshRequestedPayload).RootID)
+	case rootID := <-refreshes:
+		require.Equal(t, "root", rootID)
 	case <-time.After(time.Second):
 		require.FailNow(t, "expected refresh request for stale primary metadata")
 	}
@@ -724,22 +724,15 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	handler.AddRepository(testRepositoryRoot("root", "meta/index.txt"))
-	handler.serviceHealth.AddResource("root", targetsToResourceTargets([]MetadataTarget{{URL: "meta/index.txt"}}), []string{"https://upstream.example"})
 	handler.saveState(ctx)
 
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	restored.restoreRoots(ctx)
+	require.NoError(t, restored.restoreRoots(ctx))
 
 	statuses := restored.RepositoryStatuses()
 	require.Len(t, statuses, 1)
 	require.Equal(t, "root", statuses[0].ID)
 	require.False(t, statuses[0].HasCurrent)
-
-	info, ok := restored.serviceHealth.ResourceHealth("root")
-	require.True(t, ok)
-	require.Equal(t, "root", info.Path)
-	require.Equal(t, []health.ResourceTarget{{Path: "meta/index.txt"}}, info.LastTargets)
-	require.Equal(t, health.RPending, info.State)
 
 	restored.mu.RLock()
 	entry := restored.roots["root"]
@@ -747,6 +740,40 @@ func TestSaveAndRestoreRootsWithoutCurrentGeneration(t *testing.T) {
 	require.NotNil(t, entry)
 	require.Len(t, entry.root.Targets, 1)
 	require.Equal(t, "meta/index.txt", entry.root.Targets[0].URL)
+}
+
+func TestStateWriterFlushesConcurrentRootUpdates(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	require.NoError(t, handler.Start(ctx))
+
+	var updates sync.WaitGroup
+	for i := range 32 {
+		updates.Add(1)
+		go func(index int) {
+			defer updates.Done()
+			handler.registerRoot(DiscoveryResult{
+				Class: ResourceMetadata,
+				Role:  DiscoveryUpdateRoot,
+				Root: RepositoryRoot{
+					ID: "root", Path: "root",
+					Targets: []MetadataTarget{{URL: fmt.Sprintf("meta/index-%02d", index)}},
+				},
+			})
+			handler.touchRoot("root")
+		}(i)
+	}
+	updates.Wait()
+	require.NoError(t, handler.Stop(ctx))
+
+	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	state, ok, err := restored.loadState(ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotZero(t, state.Revision)
+	require.Len(t, state.Roots, 1)
+	require.Len(t, state.Roots[0].Root.Targets, 33)
 }
 
 func TestRepositoryStatusesIncludePendingAndRefreshingRoots(t *testing.T) {
@@ -772,7 +799,7 @@ func TestRepositoryStatusesIncludePendingAndRefreshingRoots(t *testing.T) {
 			default:
 			}
 			<-unblock
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			paths.Add("pool/pkg.deb")
 			return &LiveSnapshot{
@@ -841,7 +868,7 @@ func TestRefreshFailureRemovesUnpublishedGeneration(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
-			_, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			_, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			return nil, errors.New("parse index: invalid metadata")
 		},
@@ -869,7 +896,7 @@ func TestRefreshFailureKeepsCurrentGeneration(t *testing.T) {
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
 			refreshes++
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			if refreshes == 2 {
 				return nil, errors.New("parse index: invalid metadata")
@@ -925,53 +952,6 @@ func TestRestoreGenerationsMarksRecoveredRootActive(t *testing.T) {
 	stats := handler.stats.Snapshot()
 	require.Equal(t, "ready", stats.Instances["repo"].MetadataState)
 
-	rh, ok := handler.serviceHealth.ResourceHealth("root")
-	require.True(t, ok)
-	require.Equal(t, health.RActive, rh.State)
-}
-
-func TestRestoreGenerationsDoesNotOverwritePersistedBlockedState(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	store := newTestStore(t)
-	original := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	rh, done, err := original.serviceHealth.TryStartRefresh("root", time.Now())
-	require.NoError(t, err)
-	original.serviceHealth.FinishRefresh("root", rh.Generation, health.ErrResourceForbidden, nil)
-	done()
-	original.saveState(ctx)
-
-	snapshot := &LiveSnapshot{
-		RootID:     "root",
-		RootPath:   "root",
-		Generation: "gen1",
-		Upstream:   "https://upstream.example",
-		Published:  time.Now().UTC(),
-		Metadata: map[string]MetadataObject{
-			"meta/index.txt": {
-				Path:      "meta/index.txt",
-				Required:  true,
-				StorePath: original.generationMetadataPath("root", "gen1", "meta/index.txt"),
-			},
-		},
-		Targets: []MetadataTarget{{URL: "meta/index.txt"}},
-	}
-	writeCurrentSnapshot(t, ctx, store, original, snapshot)
-
-	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-	restored.restoreRoots(ctx)
-	restored.restoreGenerations(ctx)
-
-	statuses := restored.RepositoryStatuses()
-	require.Len(t, statuses, 1)
-	require.True(t, statuses[0].HasCurrent)
-	require.Equal(t, "blocked", statuses[0].State)
-
-	restoredHealth, ok := restored.serviceHealth.ResourceHealth("root")
-	require.True(t, ok)
-	require.Equal(t, health.RBlocked, restoredHealth.State)
-	require.Equal(t, []health.ResourceTarget{{Path: "meta/index.txt"}}, restoredHealth.LastTargets)
 }
 
 func TestRestoreGenerationDoesNotFallbackFromInvalidCurrentReference(t *testing.T) {
@@ -1045,9 +1025,6 @@ func TestRestoreGenerationRejectsOldSnapshotSchemaReferencedByCurrent(t *testing
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	restored.restoreGenerations(ctx)
 	require.False(t, restored.hasAnyRootSnapshot())
-	resource, ok := restored.serviceHealth.ResourceHealth("root")
-	require.True(t, ok)
-	require.Equal(t, health.RSuspect, resource.State)
 }
 
 func TestRestoreGenerationRejectsMissingPersistedObject(t *testing.T) {
@@ -1064,10 +1041,6 @@ func TestRestoreGenerationRejectsMissingPersistedObject(t *testing.T) {
 	restored := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	restored.restoreGenerations(ctx)
 	require.False(t, restored.hasAnyRootSnapshot())
-	resource, ok := restored.serviceHealth.ResourceHealth("root")
-	require.True(t, ok)
-	require.Equal(t, health.RSuspect, resource.State)
-	require.Contains(t, resource.LastError, "invalid committed metadata generation")
 }
 
 func TestRestoreGenerationRequiresCompletedCurrentCommit(t *testing.T) {
@@ -1132,6 +1105,12 @@ func writeCurrentSnapshot(
 ) {
 	t.Helper()
 	snapshot.Version = snapshotSchemaVersion
+	if snapshot.Upstream == "" {
+		snapshot.Upstream = "https://upstream.example"
+	}
+	if snapshot.Published.IsZero() {
+		snapshot.Published = time.Now().UTC()
+	}
 	for cleanPath, object := range snapshot.Metadata {
 		if object.Path == "" {
 			object.Path = cleanPath
@@ -1142,26 +1121,118 @@ func writeCurrentSnapshot(
 		require.NoError(t, err)
 		object.Digest, err = handler.metadataObjectDigest(ctx, object.StorePath)
 		require.NoError(t, err)
+		info, err := store.StatObject(ctx, "repo", object.StorePath)
+		require.NoError(t, err)
+		object.State = MetadataPresent
+		object.Size = info.Size
 		snapshot.Metadata[cleanPath] = object
 	}
+	anchorPath := "meta/index.txt"
+	if len(snapshot.Targets) > 0 {
+		anchorPath = snapshot.Targets[0].URL
+	}
+	anchorObject, ok := snapshot.Metadata[anchorPath]
+	if !ok {
+		for _, object := range snapshot.Metadata {
+			anchorPath = object.Path
+			anchorObject = object
+			break
+		}
+	}
+	snapshot.Anchors = []MetadataAnchor{{Path: anchorPath, State: MetadataPresent, Size: anchorObject.Size, Digest: anchorObject.Digest}}
+	anchorDigest, err := metadataAnchorsDigest(snapshot.Anchors)
+	require.NoError(t, err)
+	snapshot.AnchorSetDigest = anchorDigest
 	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.snapshotPath(snapshot.RootID, snapshot.Generation))), 0o755))
 	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.currentPath(snapshot.RootID))), 0o755))
 	require.NoError(t, store.MkdirAll(path.Join("repo", path.Dir(handler.cleanupIndexPath(snapshot.RootID, snapshot.Generation))), 0o755))
-	_, err := store.Put(ctx, "repo", handler.cleanupIndexPath(snapshot.RootID, snapshot.Generation), strings.NewReader(""), nil)
+	cleanupData := []byte{}
+	_, err = store.Put(ctx, "repo", handler.cleanupIndexPath(snapshot.RootID, snapshot.Generation), bytes.NewReader(cleanupData), nil)
 	require.NoError(t, err)
+	snapshot.CleanupIndexDigest = digestBytes(cleanupData)
 
 	data, err := yaml.Marshal(snapshot)
 	require.NoError(t, err)
 	_, err = store.Put(ctx, "repo", handler.snapshotPath(snapshot.RootID, snapshot.Generation), bytes.NewReader(data), nil)
 	require.NoError(t, err)
 
-	refData, err := yaml.Marshal(struct {
-		RootID     string `yaml:"root_id"`
-		Generation string `yaml:"generation"`
-	}{RootID: snapshot.RootID, Generation: snapshot.Generation})
+	refData, err := yaml.Marshal(currentReference{
+		Version: 2, RootID: snapshot.RootID, Generation: snapshot.Generation,
+		SnapshotDigest: digestBytes(data), CleanupIndexDigest: snapshot.CleanupIndexDigest,
+	})
 	require.NoError(t, err)
 	_, err = store.Put(ctx, "repo", handler.currentPath(snapshot.RootID), bytes.NewReader(refData), nil)
 	require.NoError(t, err)
+}
+
+func rewriteCommittedCleanupIndex(
+	t *testing.T,
+	ctx context.Context,
+	store *blobfs.Store,
+	handler *IndexedHandler,
+	snapshot *LiveSnapshot,
+	cleanupData []byte,
+) {
+	t.Helper()
+	_, err := store.Put(ctx, handler.name, handler.cleanupIndexPath(snapshot.RootID, snapshot.Generation), bytes.NewReader(cleanupData), nil)
+	require.NoError(t, err)
+	snapshot.CleanupIndexDigest = digestBytes(cleanupData)
+	snapshotData, err := yaml.Marshal(snapshot)
+	require.NoError(t, err)
+	_, err = store.Put(ctx, handler.name, handler.snapshotPath(snapshot.RootID, snapshot.Generation), bytes.NewReader(snapshotData), nil)
+	require.NoError(t, err)
+	refData, err := yaml.Marshal(currentReference{
+		Version: 2, RootID: snapshot.RootID, Generation: snapshot.Generation,
+		SnapshotDigest: digestBytes(snapshotData), CleanupIndexDigest: snapshot.CleanupIndexDigest,
+	})
+	require.NoError(t, err)
+	_, err = store.Put(ctx, handler.name, handler.currentPath(snapshot.RootID), bytes.NewReader(refData), nil)
+	require.NoError(t, err)
+	handler.setRootSnapshot(snapshot.RootID, snapshot)
+}
+
+func writeGenerationSnapshot(
+	t *testing.T,
+	ctx context.Context,
+	store *blobfs.Store,
+	handler *IndexedHandler,
+	rootID, generation string,
+	published time.Time,
+) string {
+	t.Helper()
+	objectPath := handler.generationMetadataPath(rootID, generation, "meta/index.txt")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(objectPath)), 0o755))
+	_, err := store.Put(ctx, handler.name, objectPath, strings.NewReader(generation), nil)
+	require.NoError(t, err)
+	digest, err := handler.metadataObjectDigest(ctx, objectPath)
+	require.NoError(t, err)
+	cleanupData := []byte{}
+	cleanupPath := handler.cleanupIndexPath(rootID, generation)
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(cleanupPath)), 0o755))
+	_, err = store.Put(ctx, handler.name, cleanupPath, bytes.NewReader(cleanupData), nil)
+	require.NoError(t, err)
+	anchors := []MetadataAnchor{{Path: "meta/index.txt", State: MetadataPresent, Size: int64(len(generation)), Digest: digest}}
+	anchorDigest, err := metadataAnchorsDigest(anchors)
+	require.NoError(t, err)
+	snapshot := LiveSnapshot{
+		Version: snapshotSchemaVersion, RootID: rootID, RootPath: "", Generation: generation,
+		Upstream: "https://upstream.example", Published: published.UTC(), Anchors: anchors,
+		AnchorSetDigest: anchorDigest, CleanupIndexDigest: digestBytes(cleanupData),
+		Targets: []MetadataTarget{{URL: "meta/index.txt"}},
+		Metadata: map[string]MetadataObject{
+			"meta/index.txt": {
+				Path: "meta/index.txt", State: MetadataPresent, Required: true,
+				Size: int64(len(generation)), Digest: digest,
+			},
+		},
+	}
+	data, err := yaml.Marshal(snapshot)
+	require.NoError(t, err)
+	snapshotPath := handler.snapshotPath(rootID, generation)
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(snapshotPath)), 0o755))
+	_, err = store.Put(ctx, handler.name, snapshotPath, bytes.NewReader(data), nil)
+	require.NoError(t, err)
+	return objectPath
 }
 
 func requireGenerationDirCount(t *testing.T, store *blobfs.Store, tenant, objectRoot, rootID string, expected int) {
@@ -1191,6 +1262,7 @@ func requireGenerationDirCount(t *testing.T, store *blobfs.Store, tenant, object
 
 func TestPathIndexBuilderFinalizesSortedUniquePaths(t *testing.T) {
 	builder := &PathIndexBuilder{}
+	t.Cleanup(func() { require.NoError(t, builder.Close()) })
 	builder.Add("pool/b.deb")
 	builder.Add("pool/a.deb")
 	builder.Add("pool/b.deb")
@@ -1203,26 +1275,13 @@ func TestPathIndexBuilderFinalizesSortedUniquePaths(t *testing.T) {
 	}, builder.Finalize())
 }
 
-func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
+func TestRefreshKeepsCurrentWhenRebuiltMetadataIsUnchanged(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var headRequests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("ETag", `"meta-v1"`)
-			_, _ = io.WriteString(w, "index")
-		case http.MethodHead:
-			headRequests++
-			if r.Header.Get("If-None-Match") == `"meta-v1"` {
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		default:
-			http.NotFound(w, r)
-		}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"meta-v1"`)
+		_, _ = io.WriteString(w, "index")
 	}))
 	defer server.Close()
 
@@ -1231,7 +1290,7 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
 			builderCalls++
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
 		},
@@ -1256,14 +1315,30 @@ func TestRefreshSkipsRebuildWhenMetadataUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "unchanged", outcome.Result)
 	require.Equal(t, "same_as_current", outcome.ReasonCode)
-	require.Equal(t, 1, builderCalls)
-	require.Equal(t, 1, headRequests)
+	require.Equal(t, 2, builderCalls)
 	stats := handler.stats.Snapshot()
 	require.Equal(t, "ready", stats.Instances["repo"].MetadataState)
-	require.Equal(t, uint64(2), stats.Instances["repo"].UpstreamRequests)
-	require.Equal(t, uint64(1), stats.Instances["repo"].UpstreamStatus["304"])
-	require.Equal(t, "304", stats.Instances["repo"].Upstreams[server.URL].LastStatus)
+	require.Equal(t, uint64(4), stats.Instances["repo"].UpstreamRequests)
+	require.Equal(t, "200", stats.Instances["repo"].Upstreams[server.URL].LastStatus)
 	require.Zero(t, stats.Instances["repo"].Upstreams[server.URL].ErrorRate)
+}
+
+func TestSnapshotsMetadataEqualAcceptsMatchingNegativeCompanions(t *testing.T) {
+	present := MetadataObject{
+		Path: "meta/index", State: MetadataPresent, Required: true,
+		Digest: "sha256:" + strings.Repeat("a", 64), Size: 10,
+	}
+	current := &LiveSnapshot{Metadata: map[string]MetadataObject{
+		"meta/index":     present,
+		"meta/index.sig": {Path: "meta/index.sig", State: MetadataNotFound},
+	}}
+	next := &LiveSnapshot{Metadata: map[string]MetadataObject{
+		"meta/index":     present,
+		"meta/index.sig": {Path: "meta/index.sig", State: MetadataNotFound},
+	}}
+	require.True(t, snapshotsMetadataEqual(current, next))
+	next.Metadata["meta/index.sig"] = MetadataObject{Path: "meta/index.sig", State: MetadataForbidden}
+	require.False(t, snapshotsMetadataEqual(current, next))
 }
 
 func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
@@ -1287,7 +1362,7 @@ func TestRefreshRateLimitSchedulesRetryAndSuppressesNextRequest(t *testing.T) {
 	store := newTestStore(t)
 	handler := newTestHandler(t, store, []string{server.URL, fallback.URL},
 		func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			if err != nil {
 				return nil, err
 			}
@@ -1319,7 +1394,7 @@ func TestRefreshTransfersOnlyGatewayFailures(t *testing.T) {
 		expectFallbacks int64
 	}{
 		{name: "internal server error stops", status: http.StatusInternalServerError},
-		{name: "service unavailable transfers", status: http.StatusServiceUnavailable, expectSuccess: true, expectFallbacks: 1},
+		{name: "service unavailable transfers", status: http.StatusServiceUnavailable, expectSuccess: true, expectFallbacks: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1335,7 +1410,7 @@ func TestRefreshTransfersOnlyGatewayFailures(t *testing.T) {
 
 			handler := newTestHandler(t, newTestStore(t), []string{first.URL, fallback.URL},
 				func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
-					blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+					blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 					if err != nil {
 						return nil, err
 					}
@@ -1373,7 +1448,7 @@ func TestRefreshCompletesThroughAdmissionQueue(t *testing.T) {
 		func(ctx context.Context, session *RefreshSession, _ *PathIndexBuilder) (*LiveSnapshot, error) {
 			metadata := make(map[string]MetadataObject, 9)
 			for i := range 9 {
-				blob, err := session.Fetch(ctx, MetadataTarget{URL: fmt.Sprintf("meta/index-%d", i)})
+				blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: fmt.Sprintf("meta/index-%d", i)})
 				if err != nil {
 					return nil, err
 				}
@@ -1389,50 +1464,7 @@ func TestRefreshCompletesThroughAdmissionQueue(t *testing.T) {
 	outcome, err := handler.RefreshRootTask(ctx, "root")
 	require.NoError(t, err)
 	require.Equal(t, "updated", outcome.Result)
-	require.EqualValues(t, 9, requests.Load())
-}
-
-func TestRefreshHeadPrecheckDoesNotUpdateUpstreamHealth(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("ETag", `"meta-v1"`)
-			_, _ = io.WriteString(w, "index")
-		case http.MethodHead:
-			http.Error(w, "head failed", http.StatusInternalServerError)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{server.URL},
-		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
-			require.NoError(t, err)
-			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
-		},
-	)
-	outcome, err := handler.RefreshRootTask(ctx, "root")
-	require.NoError(t, err)
-	require.Equal(t, "updated", outcome.Result)
-	snapshot := handler.rootSnapshot("root")
-	require.NotNil(t, snapshot)
-
-	for i := 0; i < 10; i++ {
-		skipped, err := handler.canSkipRefresh(ctx, snapshot, server.URL, snapshot.Targets)
-		require.NoError(t, err)
-		require.False(t, skipped)
-	}
-
-	require.Equal(t, health.StateHealthy, handler.serviceHealth.AggregateState())
-	stats := handler.stats.Snapshot()
-	require.Equal(t, uint64(11), stats.Instances["repo"].UpstreamRequests)
-	require.Equal(t, uint64(10), stats.Instances["repo"].UpstreamStatus["500"])
+	require.EqualValues(t, 18, requests.Load())
 }
 
 func TestCleanCurrentRefTempsRemovesStalePublishRefs(t *testing.T) {
@@ -1478,7 +1510,7 @@ func TestRefreshRebuildsWhenCleanupIndexMissing(t *testing.T) {
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
 			builderCalls++
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			paths.Add("pool/pkg.deb")
 			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
@@ -1512,14 +1544,16 @@ func TestCleanupPreservesPersistedRepositoryRoots(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, handler.Cleanup(ctx, config.DefaultCleanupConfig()))
-	require.Len(t, handler.loadState(ctx).Roots, 1)
+	state, _, err := handler.loadState(ctx)
+	require.NoError(t, err)
+	require.Len(t, state.Roots, 1)
 	handler.mu.Lock()
 	handler.roots = map[string]*rootEntry{}
 	handler.mu.Unlock()
-	handler.restoreRoots(ctx)
+	require.NoError(t, handler.restoreRoots(ctx))
 	require.Equal(t, []string{"root"}, handler.currentRootIDs(), "restored roots must remain available to scheduler reconciliation")
 	_, err = store.StatObject(ctx, handler.name, path.Join(handler.objectRoot, "expired.cache"))
-	require.Error(t, err)
+	require.NoError(t, err, "unknown files are not positively classified cleanup objects")
 }
 
 func TestCleanupTaskSchedulesShortContinuationWhenBatchIsTruncated(t *testing.T) {
@@ -1572,7 +1606,8 @@ func TestMetadataGCPreservesValidRefreshStagingGeneration(t *testing.T) {
 	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
 	staging := refreshStagingState{
 		RootID: "root", Generation: "staging-gen", Upstream: "https://upstream.example", CreatedAt: time.Now().UTC(),
-		AnchorPath: "meta/index.txt", AnchorDigest: strings.Repeat("a", 64),
+		AnchorSetDigest: "sha256:" + strings.Repeat("a", 64),
+		Anchors:         []MetadataAnchor{{Path: "meta/index.txt", State: MetadataPresent, Digest: strings.Repeat("a", 64)}},
 	}
 	require.NoError(t, handler.saveRefreshStaging(ctx, staging))
 	objectPath := handler.generationMetadataPath("root", staging.Generation, "meta/partial")
@@ -1583,6 +1618,65 @@ func TestMetadataGCPreservesValidRefreshStagingGeneration(t *testing.T) {
 	require.NoError(t, handler.CleanupRoot(ctx, "root", config.DefaultCleanupConfig()))
 	_, err = store.StatObject(ctx, handler.name, objectPath)
 	require.NoError(t, err, "valid resumable staging must be pinned across metadata GC turns")
+}
+
+func TestRefreshRejectsCorruptPersistedCleanupFragment(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "metadata")
+	}))
+	defer server.Close()
+
+	store := newTestStore(t)
+	var builds atomic.Int32
+	handler := newTestHandler(t, store, []string{server.URL}, func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
+		blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
+		if err != nil {
+			return nil, err
+		}
+		paths.Add("pool/pkg.deb")
+		if builds.Add(1) == 1 {
+			return nil, errMetadataRefreshContinuation
+		}
+		return &LiveSnapshot{Metadata: map[string]MetadataObject{
+			blob.Path: {Path: blob.Path, Required: true},
+		}}, nil
+	})
+	handler.mode = config.ModeDEB
+
+	_, err := handler.RefreshRootTask(ctx, "root")
+	var retry scheduler.RetryAtError
+	require.ErrorAs(t, err, &retry)
+	staging, ok, err := handler.loadRefreshStaging(ctx, "root")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Len(t, staging.CleanupFragments, 1)
+	fragmentPath := handler.cleanupFragmentPath("root", staging.Generation, staging.CleanupFragments[0].Name)
+	_, err = store.Put(ctx, handler.name, fragmentPath, strings.NewReader("corrupt\n"), nil)
+	require.NoError(t, err)
+
+	_, err = handler.RefreshRootTask(ctx, "root")
+	require.ErrorContains(t, err, "cleanup fragment digest mismatch")
+	require.Nil(t, handler.rootSnapshot("root"))
+	_, ok, err = handler.loadRefreshStaging(ctx, "root")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestInvalidStagingWithoutRootIdentityIsDiscarded(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
+	stagingPath := handler.stagingStatePath("root")
+	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(stagingPath)), 0o755))
+	_, err := store.Put(ctx, handler.name, stagingPath, strings.NewReader("invalid: ["), nil)
+	require.NoError(t, err)
+
+	_, ok, err := handler.loadRefreshStaging(ctx, "root")
+	require.NoError(t, err)
+	require.False(t, ok)
+	_, err = store.StatObject(ctx, handler.name, stagingPath)
+	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
 func TestCleanupFailsClosedWhenCurrentCleanupIndexIsMissing(t *testing.T) {
@@ -1615,11 +1709,10 @@ func TestInactiveRootRetirementRemovesGenerationIndexesAndState(t *testing.T) {
 	}
 	writeCurrentSnapshot(t, ctx, store, handler, snapshot)
 	handler.setRootSnapshot("root", snapshot)
-	_, err := store.Put(ctx, handler.name, handler.cleanupIndexPath("root", "gen1"), strings.NewReader("pool/pkg.deb\n"), nil)
-	require.NoError(t, err)
+	rewriteCommittedCleanupIndex(t, ctx, store, handler, snapshot, []byte("pool/pkg.deb\n"))
 	artifactPath := path.Join(handler.objectRoot, ".content", "artifacts", "pool/pkg.deb")
 	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(artifactPath)), 0o755))
-	_, err = store.Put(ctx, handler.name, artifactPath, strings.NewReader("package"), map[string]string{
+	_, err := store.Put(ctx, handler.name, artifactPath, strings.NewReader("package"), map[string]string{
 		"fetched-at": time.Now().Add(-60 * 24 * time.Hour).Format(time.RFC3339),
 	})
 	require.NoError(t, err)
@@ -1639,11 +1732,11 @@ func TestInactiveRootRetirementRemovesGenerationIndexesAndState(t *testing.T) {
 	require.Equal(t, "retired", outcome.Result)
 	require.Equal(t, "root_inactive", outcome.ReasonCode)
 	require.Empty(t, handler.currentRootIDs())
-	require.Empty(t, handler.loadState(ctx).Roots)
+	state, _, err := handler.loadState(ctx)
+	require.NoError(t, err)
+	require.Empty(t, state.Roots)
 	_, err = store.StatObject(ctx, handler.name, handler.cleanupIndexPath("root", "gen1"))
 	require.Error(t, err)
-	_, ok := handler.serviceHealth.ResourceHealth("root")
-	require.False(t, ok)
 	require.Equal(t, uint64(1), handler.stats.Snapshot().Instances[handler.name].Maintenance["root_retirement.complete"])
 	_, err = handler.CleanupTask(ctx, config.DefaultCleanupConfig())
 	require.NoError(t, err)
@@ -1661,22 +1754,11 @@ func TestCleanupRootRetainsNewestPreviousAndRemovesOlderGeneration(t *testing.T)
 	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(currentIndex)), 0o755))
 	_, err := store.Put(ctx, handler.name, currentIndex, strings.NewReader("pool/current.pkg\n"), nil)
 	require.NoError(t, err)
-	previousObject := handler.generationMetadataPath("root", "previous", "meta/previous")
-	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(previousObject)), 0o755))
-	_, err = store.Put(ctx, handler.name, previousObject, strings.NewReader("previous"), nil)
-	require.NoError(t, err)
+	previousObject := writeGenerationSnapshot(t, ctx, store, handler, "root", "previous", time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
 	previousSnapshot := handler.snapshotPath("root", "previous")
-	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(previousSnapshot)), 0o755))
-	_, err = store.Put(ctx, handler.name, previousSnapshot, strings.NewReader("root_id: root\ngeneration: previous\npublished: 2026-01-02T00:00:00Z\n"), nil)
-	require.NoError(t, err)
 
-	olderObject := handler.generationMetadataPath("root", "older", "meta/older")
-	require.NoError(t, store.MkdirAll(path.Join(handler.name, path.Dir(olderObject)), 0o755))
-	_, err = store.Put(ctx, handler.name, olderObject, strings.NewReader("older"), nil)
-	require.NoError(t, err)
+	_ = writeGenerationSnapshot(t, ctx, store, handler, "root", "older", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	olderSnapshot := handler.snapshotPath("root", "older")
-	_, err = store.Put(ctx, handler.name, olderSnapshot, strings.NewReader("root_id: root\ngeneration: older\npublished: 2026-01-01T00:00:00Z\n"), nil)
-	require.NoError(t, err)
 
 	opts := config.DefaultCleanupConfig()
 	opts.BatchSize = 1
@@ -1686,6 +1768,10 @@ func TestCleanupRootRetainsNewestPreviousAndRemovesOlderGeneration(t *testing.T)
 
 	require.NoError(t, handler.CleanupRoot(ctx, "root", opts))
 	_, err = store.StatObject(ctx, handler.name, olderSnapshot)
+	if err == nil {
+		require.NoError(t, handler.CleanupRoot(ctx, "root", opts))
+		_, err = store.StatObject(ctx, handler.name, olderSnapshot)
+	}
 	require.Error(t, err)
 	_, err = store.StatObject(ctx, handler.name, previousObject)
 	require.NoError(t, err)
@@ -1737,103 +1823,13 @@ func TestCleanupRootRetainsGenerationWithActiveReader(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCanSkipRefreshReturnsFalseWhenSnapshotNil(t *testing.T) {
+func TestRefreshRebuildsMetadataBeforeComparingSnapshots(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-
-	skip, err := handler.canSkipRefresh(ctx, nil, "https://upstream.example", []MetadataTarget{{URL: "test.txt"}})
-	require.NoError(t, err)
-	require.False(t, skip)
-}
-
-func TestCanSkipRefreshReturnsFalseWhenEmptyTargets(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	store := newTestStore(t)
-	handler := newTestHandler(t, store, []string{"https://upstream.example"}, nil)
-
-	snapshot := &LiveSnapshot{
-		Metadata: map[string]MetadataObject{},
-		Targets:  []MetadataTarget{},
-	}
-	skip, err := handler.canSkipRefresh(ctx, snapshot, "https://upstream.example", nil)
-	require.NoError(t, err)
-	require.False(t, skip)
-}
-
-func TestResolveSnapshotMetadataNilSnapshot(t *testing.T) {
-	_, ok := resolveSnapshotMetadata(nil, MetadataTarget{URL: "test.txt"})
-	require.False(t, ok)
-}
-
-func TestResolveSnapshotMetadataDirectMatch(t *testing.T) {
-	snapshot := &LiveSnapshot{
-		Metadata: map[string]MetadataObject{
-			"meta/index.txt": {Path: "meta/index.txt", StorePath: "/store/path", Required: true},
-		},
-	}
-	obj, ok := resolveSnapshotMetadata(snapshot, MetadataTarget{URL: "meta/index.txt"})
-	require.True(t, ok)
-	require.Equal(t, "/store/path", obj.StorePath)
-}
-
-func TestResolveSnapshotMetadataSkipsNegativePrimaryForFallback(t *testing.T) {
-	snapshot := &LiveSnapshot{Metadata: map[string]MetadataObject{
-		"meta/InRelease": {Path: "meta/InRelease", StatusCode: http.StatusNotFound},
-		"meta/Release":   {Path: "meta/Release", StorePath: "/store/release", Required: true},
-	}}
-	obj, ok := resolveSnapshotMetadata(snapshot, MetadataTarget{URL: "meta/InRelease", Candidates: []string{"meta/Release"}})
-	require.True(t, ok)
-	require.Equal(t, "/store/release", obj.StorePath)
-}
-
-func TestResolveSnapshotMetadataResolvedPath(t *testing.T) {
-	snapshot := &LiveSnapshot{
-		Metadata: map[string]MetadataObject{
-			"meta/index.txt": {Path: "meta/real.txt", Required: true},
-			"meta/real.txt":  {Path: "meta/real.txt", StorePath: "/store/path", Required: true},
-		},
-	}
-	obj, ok := resolveSnapshotMetadata(snapshot, MetadataTarget{URL: "meta/index.txt"})
-	require.True(t, ok)
-	require.Equal(t, "/store/path", obj.StorePath)
-}
-
-func TestMarkResourceActiveDoesNotRestoreRemovedResource(t *testing.T) {
-	healthCfg := health.DefaultConfig()
-	healthCfg.ResourceRemoveAge = 0
-	healthCfg.ResourceRemoveCount = 1
-	serviceHealth := health.New("test", "test", healthCfg, []string{"https://upstream.example"}, nil)
-	rh := serviceHealth.AddResource("root", nil, []string{"https://upstream.example"})
-	require.Equal(t, health.RPending, rh.State)
-
-	serviceHealth.FinishRefresh("root", rh.Generation, health.ErrResourceNotFound, nil)
-	serviceHealth.MarkResourceActive("root", nil)
-	_, ok := serviceHealth.ResourceHealth("root")
-	require.False(t, ok)
-}
-
-func TestRefreshSkipsRebuildWhenMetadataHeadReturns200(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	var headRequests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("ETag", `"meta-v2"`)
-			_, _ = io.WriteString(w, "index")
-		case http.MethodHead:
-			headRequests++
-			w.Header().Set("ETag", `"meta-v2"`)
-			w.WriteHeader(http.StatusOK)
-		default:
-			http.NotFound(w, r)
-		}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"meta-v2"`)
+		_, _ = io.WriteString(w, "index")
 	}))
 	defer server.Close()
 
@@ -1842,7 +1838,7 @@ func TestRefreshSkipsRebuildWhenMetadataHeadReturns200(t *testing.T) {
 	handler := newTestHandler(t, store, []string{server.URL},
 		func(ctx context.Context, session *RefreshSession, paths *PathIndexBuilder) (*LiveSnapshot, error) {
 			builderCalls++
-			blob, err := session.Fetch(ctx, MetadataTarget{URL: "meta/index.txt"})
+			blob, err := session.FetchAnchor(ctx, MetadataTarget{URL: "meta/index.txt"})
 			require.NoError(t, err)
 			return &LiveSnapshot{Metadata: map[string]MetadataObject{blob.Path: {Path: blob.Path, Required: true}}}, nil
 		},

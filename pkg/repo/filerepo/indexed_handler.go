@@ -2,6 +2,7 @@ package filerepo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -12,7 +13,6 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -20,14 +20,16 @@ import (
 )
 
 const maxMetadataObjectSize = 512 << 20
-const snapshotSchemaVersion = 2
+const snapshotSchemaVersion = 3
 
 type rootEntry struct {
 	root                        RepositoryRoot
 	lastSeenAt                  time.Time
+	lastValidatedAt             time.Time
 	lastSeenSavedAt             time.Time
 	retired                     bool
 	retirementCleanupGeneration string
+	retirementCleanupDigest     string
 }
 
 type IndexedHandler struct {
@@ -45,18 +47,27 @@ type IndexedHandler struct {
 	build            SnapshotBuilder
 	serviceHealth    *health.ServiceHealth
 	upstreamGate     *httpcache.UpstreamGate
-	bus              *bus.Bus
+	triggerRefresh   func(string)
 	policy           Policy
 	metadataFreshFor time.Duration
 	rootExpireAfter  config.Expiration
 
-	mu              sync.RWMutex
-	roots           map[string]*rootEntry
-	rootSnapshots   map[string]*LiveSnapshot
-	currentView     map[string]currentViewEntry
-	metadataReaders map[string]int
-	lifecycleCtx    context.Context
-	wait            sync.WaitGroup
+	mu               sync.RWMutex
+	stateWriteMu     sync.Mutex
+	stateLifecycleMu sync.Mutex
+	stateSignal      chan struct{}
+	stateStop        chan chan error
+	stateWriterDone  chan struct{}
+	stateStopped     bool
+	stateRevision    uint64
+	roots            map[string]*rootEntry
+	rootSnapshots    map[string]*LiveSnapshot
+	currentView      map[string]currentViewEntry
+	metadataReaders  map[string]int
+	refreshing       map[string]bool
+	refreshErrors    map[string]string
+	lifecycleCtx     context.Context
+	wait             sync.WaitGroup
 }
 
 func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, upstreams []string, transport *config.TransportConfig, expireAfter config.Expiration, policy *Policy, builder SnapshotBuilder, store *blobfs.Store, stats *httpcache.Stats, svcHealth *health.ServiceHealth, upstreamGate *httpcache.UpstreamGate) *IndexedHandler {
@@ -77,6 +88,8 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 		rootSnapshots:   map[string]*LiveSnapshot{},
 		currentView:     map[string]currentViewEntry{},
 		metadataReaders: map[string]int{},
+		refreshing:      map[string]bool{},
+		refreshErrors:   map[string]string{},
 	}
 	if finalizer, ok := inspector.(RootFinalizer); ok {
 		handler.finalizer = finalizer
@@ -99,7 +112,7 @@ func NewIndexedHandler(name, mode, objectRoot string, inspector PathInspector, u
 	return handler
 }
 
-func (h *IndexedHandler) SetBus(b *bus.Bus) { h.bus = b }
+func (h *IndexedHandler) SetRefreshTrigger(trigger func(string)) { h.triggerRefresh = trigger }
 
 func (h *IndexedHandler) SetMetadataFreshFor(value config.Freshness) {
 	h.metadataFreshFor = value.Duration()
@@ -122,7 +135,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if current.Class == ResourceMetadata {
 			h.touchRoot(current.RootID)
 			if h.currentPrimaryNeedsRefresh(current.RootID, cleanPath) {
-				h.publishRefreshRequested(current.RootID)
+				h.triggerMetadataRefresh(current.RootID)
 			}
 			h.serveCurrentMetadata(w, req, current, release)
 			return
@@ -142,7 +155,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				if analysis.Role == DiscoveryUpdateRoot && analysis.Root.ID == rootID {
 					h.registerRoot(analysis)
 				}
-				h.publishRefreshRequested(rootID)
+				h.triggerMetadataRefresh(rootID)
 				w.Header().Set("Retry-After", "1")
 				w.Header().Set("X-Cache-Generation", snapshot.Generation)
 				err := fmt.Errorf("metadata path %s is absent from current generation %s", cleanPath, snapshot.Generation)
@@ -154,7 +167,7 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				h.registerRoot(analysis)
 			}
 			h.touchRoot(rootID)
-			h.publishRefreshRequested(rootID)
+			h.triggerMetadataRefresh(rootID)
 			h.base.ProxyPassthrough(w, req, cleanPath, "")
 			return
 		}
@@ -168,8 +181,8 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		rootID, created, changed := h.registerRoot(analysis)
-		if h.bus != nil && rootID != "" && (created || changed) {
-			h.publishDiscovered(rootID)
+		if rootID != "" && (created || changed) {
+			h.triggerMetadataRefresh(rootID)
 		}
 		return
 	}
@@ -183,14 +196,28 @@ func (h *IndexedHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (h *IndexedHandler) Start(ctx context.Context) error {
 	h.lifecycleCtx = ctx
-	h.restoreRoots(ctx)
+	h.startStateWriter()
+	if err := h.restoreRoots(ctx); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopErr := h.stopStateWriter(stopCtx)
+		cancel()
+		return errors.Join(fmt.Errorf("restore repository roots: %w", err), stopErr)
+	}
 	h.cleanCurrentRefTemps(ctx)
-	h.restoreGenerations(ctx)
+	if err := h.restoreGenerations(ctx); err != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopErr := h.stopStateWriter(stopCtx)
+		cancel()
+		return errors.Join(fmt.Errorf("restore metadata generations: %w", err), stopErr)
+	}
 	h.reconcileMetadataTasks()
 	return nil
 }
 
 func (h *IndexedHandler) Stop(ctx context.Context) error {
+	if err := h.stopStateWriter(ctx); err != nil {
+		return err
+	}
 	if err := utils.WaitGroupContext(ctx, &h.wait); err != nil {
 		return err
 	}
@@ -210,27 +237,11 @@ func (h *IndexedHandler) rootSnapshot(rootKey string) *LiveSnapshot {
 	return h.rootSnapshots[rootKey]
 }
 
-func (h *IndexedHandler) publishDiscovered(rootID string) {
-	if h.bus == nil || rootID == "" {
+func (h *IndexedHandler) triggerMetadataRefresh(rootID string) {
+	if h.triggerRefresh == nil || rootID == "" {
 		return
 	}
-	h.bus.Publish(bus.Event{
-		Type: bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{
-			Instance: h.name,
-			RootID:   rootID,
-		},
-	})
-}
-
-func (h *IndexedHandler) publishRefreshRequested(rootID string) {
-	if h.bus == nil || rootID == "" {
-		return
-	}
-	h.bus.Publish(bus.Event{
-		Type:    bus.EventMetadataRefreshRequested,
-		Payload: bus.MetadataRefreshRequestedPayload{Instance: h.name, RootID: rootID},
-	})
+	h.triggerRefresh(rootID)
 }
 
 func (h *IndexedHandler) currentPrimaryNeedsRefresh(rootID, cleanPath string) bool {
@@ -255,107 +266,6 @@ func (h *IndexedHandler) reconcileMetadataTasks() {
 	}
 	h.mu.RUnlock()
 	for _, rootID := range rootIDs {
-		h.publishDiscovered(rootID)
+		h.triggerMetadataRefresh(rootID)
 	}
-}
-
-func (h *IndexedHandler) canSkipRefresh(ctx context.Context, snapshot *LiveSnapshot, upstream string, targets []MetadataTarget) (bool, error) {
-	if snapshot == nil || len(targets) == 0 {
-		return false, nil
-	}
-	if _, err := h.store.StatObject(ctx, h.name, h.cleanupIndexPath(snapshot.RootID, snapshot.Generation)); err != nil {
-		return false, nil
-	}
-	for _, target := range targets {
-		resolved, ok := resolveSnapshotMetadata(snapshot, target)
-		if !ok || resolved.StorePath == "" {
-			return false, nil
-		}
-		info, err := h.store.StatObject(ctx, h.name, resolved.StorePath)
-		if err != nil {
-			return false, nil
-		}
-		etag := info.Options["etag"]
-		lastModified := info.Options["last-modified"]
-		if etag == "" && lastModified == "" {
-			return false, nil
-		}
-
-		request, err := http.NewRequestWithContext(ctx, http.MethodHead, strings.TrimRight(upstream, "/")+"/"+httpcache.EscapePath(resolved.Path), nil)
-		if err != nil {
-			return false, err
-		}
-		request.Header.Set("User-Agent", h.client.UserAgent)
-		if etag != "" {
-			request.Header.Set("If-None-Match", etag)
-		}
-		if lastModified != "" {
-			request.Header.Set("If-Modified-Since", lastModified)
-		}
-
-		release, err := h.upstreamGate.Acquire(ctx, upstream, httpcache.AdmissionRefresh)
-		if err != nil {
-			return false, err
-		}
-		start := time.Now()
-		response, err := h.client.Do(request)
-		latency := time.Since(start)
-		if err != nil {
-			release()
-			h.stats.RecordUpstreamRequest(h.name, h.mode, upstream, http.MethodHead, 0, latency, 0)
-			if ctx.Err() != nil {
-				return false, err
-			}
-			return false, fmt.Errorf("%w: metadata head request: %v", errMetadataMirrorRetry, err)
-		}
-		h.stats.RecordUpstreamRequest(
-			h.name,
-			h.mode,
-			upstream,
-			http.MethodHead,
-			response.StatusCode,
-			latency,
-			metadataContentLength(response),
-		)
-		_ = response.Body.Close()
-		release()
-		if response.StatusCode == http.StatusTooManyRequests {
-			return false, h.upstreamGate.RateLimited(upstream, response.Header.Get("Retry-After"))
-		}
-		switch response.StatusCode {
-		case http.StatusNotModified:
-			continue
-		case http.StatusOK:
-			return false, nil
-		case http.StatusMethodNotAllowed, http.StatusNotImplemented:
-			return false, nil
-		default:
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func resolveSnapshotMetadata(snapshot *LiveSnapshot, target MetadataTarget) (MetadataObject, bool) {
-	if snapshot == nil {
-		return MetadataObject{}, false
-	}
-	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
-		obj, ok := snapshot.Metadata[candidate]
-		if !ok || obj.StatusCode != 0 {
-			continue
-		}
-		if obj.Path == "" || obj.Path == candidate {
-			return obj, obj.StorePath != ""
-		}
-		resolved, ok := snapshot.Metadata[obj.Path]
-		if !ok {
-			return MetadataObject{}, false
-		}
-		if resolved.Path == "" {
-			resolved.Path = obj.Path
-		}
-		return resolved, resolved.StorePath != ""
-	}
-	return MetadataObject{}, false
 }

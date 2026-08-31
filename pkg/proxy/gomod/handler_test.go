@@ -168,7 +168,7 @@ func newTestHandler(t *testing.T, store *blobfs.Store, expireAfter config.Expira
 	t.Helper()
 	handler, err := NewHandler("gomod", expireAfter, upstreams, transport, policy, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	require.NoError(t, err)
-	t.Cleanup(handler.Close)
+	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
 	return handler
 }
 

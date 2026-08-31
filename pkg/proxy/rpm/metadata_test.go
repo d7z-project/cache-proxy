@@ -25,6 +25,7 @@ import (
 func TestParsePrimaryBuildsCleanupPaths(t *testing.T) {
 	input := `<metadata><package><location href="Packages/h/hello.rpm"/><checksum>abc</checksum></package></metadata>`
 	paths := &filerepo.PathIndexBuilder{}
+	t.Cleanup(func() { require.NoError(t, paths.Close()) })
 	count, err := parsePrimary(strings.NewReader(input), paths, "repo/os")
 	require.NoError(t, err)
 	require.Equal(t, 1, count)

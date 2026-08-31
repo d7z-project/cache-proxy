@@ -67,6 +67,43 @@ func TestUpstreamGateForegroundPrecedesRefresh(t *testing.T) {
 	refreshResult.release()
 }
 
+func TestUpstreamGateRefreshRunsAfterBoundedForegroundBurst(t *testing.T) {
+	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+	release, err := gate.Acquire(context.Background(), "https://busy.example/a", AdmissionForeground)
+	require.NoError(t, err)
+	type result struct {
+		class   AdmissionClass
+		release func()
+		err     error
+	}
+	granted := make(chan result, maxForegroundBurst+2)
+	acquire := func(class AdmissionClass, upstream string) {
+		go func() {
+			release, err := gate.Acquire(context.Background(), upstream, class)
+			granted <- result{class: class, release: release, err: err}
+		}()
+	}
+	acquire(AdmissionRefresh, "https://refresh.example/metadata")
+	for i := 0; i < maxForegroundBurst+1; i++ {
+		acquire(AdmissionForeground, "https://client.example/object")
+	}
+	require.Eventually(t, func() bool {
+		snapshot := gate.Snapshot()
+		return snapshot.RefreshQueued == 1 && snapshot.ForegroundQueued == maxForegroundBurst+1
+	}, time.Second, time.Millisecond)
+	release()
+	for range maxForegroundBurst - 1 {
+		item := <-granted
+		require.NoError(t, item.err)
+		require.Equal(t, AdmissionForeground, item.class)
+		item.release()
+	}
+	item := <-granted
+	require.NoError(t, item.err)
+	require.Equal(t, AdmissionRefresh, item.class)
+	item.release()
+}
+
 func TestUpstreamGateDoesNotHeadOfLineBlockOtherHosts(t *testing.T) {
 	gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 2, MaxActivePerHost: 1})
 	releaseA, err := gate.Acquire(context.Background(), "https://one.example/a", AdmissionForeground)

@@ -11,8 +11,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
-
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 func TestPreStartFactorySupportsRestore(t *testing.T) {
@@ -22,8 +20,7 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 
 	{
 		reg := prometheus.NewRegistry()
-		b := bus.NewWithRegisterer(reg)
-		sched := New(b, store, reg)
+		sched := New(store, reg)
 		sched.RegisterFactory(TaskFactory{
 			Instance:        "repo",
 			RefreshInterval: time.Hour,
@@ -33,7 +30,7 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
-		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+		require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 		require.Eventually(t, func() bool {
 			_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 			return ok
@@ -48,8 +45,7 @@ func TestPreStartFactorySupportsRestore(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
-	b := bus.NewWithRegisterer(reg)
-	sched := New(b, store, reg)
+	sched := New(store, reg)
 	sched.RegisterFactory(TaskFactory{
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
@@ -75,8 +71,7 @@ func TestPersistenceRestoreSkipsMissingFactory(t *testing.T) {
 
 	{
 		reg := prometheus.NewRegistry()
-		b := bus.NewWithRegisterer(reg)
-		sched := New(b, store, reg)
+		sched := New(store, reg)
 		sched.RegisterFactory(TaskFactory{
 			Instance:        "ghost",
 			RefreshInterval: time.Hour,
@@ -86,7 +81,7 @@ func TestPersistenceRestoreSkipsMissingFactory(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
-		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "ghost", RootID: "x"}})
+		require.True(t, sched.Trigger(NewTaskKey("ghost", TypeMetadataRefresh, "x")))
 		require.Eventually(t, func() bool {
 			_, ok := sched.Info(NewTaskKey("ghost", TypeMetadataRefresh, "x"))
 			return ok
@@ -101,8 +96,7 @@ func TestPersistenceRestoreSkipsMissingFactory(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
-	b := bus.NewWithRegisterer(reg)
-	sched := New(b, store, reg)
+	sched := New(store, reg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -121,8 +115,7 @@ func TestRestoreMetrics(t *testing.T) {
 
 	{
 		reg := prometheus.NewRegistry()
-		b := bus.NewWithRegisterer(reg)
-		sched := New(b, store, reg)
+		sched := New(store, reg)
 		sched.RegisterFactory(TaskFactory{
 			Instance:        "repo",
 			RefreshInterval: time.Hour,
@@ -132,9 +125,9 @@ func TestRestoreMetrics(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		sched.Start(ctx)
-		b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+		require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 		require.Eventually(t, func() bool {
-			return metricValue(t, sched.metrics.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")) == 1
+			return metricValue(t, sched.metrics.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "reconcile")) == 1
 		}, time.Second, 10*time.Millisecond)
 		cancel()
 		require.NoError(t, sched.Stop(context.Background()))
@@ -146,8 +139,7 @@ func TestRestoreMetrics(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
-	b := bus.NewWithRegisterer(reg)
-	sched := New(b, store, reg)
+	sched := New(store, reg)
 	sched.RegisterFactory(TaskFactory{
 		Instance:        "repo",
 		RefreshInterval: time.Hour,
@@ -185,13 +177,37 @@ func TestLoadTaskStateTreatsOnlyMissingFileAsEmpty(t *testing.T) {
 	require.Empty(t, data)
 }
 
+func TestLoadTaskStateRejectsInvalidEnvelope(t *testing.T) {
+	tests := map[string]string{
+		"unknown field":       "version: 1\ntasks: []\nunexpected: true\n",
+		"multiple documents":  "version: 1\ntasks: []\n---\nversion: 1\ntasks: []\n",
+		"unsupported version": "version: 2\ntasks: []\n",
+		"oversized":           "version: 1\ntasks: []\n#" + strings.Repeat("x", maxPersistedStateSize),
+	}
+	for name, state := range tests {
+		t.Run(name, func(t *testing.T) {
+			store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+			require.NoError(t, store.MkdirAll("_scheduler/", 0o755))
+			_, err = store.Put(context.Background(), "_scheduler", "tasks.yaml", strings.NewReader(state), nil)
+			require.NoError(t, err)
+
+			data, err := loadTaskState(store, "_scheduler")
+			require.Error(t, err)
+			require.Empty(t, data)
+		})
+	}
+}
+
 func TestSaveStatePublishesThroughTempAndCleansTemps(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 
 	reg := prometheus.NewRegistry()
-	sched := New(bus.NewWithRegisterer(reg), store, reg)
+	sched := New(store, reg)
 	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
 	sched.tasks[key] = &taskState{
 		TaskInfo: TaskInfo{
@@ -224,7 +240,7 @@ func TestCleanStateTempsRemovesStaleSchedulerTemps(t *testing.T) {
 	require.True(t, schedulerStateTempExists(t, store))
 
 	reg := prometheus.NewRegistry()
-	New(bus.NewWithRegisterer(reg), store, reg).cleanStateTemps()
+	New(store, reg).cleanStateTemps()
 
 	require.False(t, schedulerStateTempExists(t, store))
 }

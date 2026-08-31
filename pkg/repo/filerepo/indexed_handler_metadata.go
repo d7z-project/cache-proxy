@@ -1,11 +1,11 @@
 package filerepo
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -228,10 +228,9 @@ func (h *IndexedHandler) putMetadataObject(ctx context.Context, rootID, generati
 	return err
 }
 
-func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnapshot, cleanupPaths []string) error {
-	data, err := yaml.Marshal(snapshot)
-	if err != nil {
-		return err
+func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnapshot, cleanupIndex *PathIndexBuilder) error {
+	if cleanupIndex == nil {
+		return errors.New("metadata cleanup index is nil")
 	}
 	snapshotPath := h.snapshotPath(snapshot.RootID, snapshot.Generation)
 	cleanupPath := h.cleanupIndexPath(snapshot.RootID, snapshot.Generation)
@@ -245,21 +244,25 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	if err := h.store.MkdirAll(path.Join(h.name, path.Dir(currentPath)), 0o755); err != nil {
 		return err
 	}
-	cleanupData := bytes.Buffer{}
-	writer := bufio.NewWriter(&cleanupData)
-	for _, item := range cleanupPaths {
-		item = strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(item)), "/")
-		if item == "." || item == "" || !httpcache.SafePath(item) {
-			continue
-		}
-		if _, err := writer.WriteString(item + "\n"); err != nil {
-			return err
-		}
-	}
-	if err := writer.Flush(); err != nil {
+	cleanupReader, err := cleanupIndex.rewind()
+	if err != nil {
 		return err
 	}
-	if _, err = h.store.Put(ctx, h.name, cleanupPath, bytes.NewReader(cleanupData.Bytes()), map[string]string{
+	cleanupHash := sha256.New()
+	if _, err := io.Copy(cleanupHash, cleanupReader); err != nil {
+		return err
+	}
+	snapshot.CleanupIndexDigest = "sha256:" + hex.EncodeToString(cleanupHash.Sum(nil))
+	data, err := yaml.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	snapshotDigest := digestBytes(data)
+	cleanupReader, err = cleanupIndex.rewind()
+	if err != nil {
+		return err
+	}
+	if _, err = h.store.Put(ctx, h.name, cleanupPath, cleanupReader, map[string]string{
 		"content-type": "text/plain; charset=utf-8",
 		"mode":         h.mode,
 	}); err != nil {
@@ -271,10 +274,10 @@ func (h *IndexedHandler) publishSnapshot(ctx context.Context, snapshot *LiveSnap
 	}); err != nil {
 		return err
 	}
-	refData, err := yaml.Marshal(struct {
-		RootID     string `yaml:"root_id"`
-		Generation string `yaml:"generation"`
-	}{RootID: snapshot.RootID, Generation: snapshot.Generation})
+	refData, err := yaml.Marshal(currentReference{
+		Version: 2, RootID: snapshot.RootID, Generation: snapshot.Generation,
+		SnapshotDigest: snapshotDigest, CleanupIndexDigest: snapshot.CleanupIndexDigest,
+	})
 	if err != nil {
 		return err
 	}

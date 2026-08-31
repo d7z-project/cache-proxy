@@ -19,7 +19,9 @@ import (
 )
 
 func (h *Handler) handleRequest(ctx context.Context, req *http.Request) (*utils.ResponseWrapper, error) {
-	h.wait.Add(1)
+	if !h.beginOperation() {
+		return nil, errors.New("cache handler is closing")
+	}
 	defer h.wait.Done()
 	route, err := h.resolver.Resolve(req)
 	if err != nil {
@@ -199,7 +201,7 @@ func (h *Handler) revalidateCached(ctx context.Context, req *http.Request, route
 	switch resp.StatusCode {
 	case http.StatusNotModified:
 		_ = resp.Close()
-		if err := h.markRevalidated(ctx, route, resp.Headers); err != nil {
+		if err := h.markRevalidated(h.lifecycleCtx, route, resp.Headers); err != nil {
 			return nil, err
 		}
 		cached.Headers["X-Cache"] = "REVALIDATED"
@@ -214,7 +216,7 @@ func (h *Handler) revalidateCached(ctx context.Context, req *http.Request, route
 		return h.streamResponse(req, route, "REFRESH", flight, resp)
 	case http.StatusNotFound, http.StatusGone:
 		_ = cached.Close()
-		_ = h.store.DeleteObject(ctx, h.name, route.ObjectPath)
+		_ = h.store.DeleteObject(h.lifecycleCtx, h.name, route.ObjectPath)
 		resp.Headers["X-Cache"] = "BYPASS"
 		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 	default:
@@ -331,6 +333,7 @@ func (h *Handler) remoteOptionsForRoute(route Route, record bool, req *http.Requ
 		TargetURL:          route.TargetURL,
 		AllowedTargetHosts: route.AllowedTargetHosts,
 		PreferredUpstream:  route.PreferredUpstream,
+		AdmissionContext:   req.Context(),
 	}
 }
 

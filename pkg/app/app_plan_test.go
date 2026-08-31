@@ -45,7 +45,7 @@ instances:
 `))
 	require.NoError(t, err)
 
-	application, err := Open(context.Background(), doc, "")
+	application, err := Open(context.Background(), doc)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, application.Close(context.Background())) })
 

@@ -100,7 +100,7 @@ func TestAPKBusinessStressRefreshCacheCleanupMemoryRecovery(t *testing.T) {
 	requestsBeforeMissingMetadata := upstreamRequests.Load()
 	missingMetadata := httptest.NewRecorder()
 	handler.ServeHTTP(missingMetadata, httptest.NewRequest(http.MethodGet, "/"+path.Join(repoRoot, "APKINDEX.tar.gz.sig"), nil))
-	require.Equal(t, http.StatusServiceUnavailable, missingMetadata.Code)
+	require.Equal(t, http.StatusNotFound, missingMetadata.Code)
 	require.Equal(t, requestsBeforeMissingMetadata, upstreamRequests.Load())
 	cacheAPKArtifacts(t, handler, repoRoot, 1, 6)
 	require.NoError(t, handler.CleanupRoot(ctx, rootID, config.DefaultCleanupConfig()))

@@ -2,7 +2,6 @@ package httpcache
 
 import (
 	"context"
-	"errors"
 	"io/fs"
 	"log/slog"
 	"time"
@@ -42,7 +41,10 @@ func cleanupStoreTenant(ctx context.Context, store *blobfs.Store, tenant string,
 			completed = false
 			return fs.SkipAll
 		}
-		if err != nil || entry.IsDir() {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		if after != "" && objectPath <= after {
@@ -58,7 +60,10 @@ func cleanupStoreTenant(ctx context.Context, store *blobfs.Store, tenant string,
 			return nil
 		}
 		info, statErr := store.StatObject(ctx, tenant, objectPath)
-		if statErr != nil || info.State != "ACTIVE" {
+		if statErr != nil {
+			return statErr
+		}
+		if info.State != "ACTIVE" {
 			return nil
 		}
 		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
@@ -73,11 +78,10 @@ func cleanupStoreTenant(ctx context.Context, store *blobfs.Store, tenant string,
 			slog.Info("cleanup dry-run delete", "instance", tenant, "path", objectPath)
 			return nil
 		}
-		if err := store.DeleteObject(ctx, tenant, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Info("cleanup delete failed", "instance", tenant, "path", objectPath, "err", err)
-		} else {
-			deleted++
+		if err := store.DeleteObject(ctx, tenant, objectPath); err != nil {
+			return err
 		}
+		deleted++
 		return nil
 	})
 	if err != nil {

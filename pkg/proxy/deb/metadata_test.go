@@ -29,6 +29,7 @@ import (
 
 func TestParsePackagesBuildsCleanupPaths(t *testing.T) {
 	paths := &filerepo.PathIndexBuilder{}
+	t.Cleanup(func() { require.NoError(t, paths.Close()) })
 	count, err := parsePackages(strings.NewReader("Package: hello\nFilename: pool/main/h/hello/hello_1.0_amd64.deb\n\n"), paths, 0)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
@@ -37,6 +38,7 @@ func TestParsePackagesBuildsCleanupPaths(t *testing.T) {
 
 func TestParseSourcesBuildsCleanupPaths(t *testing.T) {
 	paths := &filerepo.PathIndexBuilder{}
+	t.Cleanup(func() { require.NoError(t, paths.Close()) })
 	count, err := parseSources(strings.NewReader("Package: hello\nDirectory: pool/main/h/hello\nChecksums-Sha256:\n abc111 123 hello_1.0.dsc\n def222 456 hello_1.0.orig.tar.xz\n\n"), paths, 0)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
@@ -372,7 +374,7 @@ func TestDistributionRefreshResumesPersistedStagingInBoundedSlices(t *testing.T)
 	require.True(t, handler.RepositoryStatuses()[0].HasCurrent)
 	mu.Lock()
 	defer mu.Unlock()
-	require.Equal(t, 2, requests["InRelease"])
+	require.Equal(t, 3, requests["InRelease"], "resumed slice fetches and then reconfirms its signed anchor")
 	for cleanPath := range entries {
 		require.Equal(t, 1, requests[cleanPath], cleanPath)
 	}
@@ -428,7 +430,7 @@ func TestDEBSnapshotValidatorRejectsMissingReleaseIndex(t *testing.T) {
 	snapshot := &filerepo.LiveSnapshot{
 		Targets: []filerepo.MetadataTarget{{URL: releasePath, Candidates: []string{"dists/trixie/Release"}}},
 		Metadata: map[string]filerepo.MetadataObject{
-			releasePath: {Path: releasePath, Required: true},
+			releasePath: {Path: releasePath, State: filerepo.MetadataPresent, Required: true},
 		},
 	}
 	opener := func(cleanPath string) (io.ReadCloser, error) {

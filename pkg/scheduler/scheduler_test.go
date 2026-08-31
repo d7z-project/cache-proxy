@@ -5,6 +5,7 @@ import (
 	"fmt"
 	goruntime "runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,8 +15,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
-
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 func newTestStore(t *testing.T) *blobfs.Store {
@@ -26,11 +25,10 @@ func newTestStore(t *testing.T) *blobfs.Store {
 	return store
 }
 
-func newTestScheduler(t *testing.T, store *blobfs.Store) (*Scheduler, *bus.Bus) {
+func newTestScheduler(t *testing.T, store *blobfs.Store) *Scheduler {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	b := bus.NewWithRegisterer(reg)
-	return New(b, store, reg), b
+	return New(store, reg)
 }
 
 func noopTask(context.Context) (*TaskOutcome, error) {
@@ -70,13 +68,13 @@ func TestTaskKey(t *testing.T) {
 }
 
 func TestSchedulerStartStopAllowsNilContext(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	sched.Start(nil)                    //nolint:staticcheck // Verifies the documented nil-context fallback.
 	require.NoError(t, sched.Stop(nil)) //nolint:staticcheck // Verifies the documented nil-context fallback.
 }
 
 func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -108,7 +106,7 @@ func TestSchedulerStressReleasesTaskAllocations(t *testing.T) {
 }
 
 func TestRegisterInfoAndSnapshotBeforeStart(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	key := NewTaskKey("pre", TypeExpireCleanup, "")
 	sched.Register(TaskDef{Key: key, Interval: time.Hour, Handler: noopTask})
 
@@ -120,7 +118,7 @@ func TestRegisterInfoAndSnapshotBeforeStart(t *testing.T) {
 }
 
 func TestRegisterAndUnregisterAfterStart(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -138,7 +136,7 @@ func TestRegisterAndUnregisterAfterStart(t *testing.T) {
 }
 
 func TestTaskOutcomeDefaultsToSuccess(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -157,7 +155,7 @@ func TestTaskOutcomeDefaultsToSuccess(t *testing.T) {
 }
 
 func TestTaskOutcomeReportsExplicitResult(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -189,8 +187,8 @@ func TestTaskOutcomeReportsExplicitResult(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
-func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+func TestTriggerCreatesRefreshAndGCTasks(t *testing.T) {
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -214,10 +212,8 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 		},
 	})
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
+	refreshKey := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	require.True(t, sched.Trigger(refreshKey))
 	select {
 	case result := <-executed:
 		require.Equal(t, "refresh:root", result)
@@ -225,7 +221,6 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 		require.FailNow(t, "refresh task did not execute")
 	}
 
-	refreshKey := NewTaskKey("repo", TypeMetadataRefresh, "root")
 	gcKey := NewTaskKey("repo", TypeMetadataGC, "root")
 	_, ok := sched.Info(refreshKey)
 	require.True(t, ok)
@@ -234,13 +229,13 @@ func TestDiscoveryCreatesRefreshAndGCTasks(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		metricValue(t, sched.metrics.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "discovery")),
+		metricValue(t, sched.metrics.registered.WithLabelValues("repo", string(TypeMetadataRefresh), "reconcile")),
 	)
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
 func TestFactoryReconcileCreatesMetadataTasksWithoutBusEvent(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -272,7 +267,7 @@ func TestFactoryReconcileCreatesMetadataTasksWithoutBusEvent(t *testing.T) {
 }
 
 func TestFactoryReconcileRemovesStaleMetadataTasks(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -306,7 +301,7 @@ func TestFactoryReconcileRemovesStaleMetadataTasks(t *testing.T) {
 }
 
 func TestFactoryReconcileUpdatesExistingTaskInterval(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -338,8 +333,8 @@ func TestFactoryReconcileUpdatesExistingTaskInterval(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
-func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+func TestUnregisterRemovesMetadataTasks(t *testing.T) {
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.RegisterFactory(TaskFactory{
@@ -351,19 +346,16 @@ func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
+	refreshKey := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	gcKey := NewTaskKey("repo", TypeMetadataGC, "root")
+	require.True(t, sched.Trigger(refreshKey))
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return ok
 	}, time.Second, 10*time.Millisecond)
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataRemoved,
-		Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "root"},
-	})
+	sched.Unregister(refreshKey)
+	sched.Unregister(gcKey)
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return !ok
@@ -371,34 +363,8 @@ func TestMetadataRemovedEventUnregistersTasks(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
-func TestInvalidBusPayloadDoesNotStopScheduler(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sched.RegisterFactory(TaskFactory{
-		Instance:        "repo",
-		RefreshInterval: time.Hour,
-		GCInterval:      time.Hour,
-		NewRefresh:      func(string) TaskHandler { return noopTask },
-		NewGC:           func(string) TaskHandler { return noopTask },
-	})
-	sched.Start(ctx)
-
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: "bad-payload"})
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
-
-	require.Eventually(t, func() bool {
-		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
-		return ok
-	}, time.Second, 10*time.Millisecond)
-	require.NoError(t, sched.Stop(context.Background()))
-}
-
 func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -417,10 +383,7 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 	require.Eventually(t, func() bool {
 		info, _ := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		return info.Status == StatusFailed
@@ -435,7 +398,7 @@ func TestRefreshTaskFailureUpdatesStatusAndBackoff(t *testing.T) {
 }
 
 func TestRetryAtKeepsTaskDoneAndSchedulesExactRetry(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -453,10 +416,7 @@ func TestRetryAtKeepsTaskDoneAndSchedulesExactRetry(t *testing.T) {
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 	require.Eventually(t, func() bool {
 		info, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "root"))
 		if !ok {
@@ -467,8 +427,45 @@ func TestRetryAtKeepsTaskDoneAndSchedulesExactRetry(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
+func TestCoalescedTriggerDoesNotOverrideRetryAt(t *testing.T) {
+	sched := newTestScheduler(t, newTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	retryAt := time.Now().Add(time.Hour)
+	var runs atomic.Int32
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh: func(string) TaskHandler {
+			return func(context.Context) (*TaskOutcome, error) {
+				runs.Add(1)
+				close(started)
+				<-release
+				return nil, RetryAt(retryAt)
+			}
+		},
+		NewGC: func(string) TaskHandler { return noopTask },
+	})
+	sched.Start(ctx)
+	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	require.True(t, sched.Trigger(key))
+	<-started
+	require.True(t, sched.Trigger(key))
+	close(release)
+	require.Eventually(t, func() bool {
+		info, ok := sched.Info(key)
+		return ok && info.Status == StatusDone && info.NextRun.Equal(retryAt)
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, int32(1), runs.Load())
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
 func TestHandlerPanicMarksTaskFailed(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -493,7 +490,7 @@ func TestHandlerPanicMarksTaskFailed(t *testing.T) {
 }
 
 func TestContextCancellationStopsRunningTask(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -515,10 +512,7 @@ func TestContextCancellationStopsRunningTask(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
@@ -534,8 +528,54 @@ func TestContextCancellationStopsRunningTask(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
+func TestTaskDeadlineReportsStuckAndCoalescesOneRerun(t *testing.T) {
+	sched := newTestScheduler(t, newTestStore(t))
+	sched.taskTimeout = func(time.Duration) time.Duration { return 20 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	timedOut := make(chan struct{})
+	release := make(chan struct{})
+	var runs atomic.Int32
+	sched.RegisterFactory(TaskFactory{
+		Instance:        "repo",
+		RefreshInterval: time.Hour,
+		GCInterval:      time.Hour,
+		NewRefresh: func(string) TaskHandler {
+			return func(ctx context.Context) (*TaskOutcome, error) {
+				if runs.Add(1) != 1 {
+					return nil, nil
+				}
+				close(started)
+				<-ctx.Done()
+				close(timedOut)
+				<-release
+				return nil, ctx.Err()
+			}
+		},
+		NewGC: func(string) TaskHandler { return noopTask },
+	})
+	sched.Start(ctx)
+	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	require.True(t, sched.Trigger(key))
+	<-started
+	<-timedOut
+	require.Eventually(t, func() bool {
+		info, ok := sched.Info(key)
+		return ok && info.Status == StatusStuck && strings.Contains(info.LastError, "cooperative termination")
+	}, time.Second, 10*time.Millisecond)
+	for range 5 {
+		require.True(t, sched.Trigger(key))
+	}
+	close(release)
+	require.Eventually(t, func() bool { return runs.Load() == 2 }, time.Second, 10*time.Millisecond)
+	require.Never(t, func() bool { return runs.Load() > 2 }, 100*time.Millisecond, 10*time.Millisecond)
+	require.NoError(t, sched.Stop(context.Background()))
+}
+
 func TestZeroIntervalTaskRunsImmediately(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -554,7 +594,7 @@ func TestZeroIntervalTaskRunsImmediately(t *testing.T) {
 }
 
 func TestDuplicateRegisterKeepsLatestDefinition(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -579,12 +619,12 @@ func TestBackoff(t *testing.T) {
 }
 
 func TestStopBeforeStartIsSafe(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
 func TestAPIsReturnAfterStop(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -611,7 +651,7 @@ func TestAPIsReturnAfterStop(t *testing.T) {
 }
 
 func TestTaskHandlerCanCallSchedulerAPIs(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	key := NewTaskKey("reentrant", TypeBlobGC, "")
 	finished := make(chan struct{})
 	sched.Register(TaskDef{
@@ -636,26 +676,8 @@ func TestTaskHandlerCanCallSchedulerAPIs(t *testing.T) {
 	require.NoError(t, sched.Stop(context.Background()))
 }
 
-func TestRunObserverCanCallSchedulerAPIs(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
-	observed := make(chan struct{})
-	sched.SetRunObserver(func(TaskRun) {
-		require.NotEmpty(t, sched.Snapshot())
-		close(observed)
-	})
-	sched.Register(TaskDef{Key: NewTaskKey("observer", TypeBlobGC, ""), Interval: 0, Handler: noopTask})
-	sched.Start(context.Background())
-
-	select {
-	case <-observed:
-	case <-time.After(3 * time.Second):
-		require.FailNow(t, "reentrant observer blocked")
-	}
-	require.NoError(t, sched.Stop(context.Background()))
-}
-
 func TestConcurrentAPIsReturnWhileStopping(t *testing.T) {
-	sched, _ := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	sched.Start(context.Background())
 
 	var callers sync.WaitGroup
@@ -683,7 +705,7 @@ func TestConcurrentAPIsReturnWhileStopping(t *testing.T) {
 }
 
 func TestMetricInstancesCleanupOnRemove(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sched.Start(ctx)
@@ -696,14 +718,8 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 		NewGC:           func(string) TaskHandler { return noopTask },
 	})
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "a"},
-	})
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "b"},
-	})
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "a")))
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "b")))
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 		return ok
@@ -712,10 +728,8 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 	_, aOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
 	require.True(t, aOk)
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataRemoved,
-		Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "a"},
-	})
+	sched.Unregister(NewTaskKey("repo", TypeMetadataRefresh, "a"))
+	sched.Unregister(NewTaskKey("repo", TypeMetadataGC, "a"))
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "a"))
 		return !ok
@@ -724,10 +738,8 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 	_, bOk := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 	require.True(t, bOk, "subpath b should still be present after removing a")
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataRemoved,
-		Payload: bus.MetadataRemovedPayload{Instance: "repo", RootID: "b"},
-	})
+	sched.Unregister(NewTaskKey("repo", TypeMetadataRefresh, "b"))
+	sched.Unregister(NewTaskKey("repo", TypeMetadataGC, "b"))
 	require.Eventually(t, func() bool {
 		_, ok := sched.Info(NewTaskKey("repo", TypeMetadataRefresh, "b"))
 		return !ok
@@ -736,7 +748,7 @@ func TestMetricInstancesCleanupOnRemove(t *testing.T) {
 }
 
 func TestMetadataRefreshRequestAdvancesExistingTaskAndCoalescesWhileRunning(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -760,10 +772,10 @@ func TestMetadataRefreshRequestAdvancesExistingTaskAndCoalescesWhileRunning(t *t
 		NewGC: func(string) TaskHandler { return noopTask },
 	})
 	sched.Start(ctx)
-	b.Publish(bus.Event{Type: bus.EventMetadataDiscovered, Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"}})
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 	require.Equal(t, 1, <-started)
 	for range 5 {
-		b.Publish(bus.Event{Type: bus.EventMetadataRefreshRequested, Payload: bus.MetadataRefreshRequestedPayload{Instance: "repo", RootID: "root"}})
+		require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 	}
 	close(releaseFirst)
 	require.Equal(t, 2, <-started)
@@ -771,7 +783,7 @@ func TestMetadataRefreshRequestAdvancesExistingTaskAndCoalescesWhileRunning(t *t
 }
 
 func TestStopTimeoutMarksStopped(t *testing.T) {
-	sched, b := newTestScheduler(t, newTestStore(t))
+	sched := newTestScheduler(t, newTestStore(t))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	started := make(chan struct{})
@@ -791,10 +803,7 @@ func TestStopTimeoutMarksStopped(t *testing.T) {
 	})
 	sched.Start(ctx)
 
-	b.Publish(bus.Event{
-		Type:    bus.EventMetadataDiscovered,
-		Payload: bus.MetadataDiscoveredPayload{Instance: "repo", RootID: "root"},
-	})
+	require.True(t, sched.Trigger(NewTaskKey("repo", TypeMetadataRefresh, "root")))
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):

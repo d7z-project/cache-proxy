@@ -42,27 +42,28 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 			requestHeaders["If-Modified-Since"] = modified
 		}
 	}
-	response, err := h.remoteRequest(ctx, http.MethodGet, resolved.upstreamPath, userAgent, requestHeaders)
+	response, err := h.remoteRequest(req.Context(), h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, requestHeaders)
 	if err != nil {
 		return 0, "", 0, err
 	}
 	defer func() { _ = response.Body.Close() }()
+	cacheCtx := h.lifecycleCtx
 	if response.StatusCode == http.StatusNotModified {
-		state, stateErr := h.readState(ctx, statePath)
+		state, stateErr := h.readState(cacheCtx, statePath)
 		if stateErr != nil {
 			return 0, "", 0, stateErr
 		}
 		state.FetchedAt = time.Now().UTC()
-		if stateErr = h.writeState(ctx, state); stateErr != nil {
+		if stateErr = h.writeState(cacheCtx, state); stateErr != nil {
 			return 0, "", 0, stateErr
 		}
-		if info, statErr := h.store.StatObject(ctx, h.name, manifestPath); statErr == nil {
+		if info, statErr := h.store.StatObject(cacheCtx, h.name, manifestPath); statErr == nil {
 			options := make(map[string]string, len(info.Options))
 			for key, value := range info.Options {
 				options[key] = value
 			}
 			options["fetched-at"] = state.FetchedAt.Format(time.RFC3339Nano)
-			if _, updateErr := h.store.UpdateMetadata(ctx, h.name, manifestPath, options); updateErr != nil {
+			if _, updateErr := h.store.UpdateMetadata(cacheCtx, h.name, manifestPath, options); updateErr != nil {
 				return 0, "", 0, updateErr
 			}
 		}
@@ -138,14 +139,14 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if v := strings.Join(response.Header.Values("Vary"), ", "); v != "" {
 		meta["vary"] = v
 	}
-	if err := h.storeObject(ctx, h.refManifestPath(resolved.repo, resolved.ref), tempFile, meta); err != nil {
+	if err := h.storeObject(cacheCtx, h.refManifestPath(resolved.repo, resolved.ref), tempFile, meta); err != nil {
 		return 0, "", 0, err
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return 0, "", 0, err
 	}
 
-	if err := h.writeState(ctx, state); err != nil {
+	if err := h.writeState(cacheCtx, state); err != nil {
 		return 0, "", 0, err
 	}
 
@@ -173,7 +174,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	}()
 
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRequest(h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, nil)
+	response, err := h.remoteRequest(req.Context(), h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, nil)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -211,6 +212,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	if err != nil {
 		return 0, "", 0, err
 	}
+	defer func() { _ = pr.Close() }()
 	cleanupDownload = false
 
 	headers := objectHeaders(respHeader, int(contentLen), "MISS")
@@ -272,7 +274,10 @@ func (h *handler) stateExpired(state refState) bool {
 func (h *handler) deleteTree(ctx context.Context, prefix string) error {
 	var objects []string
 	if err := fs.WalkDir(h.store.TenantFS(h.name), prefix, func(current string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		objects = append(objects, current)

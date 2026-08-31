@@ -3,35 +3,27 @@ package filerepo
 import (
 	"sort"
 
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func (h *IndexedHandler) reportMetadataState() {
 	ready := h.hasAnyRootSnapshot()
+	h.mu.RLock()
+	refreshing := false
+	hasErrors := len(h.refreshErrors) > 0
+	for _, active := range h.refreshing {
+		refreshing = refreshing || active
+	}
+	h.mu.RUnlock()
 	stateStr := "booting"
-	if h.serviceHealth != nil {
-		resources := h.serviceHealth.SnapshotResources()
-		refreshing := false
-		for _, item := range resources {
-			if item.Refreshing {
-				refreshing = true
-				break
-			}
-		}
-		switch {
-		case refreshing && ready:
-			stateStr = "refreshing"
-		case refreshing:
-			stateStr = "bootstrapping"
-		case !ready:
-			stateStr = "booting"
-		case h.serviceHealth.AggregateState() == health.StateHealthy:
-			stateStr = "ready"
-		default:
-			stateStr = "degraded"
-		}
-	} else if ready {
+	switch {
+	case refreshing && ready:
+		stateStr = "refreshing"
+	case refreshing:
+		stateStr = "bootstrapping"
+	case ready && hasErrors:
+		stateStr = "degraded"
+	case ready:
 		stateStr = "ready"
 	}
 	h.stats.SetMetadataState(h.name, h.mode, stateStr, ready)
@@ -52,6 +44,10 @@ func (h *IndexedHandler) RepositoryStatuses() []runtime.RepositoryStatus {
 			Layout:          entry.root.Layout,
 			PrimaryMetadata: append([]string(nil), entry.root.PrimaryMetadata...),
 			Attributes:      attributes,
+			State:           "pending",
+			Refreshing:      h.refreshing[rootID],
+			LastError:       h.refreshErrors[rootID],
+			LastSuccessAt:   entry.lastValidatedAt,
 		}
 	}
 	for rootID, snapshot := range h.rootSnapshots {
@@ -62,6 +58,7 @@ func (h *IndexedHandler) RepositoryStatuses() []runtime.RepositoryStatus {
 		}
 		status.Generation = snapshot.Generation
 		status.HasCurrent = true
+		status.State = "active"
 		status.Published = snapshot.Published
 		status.Upstream = snapshot.Upstream
 		status.ArtifactCount = snapshot.ArtifactCount
@@ -73,30 +70,11 @@ func (h *IndexedHandler) RepositoryStatuses() []runtime.RepositoryStatus {
 	}
 	h.mu.RUnlock()
 
-	if h.serviceHealth != nil {
-		for _, resource := range h.serviceHealth.SnapshotResources() {
-			status := statusesByID[resource.Path]
-			status.ID = resource.Path
-			if status.Path == "" {
-				status.Path = resource.Path
-			}
-			if status.DisplayName == "" {
-				status.DisplayName = status.Path
-			}
-			status.State = resource.State
-			status.Refreshing = resource.Refreshing
-			status.LastError = resource.LastError
-			status.LastSuccessAt = resource.LastSuccessAt
-			status.LastRefreshAt = resource.LastRefreshAt
-			statusesByID[resource.Path] = status
-		}
-	}
-
 	statuses := make([]runtime.RepositoryStatus, 0, len(statusesByID))
 	for _, item := range statusesByID {
 		statuses = append(statuses, item)
 	}
-	stateOrder := map[string]int{"active": 0, "suspect": 1, "blocked": 2, "pending": 3, "removed": 4, "": 5}
+	stateOrder := map[string]int{"active": 0, "pending": 1, "retired": 2, "": 3}
 	sort.Slice(statuses, func(i, j int) bool {
 		if statuses[i].Refreshing != statuses[j].Refreshing {
 			return statuses[i].Refreshing

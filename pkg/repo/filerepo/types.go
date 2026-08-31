@@ -1,6 +1,8 @@
 package filerepo
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -64,15 +68,33 @@ func (b MetadataBlob) Open() (io.ReadSeekCloser, error) {
 	return os.Open(b.temp)
 }
 
+type MetadataObjectState string
+
+const (
+	MetadataPresent   MetadataObjectState = "present"
+	MetadataNotFound  MetadataObjectState = "not_found"
+	MetadataForbidden MetadataObjectState = "forbidden"
+)
+
+type MetadataAnchor struct {
+	Path   string              `yaml:"path"`
+	State  MetadataObjectState `yaml:"state"`
+	Size   int64               `yaml:"size,omitempty"`
+	Digest string              `yaml:"sha256,omitempty"`
+}
+
 type MetadataObject struct {
-	Path         string `yaml:"path"`
-	Required     bool   `yaml:"required"`
-	StatusCode   int    `yaml:"status_code,omitempty"`
-	StorePath    string `yaml:"store_path,omitempty"`
-	Digest       string `yaml:"digest,omitempty"`
-	Size         int64  `yaml:"size,omitempty"`
-	ChecksumType string `yaml:"checksum_type,omitempty"`
-	Checksum     string `yaml:"checksum,omitempty"`
+	Path         string              `yaml:"canonical_path"`
+	State        MetadataObjectState `yaml:"state"`
+	Required     bool                `yaml:"required"`
+	Digest       string              `yaml:"sha256,omitempty"`
+	Size         int64               `yaml:"size,omitempty"`
+	ChecksumType string              `yaml:"checksum_type,omitempty"`
+	Checksum     string              `yaml:"checksum,omitempty"`
+
+	// StorePath and StatusCode are derived runtime fields and are never persisted.
+	StorePath  string `yaml:"-"`
+	StatusCode int    `yaml:"-"`
 }
 
 type RepositoryAttribute struct {
@@ -119,60 +141,131 @@ func RepositoryID(layout, rootPath string) string {
 }
 
 type LiveSnapshot struct {
-	Version       int                       `yaml:"version"`
-	RootID        string                    `yaml:"root_id"`
-	RootPath      string                    `yaml:"root_path"`
-	Generation    string                    `yaml:"generation"`
-	Upstream      string                    `yaml:"upstream"`
-	Published     time.Time                 `yaml:"published"`
-	Metadata      map[string]MetadataObject `yaml:"metadata"`
-	ArtifactCount int                       `yaml:"artifact_count"`
-	Targets       []MetadataTarget          `yaml:"targets,omitempty"`
+	Version            int                       `yaml:"version"`
+	RootID             string                    `yaml:"root_id"`
+	RootPath           string                    `yaml:"root_path"`
+	Generation         string                    `yaml:"generation"`
+	Upstream           string                    `yaml:"upstream"`
+	Published          time.Time                 `yaml:"published_at"`
+	AnchorSetDigest    string                    `yaml:"anchor_set_sha256"`
+	Anchors            []MetadataAnchor          `yaml:"anchors"`
+	Metadata           map[string]MetadataObject `yaml:"objects"`
+	ArtifactCount      int                       `yaml:"artifact_count"`
+	Targets            []MetadataTarget          `yaml:"targets"`
+	CleanupIndexDigest string                    `yaml:"cleanup_index_sha256"`
+}
+
+type currentReference struct {
+	Version            int    `yaml:"version"`
+	RootID             string `yaml:"root_id"`
+	Generation         string `yaml:"generation"`
+	SnapshotDigest     string `yaml:"snapshot_sha256"`
+	CleanupIndexDigest string `yaml:"cleanup_index_sha256"`
 }
 
 type SnapshotBuilder func(context.Context, *RefreshSession, *PathIndexBuilder) (*LiveSnapshot, error)
 
 type PathIndexBuilder struct {
-	paths []string
+	file   *os.File
+	writer *bufio.Writer
+	err    error
 }
 
 func (b *PathIndexBuilder) Add(rawPath string) {
-	cleanPath := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(rawPath)), "/")
-	if cleanPath == "." || cleanPath == "" || !httpcache.SafePath(cleanPath) {
+	if b.err != nil {
 		return
 	}
-	b.paths = append(b.paths, cleanPath)
+	cleanPath := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(rawPath)), "/")
+	if cleanPath == "." || cleanPath == "" || len(cleanPath) > 4096 || !httpcache.SafePath(cleanPath) {
+		return
+	}
+	if b.file == nil {
+		b.file, b.err = os.CreateTemp("", "cache-proxy-cleanup-index-*")
+		if b.err != nil {
+			return
+		}
+		b.writer = bufio.NewWriterSize(b.file, 64<<10)
+	}
+	_, b.err = b.writer.WriteString(cleanPath + "\n")
 }
 
 func (b *PathIndexBuilder) Finalize() []string {
-	if len(b.paths) == 0 {
+	reader, err := b.rewind()
+	if err != nil {
 		return nil
 	}
-	sort.Strings(b.paths)
+	var paths []string
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		paths = append(paths, scanner.Text())
+	}
+	if scanner.Err() != nil {
+		b.err = scanner.Err()
+		return nil
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Strings(paths)
 	n := 1
-	for i := 1; i < len(b.paths); i++ {
-		if b.paths[i] == b.paths[n-1] {
+	for i := 1; i < len(paths); i++ {
+		if paths[i] == paths[n-1] {
 			continue
 		}
-		b.paths[n] = b.paths[i]
+		paths[n] = paths[i]
 		n++
 	}
-	return b.paths[:n]
+	return paths[:n]
+}
+
+func (b *PathIndexBuilder) rewind() (io.Reader, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
+	if b.file == nil {
+		b.file, b.err = os.CreateTemp("", "cache-proxy-cleanup-index-*")
+		if b.err != nil {
+			return nil, b.err
+		}
+	}
+	if b.writer != nil {
+		if err := b.writer.Flush(); err != nil {
+			b.err = err
+			return nil, err
+		}
+	}
+	if _, err := b.file.Seek(0, io.SeekStart); err != nil {
+		b.err = err
+		return nil, err
+	}
+	return b.file, nil
+}
+
+func (b *PathIndexBuilder) Close() error {
+	if b.file == nil {
+		return b.err
+	}
+	name := b.file.Name()
+	err := b.file.Close()
+	if removeErr := os.Remove(name); err == nil && !errors.Is(removeErr, os.ErrNotExist) {
+		err = removeErr
+	}
+	b.file = nil
+	b.writer = nil
+	return errors.Join(b.err, err)
 }
 
 type RefreshSession struct {
-	handler              *IndexedHandler
-	rootID               string
-	upstream             string
-	generation           string
-	blobs                map[string]*MetadataBlob
-	targets              []MetadataTarget
-	maxTransfers         int
-	transfers            int
-	anchorPath           string
-	anchorDigest         string
-	expectedAnchorPath   string
-	expectedAnchorDigest string
+	handler         *IndexedHandler
+	rootID          string
+	upstream        string
+	generation      string
+	blobs           map[string]*MetadataBlob
+	targets         []MetadataTarget
+	maxTransfers    int
+	transfers       int
+	anchors         map[string]MetadataAnchor
+	expectedAnchors map[string]MetadataAnchor
 }
 
 func (s *RefreshSession) Targets() []MetadataTarget {
@@ -188,7 +281,7 @@ func IsMetadataAbsent(err error) bool {
 	return errors.Is(err, errMetadataNotFound) || errors.Is(err, errMetadataForbidden)
 }
 
-func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (MetadataBlob, error) {
+func (s *RefreshSession) fetch(ctx context.Context, target MetadataTarget) (MetadataBlob, error) {
 	candidates := append([]string{target.URL}, target.Candidates...)
 	for _, candidate := range candidates {
 		if blob, ok := s.blobs[candidate]; ok {
@@ -211,14 +304,6 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 		for _, key := range candidates {
 			s.blobs[key] = &blob
 		}
-		if s.anchorPath == "" {
-			s.anchorPath = blob.Path
-			s.anchorDigest = blob.Digest
-			if s.expectedAnchorPath != "" && s.expectedAnchorPath != blob.Path ||
-				s.expectedAnchorDigest != "" && !strings.EqualFold(s.expectedAnchorDigest, blob.Digest) {
-				return MetadataBlob{}, errMetadataAnchorChanged
-			}
-		}
 		return blob, nil
 	}
 	if lastErr == nil {
@@ -229,6 +314,59 @@ func (s *RefreshSession) Fetch(ctx context.Context, target MetadataTarget) (Meta
 		lastErr = mfe.Err
 	}
 	return MetadataBlob{}, MetadataFetchError{Path: target.URL, Err: lastErr}
+}
+
+// FetchAnchor downloads required metadata and binds it to the candidate anchor set.
+func (s *RefreshSession) FetchAnchor(ctx context.Context, target MetadataTarget) (MetadataBlob, error) {
+	var lastErr error
+	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
+		blob, err := s.fetch(ctx, MetadataTarget{URL: candidate})
+		if err == nil {
+			anchor := MetadataAnchor{Path: candidate, State: MetadataPresent, Size: blob.Size, Digest: blob.Digest}
+			if !s.acceptAnchor(anchor) {
+				return MetadataBlob{}, errMetadataAnchorChanged
+			}
+			s.anchors[candidate] = anchor
+			return blob, nil
+		}
+		var fetchErr MetadataFetchError
+		if !errors.As(err, &fetchErr) {
+			return MetadataBlob{}, err
+		}
+		switch {
+		case errors.Is(fetchErr.Err, errMetadataNotFound):
+			anchor := MetadataAnchor{Path: candidate, State: MetadataNotFound}
+			if !s.acceptAnchor(anchor) {
+				return MetadataBlob{}, errMetadataAnchorChanged
+			}
+			s.anchors[candidate] = anchor
+		case errors.Is(fetchErr.Err, errMetadataForbidden):
+			anchor := MetadataAnchor{Path: candidate, State: MetadataForbidden}
+			if !s.acceptAnchor(anchor) {
+				return MetadataBlob{}, errMetadataAnchorChanged
+			}
+			s.anchors[candidate] = anchor
+		default:
+			return MetadataBlob{}, err
+		}
+		lastErr = err
+	}
+	return MetadataBlob{}, lastErr
+}
+
+func (s *RefreshSession) acceptAnchor(anchor MetadataAnchor) bool {
+	expected, ok := s.expectedAnchors[anchor.Path]
+	return !ok || expected.State == anchor.State && expected.Size == anchor.Size && strings.EqualFold(expected.Digest, anchor.Digest)
+}
+
+func (s *RefreshSession) Anchor(cleanPath string) (MetadataAnchor, bool) {
+	anchor, ok := s.anchors[cleanPath]
+	return anchor, ok
+}
+
+// FetchRequired downloads metadata that is required by an already fetched anchor.
+func (s *RefreshSession) FetchRequired(ctx context.Context, target MetadataTarget) (MetadataBlob, error) {
+	return s.fetch(ctx, target)
 }
 
 // FetchVerified downloads requestPath but persists it under objectPath only after the
@@ -270,6 +408,37 @@ func (s *RefreshSession) FetchVerified(
 	return blob, nil
 }
 
+// MaterializeVerifiedEmpty persists an explicitly declared empty metadata object.
+// Callers may use it only after all upstream representations returned 403/404.
+func (s *RefreshSession) MaterializeVerifiedEmpty(ctx context.Context, objectPath, expectedSHA256 string) (MetadataBlob, error) {
+	emptySum := sha256.Sum256(nil)
+	if !strings.EqualFold(expectedSHA256, hex.EncodeToString(emptySum[:])) {
+		return MetadataBlob{}, errors.New("empty metadata declaration has invalid SHA256")
+	}
+	tempFile, err := os.CreateTemp("", "cache-proxy-empty-metadata-*")
+	if err != nil {
+		return MetadataBlob{}, err
+	}
+	tempPath := tempFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = tempFile.Close()
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := s.handler.putMetadataObject(ctx, s.rootID, s.generation, objectPath, tempFile, 0, nil); err != nil {
+		return MetadataBlob{}, err
+	}
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		return MetadataBlob{}, err
+	}
+	blob := MetadataBlob{Path: objectPath, temp: tempPath, Size: 0, Digest: expectedSHA256}
+	s.blobs[objectPath] = &blob
+	cleanup = false
+	return blob, nil
+}
+
 func (s *RefreshSession) reserveTransfer() error {
 	if s.maxTransfers > 0 && s.transfers >= s.maxTransfers {
 		return errMetadataRefreshContinuation
@@ -279,7 +448,7 @@ func (s *RefreshSession) reserveTransfer() error {
 }
 
 func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (MetadataObject, error) {
-	blob, err := s.Fetch(ctx, MetadataTarget{URL: derivedPath})
+	blob, err := s.FetchRequired(ctx, MetadataTarget{URL: derivedPath})
 	if err != nil {
 		var mfe MetadataFetchError
 		if errors.As(err, &mfe) && (errors.Is(mfe.Err, errMetadataNotFound) || errors.Is(mfe.Err, errMetadataForbidden)) {
@@ -289,6 +458,133 @@ func (s *RefreshSession) FetchDerived(ctx context.Context, derivedPath string) (
 		return MetadataObject{}, err
 	}
 	return MetadataObject{Path: blob.Path, Required: false}, nil
+}
+
+// FetchOptionalAnchor records both present and expected absent companion states.
+func (s *RefreshSession) FetchOptionalAnchor(ctx context.Context, cleanPath string) (MetadataObject, error) {
+	blob, err := s.FetchRequired(ctx, MetadataTarget{URL: cleanPath})
+	if err == nil {
+		anchor := MetadataAnchor{Path: cleanPath, State: MetadataPresent, Size: blob.Size, Digest: blob.Digest}
+		if !s.acceptAnchor(anchor) {
+			return MetadataObject{}, errMetadataAnchorChanged
+		}
+		s.anchors[cleanPath] = anchor
+		return MetadataObject{Path: blob.Path, State: MetadataPresent}, nil
+	}
+	var fetchErr MetadataFetchError
+	if !errors.As(err, &fetchErr) {
+		return MetadataObject{}, err
+	}
+	state := MetadataObjectState("")
+	switch {
+	case errors.Is(fetchErr.Err, errMetadataNotFound):
+		state = MetadataNotFound
+	case errors.Is(fetchErr.Err, errMetadataForbidden):
+		state = MetadataForbidden
+	default:
+		return MetadataObject{}, err
+	}
+	anchor := MetadataAnchor{Path: cleanPath, State: state}
+	if !s.acceptAnchor(anchor) {
+		return MetadataObject{}, errMetadataAnchorChanged
+	}
+	s.anchors[cleanPath] = anchor
+	return MetadataObject{Path: cleanPath, State: state}, nil
+}
+
+func (s *RefreshSession) anchorSet() ([]MetadataAnchor, string, error) {
+	anchors := make([]MetadataAnchor, 0, len(s.anchors))
+	for _, anchor := range s.anchors {
+		anchors = append(anchors, anchor)
+	}
+	digest, err := metadataAnchorsDigest(anchors)
+	if err != nil {
+		return nil, "", err
+	}
+	sort.Slice(anchors, func(i, j int) bool { return anchors[i].Path < anchors[j].Path })
+	return anchors, digest, nil
+}
+
+func metadataAnchorsDigest(anchors []MetadataAnchor) (string, error) {
+	if len(anchors) == 0 {
+		return "", errors.New("metadata refresh has no anchors")
+	}
+	ordered := append([]MetadataAnchor(nil), anchors...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+	data, err := yaml.Marshal(ordered)
+	if err != nil {
+		return "", err
+	}
+	return digestBytes(data), nil
+}
+
+// ConfirmAnchors fetches every anchor again from the same origin and rejects a
+// candidate if bytes or optional presence state changed during construction.
+func (s *RefreshSession) ConfirmAnchors(ctx context.Context) ([]MetadataAnchor, string, error) {
+	initial, initialDigest, err := s.anchorSet()
+	if err != nil {
+		return nil, "", err
+	}
+	for cleanPath, expected := range s.expectedAnchors {
+		actual, ok := s.anchors[cleanPath]
+		if !ok || actual.State != expected.State || actual.Size != expected.Size || !strings.EqualFold(actual.Digest, expected.Digest) {
+			return initial, initialDigest, errMetadataAnchorChanged
+		}
+	}
+	for _, expected := range initial {
+		if err := s.reserveTransfer(); err != nil {
+			return initial, initialDigest, err
+		}
+		blob, fetchErr := s.handler.fetchMetadataObject(ctx, metadataFetchRequest{
+			rootID: s.rootID, generation: s.generation, upstream: s.upstream,
+			requestPath: expected.Path, objectPath: expected.Path,
+		})
+		if expected.State == MetadataPresent {
+			if fetchErr != nil || blob.Size != expected.Size || !strings.EqualFold(blob.Digest, expected.Digest) {
+				return initial, initialDigest, errMetadataAnchorChanged
+			}
+			if blob.temp != "" {
+				_ = os.Remove(blob.temp)
+			}
+			continue
+		}
+		var metadataErr MetadataFetchError
+		if !errors.As(fetchErr, &metadataErr) {
+			return initial, initialDigest, errMetadataAnchorChanged
+		}
+		state := MetadataObjectState("")
+		switch {
+		case errors.Is(metadataErr.Err, errMetadataNotFound):
+			state = MetadataNotFound
+		case errors.Is(metadataErr.Err, errMetadataForbidden):
+			state = MetadataForbidden
+		}
+		if state != expected.State {
+			return initial, initialDigest, errMetadataAnchorChanged
+		}
+	}
+	return initial, initialDigest, nil
+}
+
+func digestBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func strictYAML(data []byte, value any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple YAML documents")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *RefreshSession) Release(target MetadataTarget) {

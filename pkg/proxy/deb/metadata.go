@@ -95,7 +95,7 @@ func isDistributionReleasePath(cleanPath string) bool {
 func resolveManifestTarget(snapshot *filerepo.LiveSnapshot, target filerepo.MetadataTarget) (filerepo.MetadataObject, bool) {
 	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
 		object, ok := snapshot.Metadata[candidate]
-		if !ok || object.StatusCode != 0 {
+		if !ok || object.State != filerepo.MetadataPresent {
 			continue
 		}
 		if object.Path != candidate {
@@ -142,7 +142,7 @@ func buildReleaseTarget(
 		return artifactCount, err
 	}
 	addExactMetadata(snapshot, blob.Path, true, 0, "")
-	addNegativeMetadata(snapshot, absent)
+	addNegativeMetadata(session, snapshot, absent)
 	if err := addReleaseCompanions(ctx, session, snapshot, blob.Path); err != nil {
 		session.Release(target)
 		return artifactCount, err
@@ -171,7 +171,7 @@ func buildFlatIndexTarget(
 	releaseBlob, absentRelease, releaseErr := fetchFirstAvailable(ctx, session, releaseTarget)
 	if releaseErr == nil {
 		addExactMetadata(snapshot, releaseBlob.Path, false, 0, "")
-		addNegativeMetadata(snapshot, absentRelease)
+		addNegativeMetadata(session, snapshot, absentRelease)
 		if err := addReleaseCompanions(ctx, session, snapshot, releaseBlob.Path); err != nil {
 			return artifactCount, err
 		}
@@ -192,7 +192,7 @@ func buildFlatIndexTarget(
 	}
 	defer session.Release(target)
 	addExactMetadata(snapshot, indexBlob.Path, true, 0, "")
-	addNegativeMetadata(snapshot, absent)
+	addNegativeMetadata(session, snapshot, absent)
 	return parseIndexBlob(indexBlob, target.Kind, paths, artifactCount)
 }
 
@@ -206,7 +206,7 @@ func addReleaseCompanions(
 		return nil
 	}
 	for _, suffix := range []string{".gpg", ".sig", ".asc"} {
-		companion, err := session.FetchDerived(ctx, releasePath+suffix)
+		companion, err := session.FetchOptionalAnchor(ctx, releasePath+suffix)
 		if err != nil {
 			return err
 		}
@@ -221,7 +221,7 @@ func fetchFirstAvailable(ctx context.Context, session *filerepo.RefreshSession, 
 	var absent []string
 	var lastErr error
 	for _, candidate := range append([]string{target.URL}, target.Candidates...) {
-		blob, err := session.Fetch(ctx, filerepo.MetadataTarget{URL: candidate})
+		blob, err := session.FetchAnchor(ctx, filerepo.MetadataTarget{URL: candidate})
 		if err == nil {
 			return blob, absent, nil
 		}
@@ -245,9 +245,13 @@ func addExactMetadata(snapshot *filerepo.LiveSnapshot, cleanPath string, require
 	}
 }
 
-func addNegativeMetadata(snapshot *filerepo.LiveSnapshot, cleanPaths []string) {
+func addNegativeMetadata(session *filerepo.RefreshSession, snapshot *filerepo.LiveSnapshot, cleanPaths []string) {
 	for _, cleanPath := range cleanPaths {
-		snapshot.Metadata[cleanPath] = filerepo.MetadataObject{Path: cleanPath, StatusCode: 404}
+		state := filerepo.MetadataNotFound
+		if anchor, ok := session.Anchor(cleanPath); ok {
+			state = anchor.State
+		}
+		snapshot.Metadata[cleanPath] = filerepo.MetadataObject{Path: cleanPath, State: state}
 	}
 }
 
@@ -264,14 +268,22 @@ func parseIndexBlob(
 	reader, err := filerepo.OpenCompressed(blobReader, blob.Path)
 	if err != nil {
 		_ = blobReader.Close()
-		return artifactCount, err
+		return artifactCount, fmt.Errorf("%s: %w", blob.Path, err)
 	}
 	defer func() { _ = reader.Close() }()
 
 	if kind == "packages" {
-		return parsePackages(reader, paths, artifactCount)
+		count, err := parsePackages(reader, paths, artifactCount)
+		if err != nil {
+			return artifactCount, fmt.Errorf("%s: %w", blob.Path, err)
+		}
+		return count, nil
 	}
-	return parseSources(reader, paths, artifactCount)
+	count, err := parseSources(reader, paths, artifactCount)
+	if err != nil {
+		return artifactCount, fmt.Errorf("%s: %w", blob.Path, err)
+	}
+	return count, nil
 }
 
 func fetchReleaseEntries(
@@ -301,6 +313,11 @@ func fetchReleaseEntries(
 		_, err := session.FetchVerified(ctx, requestPath, canonicalPath, entry.Size, entry.SHA256)
 		if err != nil && byHashPath != "" && filerepo.IsMetadataAbsent(err) {
 			_, err = session.FetchVerified(ctx, canonicalPath, canonicalPath, entry.Size, entry.SHA256)
+		}
+		emptyDigest := sha256.Sum256(nil)
+		if err != nil && filerepo.IsMetadataAbsent(err) && entry.Size == 0 &&
+			strings.EqualFold(entry.SHA256, hex.EncodeToString(emptyDigest[:])) {
+			_, err = session.MaterializeVerifiedEmpty(ctx, canonicalPath, entry.SHA256)
 		}
 		if err != nil {
 			return artifactCount, err

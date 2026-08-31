@@ -1,11 +1,6 @@
 package flatpak
 
-import (
-	"io/fs"
-	"path"
-
-	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
-)
+import proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 
 // DashboardStatus reports aggregate Flatpak upstream health.
 func (h *Handler) DashboardStatus() (color, label, extra string) {
@@ -33,35 +28,16 @@ func (h *Handler) RepositoryStatuses() []proxyruntime.RepositoryStatus {
 	}
 	if status.HasCurrent {
 		status.State = "active"
-		status.MetadataCount = h.currentMetadataCount(current.Generation)
+		status.MetadataCount = len(current.Manifest.Objects)
 	} else {
 		status.State = "pending"
 	}
-	if h.serviceHealth != nil {
-		if resource, ok := h.serviceHealth.ResourceHealth("/"); ok {
-			status.State = resource.State.String()
-			status.Refreshing = resource.Refreshing
-			status.LastError = resource.LastError
-			status.LastSuccessAt = resource.LastSuccessAt
-			status.LastRefreshAt = resource.LastRefreshAt
-		}
+	h.mu.RLock()
+	status.Refreshing = h.refreshing || h.refreshQueued
+	status.LastError = h.lastError
+	h.mu.RUnlock()
+	if !status.HasCurrent && status.LastError != "" {
+		status.State = "suspect"
 	}
 	return []proxyruntime.RepositoryStatus{status}
-}
-
-func (h *Handler) currentMetadataCount(generation string) int {
-	if generation == "" || h.store == nil {
-		return 0
-	}
-	entries, err := fs.ReadDir(h.store.TenantFS(h.name), path.Join(metadataRoot, generation))
-	if err != nil {
-		return 0
-	}
-	var count int
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			count++
-		}
-	}
-	return count
 }

@@ -22,10 +22,7 @@ func (h *Handler) serveDescriptor(w http.ResponseWriter, req *http.Request, clea
 		h.base.ServeHTTP(w, req)
 		return
 	}
-	route, err := routeForPath(&Policy{
-		MetadataFreshFor:   config.Freshness(defaultMetadataFreshFor),
-		MetadataBusyPolicy: config.BusyPolicyStale,
-	}, cleanPath)
+	route, err := routeForPath(&Policy{}, cleanPath)
 	if err != nil {
 		_ = httpcache.ErrorResponse(http.StatusBadRequest, err).FlushClose(req, w)
 		h.stats.RecordRequest(h.name, config.ModeFlatpak, req.Method, "ERROR", http.StatusBadRequest, 0)

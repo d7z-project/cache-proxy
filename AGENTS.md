@@ -57,8 +57,8 @@
 - 运行时清理参数统一来自 `plan.CleanupConfig()`
 - 静态清理与 blob GC 不持久化；metadata refresh / GC 持久化到调度状态
 - 清理达到 batch 上限必须短延迟续跑；inactive repository root 通过持久化 last-seen 和 generation GC 完整退役，禁止遗留 cleanup index 阻止退役
-- 客户端下载、metadata refresh、健康探测和 OCI token 请求必须共用按 upstream host 归一化的 admission / cooldown；只有真实上游 `429` 建立 cooldown，并且必须遵守 `Retry-After`
-- admission 同时限制 active body 和每 host 请求起始间隔；前台排队必须有界，refresh 在调度任务 context 内等待，健康探测无法立即取得预算时直接跳过
+- 客户端下载、metadata refresh 和 OCI token 请求必须共用按 upstream host 归一化的 admission / cooldown；只有真实上游 `429` 建立 cooldown，并且必须遵守 `Retry-After`
+- admission 同时限制 active body 和每 host 请求起始间隔；前台排队必须有界，refresh 在调度任务 context 内等待
 - 本地 admission 等待、超时和 context 取消不得记为上游限流、健康失败或触发镜像回退；refresh 收到真实 `429` 后不得继续向其他镜像扩散请求
 
 ## 安全与资源使用
@@ -84,4 +84,4 @@
 - 存储测试优先用 `blobfs.Open(t.TempDir(), blobfs.DefaultConfig())`
 - 新增行为改动必须补对应测试；并发相关逻辑需覆盖 `-race`
 - 删除或重写旧实现时，同时清理失效测试和重复测试
-- 解析器、路径分类和非可信 metadata 变更应补有界 fuzz target；语料执行使用 `make test-fuzz`
+- 解析器、路径分类和非可信 metadata 变更应补有界 fuzz target；常规 seed corpus 随 `make test` 执行，主动 fuzz 使用标准 `go test <package> -fuzz=<target>`

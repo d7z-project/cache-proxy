@@ -62,11 +62,3 @@ func (w *rateWindow) errorRate() float64 {
 	}
 	return float64(fail) / float64(total)
 }
-
-func (w *rateWindow) totalSamples() int {
-	var n int
-	for i := 0; i < w.numBuckets; i++ {
-		n += w.buckets[i].successes + w.buckets[i].failures
-	}
-	return n
-}

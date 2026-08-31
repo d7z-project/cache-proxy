@@ -61,6 +61,8 @@ type Handler struct {
 	lifecycleCtx        context.Context
 	cancel              context.CancelFunc
 	wait                sync.WaitGroup
+	closeMu             sync.Mutex
+	closing             bool
 	flights             objectFlights
 	cleanupMu           sync.Mutex
 	cleanupAfter        string
@@ -77,6 +79,7 @@ type remoteOptions struct {
 	PreferredUpstream  string
 	DisableFailover    bool
 	ValidatorOrigin    string
+	AdmissionContext   context.Context
 }
 
 // DefaultUserAgent identifies cache-proxy to upstream services.
@@ -176,14 +179,22 @@ func (h *Handler) flushResult(req *http.Request, resp http.ResponseWriter, resul
 	h.stats.RecordRequest(h.name, h.config.Mode, req.Method, cache, status, counted.bytesRead())
 }
 
-func (h *Handler) Close() {
+func (h *Handler) CloseContext(ctx context.Context) error {
+	h.closeMu.Lock()
+	h.closing = true
 	h.cancel()
-	h.wait.Wait()
+	h.closeMu.Unlock()
+	return utils.WaitGroupContext(ctx, &h.wait)
 }
 
-func (h *Handler) CloseContext(ctx context.Context) error {
-	h.cancel()
-	return utils.WaitGroupContext(ctx, &h.wait)
+func (h *Handler) beginOperation() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closing {
+		return false
+	}
+	h.wait.Add(1)
+	return true
 }
 
 func (h *Handler) Busy(objectPath string) bool {
@@ -196,7 +207,10 @@ func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, 
 
 // ProxyPassthroughStatus proxies the request and returns the downstream status code.
 func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) int {
-	h.wait.Add(1)
+	if !h.beginOperation() {
+		http.Error(resp, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return http.StatusServiceUnavailable
+	}
 	defer h.wait.Done()
 
 	route := Route{

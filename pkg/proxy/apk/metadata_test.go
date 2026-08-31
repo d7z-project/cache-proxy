@@ -11,6 +11,7 @@ import (
 
 func TestParseIndexBuildsCleanupPaths(t *testing.T) {
 	paths := &filerepo.PathIndexBuilder{}
+	t.Cleanup(func() { require.NoError(t, paths.Close()) })
 	count, err := parseIndex("v3.20/main/x86_64", strings.NewReader("P:busybox\nV:1.36.1-r2\n\n"), paths)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)

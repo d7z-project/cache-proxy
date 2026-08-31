@@ -1,15 +1,14 @@
 package filerepo
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
@@ -75,11 +74,11 @@ func (h *IndexedHandler) lookupCurrentContent(cleanPath string, class ResourceCl
 		if snapshot == nil {
 			continue
 		}
-		rank := 0
 		rootPath := strings.Trim(strings.TrimSpace(snapshot.RootPath), "/")
-		if rootPath != "" && (cleanPath == rootPath || strings.HasPrefix(cleanPath, rootPath+"/")) {
-			rank = len(rootPath)
+		if rootPath != "" && cleanPath != rootPath && !strings.HasPrefix(cleanPath, rootPath+"/") {
+			continue
 		}
+		rank := len(rootPath)
 		if selected == nil ||
 			rank > selectedRank ||
 			(rank == selectedRank && snapshot.Published.After(selected.Published)) ||
@@ -162,12 +161,25 @@ func (h *IndexedHandler) metadataGenerationInUse(rootID, generation string) bool
 }
 
 func (h *IndexedHandler) rebuildCurrentViewLocked() {
-	view := make(map[string]currentViewEntry)
+	type rankedEntry struct {
+		currentViewEntry
+		rootPathLength int
+		published      time.Time
+	}
+	ranked := make(map[string]rankedEntry)
 	for rootID, snapshot := range h.rootSnapshots {
 		if snapshot == nil {
 			continue
 		}
 		for cleanPath, item := range snapshot.Metadata {
+			rootPathLength := len(strings.Trim(strings.TrimSpace(snapshot.RootPath), "/"))
+			if current, ok := ranked[cleanPath]; ok {
+				if rootPathLength < current.rootPathLength ||
+					rootPathLength == current.rootPathLength && snapshot.Published.Before(current.published) ||
+					rootPathLength == current.rootPathLength && snapshot.Published.Equal(current.published) && rootID > current.RootID {
+					continue
+				}
+			}
 			resolved := item
 			if item.Path != "" && item.Path != cleanPath {
 				actual, ok := snapshot.Metadata[item.Path]
@@ -176,19 +188,27 @@ func (h *IndexedHandler) rebuildCurrentViewLocked() {
 				}
 				resolved = actual
 			}
-			storePath := resolved.StorePath
-			if storePath == "" {
+			storePath := ""
+			if resolved.State == MetadataPresent {
 				storePath = h.generationMetadataPath(snapshot.RootID, snapshot.Generation, resolved.Path)
 			}
-			view[cleanPath] = currentViewEntry{
-				RootID:            rootID,
-				Generation:        snapshot.Generation,
-				Class:             ResourceMetadata,
-				StorePath:         storePath,
-				StatusCode:        item.StatusCode,
-				PreferredUpstream: snapshot.Upstream,
+			ranked[cleanPath] = rankedEntry{
+				currentViewEntry: currentViewEntry{
+					RootID:            rootID,
+					Generation:        snapshot.Generation,
+					Class:             ResourceMetadata,
+					StorePath:         storePath,
+					StatusCode:        metadataStateStatus(item.State),
+					PreferredUpstream: snapshot.Upstream,
+				},
+				rootPathLength: rootPathLength,
+				published:      snapshot.Published,
 			}
 		}
+	}
+	view := make(map[string]currentViewEntry, len(ranked))
+	for cleanPath, entry := range ranked {
+		view[cleanPath] = entry.currentViewEntry
 	}
 	h.currentView = view
 }
@@ -207,6 +227,8 @@ func (h *IndexedHandler) setRootSnapshot(rootID string, snapshot *LiveSnapshot) 
 	h.rootSnapshots[rootID] = snapshot
 	if entry, ok := h.roots[rootID]; ok {
 		entry.retirementCleanupGeneration = ""
+		entry.retirementCleanupDigest = ""
+		entry.lastValidatedAt = snapshot.Published
 		if len(entry.root.Targets) == 0 && len(snapshot.Targets) > 0 {
 			entry.root.Targets = append([]MetadataTarget(nil), snapshot.Targets...)
 		}
@@ -251,30 +273,6 @@ func (h *IndexedHandler) serveCurrentMetadata(w http.ResponseWriter, req *http.R
 	result := &utils.ResponseWrapper{StatusCode: http.StatusOK, Headers: headers, Body: &generationReadCloser{ReadCloser: reader, release: release}}
 	_ = result.FlushClose(req, w)
 	h.stats.RecordRequest(h.name, h.mode, req.Method, "GENERATION", http.StatusOK, uint64(size))
-}
-
-func targetsToResourceTargets(targets []MetadataTarget) []health.ResourceTarget {
-	probes := make([]health.ResourceTarget, 0, len(targets))
-	for _, target := range targets {
-		probes = append(probes, health.ResourceTarget{Path: target.URL})
-	}
-	return probes
-}
-
-func refreshHealthError(err error) error {
-	var fetchErr MetadataFetchError
-	switch {
-	case errors.Is(err, errMetadataNotFound):
-		return health.ErrResourceNotFound
-	case errors.Is(err, errMetadataForbidden):
-		return health.ErrResourceForbidden
-	case errors.Is(err, errMetadataMirrorRetry), errors.Is(err, errMetadataTransient):
-		return health.ErrResourceTransient
-	case errors.As(err, &fetchErr):
-		return refreshHealthError(fetchErr.Err)
-	default:
-		return err
-	}
 }
 
 func (h *IndexedHandler) generationMetadataPath(rootID, generation, cleanPath string) string {

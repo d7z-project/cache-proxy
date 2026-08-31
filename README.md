@@ -62,7 +62,7 @@ Top-level fields:
 | `storage.download.hosts.<host>.max_active` | int | global host limit | Exact-host concurrent transfer override |
 | `storage.download.hosts.<host>.min_interval` | duration | global interval | Exact-host request-start interval override |
 
-The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, health probes, OCI token requests, and bypass requests. It limits active response bodies globally and per normalized host and spaces request starts per host. Saturated client requests wait within their request context, with foreground requests taking priority over repository refreshes; a health probe skips when admission is not immediately available. A real upstream `429` is returned unchanged to the client; a valid positive `Retry-After` activates a host-wide cooldown without clearing queued requests or spreading the request to another mirror.
+The upstream gate is process-wide and shared by metadata, artifacts, repository refreshes, OCI token requests, and bypass requests. It limits active response bodies globally and per normalized host, bounds global and per-host waiters, and spaces request starts per host. Saturated client requests wait within their request context. Foreground work has priority, while a finite burst and aging rule guarantees refresh progress. A real upstream `429` is returned unchanged to the client; a valid positive `Retry-After` activates a host-wide cooldown without clearing queued requests or spreading the request to another mirror.
 
 An exact-host override is useful when a deliberately short freshness policy targets a private upstream that is known to tolerate a higher request rate:
 
@@ -115,8 +115,7 @@ Notes:
 - Without `transport.ua`, responses declaring `Vary: User-Agent` or `Vary: *` are not stored, preventing
   default-UA and browser-specific content from sharing a cache entry. Cached entries without User-Agent
   variance metadata are refreshed before browser reuse.
-- `transport.health.enabled` controls passive upstream observations; `resource_remove_age` and
-  `resource_remove_count` control missing repository removal. Error rate and latency never reorder or suppress requests.
+- `transport.health.enabled` controls passive upstream observations. Error rate and latency never reorder, suppress, or remove repository requests.
 - Multiple upstreams are tried in configured order. Only transport errors and HTTP `502`, `503`, or `504` transfer
   to the next mirror; `429`, `403`, `404`, `408`, and `500` do not.
 - The built-in home page fetches status data from `/-/status/summary`, `/-/status/disk`, and `/-/status/events`.
@@ -430,7 +429,7 @@ flatpak:
   delta_expire_after: 720h
 ```
 
-Use this mode for Flatpak repositories backed by OSTree. `summary`, `summary.sig`, and `config` are refreshed as metadata generations from one upstream. OSTree objects are cached outside generations and verified before immutable cache writes. Static deltas are cached as opaque immutable files by path and are validated by Flatpak/OSTree clients when applied.
+Use this mode for Flatpak repositories backed by OSTree. `summary`, `summary.sig`, and `config` are refreshed as metadata generations from one upstream. OSTree objects are cached outside generations and verified before immutable cache writes. Static deltas are cached as finite-lifetime opaque files by path and are validated by Flatpak/OSTree clients when applied.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -439,11 +438,9 @@ Use this mode for Flatpak repositories backed by OSTree. `summary`, `summary.sig
 | `upstreams` | `[]URL` | required | Upstream OSTree repository URLs |
 | `refresh_interval` | duration | `5m` | Background `summary` refresh interval |
 | `cleanup_interval` | duration | `6h` | Expired-object cleanup interval |
-| `metadata_fresh_for` | freshness | `1m` | Freshness for metadata fallback cache |
-| `metadata_busy_policy` | busy policy | `stale` | Busy policy for metadata fallback cache |
 | `descriptor_rewrite` | bool | `true` | Rewrite `.flatpakrepo` / `.flatpakref` URLs to the proxy |
 | `verify_objects` | bool | `true` | Verify OSTree objects before immutable cache writes |
-| `cache_deltas` | bool | `true` | Cache `deltas/**` as opaque immutable files |
+| `cache_deltas` | bool | `true` | Cache `deltas/**` as finite-lifetime opaque files |
 | `delta_expire_after` | expiration | inherits `expire_after` | Maximum delta object lifetime; `never` is rejected when delta caching is enabled |
 
 </details>
@@ -589,10 +586,10 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 
 `flatpak` uses background `summary` refresh and a dedicated cache layout:
 
-- `summary`, `summary.sig`, and `config` are published as a metadata generation from one upstream.
+- `summary`, `summary.sig`, and `config` are fetched and reconfirmed as one anchor set, then published through a digest-bound current reference. A committed missing companion is served as its stored `404` or `403` state without upstream access.
 - OSTree objects under `objects/` are cached outside metadata generations for reuse across updates.
 - Verifiable OSTree objects must pass checksum validation before immutable cache writes.
-- Static deltas under `deltas/` are cached as opaque immutable files by path; cache-proxy does not parse or verify delta contents, and Flatpak/OSTree clients validate them while applying updates.
+- Static deltas under `deltas/` are cached as finite-lifetime opaque files by path; cache-proxy does not parse or verify delta contents, and Flatpak/OSTree clients validate them while applying updates.
 - `.flatpakrepo` and `.flatpakref` descriptors are revalidated and can be rewritten to keep clients on the proxy.
 
 ## Linux Repository Modes
@@ -602,7 +599,7 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 - Repositories are discovered from client metadata requests.
 - Discovered repositories are persisted, and startup reconciles refresh tasks from the persisted repository set.
 - Primary metadata older than the mode freshness threshold is served from the current generation immediately while a coalesced background refresh is advanced. Repeated requests never start concurrent refreshes for the same root.
-- Metadata is published only after a full generation is fetched and validated. Every object referenced by primary metadata is required; a missing, forbidden, unreadable, or checksum-invalid referenced object rejects the candidate generation.
+- Metadata is published only after a full same-origin generation is fetched, its complete anchor set is reconfirmed, and every required object and protocol reference is validated. A missing, forbidden, unreadable, or checksum-invalid referenced object rejects the candidate generation.
 - The current generation is the authoritative serving view for repository metadata, including companion files such as signatures and checksums.
 - Generation responses use `X-Cache: GENERATION` and expose the opaque committed generation in `X-Cache-Generation` for request-level diagnostics.
 - If no local generation exists yet, metadata requests bypass to upstream and trigger background refresh.
@@ -610,12 +607,13 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 - `current.yaml` is the durable commit marker. Startup restores only its exact snapshot after validating the schema, cleanup index, persisted object digests, and protocol manifest closure; orphan or newer snapshots are never selected as fallback.
 - Metadata and its signatures/checksums are generation-scoped and fixed to one upstream. Package artifacts and package sidecars use an instance-wide stable content namespace, so a metadata refresh does not change their cache keys.
 - Artifact and sidecar downloads are independent requests; they are not blocked by index misses or refresh failure. Protocol inspectors classify these resources before the generic cache executes their policy.
-- The current cleanup indexes are loaded only during cleanup and combined to retain shared content such as Debian `pool/` files. They are never runtime download allowlists.
+- Cleanup paths are streamed into generation fragments and a digest-bound cleanup index without retaining the complete set during refresh. Current cleanup indexes are loaded only during cleanup to retain shared content such as Debian `pool/` files; they are never runtime download allowlists.
 - Metadata refreshes share the same per-host admission and `429` cooldown as client downloads; a rate-limited refresh is rescheduled for the advertised retry time.
-- Large Debian refreshes use persisted, Release-digest-anchored staging. Each scheduler run has a bounded transfer/time slice; incomplete work resumes after a short delay, while an anchor change discards the candidate generation and starts cleanly.
+- Large Debian refreshes use persisted, signed-Release-anchor staging with bounded transfer/time slices and digest-checked cleanup fragments. Incomplete work resumes after a short delay; an anchor or fragment change discards the candidate generation and starts cleanly.
 - Cleanup expires stable content absent from all current cleanup indexes. A truncated deletion batch is continued after a short delay instead of waiting for the normal cleanup interval; a missing current cleanup index fails closed and prevents deletion.
 - Metadata GC pins durable/in-memory current generations and active response readers, keeps a grace window plus the newest previous generation, and removes generation objects together with their cleanup indexes before snapshot descriptors.
-- `root_expire_after` retires inactive discovered roots. Retirement first removes the current commit, then drains generation data through normal bounded GC, removes persisted root/health state, and finally lets later content cleanup reclaim packages no longer protected by that root. A later primary metadata request discovers the root again.
+- `root_expire_after` retires inactive discovered roots from persisted last-seen state. Retirement first removes the current commit, then drains generation data through normal bounded GC, removes persisted root state, and finally lets later content cleanup reclaim packages no longer protected by that root. A later primary metadata request discovers the root again.
+- Shutdown marks the service unready, stops scheduling, drains HTTP requests, cancels runtime contexts, flushes handler state writers, and closes storage in that order.
 - Maintenance progress is visible in scheduler task outcomes and the `cache_proxy_repository_maintenance_total`, `cache_proxy_repository_maintenance_objects_total`, and `cache_proxy_metadata_refresh_requests_total` metrics. Network status also reports global and per-host admission start intervals.
 
 ## Operations
@@ -631,13 +629,12 @@ Use this mode for a single upstream Git repository mirrored behind an HTTP path.
 make fmt
 make vet
 make test
-make test-fuzz
 make test-race
+make tidy
 ```
 
-The Make targets run in module mode (`GOWORK=off`) so a parent workspace cannot change dependency selection.
 Dependency normalization is explicit through `make tidy`; formatting does not modify `go.mod` or `go.sum`.
-`make test-fuzz` exercises bounded fuzz targets for configuration, cache rewrites, request parsing, path indexes, and Linux repository metadata. Each target runs for five seconds by default; use `make test-fuzz FUZZ_TIME=1m` for a longer campaign.
+`make test` runs the regular tests and every fuzz target's seed corpus. Run an active fuzz campaign with the standard `go test <package> -fuzz=<target> -fuzztime=<duration>` command.
 
 ## License
 

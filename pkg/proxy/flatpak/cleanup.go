@@ -3,6 +3,7 @@ package flatpak
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"strings"
@@ -14,14 +15,17 @@ import (
 
 func (h *Handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
 	deleted := 0
-	return fs.WalkDir(h.store.TenantFS(h.name), ".", func(objectPath string, entry fs.DirEntry, err error) error {
+	err := fs.WalkDir(h.store.TenantFS(h.name), ".", func(objectPath string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
 			return fs.SkipAll
 		}
-		if err != nil || entry.IsDir() || strings.HasPrefix(objectPath, metadataRoot+"/") {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || strings.HasPrefix(objectPath, metadataRoot+"/") {
 			return nil
 		}
 		expireAfter := h.expireAfter
@@ -32,7 +36,10 @@ func (h *Handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 			return nil
 		}
 		info, statErr := h.store.StatObject(ctx, h.name, objectPath)
-		if statErr != nil || info.State != "ACTIVE" {
+		if statErr != nil {
+			return statErr
+		}
+		if info.State != "ACTIVE" {
 			return nil
 		}
 		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
@@ -47,11 +54,14 @@ func (h *Handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 			slog.Info("flatpak cleanup dry-run delete", "instance", h.name, "path", objectPath)
 			return nil
 		}
-		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Info("flatpak cleanup delete failed", "instance", h.name, "path", objectPath, "err", err)
-		} else {
-			deleted++
+		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil {
+			return fmt.Errorf("delete expired Flatpak object %s: %w", objectPath, err)
 		}
+		deleted++
 		return nil
 	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }

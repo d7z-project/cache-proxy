@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -16,7 +15,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
-func TestHandlerStartsHealthAndRecordsUpstreamFailures(t *testing.T) {
+func TestHandlerRecordsUpstreamFailures(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed", http.StatusInternalServerError)
 	}))
@@ -35,39 +34,14 @@ func TestHandlerStartsHealthAndRecordsUpstreamFailures(t *testing.T) {
 		Upstreams:   []string{upstream.URL},
 		BusyPolicy:  config.BusyPolicyBypass,
 	}, store, fileResolver{policy: &Policy{DefaultPolicy: config.PolicyBypass}}, stats, sh)
-	h := &handler{base: base}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, h.Start(ctx))
-	defer func() { require.NoError(t, h.Stop(context.Background())) }()
+	defer func() { require.NoError(t, base.CloseContext(context.Background())) }()
 
 	for i := 0; i < 10; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/object.txt", nil)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+		base.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 	}
 
 	require.Equal(t, float64(1), stats.Snapshot().Instances["files"].Upstreams[upstream.URL].ErrorRate)
-}
-
-func TestHandlerStopClosesHealthBeforeBase(t *testing.T) {
-	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-
-	stats := httpcache.NewStats(prometheus.NewRegistry())
-	sh := health.New("files", config.ModeFile, health.DefaultConfig(), []string{"https://example.com"}, stats)
-	base := httpcache.NewHandler("files", httpcache.RuntimeConfig{
-		Mode:        config.ModeFile,
-		ExpireAfter: config.Expiration(time.Hour),
-		Upstreams:   []string{"https://example.com"},
-	}, store, fileResolver{policy: &Policy{DefaultPolicy: config.PolicyBypass}}, stats, sh)
-	h := &handler{base: base}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	require.NoError(t, h.Start(ctx))
-	require.NoError(t, h.Stop(context.Background()))
 }

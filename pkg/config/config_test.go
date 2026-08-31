@@ -153,8 +153,6 @@ instances:
       transport:
         health:
           enabled: false
-          resource_remove_count: 7
-          resource_remove_age: 3m
 `))
 	require.NoError(t, err)
 	selected, err := doc.Instances[0].SelectMode()
@@ -171,10 +169,6 @@ instances:
 	require.NotNil(t, cfg.Transport.Health)
 	require.NotNil(t, cfg.Transport.Health.Enabled)
 	require.False(t, *cfg.Transport.Health.Enabled)
-	require.NotNil(t, cfg.Transport.Health.ResourceRemoveCount)
-	require.Equal(t, 7, *cfg.Transport.Health.ResourceRemoveCount)
-	require.NotNil(t, cfg.Transport.Health.ResourceRemoveAge)
-	require.Equal(t, 3*time.Minute, *cfg.Transport.Health.ResourceRemoveAge)
 }
 
 func TestDecodePackageRepositoryConfig(t *testing.T) {

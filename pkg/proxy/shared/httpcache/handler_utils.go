@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
@@ -246,7 +247,8 @@ func HeaderName(key string) string {
 }
 
 func SafePath(value string) bool {
-	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") ||
+		strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return false
 	}
 	for _, part := range strings.Split(value, "/") {

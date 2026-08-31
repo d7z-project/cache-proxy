@@ -20,6 +20,7 @@ func FuzzPathIndexBuilder(f *testing.F) {
 			t.Skip()
 		}
 		var builder PathIndexBuilder
+		defer func() { _ = builder.Close() }()
 		for item := range strings.FieldsSeq(input) {
 			builder.Add(item)
 		}

@@ -93,14 +93,14 @@ func buildIndexTarget(
 	target filerepo.MetadataTarget,
 	paths *filerepo.PathIndexBuilder,
 ) (int, error) {
-	blob, err := session.Fetch(ctx, target)
+	blob, err := session.FetchAnchor(ctx, target)
 	if err != nil {
 		return 0, err
 	}
 	defer session.Release(target)
 
 	snapshot.Metadata[blob.Path] = filerepo.MetadataObject{Path: blob.Path, Required: true}
-	companion, err := session.FetchDerived(ctx, blob.Path+".sig")
+	companion, err := session.FetchOptionalAnchor(ctx, blob.Path+".sig")
 	if err != nil {
 		return 0, err
 	}

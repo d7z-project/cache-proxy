@@ -22,10 +22,9 @@ type repositoryRuntime struct {
 	repositories []proxyruntime.RepositoryStatus
 }
 
-func (repositoryRuntime) ServeHTTP(http.ResponseWriter, *http.Request)        {}
-func (repositoryRuntime) Start(context.Context) error                         { return nil }
-func (repositoryRuntime) Stop(context.Context) error                          { return nil }
-func (repositoryRuntime) Cleanup(context.Context, config.CleanupConfig) error { return nil }
+func (repositoryRuntime) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (repositoryRuntime) Start(context.Context) error                  { return nil }
+func (repositoryRuntime) Stop(context.Context) error                   { return nil }
 func (r repositoryRuntime) RepositoryStatuses() []proxyruntime.RepositoryStatus {
 	return append([]proxyruntime.RepositoryStatus(nil), r.repositories...)
 }

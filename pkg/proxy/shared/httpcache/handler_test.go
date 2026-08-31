@@ -1129,9 +1129,10 @@ func TestConditionalGetReplacesStaleContentWithOneRequest(t *testing.T) {
 
 func TestRateLimitDoesNotFailOverToAnotherUpstream(t *testing.T) {
 	var firstRequests, secondRequests atomic.Int64
+	stats := NewStats(prometheus.NewRegistry())
 	handler := NewHandler("test", RuntimeConfig{
 		Mode: "test", Upstreams: []string{"https://first.example", "https://second.example"},
-	}, nil, literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
+	}, nil, literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, stats, nil)
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {
 		case "first.example":
@@ -1151,6 +1152,7 @@ func TestRateLimitDoesNotFailOverToAnotherUpstream(t *testing.T) {
 	require.Equal(t, "60", recorder.Header().Get("Retry-After"))
 	require.EqualValues(t, 1, firstRequests.Load())
 	require.Zero(t, secondRequests.Load())
+	require.Equal(t, uint64(1), stats.Snapshot().Instances["test"].UpstreamStatus["429"])
 }
 
 func TestRateLimitCooldownQueuesNextForegroundRequest(t *testing.T) {
@@ -1630,6 +1632,40 @@ func TestUpstreamAdmissionIsAcquiredBeforeRequest(t *testing.T) {
 	require.EqualValues(t, 1, requests.Load())
 }
 
+func TestCanceledAdmissionStartsNoUpstreamRequest(t *testing.T) {
+	var requests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, "unexpected")
+	}))
+	defer upstream.Close()
+
+	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+	release, err := limiter.Acquire(context.Background(), upstream.URL, AdmissionForeground)
+	require.NoError(t, err)
+	handler := NewHandler("test", RuntimeConfig{
+		Mode: "test", Upstreams: []string{upstream.URL}, UpstreamGate: limiter,
+	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
+
+	request := httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil)
+	requestCtx, cancel := context.WithCancel(request.Context())
+	request = request.WithContext(requestCtx)
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+		close(done)
+	}()
+	require.Eventually(t, func() bool { return limiter.Snapshot().Queued == 1 }, time.Second, time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled admission did not return")
+	}
+	release()
+	require.Zero(t, requests.Load())
+}
+
 func TestHandlerCountsInterruptedResponseBytes(t *testing.T) {
 	stats := NewStats(prometheus.NewRegistry())
 	handler := NewHandler("test", RuntimeConfig{
@@ -1662,6 +1698,7 @@ func TestSafePath(t *testing.T) {
 	require.False(t, SafePath("/absolute/path"))
 	require.False(t, SafePath("."))
 	require.False(t, SafePath(".."))
+	require.False(t, SafePath("pool/pkg.deb\n../escape"))
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

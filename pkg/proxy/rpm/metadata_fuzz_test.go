@@ -27,6 +27,7 @@ func FuzzRPMMetadataParsers(f *testing.F) {
 			return
 		}
 		paths := &filerepo.PathIndexBuilder{}
+		defer func() { _ = paths.Close() }()
 		_, err := parsePrimary(strings.NewReader(input), paths, "repo")
 		if err == nil {
 			for _, item := range paths.Finalize() {

@@ -13,6 +13,9 @@ import (
 )
 
 const maxAdmissionWaiters = 4096
+const maxAdmissionWaitersPerHost = 512
+const maxForegroundBurst = 8
+const refreshAdmissionMaxWait = time.Second
 
 var ErrAdmissionOverloaded = errors.New("upstream admission queue is full")
 
@@ -93,6 +96,7 @@ type UpstreamGate struct {
 	wakeAt           time.Time
 	wakeSequence     uint64
 	lastGrantedHost  [2]string
+	foregroundBurst  int
 }
 
 type UpstreamGateSnapshot struct {
@@ -153,7 +157,7 @@ func (g *UpstreamGate) Acquire(ctx context.Context, upstream string, class Admis
 		g.mu.Unlock()
 		return nil, err
 	}
-	if g.foreground.Len()+g.refresh.Len() >= maxAdmissionWaiters {
+	if g.foreground.Len()+g.refresh.Len() >= maxAdmissionWaiters || state.queued >= maxAdmissionWaitersPerHost {
 		g.mu.Unlock()
 		return nil, &AdmissionOverloadError{}
 	}
@@ -305,6 +309,11 @@ func (g *UpstreamGate) grantWaitersLocked() {
 		state.active++
 		state.lastStarted = time.Now()
 		g.lastGrantedHost[selected.class] = selected.host
+		if selected.class == AdmissionRefresh {
+			g.foregroundBurst = 0
+		} else {
+			g.foregroundBurst++
+		}
 		selected.granted = true
 		close(selected.ready)
 	}
@@ -312,7 +321,15 @@ func (g *UpstreamGate) grantWaitersLocked() {
 
 func (g *UpstreamGate) selectWaiterLocked(now time.Time) (*gateWaiter, time.Time) {
 	var nextWake time.Time
-	for class, queue := range []*list.List{&g.foreground, &g.refresh} {
+	queues := []*list.List{&g.foreground, &g.refresh}
+	classes := []AdmissionClass{AdmissionForeground, AdmissionRefresh}
+	if firstRefresh := g.refresh.Front(); firstRefresh != nil &&
+		(g.foregroundBurst >= maxForegroundBurst || now.Sub(firstRefresh.Value.(*gateWaiter).queuedAt) >= refreshAdmissionMaxWait) {
+		queues[0], queues[1] = queues[1], queues[0]
+		classes[0], classes[1] = classes[1], classes[0]
+	}
+	for i, queue := range queues {
+		class := classes[i]
 		seenHosts := map[string]struct{}{}
 		var firstEligible *gateWaiter
 		for element := queue.Front(); element != nil; element = element.Next() {

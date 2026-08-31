@@ -17,17 +17,14 @@ import (
 const (
 	defaultCleanupInterval    = 6 * time.Hour
 	defaultRefreshInterval    = 5 * time.Minute
-	defaultMetadataFreshFor   = time.Minute
 	defaultDescriptorFreshFor = 5 * time.Minute
 )
 
 type Policy struct {
-	MetadataFreshFor   config.Freshness  `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy string            `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	DescriptorRewrite  *bool             `json:"descriptorRewrite,omitempty" yaml:"descriptor_rewrite,omitempty"`
-	VerifyObjects      *bool             `json:"verifyObjects,omitempty" yaml:"verify_objects,omitempty"`
-	CacheDeltas        *bool             `json:"cacheDeltas,omitempty" yaml:"cache_deltas,omitempty"`
-	DeltaExpireAfter   config.Expiration `json:"deltaExpireAfter,omitempty" yaml:"delta_expire_after,omitempty"`
+	DescriptorRewrite *bool             `json:"descriptorRewrite,omitempty" yaml:"descriptor_rewrite,omitempty"`
+	VerifyObjects     *bool             `json:"verifyObjects,omitempty" yaml:"verify_objects,omitempty"`
+	CacheDeltas       *bool             `json:"cacheDeltas,omitempty" yaml:"cache_deltas,omitempty"`
+	DeltaExpireAfter  config.Expiration `json:"deltaExpireAfter,omitempty" yaml:"delta_expire_after,omitempty"`
 }
 
 type Block struct {
@@ -86,20 +83,15 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.Transport != nil {
 		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
 	}
-	if err := health.ValidateConfig(healthCfg); err != nil {
-		return fmt.Errorf("health: %w", err)
-	}
 	serviceHealth := health.New(plan.Name(), config.ModeFlatpak, healthCfg, upstreams, plan.Stats())
-	serviceHealth.SetBus(plan.Bus())
 
 	runtimeCfg := httpcache.RuntimeConfig{
-		Mode:            config.ModeFlatpak,
-		ExpireAfter:     expireAfter,
-		Upstreams:       upstreams,
-		Transport:       block.Transport,
-		BusyPolicy:      block.MetadataBusyPolicy,
-		DefaultFreshFor: block.MetadataFreshFor,
-		UpstreamGate:    plan.UpstreamGate(),
+		Mode:         config.ModeFlatpak,
+		ExpireAfter:  expireAfter,
+		Upstreams:    upstreams,
+		Transport:    block.Transport,
+		BusyPolicy:   config.BusyPolicyJoin,
+		UpstreamGate: plan.UpstreamGate(),
 	}
 	handler := NewHandler(
 		plan.Name(),
@@ -122,9 +114,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		},
 	})
 	plan.Scheduler().Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataRefresh, ""),
-		Interval: refreshInterval,
-		Handler:  handler.RefreshTask,
+		Key:            scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataRefresh, ""),
+		Interval:       refreshInterval,
+		RunImmediately: true,
+		Handler:        handler.RefreshTask,
+	})
+	handler.SetRefreshTrigger(func() {
+		plan.Scheduler().Trigger(scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataRefresh, ""))
 	})
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataGC, ""),
@@ -138,12 +134,6 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 }
 
 func applyDefaults(policy *Policy) {
-	if policy.MetadataFreshFor == 0 {
-		policy.MetadataFreshFor = config.Freshness(defaultMetadataFreshFor)
-	}
-	if policy.MetadataBusyPolicy == "" {
-		policy.MetadataBusyPolicy = config.BusyPolicyStale
-	}
 	if policy.DescriptorRewrite == nil {
 		enabled := true
 		policy.DescriptorRewrite = &enabled
@@ -183,12 +173,6 @@ func resolveDeltaExpireAfter(policy *Policy, expireAfter config.Expiration) conf
 }
 
 func validatePolicy(policy *Policy, expireAfter config.Expiration) error {
-	if !config.ValidBusyPolicy(policy.MetadataBusyPolicy) {
-		return fmt.Errorf("invalid flatpak metadata busy policy %q", policy.MetadataBusyPolicy)
-	}
-	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
-		return errors.New("flatpak metadata fresh_for must be at least 1s")
-	}
 	if policy.CacheDeltas != nil && *policy.CacheDeltas {
 		deltaExpireAfter := resolveDeltaExpireAfter(policy, expireAfter)
 		if deltaExpireAfter.IsNever() {

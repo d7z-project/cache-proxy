@@ -62,14 +62,10 @@ func PlanRepoMode(
 	if block.Transport != nil {
 		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
 	}
-	if err := health.ValidateConfig(healthCfg); err != nil {
-		return fmt.Errorf("health: %w", err)
-	}
 	if !plan.Enabled() {
 		return nil
 	}
 	serviceHealth := health.New(plan.Name(), mode, healthCfg, upstreams, plan.Stats())
-	serviceHealth.SetBus(plan.Bus())
 	handler := NewIndexedHandler(
 		plan.Name(),
 		mode,
@@ -85,7 +81,6 @@ func PlanRepoMode(
 		serviceHealth,
 		plan.UpstreamGate(),
 	)
-	handler.SetBus(plan.Bus())
 	handler.SetMetadataFreshFor(defaultFreshFor)
 	rootExpireAfter := block.RootExpireAfter
 	if rootExpireAfter.IsUnset() {
@@ -122,6 +117,9 @@ func PlanRepoMode(
 			}
 		},
 		CurrentRoots: handler.currentRootIDs,
+	})
+	handler.SetRefreshTrigger(func(rootID string) {
+		sched.Trigger(scheduler.NewTaskKey(plan.Name(), scheduler.TypeMetadataRefresh, rootID))
 	})
 
 	plan.SetHomeSnippet(plan.RenderSnippet())

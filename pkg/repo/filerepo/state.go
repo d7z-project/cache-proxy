@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"path"
@@ -13,23 +14,31 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 )
 
 const rootsStateFileName = "_roots.yaml"
 
+const (
+	maxRootsStateSize   = 16 << 20
+	maxCurrentStateSize = 1 << 20
+	maxSnapshotSize     = 16 << 20
+)
+
+var errPersistedStateTooLarge = errors.New("persisted state exceeds size limit")
+
 type persistedRoot struct {
-	Root              RepositoryRoot          `yaml:"root"`
-	State             health.ResourceSnapshot `yaml:"state"`
-	LastSeenAt        time.Time               `yaml:"last_seen_at"`
-	Retired           bool                    `yaml:"retired,omitempty"`
-	CleanupGeneration string                  `yaml:"cleanup_generation,omitempty"`
+	Root              RepositoryRoot `yaml:"root"`
+	LastSeenAt        time.Time      `yaml:"last_seen_at"`
+	LastValidatedAt   time.Time      `yaml:"last_validated_at,omitempty"`
+	Retired           bool           `yaml:"retired,omitempty"`
+	CleanupGeneration string         `yaml:"cleanup_generation,omitempty"`
+	CleanupDigest     string         `yaml:"cleanup_index_sha256,omitempty"`
 }
 
 type persistedState struct {
-	Version int             `yaml:"version"`
-	Roots   []persistedRoot `yaml:"roots"`
+	Version  int             `yaml:"version"`
+	Revision uint64          `yaml:"revision"`
+	Roots    []persistedRoot `yaml:"roots"`
 }
 
 func (h *IndexedHandler) statePath() string {
@@ -43,27 +52,40 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	h.stateLifecycleMu.Lock()
+	signal := h.stateSignal
+	stopped := h.stateStopped
+	h.stateLifecycleMu.Unlock()
+	if stopped {
+		return
+	}
+	if signal != nil {
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
+		return
+	}
+	if err := h.writeState(ctx); err != nil {
+		slog.Warn("indexed state write failed", "instance", h.name, "err", err)
+	}
+}
 
-	h.mu.RLock()
+func (h *IndexedHandler) writeState(ctx context.Context) error {
+
+	h.stateWriteMu.Lock()
+	defer h.stateWriteMu.Unlock()
+	h.mu.Lock()
+	h.stateRevision++
+	revision := h.stateRevision
 	roots := make(map[string]rootEntry, len(h.roots))
-	currentRoots := make(map[string]struct{}, len(h.rootSnapshots))
 	for rootID, entry := range h.roots {
 		if entry == nil {
 			continue
 		}
 		roots[rootID] = *entry
 	}
-	for rootID := range h.rootSnapshots {
-		currentRoots[rootID] = struct{}{}
-	}
-	h.mu.RUnlock()
-
-	resources := map[string]health.ResourceSnapshot{}
-	if h.serviceHealth != nil {
-		for _, item := range h.serviceHealth.SnapshotResources() {
-			resources[item.Path] = item
-		}
-	}
+	h.mu.Unlock()
 
 	keys := make([]string, 0, len(roots))
 	for rootID := range roots {
@@ -71,63 +93,166 @@ func (h *IndexedHandler) saveState(ctx context.Context) {
 	}
 	sort.Strings(keys)
 
-	state := persistedState{Version: 1}
+	state := persistedState{Version: 2, Revision: revision}
 	for _, rootID := range keys {
-		snapshot, ok := resources[rootID]
-		if !ok {
-			if _, keep := currentRoots[rootID]; !keep {
-				continue
-			}
-			snapshot = health.ResourceSnapshot{
-				Path:         rootID,
-				State:        health.RActive.String(),
-				UpstreamURLs: append([]string(nil), h.upstreams...),
-			}
-		}
 		state.Roots = append(state.Roots, persistedRoot{
 			Root:              roots[rootID].root,
-			State:             snapshot,
 			LastSeenAt:        roots[rootID].lastSeenAt,
+			LastValidatedAt:   roots[rootID].lastValidatedAt,
 			Retired:           roots[rootID].retired,
 			CleanupGeneration: roots[rootID].retirementCleanupGeneration,
+			CleanupDigest:     roots[rootID].retirementCleanupDigest,
 		})
 	}
 
 	data, err := yaml.Marshal(state)
 	if err != nil {
-		slog.Warn("indexed state marshal failed", "instance", h.name, "err", err)
-		return
+		return fmt.Errorf("marshal indexed state: %w", err)
 	}
 	if err := h.store.MkdirAll(path.Join(h.name, h.objectRoot), 0o755); err != nil {
-		slog.Warn("indexed state mkdir failed", "instance", h.name, "err", err)
-		return
+		return fmt.Errorf("create indexed state directory: %w", err)
 	}
-	if _, err := h.store.Put(ctx, h.name, h.statePath(), bytes.NewReader(data), map[string]string{
+	tmpPath := h.statePath() + ".tmp"
+	if _, err := h.store.Put(ctx, h.name, tmpPath, bytes.NewReader(data), map[string]string{
 		"content-type": "application/yaml",
 		"mode":         h.mode,
 	}); err != nil {
-		slog.Warn("indexed state write failed", "instance", h.name, "err", err)
+		return fmt.Errorf("write indexed state temporary object: %w", err)
+	}
+	if err := h.store.Rename(path.Join(h.name, tmpPath), path.Join(h.name, h.statePath())); err != nil {
+		return fmt.Errorf("commit indexed state: %w", err)
+	}
+	return nil
+}
+
+func (h *IndexedHandler) startStateWriter() {
+	h.stateLifecycleMu.Lock()
+	defer h.stateLifecycleMu.Unlock()
+	if h.stateSignal != nil || h.stateStopped {
+		return
+	}
+	h.stateSignal = make(chan struct{}, 1)
+	h.stateStop = make(chan chan error)
+	h.stateWriterDone = make(chan struct{})
+	go h.runStateWriter(h.stateSignal, h.stateStop, h.stateWriterDone)
+}
+
+func (h *IndexedHandler) runStateWriter(signal <-chan struct{}, stop <-chan chan error, done chan<- struct{}) {
+	defer close(done)
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	dirty := false
+	flush := func() error {
+		if !dirty {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := h.writeState(ctx); err != nil {
+			return err
+		}
+		dirty = false
+		return nil
+	}
+	for {
+		select {
+		case <-signal:
+			dirty = true
+			if timer == nil {
+				timer = time.NewTimer(100 * time.Millisecond)
+				timerC = timer.C
+			}
+		case <-timerC:
+			if err := flush(); err != nil {
+				slog.Warn("indexed state write failed", "instance", h.name, "err", err)
+				timer.Reset(time.Second)
+				timerC = timer.C
+				continue
+			}
+			timer = nil
+			timerC = nil
+		case response := <-stop:
+			if timer != nil {
+				timer.Stop()
+			}
+			response <- flush()
+			return
+		}
 	}
 }
 
-func (h *IndexedHandler) loadState(ctx context.Context) persistedState {
+func (h *IndexedHandler) stopStateWriter(ctx context.Context) error {
+	h.stateLifecycleMu.Lock()
+	if h.stateSignal == nil {
+		h.stateStopped = true
+		h.stateLifecycleMu.Unlock()
+		return nil
+	}
+	stop := h.stateStop
+	done := h.stateWriterDone
+	h.stateSignal = nil
+	h.stateStop = nil
+	h.stateWriterDone = nil
+	h.stateStopped = true
+	h.stateLifecycleMu.Unlock()
+
+	response := make(chan error, 1)
+	select {
+	case stop <- response:
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-response:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *IndexedHandler) loadState(ctx context.Context) (persistedState, bool, error) {
 	reader, err := h.store.OpenObject(ctx, h.name, h.statePath())
 	if err != nil {
-		return persistedState{Version: 1}
+		if errors.Is(err, fs.ErrNotExist) {
+			return persistedState{}, false, nil
+		}
+		return persistedState{}, false, fmt.Errorf("open indexed state: %w", err)
 	}
-	defer func() { _ = reader.Close() }()
-
+	data, readErr := readBoundedState(reader, maxRootsStateSize)
+	closeErr := reader.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		if errors.Is(err, errPersistedStateTooLarge) {
+			slog.Warn("indexed state is oversized", "instance", h.name, "err", err)
+			return persistedState{}, false, nil
+		}
+		return persistedState{}, false, fmt.Errorf("read indexed state: %w", err)
+	}
 	var state persistedState
-	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
-		slog.Warn("indexed state unmarshal failed", "instance", h.name, "err", err)
-		return persistedState{Version: 1}
+	decodeErr := strictYAML(data, &state)
+	if decodeErr != nil || state.Version != 2 || state.Revision == 0 {
+		stateErr := decodeErr
+		if stateErr == nil {
+			stateErr = fmt.Errorf("unsupported roots state version %d or revision %d", state.Version, state.Revision)
+		}
+		slog.Warn("indexed state unmarshal failed", "instance", h.name, "err", stateErr)
+		return persistedState{}, false, nil
 	}
-	return state
+	return state, true, nil
 }
 
-func (h *IndexedHandler) restoreRoots(ctx context.Context) {
-	persisted := h.loadState(ctx)
-	var resources []health.ResourceSnapshot
+func (h *IndexedHandler) restoreRoots(ctx context.Context) error {
+	persisted, ok, err := h.loadState(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	h.mu.Lock()
+	h.stateRevision = persisted.Revision
+	h.mu.Unlock()
 	for _, root := range persisted.Roots {
 		if root.Root.ID == "" {
 			continue
@@ -140,50 +265,58 @@ func (h *IndexedHandler) restoreRoots(ctx context.Context) {
 				entry.lastSeenAt = time.Now().UTC()
 			}
 			entry.lastSeenSavedAt = entry.lastSeenAt
+			entry.lastValidatedAt = root.LastValidatedAt
 			entry.retired = root.Retired
 			entry.retirementCleanupGeneration = root.CleanupGeneration
+			entry.retirementCleanupDigest = root.CleanupDigest
 		}
 		h.mu.Unlock()
-		if root.State.Path == "" {
-			root.State.Path = root.Root.ID
-		}
-		if len(root.State.LastTargets) == 0 {
-			root.State.LastTargets = targetsToResourceTargets(root.Root.Targets)
-		}
-		if len(root.State.UpstreamURLs) == 0 {
-			root.State.UpstreamURLs = append([]string(nil), h.upstreams...)
-		}
-		resources = append(resources, root.State)
 	}
-	if h.serviceHealth != nil {
-		h.serviceHealth.RestoreResources(resources)
-	}
+	return nil
 }
 
-func (h *IndexedHandler) restoreGenerations(ctx context.Context) {
+func (h *IndexedHandler) restoreGenerations(ctx context.Context) error {
 	rootDir := path.Join(h.objectRoot, ".roots")
 	err := fs.WalkDir(h.store.TenantFS(h.name), rootDir, func(objectPath string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || path.Base(objectPath) != "current.yaml" {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return err
+		}
+		if entry.IsDir() || path.Base(objectPath) != "current.yaml" {
 			return nil
 		}
-		snapshot, ok := h.loadCurrentSnapshot(ctx, objectPath)
+		snapshot, ok, err := h.loadCurrentSnapshot(ctx, objectPath)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			return nil
 		}
 		h.setRootSnapshot(snapshot.RootID, snapshot)
-
-		if h.serviceHealth != nil {
-			restored := h.serviceHealth.AddResource(snapshot.RootID, targetsToResourceTargets(snapshot.Targets), h.upstreams)
-			if restored.State == health.RPending && restored.LastSuccessAt.IsZero() {
-				h.serviceHealth.MarkResourceActive(snapshot.RootID, targetsToResourceTargets(snapshot.Targets))
+		h.mu.Lock()
+		if h.roots[snapshot.RootID] == nil {
+			primary := make([]string, 0, len(snapshot.Anchors))
+			for _, anchor := range snapshot.Anchors {
+				if anchor.State == MetadataPresent {
+					primary = append(primary, anchor.Path)
+				}
 			}
+			now := time.Now().UTC()
+			h.roots[snapshot.RootID] = &rootEntry{root: RepositoryRoot{
+				ID: snapshot.RootID, Path: snapshot.RootPath, DisplayName: snapshot.RootPath,
+				PrimaryMetadata: primary, Targets: append([]MetadataTarget(nil), snapshot.Targets...),
+			}, lastSeenAt: now, lastValidatedAt: snapshot.Published}
 		}
+		h.mu.Unlock()
 		h.reportMetadataState()
 		return nil
 	})
-	if err != nil && !strings.Contains(err.Error(), "not exist") {
-		slog.Warn("indexed generation restore failed", "instance", h.name, "err", err)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
+	return err
 }
 
 func (h *IndexedHandler) cleanCurrentRefTemps(ctx context.Context) {
@@ -192,7 +325,10 @@ func (h *IndexedHandler) cleanCurrentRefTemps(ctx context.Context) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if walkErr != nil || entry.IsDir() || !strings.HasPrefix(path.Base(objectPath), "current.yaml.tmp.") {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasPrefix(path.Base(objectPath), "current.yaml.tmp.") {
 			return nil
 		}
 		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
@@ -210,41 +346,39 @@ func (h *IndexedHandler) cleanCurrentRefTemps(ctx context.Context) {
 	}
 }
 
-func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath string) (*LiveSnapshot, bool) {
+func (h *IndexedHandler) loadCurrentSnapshot(ctx context.Context, currentPath string) (*LiveSnapshot, bool, error) {
 	reader, err := h.store.OpenObject(ctx, h.name, currentPath)
 	if err != nil {
-		return nil, false
+		return nil, false, fmt.Errorf("open committed metadata reference %s: %w", currentPath, err)
 	}
-	defer func() { _ = reader.Close() }()
-	var ref struct {
-		RootID     string `yaml:"root_id"`
-		Generation string `yaml:"generation"`
-	}
-	if err := yaml.NewDecoder(reader).Decode(&ref); err != nil || ref.RootID == "" || ref.Generation == "" {
-		return nil, false
-	}
-	reject := func(err error) {
-		slog.Warn("committed metadata generation rejected", "instance", h.name, "root_id", ref.RootID, "generation", ref.Generation, "err", err)
-		if h.serviceHealth != nil {
-			resource := h.serviceHealth.AddResource(ref.RootID, nil, h.upstreams)
-			h.serviceHealth.FinishRefresh(
-				ref.RootID,
-				resource.Generation,
-				fmt.Errorf("%w: invalid committed metadata generation: %v", health.ErrResourceTransient, err),
-				nil,
-			)
+	data, readErr := readBoundedState(reader, maxCurrentStateSize)
+	_ = reader.Close()
+	var ref currentReference
+	if readErr != nil || strictYAML(data, &ref) != nil || ref.Version != 2 || ref.RootID == "" || ref.Generation == "" ||
+		ref.SnapshotDigest == "" || ref.CleanupIndexDigest == "" {
+		if err := h.store.DeleteObject(ctx, h.name, currentPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, false, fmt.Errorf("discard invalid metadata reference %s: %w", currentPath, err)
 		}
+		return nil, false, nil
 	}
-	snapshot, ok := h.loadSnapshot(ctx, h.snapshotPath(ref.RootID, ref.Generation))
+	reject := func(cause error) error {
+		slog.Warn("committed metadata generation rejected", "instance", h.name, "root_id", ref.RootID, "generation", ref.Generation, "err", cause)
+		if err := h.store.DeleteObject(ctx, h.name, currentPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("discard rejected metadata reference %s: %w", currentPath, err)
+		}
+		return nil
+	}
+	snapshot, snapshotDigest, ok := h.loadSnapshotWithDigest(ctx, h.snapshotPath(ref.RootID, ref.Generation))
 	if !ok || snapshot.RootID != ref.RootID || snapshot.Generation != ref.Generation {
-		reject(errors.New("referenced snapshot is missing or has mismatched identity"))
-		return nil, false
+		return nil, false, reject(errors.New("referenced snapshot is missing or has mismatched identity"))
+	}
+	if snapshotDigest != ref.SnapshotDigest || snapshot.CleanupIndexDigest != ref.CleanupIndexDigest {
+		return nil, false, reject(errors.New("current reference digest mismatch"))
 	}
 	if err := h.validateSnapshot(ctx, snapshot, true); err != nil {
-		reject(err)
-		return nil, false
+		return nil, false, reject(err)
 	}
-	return snapshot, true
+	return snapshot, true, nil
 }
 
 func (h *IndexedHandler) durableCurrentGeneration(ctx context.Context, rootID string) (string, bool) {
@@ -253,26 +387,51 @@ func (h *IndexedHandler) durableCurrentGeneration(ctx context.Context, rootID st
 		return "", false
 	}
 	defer func() { _ = reader.Close() }()
-	var ref struct {
-		RootID     string `yaml:"root_id"`
-		Generation string `yaml:"generation"`
+	data, err := readBoundedState(reader, maxCurrentStateSize)
+	if err != nil {
+		return "", false
 	}
-	if yaml.NewDecoder(reader).Decode(&ref) != nil || ref.RootID != rootID || ref.Generation == "" {
+	var ref currentReference
+	if strictYAML(data, &ref) != nil || ref.Version != 2 || ref.RootID != rootID || ref.Generation == "" ||
+		ref.SnapshotDigest == "" || ref.CleanupIndexDigest == "" {
 		return "", false
 	}
 	return ref.Generation, true
 }
 
 func (h *IndexedHandler) loadSnapshot(ctx context.Context, objectPath string) (*LiveSnapshot, bool) {
+	snapshot, _, ok := h.loadSnapshotWithDigest(ctx, objectPath)
+	return snapshot, ok
+}
+
+func (h *IndexedHandler) loadSnapshotWithDigest(ctx context.Context, objectPath string) (*LiveSnapshot, string, bool) {
 	reader, err := h.store.OpenObject(ctx, h.name, objectPath)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
-	defer func() { _ = reader.Close() }()
-
+	data, readErr := readBoundedState(reader, maxSnapshotSize)
+	_ = reader.Close()
 	var snapshot LiveSnapshot
-	if err := yaml.NewDecoder(reader).Decode(&snapshot); err != nil || snapshot.RootID == "" {
-		return nil, false
+	if readErr != nil || strictYAML(data, &snapshot) != nil || snapshot.Version != snapshotSchemaVersion || snapshot.RootID == "" {
+		return nil, "", false
 	}
-	return &snapshot, true
+	for cleanPath, object := range snapshot.Metadata {
+		if object.State == MetadataPresent {
+			object.StorePath = h.generationMetadataPath(snapshot.RootID, snapshot.Generation, object.Path)
+		}
+		object.StatusCode = metadataStateStatus(object.State)
+		snapshot.Metadata[cleanPath] = object
+	}
+	return &snapshot, digestBytes(data), true
+}
+
+func readBoundedState(reader io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w: limit %d bytes", errPersistedStateTooLarge, limit)
+	}
+	return data, nil
 }

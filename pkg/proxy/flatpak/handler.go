@@ -17,17 +17,47 @@ import (
 )
 
 const (
-	metadataRoot        = "flatpak/metadata"
-	maxMetadataSize     = 64 << 20
-	maxDescriptorSize   = 10 << 20
-	metadataGenerations = 3
+	metadataRoot      = "flatpak/metadata"
+	maxMetadataSize   = 64 << 20
+	maxDescriptorSize = 10 << 20
 )
 
 type currentMetadata struct {
-	Generation  string    `yaml:"generation"`
-	Upstream    string    `yaml:"upstream"`
-	Published   time.Time `yaml:"published"`
-	Fingerprint string    `yaml:"fingerprint,omitempty"`
+	Generation     string           `yaml:"-"`
+	Upstream       string           `yaml:"-"`
+	Published      time.Time        `yaml:"-"`
+	Fingerprint    string           `yaml:"-"`
+	SnapshotDigest string           `yaml:"-"`
+	Manifest       metadataManifest `yaml:"-"`
+}
+
+type metadataObjectState string
+
+const (
+	metadataPresent   metadataObjectState = "present"
+	metadataNotFound  metadataObjectState = "not_found"
+	metadataForbidden metadataObjectState = "forbidden"
+)
+
+type metadataManifestObject struct {
+	State  metadataObjectState `yaml:"state"`
+	Size   int64               `yaml:"size,omitempty"`
+	Digest string              `yaml:"sha256,omitempty"`
+}
+
+type metadataManifest struct {
+	Version         int                               `yaml:"version"`
+	Generation      string                            `yaml:"generation"`
+	Upstream        string                            `yaml:"upstream"`
+	Published       time.Time                         `yaml:"published_at"`
+	AnchorSetDigest string                            `yaml:"anchor_set_sha256"`
+	Objects         map[string]metadataManifestObject `yaml:"objects"`
+}
+
+type metadataCurrentReference struct {
+	Version        int    `yaml:"version"`
+	Generation     string `yaml:"generation"`
+	SnapshotDigest string `yaml:"snapshot_sha256"`
 }
 
 type Handler struct {
@@ -42,13 +72,23 @@ type Handler struct {
 	refreshInterval  time.Duration
 	serviceHealth    *health.ServiceHealth
 
-	mu            sync.RWMutex
-	refreshMu     sync.Mutex
-	current       currentMetadata
-	rewriteDesc   bool
-	verifyObjects bool
-	upstreamGate  *httpcache.UpstreamGate
+	mu             sync.RWMutex
+	refreshMu      sync.Mutex
+	current        currentMetadata
+	readers        map[string]int
+	refreshing     bool
+	refreshQueued  bool
+	lastError      string
+	lifecycleCtx   context.Context
+	triggerRefresh func()
+	stopping       bool
+	wait           sync.WaitGroup
+	rewriteDesc    bool
+	verifyObjects  bool
+	upstreamGate   *httpcache.UpstreamGate
 }
+
+func (h *Handler) SetRefreshTrigger(trigger func()) { h.triggerRefresh = trigger }
 
 func NewHandler(
 	name string,
@@ -75,6 +115,7 @@ func NewHandler(
 		rewriteDesc:      policy.DescriptorRewrite != nil && *policy.DescriptorRewrite,
 		verifyObjects:    policy.VerifyObjects != nil && *policy.VerifyObjects,
 		upstreamGate:     upstreamGate,
+		readers:          map[string]int{},
 	}
 	handler.client = utils.DefaultHTTPClientWrapper()
 	httpcache.ConfigureClientTransport(handler.client, name, transport)
@@ -109,19 +150,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *Handler) Start(ctx context.Context) error {
-	if h.serviceHealth != nil {
-		h.serviceHealth.AddResource("/", []health.ResourceTarget{{Path: "summary"}}, h.upstreams)
-	}
+	h.lifecycleCtx = ctx
 	h.cleanCurrentTemp(ctx)
 	if err := h.restoreCurrent(ctx); err != nil {
 		return err
-	}
-	if h.serviceHealth != nil && h.currentSnapshot().Generation != "" {
-		h.serviceHealth.MarkResourceActive("/", []health.ResourceTarget{{Path: "summary"}})
 	}
 	return nil
 }
 
 func (h *Handler) Stop(ctx context.Context) error {
+	h.mu.Lock()
+	h.stopping = true
+	h.mu.Unlock()
+	if err := utils.WaitGroupContext(ctx, &h.wait); err != nil {
+		return err
+	}
 	return h.base.CloseContext(ctx)
 }

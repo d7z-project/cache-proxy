@@ -54,7 +54,10 @@ func TestRefreshUsesOneUpstreamForMetadataGeneration(t *testing.T) {
 	current := handler.currentSnapshot()
 	require.Equal(t, second.URL, current.Upstream)
 	require.NotEmpty(t, current.Generation)
-	require.ElementsMatch(t, []string{"/summary", "/summary.sig", "/config"}, requests)
+	require.ElementsMatch(t, []string{
+		"/summary", "/summary.sig", "/config",
+		"/summary", "/summary.sig", "/config",
+	}, requests)
 	requireStoreObject(t, store, "flatpak-test", "flatpak/metadata/"+current.Generation+"/summary")
 	requireStoreObject(t, store, "flatpak-test", "flatpak/metadata/"+current.Generation+"/summary.sig")
 	requireStoreObject(t, store, "flatpak-test", "flatpak/metadata/"+current.Generation+"/config")
@@ -105,10 +108,65 @@ func TestSummarySigRequestDoesNotCreateGeneration(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	require.Empty(t, handler.currentSnapshot().Generation)
 	_, err := store.StatObject(context.Background(), "flatpak-test", currentMetadataObject)
 	require.Error(t, err)
+}
+
+func TestCommittedMissingCompanionDoesNotReachUpstream(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path == "/summary" {
+			_, _ = io.WriteString(w, "summary-data")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(t, openTestStore(t), []string{upstream.URL})
+	require.NoError(t, handler.Refresh(context.Background()))
+	before := requests.Load()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/summary.sig", nil))
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Equal(t, before, requests.Load())
+}
+
+func TestCorruptCurrentDoesNotRestorePreviousGeneration(t *testing.T) {
+	var version atomic.Int32
+	version.Store(1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/summary" {
+			_, _ = fmt.Fprintf(w, "summary-%d", version.Load())
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	ctx := context.Background()
+	store := openTestStore(t)
+	handler := newTestHandler(t, store, []string{upstream.URL})
+	require.NoError(t, handler.Refresh(ctx))
+	previous := handler.currentSnapshot().Generation
+	version.Store(2)
+	require.NoError(t, handler.Refresh(ctx))
+	current := handler.currentSnapshot().Generation
+	require.NotEqual(t, previous, current)
+
+	manifestPath := path.Join(metadataRoot, current, "snapshot.yaml")
+	_, err := store.Put(ctx, "flatpak-test", manifestPath, strings.NewReader("corrupt: ["), nil)
+	require.NoError(t, err)
+
+	restored := newTestHandler(t, store, []string{upstream.URL})
+	require.NoError(t, restored.restoreCurrent(ctx))
+	require.Empty(t, restored.currentSnapshot().Generation)
+	_, err = store.StatObject(ctx, "flatpak-test", currentMetadataObject)
+	require.Error(t, err)
+	requireStoreObject(t, store, "flatpak-test", path.Join(metadataRoot, previous, "snapshot.yaml"))
 }
 
 func TestCleanCurrentTempRemovesStalePublishRef(t *testing.T) {
@@ -229,7 +287,7 @@ func TestRepositoryStatusesReportCurrentMetadataGeneration(t *testing.T) {
 	require.Equal(t, "active", status.State)
 	require.Equal(t, upstream.URL, status.Upstream)
 	require.Equal(t, []string{"summary"}, status.PrimaryMetadata)
-	require.Equal(t, 2, status.MetadataCount)
+	require.Equal(t, 3, status.MetadataCount)
 	require.Equal(t, status.Published, status.LastSuccessAt)
 	require.Equal(t, status.Published, status.LastRefreshAt)
 }
@@ -400,18 +458,14 @@ func TestDeltaBypassesCacheWhenDisabled(t *testing.T) {
 			ExpireAfter:     config.DefaultExpireAfter,
 			Upstreams:       []string{upstream.URL},
 			BusyPolicy:      config.BusyPolicyStale,
-			DefaultFreshFor: config.Freshness(defaultMetadataFreshFor),
+			DefaultFreshFor: config.Freshness(defaultDescriptorFreshFor),
 			UpstreamGate: httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{
 				MaxActive: 8, MaxActivePerHost: 4,
 			}),
 			VerifyFunc: handler.verifyCacheObject,
 		},
 		store,
-		resolver{policy: &Policy{
-			MetadataFreshFor:   config.Freshness(defaultMetadataFreshFor),
-			MetadataBusyPolicy: config.BusyPolicyStale,
-			CacheDeltas:        &disabled,
-		}},
+		resolver{policy: &Policy{CacheDeltas: &disabled}},
 		handler.stats,
 		nil,
 	)
@@ -437,7 +491,7 @@ func TestMetadataGCDoesNotDeleteObjectOrDeltaCache(t *testing.T) {
 
 	store := openTestStore(t)
 	handler := newTestHandler(t, store, []string{upstream.URL})
-	for range metadataGenerations + 2 {
+	for range 5 {
 		require.NoError(t, handler.Refresh(context.Background()))
 		time.Sleep(time.Millisecond)
 	}
@@ -606,8 +660,8 @@ func newTestHandlerWithStatsAndHealth(
 		Mode:            config.ModeFlatpak,
 		ExpireAfter:     config.DefaultExpireAfter,
 		Upstreams:       upstreams,
-		BusyPolicy:      policy.MetadataBusyPolicy,
-		DefaultFreshFor: policy.MetadataFreshFor,
+		BusyPolicy:      config.BusyPolicyJoin,
+		DefaultFreshFor: config.Freshness(defaultDescriptorFreshFor),
 		UpstreamGate:    upstreamGate,
 	}
 	return NewHandler(

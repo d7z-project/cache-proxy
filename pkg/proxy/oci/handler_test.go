@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,33 +22,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
-
-func TestParseOCIRef(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
-	}{
-		{name: "repo only", input: "library/alpine", want: "v2/library/alpine/tags/list"},
-		{name: "repo with tag", input: "library/alpine:latest", want: "v2/library/alpine/manifests/latest"},
-		{name: "simple repo", input: "nginx", want: "v2/nginx/tags/list"},
-		{name: "simple repo with tag", input: "nginx:1.25", want: "v2/nginx/manifests/1.25"},
-		{name: "nested repo", input: "org/project/image:v1", want: "v2/org/project/image/manifests/v1"},
-		{name: "empty input", input: "", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseOCIRef(tt.input)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-		})
-	}
-}
 
 func TestResolveRequestMatchesRepoPolicy(t *testing.T) {
 	cfg := &Policy{
@@ -383,6 +357,8 @@ func TestOCIBlobCacheIsIndependentFromRefExpiry(t *testing.T) {
 func TestOCICachesDigestBlobWithoutActiveRef(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir)
 
 	var blobRequests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +394,10 @@ func TestOCICachesDigestBlobWithoutActiveRef(t *testing.T) {
 		return reader.Close() == nil
 	}, time.Second, 10*time.Millisecond)
 	require.False(t, strings.Contains(rec.Body.String(), "Bad Gateway"))
+	require.NoError(t, handler.Stop(ctx))
+	entries, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
 }
 
 func TestOCIBlobFetchClearsBusyStateOnUpstreamError(t *testing.T) {
@@ -661,7 +641,9 @@ func TestOCITokenPurgeExpired(t *testing.T) {
 	handler.auth.tokens["valid"] = ociToken{value: "tok2", expire: now.Add(time.Hour)}
 	handler.auth.tokens["just-expired"] = ociToken{value: "tok3", expire: now}
 
-	handler.purgeExpiredTokens()
+	handler.auth.tokenMu.Lock()
+	handler.trimTokenCacheLocked(now, "")
+	handler.auth.tokenMu.Unlock()
 
 	require.Empty(t, handler.auth.tokens["expired"].value)
 	require.Empty(t, handler.auth.tokens["just-expired"].value)
@@ -681,7 +663,9 @@ func TestOCITokenCacheIsBounded(t *testing.T) {
 		}
 	}
 
-	handler.purgeExpiredTokens()
+	handler.auth.tokenMu.Lock()
+	handler.trimTokenCacheLocked(now, "")
+	handler.auth.tokenMu.Unlock()
 
 	require.LessOrEqual(t, len(handler.auth.tokens), maxTokenCacheEntries)
 	require.Empty(t, handler.auth.tokens["scope-0"].value)

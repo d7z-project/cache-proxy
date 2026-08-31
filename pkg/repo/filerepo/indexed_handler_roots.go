@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-func (h *IndexedHandler) orderedUpstreams() []string {
-	return append([]string(nil), h.upstreams...)
-}
-
 func (h *IndexedHandler) currentRootIDs() []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -64,9 +60,6 @@ func (h *IndexedHandler) registerRoot(result DiscoveryResult) (string, bool, boo
 	}
 	if created {
 		slog.Debug("discovered new repository root", "instance", h.name, "mode", h.mode, "root_id", rootID, "path", result.Root.Path)
-		if h.serviceHealth != nil {
-			h.serviceHealth.AddResource(rootID, targetsToResourceTargets(result.Root.Targets), h.upstreams)
-		}
 	}
 	h.saveState(context.Background())
 	return rootID, created, changed
@@ -220,9 +213,6 @@ func (h *IndexedHandler) AddRepository(root RepositoryRoot) {
 	now := time.Now().UTC()
 	h.roots[root.ID] = &rootEntry{root: root, lastSeenAt: now}
 	h.mu.Unlock()
-	if h.serviceHealth != nil {
-		h.serviceHealth.AddResource(root.ID, targetsToResourceTargets(root.Targets), h.upstreams)
-	}
 }
 
 func (h *IndexedHandler) touchRoot(rootID string) {
@@ -278,11 +268,18 @@ func (h *IndexedHandler) beginRootRetirement(ctx context.Context, rootID string)
 	}
 	if snapshot := h.rootSnapshots[rootID]; snapshot != nil {
 		entry.retirementCleanupGeneration = snapshot.Generation
+		entry.retirementCleanupDigest = snapshot.CleanupIndexDigest
 	}
 	entry.retired = true
 	h.mu.Unlock()
-	if staging, ok := h.loadRefreshStaging(ctx, rootID); ok {
-		h.discardRefreshStaging(ctx, staging)
+	staging, ok, err := h.loadRefreshStaging(ctx, rootID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if err := h.discardRefreshStaging(ctx, rootID, staging); err != nil {
+			return err
+		}
 	} else {
 		if err := h.deleteRefreshStaging(ctx, rootID); err != nil {
 			return err

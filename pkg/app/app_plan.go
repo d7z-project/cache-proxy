@@ -10,7 +10,6 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -63,7 +62,6 @@ func planEntries(
 	stats *httpcache.Stats,
 	upstreamGate *httpcache.UpstreamGate,
 	sched *scheduler.Scheduler,
-	b *bus.Bus,
 ) (map[string]*proxyruntime.Entry, error) {
 	plan := proxyruntime.NewPlanContext(
 		store,
@@ -73,7 +71,6 @@ func planEntries(
 		doc.Server.Bind,
 		doc.Metrics.Path,
 		sched,
-		b,
 	)
 	plan.ReservePathPrefix(statusAPIPath, "status API")
 	drivers := driverSet()

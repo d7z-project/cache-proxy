@@ -14,17 +14,21 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath, userAgent string, headers map[string]string) (*http.Response, error) {
+func (h *handler) remoteRequest(admissionCtx, transferCtx context.Context, method, upstreamPath, userAgent string, headers map[string]string) (*http.Response, error) {
 	targetURL := h.upstream + "/" + httpcache.EscapePath(strings.TrimLeft(upstreamPath, "/"))
 	if userAgent == "" {
 		userAgent = h.client.UserAgent
 	}
 	send := func(authorization string) (*http.Response, error) {
-		releaseAdmission, err := h.upstreamGate.Acquire(ctx, h.upstream, httpcache.AdmissionForeground)
+		releaseAdmission, err := h.upstreamGate.Acquire(admissionCtx, h.upstream, httpcache.AdmissionForeground)
 		if err != nil {
 			return nil, err
 		}
-		request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+		if err := admissionCtx.Err(); err != nil {
+			releaseAdmission()
+			return nil, err
+		}
+		request, err := http.NewRequestWithContext(transferCtx, method, targetURL, nil)
 		if err != nil {
 			releaseAdmission()
 			return nil, err
@@ -77,7 +81,7 @@ func (h *handler) remoteRequest(ctx context.Context, method, upstreamPath, userA
 		return response, nil
 	}
 	_ = response.Body.Close()
-	authorization, err := h.authorizationForChallenge(ctx, challenge)
+	authorization, err := h.authorizationForChallenge(transferCtx, challenge)
 	if err != nil || authorization == "" {
 		return nil, err
 	}

@@ -12,10 +12,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
-	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
-
-const defaultCleanupInterval = 6 * time.Hour
 
 type Policy struct {
 	MetadataFreshFor   config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
@@ -76,20 +73,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		BusyPolicy:   config.BusyPolicyJoin,
 		UpstreamGate: plan.UpstreamGate(),
 	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats(), nil)
-	plan.Scheduler().Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
-		Interval: defaultCleanupInterval,
-		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
-		},
-	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
-		Handler:      handler,
-		Close:        func() error { handler.Close(); return nil },
-		CloseContext: handler.CloseContext,
-		CleanupFn:    handler.Cleanup,
-	})
+	return plan.BindHTTPPath(block.Route.Path, expireAfter, handler)
 }
 
 func applyDefaults(policy *Policy) {

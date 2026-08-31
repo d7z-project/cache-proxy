@@ -46,8 +46,11 @@ type gitHandler struct {
 	syncerCancel context.CancelFunc
 	syncerDone   chan struct{}
 
-	requestMu sync.RWMutex
-	stats     *gitStats
+	requestMu       sync.Mutex
+	activeRequests  int
+	requestDraining bool
+	requestsIdle    chan struct{}
+	stats           *gitStats
 }
 
 func newGitHandler(cfg gitConfig) *gitHandler {
@@ -117,8 +120,28 @@ func (h *gitHandler) Cleanup(_ context.Context, _ config.CleanupConfig) error {
 }
 
 func (h *gitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.requestMu.RLock()
-	defer h.requestMu.RUnlock()
+	h.requestMu.Lock()
+	if h.requestDraining {
+		h.requestMu.Unlock()
+		h.mu.RLock()
+		state := h.state
+		h.mu.RUnlock()
+		h.serveRepositoryState(w, state)
+		return
+	}
+	if h.activeRequests == 0 {
+		h.requestsIdle = make(chan struct{})
+	}
+	h.activeRequests++
+	h.requestMu.Unlock()
+	defer func() {
+		h.requestMu.Lock()
+		h.activeRequests--
+		if h.activeRequests == 0 {
+			close(h.requestsIdle)
+		}
+		h.requestMu.Unlock()
+	}()
 
 	h.mu.RLock()
 	state := h.state
@@ -133,10 +156,19 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gitHandler) drainRequests(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
+	h.requestMu.Lock()
+	h.requestDraining = true
+	if h.activeRequests == 0 {
+		h.requestDraining = false
+		h.requestMu.Unlock()
+		return nil
+	}
+	done := h.requestsIdle
+	h.requestMu.Unlock()
+
+	defer func() {
 		h.requestMu.Lock()
-		close(done)
+		h.requestDraining = false
 		h.requestMu.Unlock()
 	}()
 	select {

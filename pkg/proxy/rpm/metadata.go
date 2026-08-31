@@ -184,7 +184,7 @@ func buildRepomdTarget(
 	target filerepo.MetadataTarget,
 	paths *filerepo.PathIndexBuilder,
 ) (int, error) {
-	repomd, err := session.Fetch(ctx, target)
+	repomd, err := session.FetchAnchor(ctx, target)
 	if err != nil {
 		return 0, err
 	}
@@ -193,7 +193,7 @@ func buildRepomdTarget(
 	snapshot.Metadata[repomd.Path] = filerepo.MetadataObject{Path: repomd.Path, Required: true}
 	for _, suffix := range []string{".asc", ".sig", ".key"} {
 		companionPath := repomd.Path + suffix
-		companion, err := session.FetchDerived(ctx, companionPath)
+		companion, err := session.FetchOptionalAnchor(ctx, companionPath)
 		if err != nil {
 			return 0, err
 		}
@@ -238,7 +238,7 @@ func buildRepomdItem(
 ) (int, error) {
 	metadataPath := path.Join(repoRoot, item.Location)
 	metaTarget := filerepo.MetadataTarget{URL: metadataPath}
-	blob, err := session.Fetch(ctx, metaTarget)
+	blob, err := session.FetchRequired(ctx, metaTarget)
 	if err != nil {
 		return 0, err
 	}

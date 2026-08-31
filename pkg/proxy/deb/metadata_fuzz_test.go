@@ -17,6 +17,7 @@ func FuzzDebianMetadataParsers(f *testing.F) {
 	f.Add(uint8(1), "Package: hello\nFilename: pool/main/h/hello_1.0_amd64.deb\n\n")
 	f.Add(uint8(2), "Package: hello\nDirectory: pool/main/h/hello\nChecksums-Sha256:\n abc 1 hello.dsc\n\n")
 	f.Add(uint8(0), "SHA256:\n invalid entry\n")
+	f.Add(uint8(2), "Directory:0\n .\nChecksums-Sha256:0 0 0")
 
 	f.Fuzz(func(t *testing.T, kind uint8, input string) {
 		if len(input) > 256<<10 {
@@ -40,6 +41,7 @@ func FuzzDebianMetadataParsers(f *testing.F) {
 			require.True(t, slices.IsSorted(paths))
 		case 1, 2:
 			paths := &filerepo.PathIndexBuilder{}
+			defer func() { _ = paths.Close() }()
 			var err error
 			if kind%3 == 1 {
 				_, err = parsePackages(strings.NewReader(input), paths, 0)

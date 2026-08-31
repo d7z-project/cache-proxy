@@ -32,8 +32,8 @@ func routeForPath(policy *Policy, cleanPath string) (httpcache.Route, error) {
 			ObjectPath:   "flatpak/metadata-cache/" + cleanPath,
 			UpstreamPath: cleanPath,
 			Policy:       config.PolicyRevalidate,
-			FreshFor:     policy.MetadataFreshFor,
-			BusyPolicy:   policy.MetadataBusyPolicy,
+			FreshFor:     config.Freshness(defaultDescriptorFreshFor),
+			BusyPolicy:   config.BusyPolicyJoin,
 		}, nil
 	case isObjectPath(cleanPath):
 		return httpcache.Route{
@@ -71,8 +71,8 @@ func routeForPath(policy *Policy, cleanPath string) (httpcache.Route, error) {
 			ObjectPath:   "flatpak/" + cleanPath,
 			UpstreamPath: cleanPath,
 			Policy:       config.PolicyRevalidate,
-			FreshFor:     policy.MetadataFreshFor,
-			BusyPolicy:   policy.MetadataBusyPolicy,
+			FreshFor:     config.Freshness(defaultDescriptorFreshFor),
+			BusyPolicy:   config.BusyPolicyStale,
 		}, nil
 	default:
 		return httpcache.Route{

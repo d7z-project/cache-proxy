@@ -186,8 +186,16 @@ func (h *Handler) openTargetURL(ctx context.Context, method string, options remo
 	if err := h.validateTargetURL(options.TargetURL, options.AllowedTargetHosts); err != nil {
 		return nil, err
 	}
-	releaseAdmission, err := h.upstreamGate.Acquire(ctx, options.TargetURL, AdmissionForeground)
+	admissionCtx := options.AdmissionContext
+	if admissionCtx == nil {
+		admissionCtx = ctx
+	}
+	releaseAdmission, err := h.upstreamGate.Acquire(admissionCtx, options.TargetURL, AdmissionForeground)
 	if err != nil {
+		return nil, err
+	}
+	if err := admissionCtx.Err(); err != nil {
+		releaseAdmission()
 		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, method, options.TargetURL, nil)
@@ -223,12 +231,6 @@ func (h *Handler) openTargetURL(ctx context.Context, method string, options remo
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		if options.Record {
-			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, response.StatusCode, latency, 0)
-			if h.health != nil {
-				h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
-			}
-		}
 		_ = h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
 	}
 	if options.Record && h.health != nil {
@@ -292,8 +294,16 @@ func (h *Handler) tryUpstream(
 	if rawQuery != "" {
 		targetURL += "?" + rawQuery
 	}
-	releaseAdmission, err := h.upstreamGate.Acquire(ctx, candidate.URL, AdmissionForeground)
+	admissionCtx := options.AdmissionContext
+	if admissionCtx == nil {
+		admissionCtx = ctx
+	}
+	releaseAdmission, err := h.upstreamGate.Acquire(admissionCtx, candidate.URL, AdmissionForeground)
 	if err != nil {
+		return nil, err
+	}
+	if err := admissionCtx.Err(); err != nil {
+		releaseAdmission()
 		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
@@ -333,12 +343,6 @@ func (h *Handler) tryUpstream(
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		if options.Record {
-			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)
-		}
-		if h.health != nil {
-			h.health.RecordResult(candidate.URL, response.StatusCode, latency)
-		}
 		_ = h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
 	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)

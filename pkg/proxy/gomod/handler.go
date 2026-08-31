@@ -97,10 +97,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.base.ServeHTTP(w, req)
 }
 
-func (h *Handler) Close() {
-	h.base.Close()
-}
-
 func (h *Handler) CloseContext(ctx context.Context) error {
 	return h.base.CloseContext(ctx)
 }

@@ -52,6 +52,8 @@ type handler struct {
 	lifecycleCtx context.Context
 	cancel       context.CancelFunc
 	wait         sync.WaitGroup
+	closeMu      sync.Mutex
+	closing      bool
 	auth         authHandler
 	downloads    sync.Map
 	refLocks     *utils.RWLockGroup

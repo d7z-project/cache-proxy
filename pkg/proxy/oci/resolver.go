@@ -131,17 +131,3 @@ func matchRepo(cfg *Policy, repoName string) repoMatch {
 	}
 	return match
 }
-
-func parseOCIRef(ref string) (string, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", errors.New("empty OCI reference")
-	}
-	if i := strings.LastIndex(ref, ":"); i >= 0 && !strings.Contains(ref[i+1:], "/") {
-		repo, tag := ref[:i], ref[i+1:]
-		if repo != "" && tag != "" {
-			return "v2/" + repo + "/manifests/" + tag, nil
-		}
-	}
-	return "v2/" + ref + "/tags/list", nil
-}

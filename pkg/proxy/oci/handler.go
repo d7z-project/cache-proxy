@@ -3,6 +3,7 @@ package oci
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -52,12 +53,6 @@ func (h *handler) Start(ctx context.Context) error {
 	return nil
 }
 
-func (h *handler) purgeExpiredTokens() {
-	h.auth.tokenMu.Lock()
-	h.trimTokenCacheLocked(time.Now(), "")
-	h.auth.tokenMu.Unlock()
-}
-
 func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 	for key, token := range h.auth.tokens {
 		if token.value == "" || !now.Before(token.expire) {
@@ -90,8 +85,21 @@ func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 }
 
 func (h *handler) Stop(ctx context.Context) error {
+	h.closeMu.Lock()
+	h.closing = true
 	h.cancel()
+	h.closeMu.Unlock()
 	return utils.WaitGroupContext(ctx, &h.wait)
+}
+
+func (h *handler) beginOperation() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closing {
+		return false
+	}
+	h.wait.Add(1)
+	return true
 }
 
 func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
@@ -103,7 +111,10 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
 			return fs.SkipAll
 		}
-		if err != nil || entry.IsDir() || path.Base(current) != "state.yaml" {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || path.Base(current) != "state.yaml" {
 			return nil
 		}
 		lock := h.refLocks.Get(current)
@@ -118,11 +129,10 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 				slog.Info("oci cleanup dry-run delete", "instance", h.name, "prefix", path.Dir(current))
 				return nil
 			}
-			if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil && !errors.Is(removeErr, context.Canceled) {
-				slog.Info("oci cleanup delete failed", "instance", h.name, "prefix", path.Dir(current), "err", removeErr)
-			} else {
-				deleted++
+			if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil {
+				return fmt.Errorf("delete expired OCI ref %s: %w", path.Dir(current), removeErr)
 			}
+			deleted++
 		}
 		return nil
 	})
@@ -139,7 +149,10 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
 			return fs.SkipAll
 		}
-		if walkErr != nil || entry.IsDir() {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		if _, busy := h.downloads.Load(current); busy {
@@ -147,7 +160,7 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 		}
 		info, statErr := h.store.StatObject(ctx, h.name, current)
 		if statErr != nil {
-			return nil
+			return statErr
 		}
 		fetchedAt, parseErr := utils.ParseFetchedAt(info.Options["fetched-at"])
 		if parseErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
@@ -158,11 +171,10 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 			slog.Info("oci cleanup dry-run delete blob", "instance", h.name, "path", current)
 			return nil
 		}
-		if deleteErr := h.store.DeleteObject(ctx, h.name, current); deleteErr != nil && !errors.Is(deleteErr, context.Canceled) {
-			slog.Info("oci cleanup blob failed", "instance", h.name, "path", current, "err", deleteErr)
-		} else {
-			deleted++
+		if deleteErr := h.store.DeleteObject(ctx, h.name, current); deleteErr != nil {
+			return fmt.Errorf("delete expired OCI blob %s: %w", current, deleteErr)
 		}
+		deleted++
 		return nil
 	})
 	if errors.Is(err, fs.ErrNotExist) {
@@ -178,7 +190,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
 		return
 	}
-	h.wait.Add(1)
+	if !h.beginOperation() {
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
 	defer h.wait.Done()
 
 	resolved, err := resolveRequest(req, h.policy)
@@ -335,7 +350,7 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 
 func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRequest(ctx, req.Method, upstreamPath, userAgent, headers)
+	response, err := h.remoteRequest(ctx, ctx, req.Method, upstreamPath, userAgent, headers)
 	if err != nil {
 		return 0, "", 0, err
 	}

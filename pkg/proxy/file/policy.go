@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 
@@ -16,10 +15,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
-	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
-
-const defaultCleanupInterval = 6 * time.Hour
 
 type Policy struct {
 	PassHeaders   []string         `json:"passHeaders,omitempty" yaml:"pass_headers,omitempty"`
@@ -52,26 +48,6 @@ type Driver struct{}
 func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 
 func (Driver) Mode() string { return config.ModeFile }
-
-type handler struct {
-	base *httpcache.Handler
-}
-
-func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	h.base.ServeHTTP(w, req)
-}
-
-func (h *handler) Start(ctx context.Context) error {
-	return nil
-}
-
-func (h *handler) Stop(ctx context.Context) error {
-	return h.base.CloseContext(ctx)
-}
-
-func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
-	return h.base.Cleanup(ctx, opts)
-}
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	var block Block
@@ -107,14 +83,10 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.Transport != nil {
 		healthCfg = health.ApplyConfigPatch(healthCfg, block.Transport.Health)
 	}
-	if err := health.ValidateConfig(healthCfg); err != nil {
-		return fmt.Errorf("health: %w", err)
-	}
 	if !plan.Enabled() {
 		return nil
 	}
 	sh := health.New(plan.Name(), config.ModeFile, healthCfg, upstreams, plan.Stats())
-	sh.SetBus(plan.Bus())
 	base := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
 		Mode:            config.ModeFile,
 		ExpireAfter:     expireAfter,
@@ -125,16 +97,8 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		DefaultFreshFor: block.FreshFor,
 		UpstreamGate:    plan.UpstreamGate(),
 	}, plan.Store(), fileResolver{policy: &block.Policy}, plan.Stats(), sh)
-	handler := &handler{base: base}
-	plan.Scheduler().Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
-		Interval: defaultCleanupInterval,
-		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
-		},
-	})
 	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindPath(block.Route.Path, expireAfter, handler)
+	return plan.BindHTTPPath(block.Route.Path, expireAfter, base)
 }
 
 type fileResolver struct {

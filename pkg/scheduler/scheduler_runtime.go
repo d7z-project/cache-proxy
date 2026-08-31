@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"gopkg.d7z.net/cache-proxy/pkg/bus"
 )
 
 func (s *Scheduler) loop() {
@@ -33,8 +31,6 @@ func (s *Scheduler) loop() {
 			return
 		case c := <-s.cmdCh:
 			s.handleCmd(c)
-		case evt := <-s.busSub:
-			s.handleBusEvent(evt)
 		case <-ticker.C:
 			s.processDue()
 		}
@@ -72,78 +68,25 @@ func (s *Scheduler) handleCmd(c cmd) {
 			infos = append(infos, ts.TaskInfo)
 		}
 		c.respCh <- infos
-	}
-}
-
-func (s *Scheduler) handleBusEvent(evt bus.Event) {
-	switch evt.Type {
-	case bus.EventMetadataDiscovered:
-		p, ok := evt.Payload.(bus.MetadataDiscoveredPayload)
-		if !ok {
-			slog.Debug("scheduler ignored metadata discovery event with invalid payload")
-			return
-		}
-		factory := s.factories[p.Instance]
-		if factory == nil {
-			return
-		}
-		refreshKey := NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID)
-		if _, exists := s.tasks[refreshKey]; exists {
-			return
-		}
-		now := time.Now()
-		s.registerLocked(TaskDef{
-			Key:      refreshKey,
-			Interval: factory.RefreshInterval,
-			Handler:  factory.NewRefresh(p.RootID),
-		}, "discovery", now)
-		s.registerLocked(TaskDef{
-			Key:      NewTaskKey(p.Instance, TypeMetadataGC, p.RootID),
-			Interval: factory.GCInterval,
-			Handler:  factory.NewGC(p.RootID),
-		}, "discovery", time.Time{})
-		s.triggerLocked(refreshKey)
-		s.updateHeap(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID))
-		s.reconcileFactoryLocked(factory)
-		s.refreshMetrics()
-		s.saveState()
-		slog.Debug("scheduler registered metadata tasks", "instance", p.Instance, "root_id", p.RootID)
-	case bus.EventMetadataRefreshRequested:
-		p, ok := evt.Payload.(bus.MetadataRefreshRequestedPayload)
-		if !ok {
-			slog.Debug("scheduler ignored metadata refresh request with invalid payload")
-			return
-		}
-		key := NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID)
-		registered := false
-		if _, exists := s.tasks[key]; !exists {
-			if factory := s.factories[p.Instance]; factory != nil {
-				s.syncMetadataTaskLocked(factory, TypeMetadataRefresh, p.RootID)
-				_, registered = s.tasks[key]
+	case cmdTrigger:
+		changed := false
+		if _, exists := s.tasks[c.key]; !exists && c.key.Type() == TypeMetadataRefresh && c.key.RootID() != "" {
+			if factory := s.factories[c.key.Instance()]; factory != nil {
+				changed = s.syncMetadataTaskLocked(factory, TypeMetadataRefresh, c.key.RootID())
+				if s.syncMetadataTaskLocked(factory, TypeMetadataGC, c.key.RootID()) {
+					changed = true
+				}
 			}
 		}
-		triggerResult := s.triggerLocked(key)
-		if s.metrics != nil {
-			s.metrics.refreshRequests.WithLabelValues(p.Instance, triggerResult).Inc()
+		result := s.triggerLocked(c.key)
+		if s.metrics != nil && c.key.Type() == TypeMetadataRefresh {
+			s.metrics.refreshRequests.WithLabelValues(c.key.Instance(), result).Inc()
 		}
-		s.refreshMetrics()
-		if registered || triggerResult == "advanced" {
+		if changed || result == "advanced" {
 			s.saveState()
 		}
-	case bus.EventMetadataRemoved:
-		p, ok := evt.Payload.(bus.MetadataRemovedPayload)
-		if !ok {
-			slog.Debug("scheduler ignored metadata removal event with invalid payload")
-			return
-		}
-		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataRefresh, p.RootID), "removed")
-		s.unregisterLocked(NewTaskKey(p.Instance, TypeMetadataGC, p.RootID), "removed")
-		if factory := s.factories[p.Instance]; factory != nil {
-			s.reconcileFactoryLocked(factory)
-		}
 		s.refreshMetrics()
-		s.saveState()
-		slog.Debug("scheduler removed metadata tasks", "instance", p.Instance, "root_id", p.RootID)
+		c.respCh <- result != "missing"
 	}
 }
 
@@ -157,10 +100,10 @@ func (s *Scheduler) processDue() {
 		if s.stopped.Load() {
 			return
 		}
-		ts := s.heapPeek()
-		if ts == nil || ts.NextRun.After(now) {
+		if s.heap.Len() == 0 || s.heap[0].NextRun.After(now) {
 			return
 		}
+		ts := s.heap[0]
 		heap.Pop(&s.heap)
 		s.execute(ts)
 	}
@@ -250,15 +193,7 @@ func (s *Scheduler) syncMetadataTaskLocked(factory *TaskFactory, typ TaskType, r
 }
 
 func (s *Scheduler) execute(ts *taskState) {
-	deadline := ts.Interval / 2
-	if deadline < time.Minute {
-		deadline = time.Minute
-	}
-	if deadline > 30*time.Minute {
-		deadline = 30 * time.Minute
-	}
-
-	ctx, cancel := context.WithTimeout(s.ctx, deadline)
+	ctx, cancel := context.WithTimeout(s.ctx, s.taskTimeout(ts.Interval))
 	defer cancel()
 
 	ts.Status = StatusRunning
@@ -273,6 +208,7 @@ func (s *Scheduler) execute(ts *taskState) {
 		completed <- taskResult{outcome: outcome, err: err}
 	}()
 	var call taskResult
+	deadlineC := ctx.Done()
 	waiting := true
 	for waiting {
 		select {
@@ -280,8 +216,12 @@ func (s *Scheduler) execute(ts *taskState) {
 			waiting = false
 		case c := <-s.cmdCh:
 			s.handleCmd(c)
-		case evt := <-s.busSub:
-			s.handleBusEvent(evt)
+		case <-deadlineC:
+			ts.Status = StatusStuck
+			ts.LastError = "task deadline exceeded; waiting for cooperative termination"
+			deadlineC = nil
+			s.refreshMetrics()
+			s.saveState()
 		}
 	}
 	outcome, err := call.outcome, call.err
@@ -308,9 +248,11 @@ func (s *Scheduler) execute(ts *taskState) {
 
 	ts.LastRun = start
 	ts.RunCount++
+	retryAtScheduled := false
 	if err != nil && !errors.Is(err, ErrTaskSkipped) {
 		var retryAt RetryAtError
 		if errors.As(err, &retryAt) {
+			retryAtScheduled = true
 			ts.LastError = ""
 			ts.Status = StatusDone
 			ts.NextRun = retryAt.At
@@ -334,14 +276,15 @@ func (s *Scheduler) execute(ts *taskState) {
 	} else {
 		ts.LastError = ""
 		ts.Status = StatusDone
-		if ts.rerunRequested {
-			ts.rerunRequested = false
-			ts.NextRun = time.Now()
-		} else {
-			ts.NextRun = time.Now().Add(ts.Interval)
-		}
+		ts.NextRun = time.Now().Add(ts.Interval)
 		if errors.Is(err, ErrTaskSkipped) {
 			result = "skipped"
+		}
+	}
+	if ts.rerunRequested {
+		ts.rerunRequested = false
+		if !retryAtScheduled {
+			ts.NextRun = time.Now()
 		}
 	}
 
@@ -372,9 +315,7 @@ func (s *Scheduler) execute(ts *taskState) {
 			Message:    message,
 			Err:        ts.LastError,
 		}
-		observed := make(chan struct{})
-		go func() {
-			defer close(observed)
+		func() {
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					slog.Error("scheduler observer panic", "panic", recovered)
@@ -382,17 +323,6 @@ func (s *Scheduler) execute(ts *taskState) {
 			}()
 			runObserver(run)
 		}()
-		waiting = true
-		for waiting {
-			select {
-			case <-observed:
-				waiting = false
-			case c := <-s.cmdCh:
-				s.handleCmd(c)
-			case evt := <-s.busSub:
-				s.handleBusEvent(evt)
-			}
-		}
 	}
 
 	if ts.Interval > 0 {
@@ -420,6 +350,9 @@ func (s *Scheduler) registerLocked(def TaskDef, source string, discoveredAt time
 		handler:      def.Handler,
 		index:        -1,
 		discoveredAt: discoveredAt,
+	}
+	if def.RunImmediately {
+		ts.NextRun = time.Now()
 	}
 	s.tasks[def.Key] = ts
 	s.metricInstances[def.Key.Instance()] = struct{}{}
@@ -459,7 +392,7 @@ func (s *Scheduler) triggerLocked(key TaskKey) string {
 	if !ok {
 		return "missing"
 	}
-	if ts.Status == StatusRunning {
+	if ts.Status == StatusRunning || ts.Status == StatusStuck {
 		ts.rerunRequested = true
 		return "coalesced"
 	}
@@ -482,13 +415,6 @@ func (s *Scheduler) updateHeap(key TaskKey) {
 	} else {
 		heap.Push(&s.heap, ts)
 	}
-}
-
-func (s *Scheduler) heapPeek() *taskState {
-	if s.heap.Len() == 0 {
-		return nil
-	}
-	return s.heap[0]
 }
 
 func (s *Scheduler) refreshMetrics() {
@@ -528,7 +454,7 @@ func (s *Scheduler) refreshMetrics() {
 			s.metrics.nextDelay.WithLabelValues(inst, string(typ)).Set(nextDelay[key])
 			s.metrics.overdue.WithLabelValues(inst, string(typ)).Set(overdue[key])
 			s.metrics.backoff.WithLabelValues(inst, string(typ)).Set(backoffVals[key])
-			for _, status := range []TaskStatus{StatusIdle, StatusRunning, StatusDone, StatusFailed} {
+			for _, status := range []TaskStatus{StatusIdle, StatusRunning, StatusStuck, StatusDone, StatusFailed} {
 				s.metrics.status.WithLabelValues(inst, string(typ), string(status)).
 					Set(statuses[[3]string{inst, string(typ), string(status)}])
 			}
