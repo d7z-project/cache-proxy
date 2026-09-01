@@ -3,16 +3,25 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
+	"strconv"
 	"sync"
 	"time"
 
+	gitlib "github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/server"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/spf13/afero"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 type gitConfig struct {
@@ -21,9 +30,8 @@ type gitConfig struct {
 	upstream         string
 	auth             transport.AuthMethod
 	proxyURL         string
-	syncInterval     time.Duration
 	operationTimeout time.Duration
-	forceOverwrite   bool
+	upstreamGate     *httpcache.UpstreamGate
 }
 
 type gitHandler struct {
@@ -31,250 +39,192 @@ type gitHandler struct {
 	upstream         string
 	auth             transport.AuthMethod
 	proxyURL         string
-	syncInterval     time.Duration
 	operationTimeout time.Duration
-	forceOverwrite   bool
 	billyFs          *billyAdapter
 	bootstrapClient  *http.Client
+	upstreamGate     *httpcache.UpstreamGate
 
-	mu         sync.RWMutex
-	current    *gitGeneration
-	readers    map[string]int
-	state      gitState
-	refreshErr string
+	repositoryMu sync.RWMutex
+	repository   *gitlib.Repository
+	server       transport.Transport
+	syncing      bool
+	lastError    string
 
-	syncerCancel context.CancelFunc
-	syncerDone   chan struct{}
-
-	requestMu       sync.Mutex
-	activeRequests  int
-	requestDraining bool
-	requestsIdle    chan struct{}
-	stats           *gitStats
+	requestMu sync.Mutex
+	closing   bool
+	requests  sync.WaitGroup
 }
 
 func newGitHandler(cfg gitConfig) *gitHandler {
-	bootstrapTransport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if cfg.proxyURL != "" {
 		if proxyURL, err := url.Parse(cfg.proxyURL); err == nil {
-			bootstrapTransport.Proxy = http.ProxyURL(proxyURL)
+			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
 	return &gitHandler{
-		name:             cfg.name,
-		upstream:         cfg.upstream,
-		auth:             cfg.auth,
-		proxyURL:         cfg.proxyURL,
-		syncInterval:     cfg.syncInterval,
-		operationTimeout: cfg.operationTimeout,
-		forceOverwrite:   cfg.forceOverwrite,
-		billyFs:          cfg.billyFs,
-		bootstrapClient:  &http.Client{Transport: bootstrapTransport, Timeout: cfg.operationTimeout},
-		state:            gitStateCloning,
-		readers:          map[string]int{},
-		stats:            newGitStats(cfg.name),
+		name: cfg.name, upstream: cfg.upstream, auth: cfg.auth, proxyURL: cfg.proxyURL,
+		operationTimeout: cfg.operationTimeout, billyFs: cfg.billyFs,
+		bootstrapClient: &http.Client{Transport: transport, Timeout: cfg.operationTimeout}, upstreamGate: cfg.upstreamGate,
 	}
 }
 
-func (h *gitHandler) Start(ctx context.Context) error {
-	h.mu.Lock()
-	if h.syncerCancel != nil {
-		h.mu.Unlock()
+func (h *gitHandler) Start(context.Context) error {
+	storage := filesystem.NewStorage(h.billyFs, cache.NewObjectLRUDefault())
+	repository, err := gitlib.Open(storage, nil)
+	if err != nil {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	h.syncerCancel = cancel
-	h.syncerDone = make(chan struct{})
-	h.mu.Unlock()
-	if err := h.restoreCurrent(); err != nil {
-		cancel()
-		h.mu.Lock()
-		h.syncerCancel = nil
-		close(h.syncerDone)
-		h.syncerDone = nil
-		h.mu.Unlock()
-		return err
+	if _, err := repository.Head(); err != nil {
+		return nil
 	}
-
-	go func() {
-		defer close(h.syncerDone)
-		h.cloneAndSync(ctx)
-	}()
+	h.repositoryMu.Lock()
+	h.repository = repository
+	h.server = server.NewServer(&singleLoader{storer: storage})
+	h.repositoryMu.Unlock()
 	return nil
 }
 
 func (h *gitHandler) Stop(ctx context.Context) error {
-	h.mu.Lock()
-	cancel := h.syncerCancel
-	done := h.syncerDone
-	h.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	return h.drainRequests(ctx)
+	h.requestMu.Lock()
+	h.closing = true
+	h.requestMu.Unlock()
+	return utils.WaitGroupContext(ctx, &h.requests)
 }
 
-func (h *gitHandler) Cleanup(ctx context.Context, _ config.CleanupConfig) error {
-	entries, err := h.billyFs.ReadDir("generations")
+func (h *gitHandler) Sync(ctx context.Context) error {
+	releaseAdmission, err := h.upstreamGate.Acquire(ctx, h.upstream, httpcache.AdmissionRefresh)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	defer releaseAdmission()
+
+	h.repositoryMu.Lock()
+	defer h.repositoryMu.Unlock()
+	h.syncing = true
+	defer func() { h.syncing = false }()
+
+	operationCtx := ctx
+	cancel := func() {}
+	if h.operationTimeout > 0 {
+		operationCtx, cancel = context.WithTimeout(ctx, h.operationTimeout)
+	}
+	defer cancel()
+
+	if h.repository == nil {
+		if err := h.clearRepository(); err != nil {
 			return err
 		}
-		entries = nil
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].ModTime().Equal(entries[j].ModTime()) {
-			return entries[i].Name() > entries[j].Name()
+		storage := filesystem.NewStorage(h.billyFs, cache.NewObjectLRUDefault())
+		options := &gitlib.CloneOptions{URL: h.upstream, Auth: h.auth, Tags: gitlib.AllTags}
+		if h.proxyURL != "" {
+			options.ProxyOptions = proxyOptions(h.proxyURL)
 		}
-		return entries[i].ModTime().After(entries[j].ModTime())
-	})
-	h.mu.RLock()
-	retained := make(map[string]struct{}, len(h.readers)+2)
-	if h.current != nil {
-		retained[h.current.name] = struct{}{}
-	}
-	for generation, readers := range h.readers {
-		if readers > 0 {
-			retained[generation] = struct{}{}
+		repository, err := gitlib.CloneContext(operationCtx, storage, nil, options)
+		if err != nil {
+			h.lastError = err.Error()
+			return err
 		}
+		if _, err := repository.Head(); err != nil {
+			h.lastError = err.Error()
+			return fmt.Errorf("validate git mirror: %w", err)
+		}
+		h.repository = repository
+		h.server = server.NewServer(&singleLoader{storer: storage})
+		h.lastError = ""
+		slog.Info("git mirror cloned", "instance", h.name, "upstream", h.redactedUpstream())
+		return nil
 	}
-	h.mu.RUnlock()
-	keptPrevious := false
+
+	options := &gitlib.FetchOptions{
+		Auth: h.auth, Force: true, Prune: true,
+		RefSpecs: []gitconfig.RefSpec{"+refs/*:refs/*"},
+	}
+	if h.proxyURL != "" {
+		options.ProxyOptions = proxyOptions(h.proxyURL)
+	}
+	err = h.repository.FetchContext(operationCtx, options)
+	if errors.Is(err, gitlib.NoErrAlreadyUpToDate) {
+		err = nil
+	}
+	if err != nil {
+		h.lastError = err.Error()
+		return err
+	}
+	h.lastError = ""
+	return nil
+}
+
+func (h *gitHandler) clearRepository() error {
+	entries, err := afero.ReadDir(h.billyFs.fs, ".")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read git mirror directory: %w", err)
+	}
 	for _, entry := range entries {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if !entry.IsDir() {
-			continue
-		}
-		if _, keep := retained[entry.Name()]; keep {
-			continue
-		}
-		if !keptPrevious {
-			keptPrevious = true
-			continue
-		}
-		if err := removeGitTree(h.billyFs, "generations/"+entry.Name()); err != nil {
-			return err
-		}
-	}
-	for _, legacyPath := range []string{
-		"HEAD", "branches", "config", "description", "hooks", "index", "info", "logs",
-		"modules", "objects", "packed-refs", "refs", "shallow",
-	} {
-		if err := removeGitTree(h.billyFs, legacyPath); err != nil {
-			return err
+		if err := (afero.Afero{Fs: h.billyFs.fs}).RemoveAll(entry.Name()); err != nil {
+			return fmt.Errorf("clear git mirror %s: %w", entry.Name(), err)
 		}
 	}
 	return nil
 }
 
-func (h *gitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.requestMu.Lock()
-	if h.requestDraining {
+	if h.closing {
 		h.requestMu.Unlock()
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "repository handler is stopping", http.StatusServiceUnavailable)
 		return
 	}
-	if h.activeRequests == 0 {
-		h.requestsIdle = make(chan struct{})
-	}
-	h.activeRequests++
+	h.requests.Add(1)
 	h.requestMu.Unlock()
-	defer func() {
-		h.requestMu.Lock()
-		h.activeRequests--
-		if h.activeRequests == 0 {
-			close(h.requestsIdle)
-		}
-		h.requestMu.Unlock()
-	}()
+	defer h.requests.Done()
 
-	generation, release := h.acquireCurrent()
-	if generation == nil {
-		h.proxyBootstrap(w, r)
+	if !h.repositoryMu.TryRLock() {
+		h.proxyBootstrap(w, req)
 		return
 	}
-	defer release()
-
-	serveGitHTTP(w, r, generation.server, h.name)
-}
-
-func (h *gitHandler) acquireCurrent() (*gitGeneration, func()) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.current == nil {
-		return nil, func() {}
+	if h.server == nil {
+		h.repositoryMu.RUnlock()
+		h.proxyBootstrap(w, req)
+		return
 	}
-	generation := h.current
-	h.readers[generation.name]++
-	return generation, func() {
-		h.mu.Lock()
-		h.readers[generation.name]--
-		if h.readers[generation.name] == 0 {
-			delete(h.readers, generation.name)
-		}
-		h.mu.Unlock()
-	}
-}
-
-func (h *gitHandler) drainRequests(ctx context.Context) error {
-	h.requestMu.Lock()
-	h.requestDraining = true
-	if h.activeRequests == 0 {
-		h.requestDraining = false
-		h.requestMu.Unlock()
-		return nil
-	}
-	done := h.requestsIdle
-	h.requestMu.Unlock()
-
-	defer func() {
-		h.requestMu.Lock()
-		h.requestDraining = false
-		h.requestMu.Unlock()
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (h *gitHandler) redactedUpstream() string {
-	return redactURL(h.upstream)
+	serveGitHTTP(w, req, h.server, h.name)
+	h.repositoryMu.RUnlock()
 }
 
 func (h *gitHandler) DashboardStatus() (color, label, extra string) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	if h.current != nil {
-		if h.state == gitStateSyncing {
+	h.repositoryMu.RLock()
+	defer h.repositoryMu.RUnlock()
+	if h.repository != nil {
+		if h.syncing {
 			return "green", "ready", "syncing"
 		}
-		return "green", "ready", ""
+		return "green", "ready", h.lastError
 	}
-	switch h.state {
-	case gitStateCloning:
+	if h.syncing {
 		return "blue", "cloning...", ""
-	case gitStateSyncing:
-		return "blue", "syncing...", ""
-	case gitStateReady:
-		return "green", "ready", ""
-	case gitStateFailed:
-		return "red", "failed", h.refreshErr
-	default:
-		return "gray", "unknown", ""
 	}
+	if h.lastError != "" {
+		return "red", "failed", h.lastError
+	}
+	return "gray", "starting", ""
+}
+
+func (h *gitHandler) redactedUpstream() string { return redactURL(h.upstream) }
+
+func (h *gitHandler) writeAdmissionError(w http.ResponseWriter, err error) {
+	status := http.StatusServiceUnavailable
+	var limited *httpcache.UpstreamRateLimitError
+	if errors.As(err, &limited) {
+		status = http.StatusTooManyRequests
+	}
+	if seconds, ok := httpcache.AdmissionRetryAfterSeconds(err); ok {
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
+	http.Error(w, http.StatusText(status), status)
+}
+
+func proxyOptions(rawURL string) transport.ProxyOptions {
+	return transport.ProxyOptions{URL: rawURL}
 }

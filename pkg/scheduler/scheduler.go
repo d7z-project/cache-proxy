@@ -3,8 +3,8 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -14,10 +14,9 @@ import (
 type TaskType string
 
 const (
-	TypeBlobGC          TaskType = "blob_gc"
-	TypeExpireCleanup   TaskType = "expire_cleanup"
-	TypeMetadataRefresh TaskType = "metadata_refresh"
-	TypeMetadataGC      TaskType = "metadata_gc"
+	TypeBlobGC        TaskType = "blob_gc"
+	TypeExpireCleanup TaskType = "expire_cleanup"
+	TypeGitSync       TaskType = "git_sync"
 )
 
 type TaskStatus string
@@ -25,15 +24,12 @@ type TaskStatus string
 const (
 	StatusIdle    TaskStatus = "idle"
 	StatusRunning TaskStatus = "running"
-	StatusStuck   TaskStatus = "stuck"
 	StatusDone    TaskStatus = "done"
 	StatusFailed  TaskStatus = "failed"
 )
 
-// TaskHandler runs a scheduled task and may report a structured successful outcome.
-type TaskHandler func(ctx context.Context) (*TaskOutcome, error)
+type TaskHandler func(context.Context) (*TaskOutcome, error)
 
-// TaskOutcome describes the semantic result of a completed task.
 type TaskOutcome struct {
 	Result     string
 	ReasonCode string
@@ -43,35 +39,17 @@ type TaskOutcome struct {
 
 var ErrTaskSkipped = errors.New("task skipped")
 
-var errHandlerPanic = errors.New("handler panic")
-
-const maxTaskErrorBytes = 4096
-
-type RetryAtError struct {
-	At time.Time
-}
-
-func (e RetryAtError) Error() string {
-	return "retry at " + e.At.UTC().Format(time.RFC3339Nano)
-}
-
-func RetryAt(at time.Time) error {
-	return RetryAtError{At: at}
-}
-
 type TaskKey struct {
 	instance string
 	typ      TaskType
 	rootID   string
-	str      string
 }
 
 func NewTaskKey(instance string, typ TaskType, rootID string) TaskKey {
-	s := instance + ":" + string(typ) + ":" + rootID
-	return TaskKey{instance: instance, typ: typ, rootID: rootID, str: s}
+	return TaskKey{instance: instance, typ: typ, rootID: rootID}
 }
 
-func (k TaskKey) String() string   { return k.str }
+func (k TaskKey) String() string   { return k.instance + ":" + string(k.typ) + ":" + k.rootID }
 func (k TaskKey) Instance() string { return k.instance }
 func (k TaskKey) Type() TaskType   { return k.typ }
 func (k TaskKey) RootID() string   { return k.rootID }
@@ -106,278 +84,196 @@ type TaskRun struct {
 	Err        string
 }
 
-type TaskFactory struct {
-	Instance        string
-	RefreshInterval time.Duration
-	GCInterval      time.Duration
-	NewRefresh      func(rootID string) TaskHandler
-	NewGC           func(rootID string) TaskHandler
-	CurrentRoots    func() []string
-}
-
-type taskState struct {
-	TaskInfo
-	handler        TaskHandler
-	index          int
-	discoveredAt   time.Time
-	firstRunDone   bool
-	rerunRequested bool
-}
-
-type cmdKind int
-
-const (
-	cmdRegister cmdKind = iota
-	cmdRegisterFactory
-	cmdUnregister
-	cmdInfo
-	cmdSnapshot
-	cmdTrigger
-)
-
-type cmd struct {
-	kind    cmdKind
-	def     TaskDef
-	factory TaskFactory
-	key     TaskKey
-	respCh  chan any
+type scheduledTask struct {
+	info    TaskInfo
+	handler TaskHandler
 }
 
 type Scheduler struct {
-	cmdCh           chan cmd
-	startGate       chan struct{}
-	done            chan struct{}
-	doneOnce        sync.Once
-	stopped         atomic.Bool
-	factories       map[string]*TaskFactory
-	metricInstances map[string]struct{}
-	tasks           map[TaskKey]*taskState
-	heap            taskHeap
-
-	store   *blobfs.Store
-	tenant  string
-	storeMu sync.Mutex
-	startMu sync.Mutex
-	started bool
-	metrics *metrics
-
-	preStartTasks map[TaskKey]TaskDef
-	runObserver   func(TaskRun)
-	observerMu    sync.RWMutex
-	taskTimeout   func(time.Duration) time.Duration
-
-	ctx    context.Context
-	cancel context.CancelFunc
+	mu       sync.Mutex
+	tasks    map[TaskKey]*scheduledTask
+	observer func(TaskRun)
+	wake     chan struct{}
+	done     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+	started  bool
+	stopped  bool
 }
 
-func New(store *blobfs.Store, reg prometheus.Registerer) *Scheduler {
-	return &Scheduler{
-		cmdCh:           make(chan cmd, 16),
-		startGate:       make(chan struct{}),
-		done:            make(chan struct{}),
-		factories:       map[string]*TaskFactory{},
-		metricInstances: map[string]struct{}{},
-		tasks:           map[TaskKey]*taskState{},
-		heap:            taskHeap{},
-		store:           store,
-		tenant:          "_scheduler",
-		metrics:         newMetrics(reg),
-		preStartTasks:   map[TaskKey]TaskDef{},
-		taskTimeout: func(interval time.Duration) time.Duration {
-			deadline := interval / 2
-			if deadline < time.Minute {
-				return time.Minute
-			}
-			if deadline > 30*time.Minute {
-				return 30 * time.Minute
-			}
-			return deadline
-		},
-	}
+func New(_ *blobfs.Store, _ prometheus.Registerer) *Scheduler {
+	return &Scheduler{tasks: make(map[TaskKey]*scheduledTask), wake: make(chan struct{}, 1), done: make(chan struct{})}
 }
 
 func (s *Scheduler) Register(def TaskDef) {
-	if s.stopped.Load() {
+	if def.Handler == nil || def.Interval <= 0 {
 		return
 	}
-	if s.withPreStart(func() {
-		s.preStartTasks[def.Key] = def
-	}) {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
 		return
 	}
-	respCh := make(chan any, 1)
-	s.submit(cmd{kind: cmdRegister, def: def, respCh: respCh})
-}
-
-func (s *Scheduler) RegisterFactory(factory TaskFactory) {
-	if s.stopped.Load() {
-		return
+	next := time.Now().Add(def.Interval)
+	if def.RunImmediately {
+		next = time.Now()
 	}
-	if s.withPreStart(func() {
-		s.factories[factory.Instance] = &factory
-	}) {
-		return
-	}
-	respCh := make(chan any, 1)
-	s.submit(cmd{kind: cmdRegisterFactory, factory: factory, respCh: respCh})
-}
-
-func (s *Scheduler) Unregister(key TaskKey) {
-	if s.stopped.Load() {
-		return
-	}
-	if s.withPreStart(func() {
-		delete(s.preStartTasks, key)
-	}) {
-		return
-	}
-	respCh := make(chan any, 1)
-	s.submit(cmd{kind: cmdUnregister, key: key, respCh: respCh})
-}
-
-// Trigger advances a task to run as soon as the current serial task completes.
-// Metadata factory tasks are reconciled before the trigger is applied.
-func (s *Scheduler) Trigger(key TaskKey) bool {
-	if s.stopped.Load() {
-		return false
-	}
-	respCh := make(chan any, 1)
-	value, ok := s.submit(cmd{kind: cmdTrigger, key: key, respCh: respCh})
-	return ok && value.(bool)
+	s.tasks[def.Key] = &scheduledTask{info: TaskInfo{Key: def.Key, Status: StatusIdle, NextRun: next, Interval: def.Interval}, handler: def.Handler}
+	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
-	if s.stopped.Load() {
-		return TaskInfo{}, false
-	}
-	s.startMu.Lock()
-	if !s.started {
-		if def, ok := s.preStartTasks[key]; ok {
-			s.startMu.Unlock()
-			return TaskInfo{
-				Key:      key,
-				Status:   StatusIdle,
-				Interval: def.Interval,
-			}, true
-		}
-		s.startMu.Unlock()
-		return TaskInfo{}, false
-	}
-	s.startMu.Unlock()
-	respCh := make(chan any, 1)
-	value, ok := s.submit(cmd{kind: cmdInfo, key: key, respCh: respCh})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[key]
 	if !ok {
 		return TaskInfo{}, false
 	}
-	result := value.(TaskInfo)
-	return result, result.Key.instance != ""
+	return task.info, true
 }
 
 func (s *Scheduler) Snapshot() []TaskInfo {
-	if s.stopped.Load() {
-		return nil
+	s.mu.Lock()
+	infos := make([]TaskInfo, 0, len(s.tasks))
+	for _, task := range s.tasks {
+		infos = append(infos, task.info)
 	}
-	s.startMu.Lock()
-	if !s.started {
-		infos := make([]TaskInfo, 0, len(s.preStartTasks))
-		for _, def := range s.preStartTasks {
-			infos = append(infos, TaskInfo{
-				Key:      def.Key,
-				Status:   StatusIdle,
-				Interval: def.Interval,
-			})
-		}
-		s.startMu.Unlock()
-		return infos
-	}
-	s.startMu.Unlock()
-	respCh := make(chan any, 1)
-	value, ok := s.submit(cmd{kind: cmdSnapshot, respCh: respCh})
-	if !ok {
-		return nil
-	}
-	return value.([]TaskInfo)
+	s.mu.Unlock()
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Key.String() < infos[j].Key.String() })
+	return infos
 }
 
-func (s *Scheduler) Start(ctx context.Context) {
-	if s.stopped.Load() {
-		return
-	}
-	s.startMu.Lock()
-	if s.stopped.Load() {
-		s.startMu.Unlock()
-		return
-	}
-	if s.started {
-		s.startMu.Unlock()
+func (s *Scheduler) Start(parent context.Context) {
+	s.mu.Lock()
+	if s.started || s.stopped {
+		s.mu.Unlock()
 		return
 	}
 	s.started = true
-	s.ctx, s.cancel = context.WithCancel(ctx)
-	s.startMu.Unlock()
+	s.ctx, s.cancel = context.WithCancel(parent)
+	s.mu.Unlock()
 	go s.loop()
 }
 
-func (s *Scheduler) SetRunObserver(fn func(TaskRun)) {
-	s.observerMu.Lock()
-	s.runObserver = fn
-	s.observerMu.Unlock()
+func (s *Scheduler) SetRunObserver(observer func(TaskRun)) {
+	s.mu.Lock()
+	s.observer = observer
+	s.mu.Unlock()
 }
 
 func (s *Scheduler) Stop(ctx context.Context) error {
-	if s.stopped.CompareAndSwap(false, true) {
-		s.startMu.Lock()
-		started := s.started
-		cancel := s.cancel
-		s.startMu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-		if !started {
-			s.finish()
+	s.mu.Lock()
+	if !s.stopped {
+		s.stopped = true
+		if s.cancel != nil {
+			s.cancel()
+		} else {
+			close(s.done)
 		}
 	}
+	done := s.done
+	s.mu.Unlock()
 	select {
-	case <-s.done:
+	case <-done:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	s.saveState()
-	return nil
 }
 
-func (s *Scheduler) submit(c cmd) (any, bool) {
-	select {
-	case <-s.startGate:
-	case <-s.done:
-		return nil, false
-	}
-	select {
-	case s.cmdCh <- c:
-	case <-s.done:
-		return nil, false
-	}
-	select {
-	case value := <-c.respCh:
-		return value, true
-	case <-s.done:
-		return nil, false
+func (s *Scheduler) loop() {
+	defer close(s.done)
+	for {
+		key, wait := s.nextTask()
+		timer := time.NewTimer(wait)
+		select {
+		case <-s.ctx.Done():
+			timer.Stop()
+			return
+		case <-s.wake:
+			timer.Stop()
+			continue
+		case <-timer.C:
+		}
+		if key != (TaskKey{}) {
+			s.run(key)
+		}
 	}
 }
 
-func (s *Scheduler) finish() {
-	s.doneOnce.Do(func() { close(s.done) })
+func (s *Scheduler) nextTask() (TaskKey, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var selected TaskKey
+	var next time.Time
+	for key, task := range s.tasks {
+		if next.IsZero() || task.info.NextRun.Before(next) {
+			selected, next = key, task.info.NextRun
+		}
+	}
+	if next.IsZero() {
+		return TaskKey{}, time.Hour
+	}
+	return selected, max(time.Until(next), 0)
 }
 
-func (s *Scheduler) withPreStart(fn func()) bool {
-	s.startMu.Lock()
-	defer s.startMu.Unlock()
-	if s.stopped.Load() {
-		return true
+func (s *Scheduler) run(key TaskKey) {
+	s.mu.Lock()
+	task := s.tasks[key]
+	if task == nil {
+		s.mu.Unlock()
+		return
 	}
-	if s.started {
-		return false
+	task.info.Status = StatusRunning
+	handler := task.handler
+	interval := task.info.Interval
+	s.mu.Unlock()
+
+	started := time.Now()
+	deadline := interval / 2
+	if deadline < time.Minute {
+		deadline = time.Minute
 	}
-	fn()
-	return true
+	ctx, cancel := context.WithTimeout(s.ctx, deadline)
+	outcome, err := handler(ctx)
+	cancel()
+	finished := time.Now()
+	run := TaskRun{Key: key, StartedAt: started, FinishedAt: finished, Duration: finished.Sub(started)}
+	if outcome != nil {
+		run.Result, run.ReasonCode, run.Detail, run.Message = outcome.Result, outcome.ReasonCode, outcome.Detail, outcome.Message
+	}
+	if run.Result == "" {
+		run.Result = "success"
+	}
+	if err != nil {
+		run.Err = err.Error()
+		run.Result = "failed"
+	}
+
+	s.mu.Lock()
+	if current := s.tasks[key]; current != nil {
+		current.info.LastRun = finished
+		current.info.NextRun = finished.Add(interval)
+		current.info.RunCount++
+		current.info.LastError = run.Err
+		if err != nil {
+			current.info.Status = StatusFailed
+			current.info.ErrCount++
+		} else {
+			current.info.Status = StatusDone
+		}
+	}
+	observer := s.observer
+	s.mu.Unlock()
+	if observer != nil {
+		observer(run)
+	}
+}
+
+func (s *Scheduler) signal() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }

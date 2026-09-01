@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
@@ -28,8 +27,8 @@ func FuzzOCIRequestParsers(f *testing.F) {
 				require.NotEmpty(t, challenge.realm)
 			}
 		case 1:
-			policy := &Policy{DefaultPolicy: config.PolicyBypass, BusyPolicy: config.BusyPolicyJoin}
-			result, err := resolveRequest(&http.Request{URL: &url.URL{Path: input}}, policy)
+			options := &Options{}
+			result, err := resolveRequest(&http.Request{URL: &url.URL{Path: input}}, options)
 			if err == nil && result.upstreamPath != "" {
 				require.True(t, httpcache.SafePath(result.upstreamPath))
 			}

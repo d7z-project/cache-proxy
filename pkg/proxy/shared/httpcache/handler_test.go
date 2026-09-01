@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +21,6 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -41,23 +41,15 @@ func TestHeaderName(t *testing.T) {
 
 func TestStripInternal(t *testing.T) {
 	headers := map[string]string{
-		"Content-Type":              "application/json",
-		"Content-Length":            "123",
-		"ETag":                      "\"abc\"",
-		"fetched-at":                "2024-01-01T00:00:00Z",
-		"mode":                      "test",
-		"cache":                     "HIT",
-		"indexed":                   "true",
-		"indexed-identity":          "sha256:xyz",
-		"indexed-root":              "root",
-		"indexed-generation":        "7",
-		"indexed-upstream":          "https://upstream.example",
-		"indexed-digest-algorithm":  "sha256",
-		"indexed-digest":            "abc",
-		"indexed-digest-verifiable": "true",
-		"source-upstream":           "https://upstream.example",
-		UserAgentReviewedOption:     "true",
-		"X-Cache":                   "HIT",
+		"Content-Type":          "application/json",
+		"Content-Length":        "123",
+		"ETag":                  "\"abc\"",
+		"fetched-at":            "2024-01-01T00:00:00Z",
+		"mode":                  "test",
+		"cache":                 "HIT",
+		"source-upstream":       "https://upstream.example",
+		UserAgentReviewedOption: "true",
+		"X-Cache":               "HIT",
 	}
 	StripInternal(headers)
 	require.Equal(t, "application/json", headers["Content-Type"])
@@ -67,14 +59,6 @@ func TestStripInternal(t *testing.T) {
 	require.NotContains(t, headers, "fetched-at")
 	require.NotContains(t, headers, "mode")
 	require.NotContains(t, headers, "cache")
-	require.NotContains(t, headers, "indexed")
-	require.NotContains(t, headers, "indexed-identity")
-	require.NotContains(t, headers, "indexed-root")
-	require.NotContains(t, headers, "indexed-generation")
-	require.NotContains(t, headers, "indexed-upstream")
-	require.NotContains(t, headers, "indexed-digest-algorithm")
-	require.NotContains(t, headers, "indexed-digest")
-	require.NotContains(t, headers, "indexed-digest-verifiable")
 	require.NotContains(t, headers, "source-upstream")
 	require.NotContains(t, headers, UserAgentReviewedOption)
 }
@@ -129,8 +113,8 @@ func TestUserAgentVaryResponsesAreNotStored(t *testing.T) {
 		ExpireAfter: config.Expiration(time.Hour),
 		Upstreams:   []string{upstream.URL},
 	}, store, &staticResolver{route: Route{
-		ObjectPath: "test/browser", Policy: config.PolicyImmutable,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		ObjectPath: "test/browser", Class: ClassContent,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	const browserUserAgent = "Mozilla/5.0 Firefox/127.0"
 	nonBrowser := httptest.NewRequest(http.MethodGet, "/browser", nil)
@@ -175,8 +159,8 @@ func TestBrowserRequestRefreshesUnreviewedCacheObject(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode: "test", ExpireAfter: config.Expiration(time.Hour), Upstreams: []string{upstream.URL},
 	}, store, &staticResolver{route: Route{
-		ObjectPath: "test/browser", Policy: config.PolicyImmutable,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		ObjectPath: "test/browser", Class: ClassContent,
+	}}, NewStats(prometheus.NewRegistry()))
 	for _, expectedCache := range []string{"MISS", "HIT"} {
 		req := httptest.NewRequest(http.MethodGet, "/browser", nil)
 		req.Header.Set("User-Agent", "Mozilla/5.0 Firefox/127.0")
@@ -202,11 +186,11 @@ func TestUserAgentFallbackAndConfiguredOverride(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	resolver := &staticResolver{route: Route{Policy: config.PolicyBypass}}
-	defaultHandler := NewHandler("default", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+	resolver := &staticResolver{route: Route{Class: ClassPassthrough}}
+	defaultHandler := NewHandler("default", RuntimeConfig{Mode: "test", Upstreams: []string{upstream.URL}}, store, resolver, NewStats(prometheus.NewRegistry()))
 	forcedHandler := NewHandler("forced", RuntimeConfig{
 		Mode: "test", Upstreams: []string{upstream.URL}, Transport: &config.TransportConfig{UserAgent: "forced/1"},
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	nonBrowser := httptest.NewRequest(http.MethodGet, "/curl", nil)
 	nonBrowser.Header.Set("User-Agent", "curl/8.8.0")
@@ -238,8 +222,8 @@ func TestConfiguredUserAgentCachesSingleVaryRepresentation(t *testing.T) {
 		Upstreams:   []string{upstream.URL},
 		Transport:   &config.TransportConfig{UserAgent: "forced/1"},
 	}, store, &staticResolver{route: Route{
-		ObjectPath: "test/forced", Policy: config.PolicyImmutable,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		ObjectPath: "test/forced", Class: ClassContent,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	for _, expectedCache := range []string{"MISS", "HIT"} {
 		req := httptest.NewRequest(http.MethodGet, "/forced", nil)
@@ -276,15 +260,14 @@ func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/object",
 		UpstreamPath: "test/object",
-		Policy:       config.PolicyImmutable,
-		FreshFor:     config.Freshness(time.Hour),
+		Class:        ClassContent,
 	}}
 	handler := NewHandler("test", RuntimeConfig{
-		Mode:            "test",
-		ExpireAfter:     config.Expiration(72 * time.Hour),
-		Upstreams:       []string{upstream.URL},
-		DefaultFreshFor: config.Freshness(time.Minute),
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+		Mode:        "test",
+		ExpireAfter: config.Expiration(72 * time.Hour),
+		Upstreams:   []string{upstream.URL},
+		MetadataTTL: time.Minute,
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	// First request: cache miss, fetches from upstream
 	rec := httptest.NewRecorder()
@@ -292,10 +275,10 @@ func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
-	require.Equal(t, config.PolicyImmutable, rec.Header().Get("X-Cache-Policy"))
+	require.Equal(t, "content", rec.Header().Get("X-Cache-Class"))
 	require.NotEmpty(t, rec.Header().Get("X-Cache-Fetched-At"))
 	require.NotEmpty(t, rec.Header().Get("X-Cache-Expires-At"))
-	require.NotEmpty(t, rec.Header().Get("X-Cache-Fresh-Until"))
+	require.Empty(t, rec.Header().Get("X-Cache-Fresh-Until"))
 	require.Empty(t, rec.Header().Get("fetched-at"))
 	require.Empty(t, rec.Header().Get("mode"))
 	require.Empty(t, rec.Header().Get("cache"))
@@ -307,10 +290,10 @@ func TestCacheDebugHeadersOnCacheHit(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "HIT", rec.Header().Get("X-Cache"))
-	require.Equal(t, config.PolicyImmutable, rec.Header().Get("X-Cache-Policy"))
+	require.Equal(t, "content", rec.Header().Get("X-Cache-Class"))
 	require.NotEmpty(t, rec.Header().Get("X-Cache-Fetched-At"))
 	require.NotEmpty(t, rec.Header().Get("X-Cache-Expires-At"))
-	require.NotEmpty(t, rec.Header().Get("X-Cache-Fresh-Until"))
+	require.Empty(t, rec.Header().Get("X-Cache-Fresh-Until"))
 	require.Empty(t, rec.Header().Get("fetched-at"))
 	require.Empty(t, rec.Header().Get("mode"))
 }
@@ -336,15 +319,14 @@ func TestCacheDebugHeadersOnRevalidateFresh(t *testing.T) {
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/revalidate",
 		UpstreamPath: "test/revalidate",
-		Policy:       config.PolicyRevalidate,
-		FreshFor:     config.Freshness(time.Hour),
+		Class:        ClassMetadata,
 	}}
 	handler := NewHandler("test", RuntimeConfig{
-		Mode:            "test",
-		ExpireAfter:     config.Expiration(72 * time.Hour),
-		Upstreams:       []string{upstream.URL},
-		DefaultFreshFor: config.Freshness(time.Minute),
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+		Mode:        "test",
+		ExpireAfter: config.Expiration(72 * time.Hour),
+		Upstreams:   []string{upstream.URL},
+		MetadataTTL: time.Minute,
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	// First request: cache miss
 	rec := httptest.NewRecorder()
@@ -354,13 +336,13 @@ func TestCacheDebugHeadersOnRevalidateFresh(t *testing.T) {
 	require.Equal(t, "MISS", rec.Header().Get("X-Cache"))
 	requireObjectFlightCompleted(t, handler, "test/revalidate")
 
-	// Second request: within FreshFor, returns FRESH
+	// Second request: within the metadata TTL, returns FRESH.
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/revalidate", nil)
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "FRESH", rec.Header().Get("X-Cache"))
-	require.Equal(t, config.PolicyRevalidate, rec.Header().Get("X-Cache-Policy"))
+	require.Equal(t, "metadata", rec.Header().Get("X-Cache-Class"))
 	require.NotEmpty(t, rec.Header().Get("X-Cache-Fetched-At"))
 	require.NotEmpty(t, rec.Header().Get("X-Cache-Fresh-Until"))
 	require.Empty(t, rec.Header().Get("fetched-at"))
@@ -385,12 +367,12 @@ func TestCacheDebugHeadersOnBypass(t *testing.T) {
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/bypass",
 		UpstreamPath: "test/bypass",
-		Policy:       config.PolicyBypass,
+		Class:        ClassPassthrough,
 	}}
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{upstream.URL},
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/bypass", nil)
@@ -419,16 +401,17 @@ func TestPassthroughStripsInternalHeaders(t *testing.T) {
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/object",
 		UpstreamPath: "test/object",
-		Policy:       config.PolicyBypass,
+		Class:        ClassPassthrough,
 	}}
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{upstream.URL},
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/object", nil)
-	handler.ProxyPassthrough(rec, req, "other", "")
+	status := handler.ProxyPassthroughStatus(rec, req, "other", "")
+	require.Equal(t, http.StatusOK, status)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "PASSTHROUGH", rec.Header().Get("X-Cache"))
 	require.Empty(t, rec.Header().Get("fetched-at"))
@@ -458,15 +441,14 @@ func TestHeadRequestStripsInternalHeaders(t *testing.T) {
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/head-obj",
 		UpstreamPath: "test/head-obj",
-		Policy:       config.PolicyImmutable,
-		FreshFor:     config.Freshness(time.Hour),
+		Class:        ClassContent,
 	}}
 	handler := NewHandler("test", RuntimeConfig{
-		Mode:            "test",
-		ExpireAfter:     config.Expiration(72 * time.Hour),
-		Upstreams:       []string{upstream.URL},
-		DefaultFreshFor: config.Freshness(time.Minute),
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+		Mode:        "test",
+		ExpireAfter: config.Expiration(72 * time.Hour),
+		Upstreams:   []string{upstream.URL},
+		MetadataTTL: time.Minute,
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	// First: cache the object
 	rec := httptest.NewRecorder()
@@ -494,14 +476,11 @@ type staticResolver struct {
 func (r *staticResolver) Resolve(req *http.Request) (Route, error) {
 	clean := strings.TrimPrefix(req.URL.Path, "/")
 	return Route{
+		Class:              r.route.Class,
 		ObjectPath:         r.route.ObjectPath,
 		UpstreamPath:       clean,
 		TargetURL:          r.route.TargetURL,
 		AllowedTargetHosts: append([]string(nil), r.route.AllowedTargetHosts...),
-		Policy:             r.route.Policy,
-		FreshFor:           r.route.FreshFor,
-		BusyPolicy:         r.route.BusyPolicy,
-		ExpireAfter:        r.route.ExpireAfter,
 	}, nil
 }
 
@@ -538,8 +517,8 @@ func TestTargetURLRejectsForeignHostWithoutFallback(t *testing.T) {
 	}, store, &staticResolver{route: Route{
 		ObjectPath: "test/object",
 		TargetURL:  foreign.URL + "/object",
-		Policy:     config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:      ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -566,8 +545,8 @@ func TestTargetURLAllowsRouteHost(t *testing.T) {
 		ObjectPath:         "test/object",
 		TargetURL:          target.URL + "/object",
 		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
-		Policy:             config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:              ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
@@ -599,7 +578,7 @@ func TestTargetURLStatsAggregateByOrigin(t *testing.T) {
 	defer target.Close()
 
 	stats := NewStats(prometheus.NewRegistry())
-	handler := NewHandler("test", RuntimeConfig{Mode: "test"}, nil, nil, stats, nil)
+	handler := NewHandler("test", RuntimeConfig{Mode: "test"}, nil, nil, stats)
 	allowedHosts := []string{strings.TrimPrefix(target.URL, "http://")}
 
 	for _, targetPath := range []string{"/files/one.whl?download=1", "/files/two.whl?download=1"} {
@@ -645,8 +624,8 @@ func TestTargetURLReturnsClientErrorWithoutFallback(t *testing.T) {
 		ObjectPath:         "test/object",
 		TargetURL:          target.URL + "/object",
 		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
-		Policy:             config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:              ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -677,8 +656,8 @@ func TestTargetURLDoesNotFallbackOnGatewayStatus(t *testing.T) {
 		ObjectPath:         "test/object",
 		TargetURL:          target.URL + "/object",
 		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
-		Policy:             config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:              ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -709,8 +688,8 @@ func TestTargetURLReturnsClientErrorWithoutUpstreamFallback(t *testing.T) {
 		ObjectPath:         "test/object",
 		TargetURL:          target.URL + "/object",
 		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
-		Policy:             config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:              ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -739,8 +718,8 @@ func TestTargetURLReturnsClientErrorWithoutFallbackPath(t *testing.T) {
 		ObjectPath:         "test/object",
 		TargetURL:          target.URL + "/object",
 		AllowedTargetHosts: []string{strings.TrimPrefix(target.URL, "http://")},
-		Policy:             config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:              ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -772,8 +751,8 @@ func TestFailoverDoesNotRetryInternalServerError(t *testing.T) {
 	}, store, &staticResolver{route: Route{
 		ObjectPath:   "test/object",
 		UpstreamPath: "object",
-		Policy:       config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:        ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -814,8 +793,8 @@ func TestFailoverDoesNotRetryClientErrors(t *testing.T) {
 			}, store, &staticResolver{route: Route{
 				ObjectPath:   "test/object",
 				UpstreamPath: "object",
-				Policy:       config.PolicyBypass,
-			}}, NewStats(prometheus.NewRegistry()), nil)
+				Class:        ClassPassthrough,
+			}}, NewStats(prometheus.NewRegistry()))
 
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -846,8 +825,8 @@ func TestFailoverDoesNotRetryNotFound(t *testing.T) {
 	}, store, &staticResolver{route: Route{
 		ObjectPath:   "test/object",
 		UpstreamPath: "object",
-		Policy:       config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:        ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil))
@@ -882,8 +861,8 @@ func TestFailoverReturnsFirstClientError(t *testing.T) {
 	}, store, &staticResolver{route: Route{
 		ObjectPath:   "test/object",
 		UpstreamPath: "object",
-		Policy:       config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:        ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/object", nil)
@@ -905,6 +884,17 @@ func TestRecordUpstreamDoesNotCountClientResponsesAsUpstreamFailures(t *testing.
 	require.Zero(t, instance.UpstreamErrors)
 	require.Zero(t, snap.Total.UpstreamErrors)
 	require.Equal(t, uint64(1), instance.UpstreamStatus["404"])
+}
+
+func TestRecordUpstreamCountsRateLimitsAndServerErrors(t *testing.T) {
+	stats := NewStats(prometheus.NewRegistry())
+	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusTooManyRequests)
+	stats.RecordUpstream("test", "test", http.MethodGet, http.StatusInternalServerError)
+	stats.RecordUpstream("test", "test", http.MethodGet, 0)
+
+	snapshot := stats.Snapshot()
+	require.Equal(t, uint64(3), snapshot.Instances["test"].UpstreamErrors)
+	require.Equal(t, uint64(3), snapshot.Total.UpstreamErrors)
 }
 
 func TestRecordUpstreamRequestTracksConcreteUpstream(t *testing.T) {
@@ -953,7 +943,7 @@ func TestOpenRemoteReleasesActiveUpstreamOnBodyClose(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{upstream.URL},
-	}, nil, nil, stats, nil)
+	}, nil, nil, stats)
 
 	resp, err := handler.openRemote(context.Background(), http.MethodGet, "object", remoteOptions{
 		AcceptErrors: true,
@@ -983,7 +973,7 @@ func TestOpenRemoteReleasesActiveUpstreamOnFailoverStatus(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{upstream.URL},
-	}, nil, nil, stats, nil)
+	}, nil, nil, stats)
 
 	resp, err := handler.openRemote(context.Background(), http.MethodGet, "object", remoteOptions{
 		AcceptErrors: true,
@@ -1022,13 +1012,13 @@ func TestStaleCacheOnValidationError(t *testing.T) {
 	resolver := &staticResolver{route: Route{
 		ObjectPath:   "test/stale-obj",
 		UpstreamPath: "test/stale-obj",
-		Policy:       config.PolicyRevalidate,
+		Class:        ClassMetadata,
 	}}
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:        "test",
 		ExpireAfter: config.Expiration(72 * time.Hour),
 		Upstreams:   []string{upstream.URL},
-	}, store, resolver, NewStats(prometheus.NewRegistry()), nil)
+	}, store, resolver, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/stale-obj", nil))
@@ -1049,6 +1039,7 @@ func TestConditionalGet304AdvancesFreshness(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = store.Put(ctx, "test", "object", strings.NewReader("cached"), map[string]string{
 		"etag":                       `"v1"`,
 		"content-length":             "6",
@@ -1059,9 +1050,9 @@ func TestConditionalGet304AdvancesFreshness(t *testing.T) {
 	require.NoError(t, err)
 
 	var requests atomic.Int64
-	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
-		ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
-	}}, NewStats(prometheus.NewRegistry()), nil)
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", MetadataTTL: time.Minute, Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
+		ObjectPath: "object", UpstreamPath: "object", Class: ClassMetadata,
+	}}, NewStats(prometheus.NewRegistry()))
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests.Add(1)
 		require.Equal(t, http.MethodGet, req.Method)
@@ -1079,6 +1070,37 @@ func TestConditionalGet304AdvancesFreshness(t *testing.T) {
 	require.EqualValues(t, 1, requests.Load())
 }
 
+func TestRevalidationMetadataFailureUsesAlreadyOpenStaleObject(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	_, err = store.Put(ctx, "test", "object", strings.NewReader("cached"), map[string]string{
+		"etag":                       `"v1"`,
+		"content-length":             "6",
+		"fetched-at":                 time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+		responseSourceUpstreamHeader: "https://mirror.example",
+		UserAgentReviewedOption:      "true",
+	})
+	require.NoError(t, err)
+
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", MetadataTTL: time.Minute, Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
+		ObjectPath: "object", UpstreamPath: "object", Class: ClassMetadata,
+	}}, NewStats(prometheus.NewRegistry()))
+	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, `"v1"`, req.Header.Get("If-None-Match"))
+		require.NoError(t, store.DeleteObject(context.Background(), "test", "object"))
+		require.NoError(t, store.MkdirAll("test/object", 0o755))
+		return &http.Response{StatusCode: http.StatusNotModified, Body: http.NoBody, Request: req}, nil
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "STALE", recorder.Header().Get("X-Cache"))
+	require.Equal(t, "cached", recorder.Body.String())
+	require.NoError(t, handler.CloseContext(context.Background()))
+}
+
 func TestConditionalGetReplacesStaleContentWithOneRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
@@ -1094,9 +1116,9 @@ func TestConditionalGetReplacesStaleContentWithOneRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	var requests atomic.Int64
-	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
-		ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
-	}}, NewStats(prometheus.NewRegistry()), nil)
+	handler := NewHandler("test", RuntimeConfig{Mode: "test", MetadataTTL: time.Minute, Upstreams: []string{"https://mirror.example"}}, store, literalResolver{route: Route{
+		ObjectPath: "object", UpstreamPath: "object", Class: ClassMetadata,
+	}}, NewStats(prometheus.NewRegistry()))
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests.Add(1)
 		require.Equal(t, http.MethodGet, req.Method)
@@ -1132,7 +1154,7 @@ func TestRateLimitDoesNotFailOverToAnotherUpstream(t *testing.T) {
 	stats := NewStats(prometheus.NewRegistry())
 	handler := NewHandler("test", RuntimeConfig{
 		Mode: "test", Upstreams: []string{"https://first.example", "https://second.example"},
-	}, nil, literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, stats, nil)
+	}, nil, literalResolver{route: Route{UpstreamPath: "object", Class: ClassPassthrough}}, stats)
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {
 		case "first.example":
@@ -1172,9 +1194,9 @@ func TestRateLimitCooldownQueuesNextForegroundRequest(t *testing.T) {
 	limiter := NewUpstreamGate(UpstreamGateConfig{MaxActive: 8, MaxActivePerHost: 4})
 	var requests atomic.Int64
 	newHandler := func(instance string) *Handler {
-		handler := NewHandler(instance, RuntimeConfig{Mode: "test", Upstreams: []string{"https://mirror.example"}, UpstreamGate: limiter}, store, literalResolver{route: Route{
-			ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
-		}}, NewStats(prometheus.NewRegistry()), nil)
+		handler := NewHandler(instance, RuntimeConfig{Mode: "test", MetadataTTL: time.Minute, Upstreams: []string{"https://mirror.example"}, UpstreamGate: limiter}, store, literalResolver{route: Route{
+			ObjectPath: "object", UpstreamPath: "object", Class: ClassMetadata,
+		}}, NewStats(prometheus.NewRegistry()))
 		handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			requests.Add(1)
 			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"1"}}, Body: http.NoBody, Request: req}, nil
@@ -1207,10 +1229,10 @@ func TestStaleValidationFailureDoesNotFailOver(t *testing.T) {
 
 	var firstRequests, secondRequests atomic.Int64
 	handler := NewHandler("test", RuntimeConfig{
-		Mode: "test", Upstreams: []string{"https://first.example", "https://second.example"},
+		Mode: "test", MetadataTTL: time.Minute, Upstreams: []string{"https://first.example", "https://second.example"},
 	}, store, literalResolver{route: Route{
-		ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyRevalidate, FreshFor: config.Freshness(time.Minute),
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		ObjectPath: "object", UpstreamPath: "object", Class: ClassMetadata,
+	}}, NewStats(prometheus.NewRegistry()))
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host == "first.example" {
 			firstRequests.Add(1)
@@ -1258,6 +1280,33 @@ func TestStreamToCacheClientCompletesBeforeStore(t *testing.T) {
 	wait.Wait()
 }
 
+func TestCachePreparationFailureServesUpstreamResponse(t *testing.T) {
+	tempPath := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(tempPath, []byte("x"), 0o600))
+	t.Setenv("TMPDIR", tempPath)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "7")
+		_, _ = io.WriteString(w, "payload")
+	}))
+	defer upstream.Close()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := NewHandler("test", RuntimeConfig{
+		Mode: "test", ExpireAfter: config.Expiration(time.Hour), Upstreams: []string{upstream.URL},
+	}, store, literalResolver{route: Route{Class: ClassContent, ObjectPath: "object", UpstreamPath: "object"}}, NewStats(prometheus.NewRegistry()))
+	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/object", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "BYPASS", recorder.Header().Get("X-Cache"))
+	require.Equal(t, "payload", recorder.Body.String())
+	_, err = store.StatObject(context.Background(), "test", "object")
+	require.Error(t, err)
+}
+
 func TestErrorResponseHidesInternalDetails(t *testing.T) {
 	resp := ErrorResponse(http.StatusBadGateway, errors.New("sensitive data"))
 	body, err := io.ReadAll(resp.Body)
@@ -1274,7 +1323,7 @@ func TestStreamDownloadCompletesFlightOnRemoteError(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{"https://upstream.example"},
-	}, store, &staticResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	}, store, &staticResolver{}, NewStats(prometheus.NewRegistry()))
 	handler.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("network down")
 	})
@@ -1301,7 +1350,7 @@ func TestStreamDownloadCompletesFlightOnNonOK(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{"https://upstream.example"},
-	}, store, &staticResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	}, store, &staticResolver{}, NewStats(prometheus.NewRegistry()))
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusNotFound,
@@ -1400,7 +1449,7 @@ func TestRetryJoinsDetachedFillAfterFirstClientCloses(t *testing.T) {
 			<-releaseVerify
 			return nil
 		},
-	}, store, literalResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	}, store, literalResolver{}, NewStats(prometheus.NewRegistry()))
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests.Add(1)
 		return &http.Response{
@@ -1410,7 +1459,7 @@ func TestRetryJoinsDetachedFillAfterFirstClientCloses(t *testing.T) {
 			Request:    req,
 		}, nil
 	})
-	route := Route{ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyImmutable}
+	route := Route{ObjectPath: "object", UpstreamPath: "object", Class: ClassContent}
 	flight, leader := handler.flights.begin(route.ObjectPath)
 	require.True(t, leader)
 	first, err := handler.streamDownload(httptest.NewRequest(http.MethodGet, "/object", nil), route, "MISS", flight)
@@ -1429,28 +1478,6 @@ func TestRetryJoinsDetachedFillAfterFirstClientCloses(t *testing.T) {
 
 	close(releaseVerify)
 	requireObjectFlightCompleted(t, handler, route.ObjectPath)
-}
-
-func TestBusyBypassStartsIndependentRequest(t *testing.T) {
-	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	var requests atomic.Int64
-	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{"https://upstream.example"}}, store, literalResolver{}, NewStats(prometheus.NewRegistry()), nil)
-	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requests.Add(1)
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("payload")), Request: req}, nil
-	})
-	route := Route{ObjectPath: "object", UpstreamPath: "object", Policy: config.PolicyImmutable, BusyPolicy: config.BusyPolicyBypass}
-	flight, leader := handler.flights.begin(route.ObjectPath)
-	require.True(t, leader)
-
-	response, err := handler.followFlight(context.Background(), httptest.NewRequest(http.MethodGet, "/object", nil), route, flight)
-	require.NoError(t, err)
-	require.Equal(t, "BYPASS", response.Headers["X-Cache"])
-	require.NoError(t, response.Close())
-	require.EqualValues(t, 1, requests.Load())
-	handler.flights.finish(route.ObjectPath, flight, nil)
 }
 
 func TestConditionalHeadersAreBoundToValidatorOrigin(t *testing.T) {
@@ -1476,32 +1503,12 @@ func TestAllUpstreamsUnavailableReturns503(t *testing.T) {
 	}, store, &staticResolver{route: Route{
 		ObjectPath:   "test/downstream",
 		UpstreamPath: "test/downstream",
-		Policy:       config.PolicyBypass,
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:        ClassPassthrough,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/test/downstream", nil))
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
-}
-
-func TestPassiveHealthFailuresDoNotSuppressUpstreamRequest(t *testing.T) {
-	const upstream = "https://mirror.example"
-	stats := NewStats(prometheus.NewRegistry())
-	svcHealth := health.New("test", "test", health.DefaultConfig(), []string{upstream}, stats)
-	for range 10 {
-		svcHealth.RecordResult(upstream, http.StatusServiceUnavailable, time.Millisecond)
-	}
-	handler := NewHandler("test", RuntimeConfig{Mode: "test", Upstreams: []string{upstream}}, nil,
-		literalResolver{route: Route{UpstreamPath: "object", Policy: config.PolicyBypass}}, stats, svcHealth)
-	var requests atomic.Int64
-	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requests.Add(1)
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok")), Request: req}, nil
-	})
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil))
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.EqualValues(t, 1, requests.Load())
 }
 
 func TestConcurrentNPMMetadataMissIsFetchedOnceAndRewritten(t *testing.T) {
@@ -1525,16 +1532,15 @@ func TestConcurrentNPMMetadataMissIsFetchedOnceAndRewritten(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := NewHandler("npm", RuntimeConfig{
-		Mode:            config.ModeNPM,
-		Upstreams:       []string{upstream.URL},
-		DefaultFreshFor: config.Freshness(time.Minute),
+		Mode:              config.ModeNPM,
+		Upstreams:         []string{upstream.URL},
+		MetadataTTL:       time.Minute,
+		ResponseTransform: NPMResponseTransform([]string{upstream.URL}),
 	}, store, literalResolver{route: Route{
 		ObjectPath:   "npm/metadata/pkg",
 		UpstreamPath: "pkg",
-		Policy:       config.PolicyRevalidate,
-		BusyPolicy:   config.BusyPolicyStale,
-		RewriteKind:  "npm-metadata",
-	}}, NewStats(prometheus.NewRegistry()), nil)
+		Class:        ClassMetadata,
+	}}, NewStats(prometheus.NewRegistry()))
 
 	const clients = 12
 	ready := sync.WaitGroup{}
@@ -1589,8 +1595,8 @@ func TestHandlerCountsActuallyStreamedResponseBytes(t *testing.T) {
 	}, store, literalResolver{route: Route{
 		ObjectPath:   "objects/chunked",
 		UpstreamPath: "objects/chunked",
-		Policy:       config.PolicyImmutable,
-	}}, stats, nil)
+		Class:        ClassContent,
+	}}, stats)
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://cache.example/objects/chunked", nil))
@@ -1615,7 +1621,7 @@ func TestUpstreamAdmissionIsAcquiredBeforeRequest(t *testing.T) {
 		Mode:         "test",
 		Upstreams:    []string{upstream.URL},
 		UpstreamGate: limiter,
-	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
+	}, nil, literalResolver{route: Route{Class: ClassPassthrough}}, NewStats(prometheus.NewRegistry()))
 
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -1645,7 +1651,7 @@ func TestCanceledAdmissionStartsNoUpstreamRequest(t *testing.T) {
 	require.NoError(t, err)
 	handler := NewHandler("test", RuntimeConfig{
 		Mode: "test", Upstreams: []string{upstream.URL}, UpstreamGate: limiter,
-	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, NewStats(prometheus.NewRegistry()), nil)
+	}, nil, literalResolver{route: Route{Class: ClassPassthrough}}, NewStats(prometheus.NewRegistry()))
 
 	request := httptest.NewRequest(http.MethodGet, "http://cache.example/object", nil)
 	requestCtx, cancel := context.WithCancel(request.Context())
@@ -1671,7 +1677,7 @@ func TestHandlerCountsInterruptedResponseBytes(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:      "test",
 		Upstreams: []string{"https://upstream.example"},
-	}, nil, literalResolver{route: Route{Policy: config.PolicyBypass}}, stats, nil)
+	}, nil, literalResolver{route: Route{Class: ClassPassthrough}}, stats)
 	handler.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode:    http.StatusOK,

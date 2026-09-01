@@ -6,11 +6,8 @@ import (
 	"io/fs"
 	"strconv"
 	"strings"
-	"time"
 
 	"gopkg.d7z.net/blobfs"
-
-	httpcache "gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 func formatHitRate(cache map[string]uint64) string {
@@ -30,7 +27,7 @@ func cacheHitRate(cache map[string]uint64) (float64, bool) {
 	for cacheResult, count := range cache {
 		total += count
 		switch strings.ToUpper(cacheResult) {
-		case "HIT", "FRESH", "STALE", "GENERATION":
+		case "HIT", "FRESH", "STALE", "REVALIDATED":
 			hits += count
 		}
 	}
@@ -38,78 +35,6 @@ func cacheHitRate(cache map[string]uint64) (float64, bool) {
 		return 0, false
 	}
 	return float64(hits) / float64(total), true
-}
-
-const preciseTimeLayout = "2006/01/02 15:04:05"
-
-func instanceStatus(s httpcache.InstanceStats, i18n map[string]string, now time.Time) (color, label, extra, extraTitle string) {
-	if s.MetadataState != "" {
-		switch s.MetadataState {
-		case "ready":
-			color = "green"
-		case "refreshing", "bootstrapping":
-			color = "blue"
-		case "degraded":
-			color = "yellow"
-		default:
-			color = "gray"
-		}
-		key := s.MetadataState
-		if key == "booting" {
-			key = "loading"
-		}
-		label = i18nStr(i18n, key)
-		switch {
-		case !s.LastStateChangeAt.IsZero():
-			extra, extraTitle = formatRecentTime(s.LastStateChangeAt, i18n, now)
-		case !s.LastRefreshAt.IsZero():
-			extra, extraTitle = formatRecentTime(s.LastRefreshAt, i18n, now)
-		}
-		return
-	}
-	if s.UpstreamRequests == 0 {
-		return "", "\u2014", "", ""
-	}
-	errRate := float64(s.UpstreamErrors) / float64(s.UpstreamRequests) * 100
-	if errRate >= 5 {
-		return "yellow", i18nStr(i18n, "n_err", int(s.UpstreamErrors)), "", ""
-	}
-	return "green", i18nStr(i18n, "upstream_ok"), "", ""
-}
-
-func formatPreciseTime(ts time.Time) string {
-	if ts.IsZero() {
-		return ""
-	}
-	return ts.Local().Format(preciseTimeLayout)
-}
-
-func formatRecentTime(ts time.Time, i18n map[string]string, now time.Time) (display, precise string) {
-	if ts.IsZero() {
-		return "", ""
-	}
-	precise = formatPreciseTime(ts)
-	if now.IsZero() {
-		now = time.Now()
-	}
-	d := now.Sub(ts)
-	if d >= 0 && d < 24*time.Hour {
-		return relativeTime(d, i18n), precise
-	}
-	return precise, precise
-}
-
-func relativeTime(d time.Duration, i18n map[string]string) string {
-	switch {
-	case d < time.Second:
-		return i18nStr(i18n, "just_now")
-	case d < time.Minute:
-		return i18nStr(i18n, "s_ago", int(d.Seconds()))
-	case d < time.Hour:
-		return i18nStr(i18n, "m_ago", int(d.Minutes()))
-	default:
-		return i18nStr(i18n, "h_ago", int(d.Hours()))
-	}
 }
 
 func i18nStr(i18n map[string]string, key string, args ...any) string {
@@ -152,25 +77,6 @@ func formatBytes(n int64) string {
 		return fmt.Sprintf("%.1fM", float64(n)/(1024*1024))
 	default:
 		return fmt.Sprintf("%.1fG", float64(n)/(1024*1024*1024))
-	}
-}
-
-func formatRootStateColor(state string) string {
-	switch state {
-	case "active":
-		return "green"
-	case "refreshing":
-		return "blue"
-	case "bootstrapping":
-		return "blue"
-	case "suspect":
-		return "yellow"
-	case "blocked":
-		return "red"
-	case "failed":
-		return "red"
-	default:
-		return "gray"
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 )
 
 //go:embed assets/home.html assets/style.css
-//go:embed assets/script_core.js assets/script_network.js assets/script_stage.js assets/script_status.js
+//go:embed assets/script_core.js
 //go:embed assets/en.json assets/zh.json assets/ja.json assets/ko.json assets/de.json assets/fr.json
 var homeAssets embed.FS
 
@@ -50,28 +50,10 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	jsNetworkData, err := homeAssets.ReadFile("assets/script_network.js")
-	if err != nil {
-		panic(err)
-	}
-	jsStageData, err := homeAssets.ReadFile("assets/script_stage.js")
-	if err != nil {
-		panic(err)
-	}
-	jsStatusData, err := homeAssets.ReadFile("assets/script_status.js")
-	if err != nil {
-		panic(err)
-	}
-	jsData := append(append([]byte{}, jsCoreData...), '\n')
-	jsData = append(jsData, jsNetworkData...)
-	jsData = append(jsData, '\n')
-	jsData = append(jsData, jsStageData...)
-	jsData = append(jsData, '\n')
-	jsData = append(jsData, jsStatusData...)
 
 	homeTemplate = template.Must(template.New("home").Funcs(template.FuncMap{
 		"css": func() template.CSS { return template.CSS(cssData) },
-		"js":  func() template.JS { return template.JS(jsData) },
+		"js":  func() template.JS { return template.JS(jsCoreData) },
 		"t":   func(string, ...any) string { return "" },
 	}).Parse(string(htmlData)))
 }

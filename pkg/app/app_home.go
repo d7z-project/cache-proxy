@@ -2,13 +2,11 @@ package app
 
 import (
 	"encoding/json"
-	"fmt"
 	"html/template"
 	"net"
 	"net/http"
 	urlpkg "net/url"
 	"strings"
-	"time"
 
 	"gopkg.d7z.net/blobfs"
 
@@ -16,49 +14,19 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-type homeRepositoryAttribute struct {
-	Label string
-	Value string
-}
-
-type homeRepository struct {
-	DisplayName     string
-	Path            string
-	Layout          string
-	PrimaryMetadata string
-	Generation      string
-	Published       string
-	PublishedTitle  string
-	ArtifactCount   string
-	MetadataCount   string
-	Upstream        string
-	StateLabel      string
-	StateColor      string
-	LastOK          string
-	LastOKTitle     string
-	LastTry         string
-	LastTryTitle    string
-	LastError       string
-	Attributes      []homeRepositoryAttribute
-}
-
 type homeInstance struct {
-	Name             string
-	Mode             string
-	URL              string
-	SetupNote        string
-	SetupCmd         string
-	SetupCopy        string
-	Requests         string
-	HitRate          string
-	DiskUsage        string
-	StatusColor      string
-	StatusLabel      string
-	StatusExtra      string
-	StatusExtraTitle string
-	HasRepositories  bool
-	ReleaseBodyID    string
-	Repositories     []homeRepository
+	Name        string
+	Mode        string
+	URL         string
+	SetupNote   string
+	SetupCmd    string
+	SetupCopy   string
+	Requests    string
+	HitRate     string
+	DiskUsage   string
+	StatusColor string
+	StatusLabel string
+	StatusExtra string
 }
 
 func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
@@ -93,7 +61,11 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	var usage map[string]int64
 	if a.store != nil {
 		storeStats, _ = a.store.Stats(req.Context())
-		usage = a.tenantUsage(req.Context(), entryNames(entries))
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name)
+		}
+		usage = a.tenantUsage(req.Context(), names)
 	}
 	if usage == nil {
 		usage = make(map[string]int64)
@@ -107,9 +79,6 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		}
 		s := ss.Instances[entry.Name]
 		hi := buildHomeInstance(entry, baseURL, req, s, usage[entry.Name], i18n)
-		if hi.HasRepositories {
-			hi.ReleaseBodyID = fmt.Sprintf("repositories-%d", len(instances))
-		}
 		if _, ok := seenModes[hi.Mode]; !ok {
 			seenModes[hi.Mode] = struct{}{}
 			modes = append(modes, hi.Mode)
@@ -139,7 +108,6 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 
 func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpcache.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
 	instURL := instURL(entry, baseURL, req)
-	now := time.Now()
 	hi := homeInstance{
 		Name: entry.Name,
 		Mode: entry.Mode,
@@ -157,100 +125,17 @@ func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Requ
 	if src, ok := entry.Runtime.(proxyruntime.StatusSource); ok {
 		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = src.DashboardStatus()
 	} else {
-		hi.StatusColor, hi.StatusLabel, hi.StatusExtra, hi.StatusExtraTitle = instanceStatus(s, i18n, now)
-	}
-	if src, ok := entry.Runtime.(proxyruntime.RepositoryStatusSource); ok {
-		repositories := src.RepositoryStatuses()
-		hi.HasRepositories = true
-		hi.Repositories = make([]homeRepository, len(repositories))
-		for i, repository := range repositories {
-			hi.Repositories[i] = buildHomeRepository(repository, i18n, now)
+		if s.UpstreamRequests == 0 {
+			hi.StatusLabel = "\u2014"
+		} else if float64(s.UpstreamErrors)/float64(s.UpstreamRequests)*100 >= 5 {
+			hi.StatusColor = "yellow"
+			hi.StatusLabel = i18nStr(i18n, "n_err", int(s.UpstreamErrors))
+		} else {
+			hi.StatusColor = "green"
+			hi.StatusLabel = i18nStr(i18n, "upstream_ok")
 		}
 	}
 	return hi
-}
-
-func buildHomeRepository(repository proxyruntime.RepositoryStatus, i18n map[string]string, now time.Time) homeRepository {
-	pub, pubTitle := formatRecentTime(repository.Published, i18n, now)
-	lastOK, lastOKTitle := formatRecentTime(repository.LastSuccessAt, i18n, now)
-	lastTry, lastTryTitle := formatRecentTime(repository.LastRefreshAt, i18n, now)
-	upstream := repository.Upstream
-	if u, err := urlpkg.Parse(upstream); err == nil && u.Host != "" {
-		upstream = u.Host
-	}
-	state := repositoryStateLabelKey(repository)
-	attributes := make([]homeRepositoryAttribute, len(repository.Attributes))
-	for i, attr := range repository.Attributes {
-		label := i18nStr(i18n, attr.LabelKey)
-		if label == "" {
-			label = attr.LabelKey
-		}
-		attributes[i] = homeRepositoryAttribute{Label: label, Value: attr.Value}
-	}
-	displayName := repository.DisplayName
-	if displayName == "" {
-		displayName = repository.Path
-	}
-	if displayName == "" {
-		displayName = repository.ID
-	}
-	rootPath := repository.Path
-	if rootPath == "" {
-		rootPath = "/"
-	}
-	layout := ""
-	if repository.Layout != "" {
-		layout = i18nStr(i18n, "repository_layout_"+repository.Layout)
-		if layout == "" {
-			layout = repository.Layout
-		}
-	}
-	return homeRepository{
-		DisplayName:     displayName,
-		Path:            rootPath,
-		Layout:          layout,
-		PrimaryMetadata: strings.Join(repository.PrimaryMetadata, ", "),
-		Generation:      repositoryGenerationLabel(repository, i18n),
-		Published:       pub,
-		PublishedTitle:  pubTitle,
-		ArtifactCount:   fmt.Sprintf("%d %s", repository.ArtifactCount, i18nStr(i18n, "packages")),
-		MetadataCount:   fmt.Sprintf("%d %s", repository.MetadataCount, i18nStr(i18n, "metadata_objects")),
-		Upstream:        upstream,
-		StateLabel:      i18nStr(i18n, "repository_state_"+state),
-		StateColor:      formatRootStateColor(state),
-		LastOK:          lastOK,
-		LastOKTitle:     lastOKTitle,
-		LastTry:         lastTry,
-		LastTryTitle:    lastTryTitle,
-		LastError:       repository.LastError,
-		Attributes:      attributes,
-	}
-}
-
-func repositoryStateLabelKey(repository proxyruntime.RepositoryStatus) string {
-	state := repository.State
-	switch {
-	case repository.Refreshing && repository.HasCurrent:
-		return "refreshing"
-	case repository.Refreshing:
-		return "bootstrapping"
-	case !repository.HasCurrent && repository.State == "blocked":
-		return "failed"
-	case !repository.HasCurrent && (repository.State == "" || repository.State == "pending"):
-		return "booting"
-	case state == "":
-		return "pending"
-	default:
-		return state
-	}
-}
-
-func repositoryGenerationLabel(repository proxyruntime.RepositoryStatus, i18n map[string]string) string {
-	generation := repository.Generation
-	if !repository.HasCurrent || generation == "" {
-		generation = i18nStr(i18n, "none")
-	}
-	return fmt.Sprintf("%s %s", i18nStr(i18n, "repository_generation"), generation)
 }
 
 func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry {
@@ -259,14 +144,6 @@ func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry
 		items = append(items, entries[name])
 	}
 	return items
-}
-
-func entryNames(entries []*proxyruntime.Entry) []string {
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name)
-	}
-	return names
 }
 
 func (a *App) publicBaseURL(req *http.Request) string {
@@ -278,8 +155,8 @@ func (a *App) publicBaseURL(req *http.Request) string {
 
 func instURL(entry *proxyruntime.Entry, baseURL string, req *http.Request) string {
 	if entry.Bind != "" {
-		if entry.Home.DisplayURL != "" {
-			return entry.Home.DisplayURL
+		if entry.DisplayURL != "" {
+			return entry.DisplayURL
 		}
 		return bindURL(req, entry.Bind)
 	}

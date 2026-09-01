@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -23,15 +24,9 @@ type AuthConfig struct {
 }
 
 type Block struct {
-	Upstream         string          `yaml:"upstream"`
 	Auth             *AuthConfig     `yaml:"auth,omitempty"`
-	Proxy            string          `yaml:"proxy,omitempty"`
 	SyncInterval     config.Duration `yaml:"sync_interval"`
 	OperationTimeout config.Duration `yaml:"operation_timeout"`
-	Overwrite        *bool           `yaml:"force_overwrite"`
-	Route            struct {
-		Path string `yaml:"path"`
-	} `yaml:"route"`
 }
 
 type Driver struct{}
@@ -45,14 +40,15 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.Decode(&block); err != nil {
 		return err
 	}
-	if block.Upstream == "" {
-		return fmt.Errorf("instance %s: upstream is required", plan.Name())
+	if block.SyncInterval < 0 {
+		return fmt.Errorf("instance %s: git sync_interval must not be negative", plan.Name())
 	}
-	if _, err := transport.NewEndpoint(strings.TrimSpace(block.Upstream)); err != nil {
+	if block.OperationTimeout < 0 {
+		return fmt.Errorf("instance %s: git operation_timeout must not be negative", plan.Name())
+	}
+	upstream := strings.TrimSpace(plan.Upstreams()[0])
+	if _, err := transport.NewEndpoint(upstream); err != nil {
 		return fmt.Errorf("instance %s: invalid git upstream: %w", plan.Name(), err)
-	}
-	if block.Route.Path == "" {
-		return fmt.Errorf("instance %s: route.path is required", plan.Name())
 	}
 
 	auth, err := buildAuth(block.Auth)
@@ -60,20 +56,12 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return fmt.Errorf("instance %s: auth: %w", plan.Name(), err)
 	}
 
-	var proxyURLStr string
-	if block.Proxy != "" {
-		if err := config.ValidateTransport(&config.TransportConfig{Proxy: block.Proxy}); err != nil {
-			return fmt.Errorf("instance %s: proxy URL: %w", plan.Name(), err)
-		}
-		proxyURLStr = block.Proxy
+	var proxyURL string
+	if plan.Transport() != nil {
+		proxyURL = plan.Transport().Proxy
 	}
 	if !plan.Enabled() {
 		return nil
-	}
-
-	forceOverwrite := true
-	if block.Overwrite != nil {
-		forceOverwrite = *block.Overwrite
 	}
 
 	baseFs := afero.NewBasePathFs(plan.Store(), "git/"+plan.Name())
@@ -82,24 +70,27 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	handler := newGitHandler(gitConfig{
 		name:             plan.Name(),
 		billyFs:          billyFs,
-		upstream:         block.Upstream,
+		upstream:         upstream,
 		auth:             auth,
-		proxyURL:         proxyURLStr,
-		syncInterval:     time.Duration(block.SyncInterval),
+		proxyURL:         proxyURL,
 		operationTimeout: block.OperationTimeout.Duration(),
-		forceOverwrite:   forceOverwrite,
+		upstreamGate:     plan.UpstreamGate(),
 	})
 
-	plan.SetHomeSnippet(plan.RenderSnippet())
-	plan.SetHomeDisplayURL(block.Upstream)
+	plan.SetHomeDisplayURL(upstream)
+	syncInterval := block.SyncInterval.Duration()
+	if syncInterval <= 0 {
+		syncInterval = 5 * time.Minute
+	}
 	plan.Scheduler().Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
-		Interval: 6 * time.Hour,
+		Key:            scheduler.NewTaskKey(plan.Name(), scheduler.TypeGitSync, ""),
+		Interval:       syncInterval,
+		RunImmediately: true,
 		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
+			return nil, handler.Sync(ctx)
 		},
 	})
-	return plan.BindPath(block.Route.Path, config.DefaultExpireAfter, handler)
+	return plan.BindPath(plan.Path(), plan.Retention(), handler)
 }
 
 func buildAuth(cfg *AuthConfig) (transport.AuthMethod, error) {
@@ -108,13 +99,22 @@ func buildAuth(cfg *AuthConfig) (transport.AuthMethod, error) {
 	}
 	switch strings.ToLower(cfg.Type) {
 	case "basic":
+		username := os.ExpandEnv(cfg.Username)
+		password := os.ExpandEnv(cfg.Password)
+		if username == "" || password == "" {
+			return nil, errors.New("basic auth requires username and password")
+		}
 		return &githttp.BasicAuth{
-			Username: os.ExpandEnv(cfg.Username),
-			Password: os.ExpandEnv(cfg.Password),
+			Username: username,
+			Password: password,
 		}, nil
 	case "token":
+		token := os.ExpandEnv(cfg.Password)
+		if token == "" {
+			return nil, errors.New("token auth requires password")
+		}
 		return &githttp.TokenAuth{
-			Token: os.ExpandEnv(cfg.Password),
+			Token: token,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown auth type %q, expected basic or token", cfg.Type)

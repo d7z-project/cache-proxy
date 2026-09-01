@@ -9,35 +9,14 @@ import (
 	"net/url"
 	"path"
 	"strings"
-	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-type Policy struct {
-	IndexPolicy         string           `json:"indexPolicy,omitempty" yaml:"index_policy,omitempty"`
-	IndexFreshFor       config.Freshness `json:"indexFreshFor,omitempty" yaml:"index_fresh_for,omitempty"`
-	IndexBusyPolicy     string           `json:"indexBusyPolicy,omitempty" yaml:"index_busy_policy,omitempty"`
-	FilePolicy          string           `json:"filePolicy,omitempty" yaml:"file_policy,omitempty"`
-	CompanionPolicy     string           `json:"companionPolicy,omitempty" yaml:"companion_policy,omitempty"`
-	CompanionFreshFor   config.Freshness `json:"companionFreshFor,omitempty" yaml:"companion_fresh_for,omitempty"`
-	CompanionBusyPolicy string           `json:"companionBusyPolicy,omitempty" yaml:"companion_busy_policy,omitempty"`
-	ProxyJSON           *bool            `json:"proxyJson,omitempty" yaml:"proxy_json,omitempty"`
-	ProxyCoreMetadata   bool             `json:"proxyCoreMetadata,omitempty" yaml:"proxy_core_metadata,omitempty"`
-	ProxySignatures     bool             `json:"proxySignatures,omitempty" yaml:"proxy_signatures,omitempty"`
-	AllowedFileHosts    []string         `json:"allowedFileHosts,omitempty" yaml:"allowed_file_hosts,omitempty"`
-}
-
-type Block struct {
-	ExpireAfter config.Expiration `yaml:"expire_after"`
-	Route       struct {
-		Path string `yaml:"path"`
-	} `yaml:"route"`
-	Upstream  string                  `yaml:"upstream"`
-	Transport *config.TransportConfig `yaml:"transport,omitempty"`
-	Policy    `yaml:",inline"`
+type Options struct {
+	AllowedFileHosts []string `json:"allowedFileHosts,omitempty" yaml:"allowed_file_hosts,omitempty"`
 }
 
 type Driver struct{}
@@ -46,117 +25,49 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModePyPI }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var block Block
-	if err := plan.Decode(&block); err != nil {
+	var options Options
+	if err := plan.Decode(&options); err != nil {
 		return err
 	}
-	if strings.TrimSpace(block.Upstream) == "" {
-		return fmt.Errorf("instance %s: pypi mode requires one upstream", plan.Name())
-	}
-	if err := config.ValidateHTTPUpstream(block.Upstream); err != nil {
-		return fmt.Errorf("instance %s: pypi upstream URL is invalid: %w", plan.Name(), err)
-	}
-	if err := config.ValidateTransport(block.Transport); err != nil {
-		return fmt.Errorf("instance %s: pypi transport: %w", plan.Name(), err)
-	}
-	applyDefaults(&block.Policy)
-	if err := validatePolicy(&block.Policy); err != nil {
-		return fmt.Errorf("instance %s: %w", plan.Name(), err)
-	}
-	if !plan.Enabled() {
-		return nil
-	}
-	expireAfter := block.ExpireAfter
-	if expireAfter.IsUnset() {
-		expireAfter = config.DefaultExpireAfter
-	}
-	upstream := strings.TrimSpace(block.Upstream)
-	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
-		Mode:               config.ModePyPI,
-		ExpireAfter:        expireAfter,
-		Upstreams:          []string{upstream},
-		Transport:          block.Transport,
-		BusyPolicy:         block.CompanionBusyPolicy,
-		DefaultFreshFor:    block.CompanionFreshFor,
-		AllowedTargetHosts: append([]string(nil), block.AllowedFileHosts...),
-		UpstreamGate:       plan.UpstreamGate(),
-	}, plan.Store(), &resolver{policy: &block.Policy}, plan.Stats(), nil)
-	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindHTTPPath(block.Route.Path, expireAfter, handler)
-}
-
-func applyDefaults(policy *Policy) {
-	if policy.IndexPolicy == "" {
-		policy.IndexPolicy = config.PolicyRevalidate
-	}
-	if policy.IndexFreshFor == 0 {
-		policy.IndexFreshFor = config.Freshness(time.Minute)
-	}
-	if policy.IndexBusyPolicy == "" {
-		policy.IndexBusyPolicy = config.BusyPolicyStale
-	}
-	if policy.FilePolicy == "" {
-		policy.FilePolicy = config.PolicyImmutable
-	}
-	if policy.CompanionPolicy == "" {
-		policy.CompanionPolicy = config.PolicyImmutable
-	}
-	if policy.CompanionFreshFor == 0 {
-		policy.CompanionFreshFor = config.Freshness(30 * time.Second)
-	}
-	if policy.CompanionBusyPolicy == "" {
-		policy.CompanionBusyPolicy = config.BusyPolicyJoin
-	}
-	if policy.ProxyJSON == nil {
-		enabled := true
-		policy.ProxyJSON = &enabled
-	}
-}
-
-func validatePolicy(policy *Policy) error {
-	for _, value := range []string{policy.IndexPolicy, policy.FilePolicy, policy.CompanionPolicy} {
-		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
-			return fmt.Errorf("invalid pypi policy %q", value)
-		}
-	}
-	for _, value := range []string{policy.IndexBusyPolicy, policy.CompanionBusyPolicy} {
-		if !config.ValidBusyPolicy(value) {
-			return fmt.Errorf("invalid pypi busy policy %q", value)
-		}
-	}
-	if policy.IndexFreshFor > 0 && policy.IndexFreshFor.Duration() < time.Second {
-		return errors.New("pypi index fresh_for must be at least 1s")
-	}
-	if policy.CompanionFreshFor > 0 && policy.CompanionFreshFor.Duration() < time.Second {
-		return errors.New("pypi companion fresh_for must be at least 1s")
-	}
-	seenHosts := make(map[string]struct{}, len(policy.AllowedFileHosts))
-	for index, rawHost := range policy.AllowedFileHosts {
+	seenHosts := make(map[string]struct{}, len(options.AllowedFileHosts))
+	for index, rawHost := range options.AllowedFileHosts {
 		host := strings.TrimSpace(rawHost)
 		parsed, err := url.Parse("//" + host)
 		if err != nil || host == "" || strings.Contains(host, "://") || parsed.Host == "" ||
 			parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return fmt.Errorf("invalid pypi allowed_file_hosts entry %q", rawHost)
+			return fmt.Errorf("instance %s: invalid pypi allowed_file_hosts entry %q", plan.Name(), rawHost)
 		}
 		host = strings.ToLower(parsed.Host)
 		if _, exists := seenHosts[host]; exists {
-			return fmt.Errorf("duplicate pypi allowed_file_hosts entry %q", rawHost)
+			return fmt.Errorf("instance %s: duplicate pypi allowed_file_hosts entry %q", plan.Name(), rawHost)
 		}
 		seenHosts[host] = struct{}{}
-		policy.AllowedFileHosts[index] = host
+		options.AllowedFileHosts[index] = host
 	}
-	return nil
+	if !plan.Enabled() {
+		return nil
+	}
+	upstream := strings.TrimSpace(plan.Upstreams()[0])
+	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
+		Mode:               config.ModePyPI,
+		ExpireAfter:        plan.Retention(),
+		MetadataTTL:        plan.MetadataTTL(),
+		Upstreams:          []string{upstream},
+		Transport:          plan.Transport(),
+		AllowedTargetHosts: options.AllowedFileHosts,
+		UpstreamGate:       plan.UpstreamGate(),
+		ResponseTransform:  httpcache.PyPIResponseTransform([]string{upstream}),
+	}, plan.Store(), resolver{}, plan.Stats())
+	return plan.BindHTTPPath(plan.Path(), plan.Retention(), handler)
 }
 
-type resolver struct {
-	policy *Policy
+type resolver struct{}
+
+func (resolver) Resolve(req *http.Request) (httpcache.Route, error) {
+	return routeForPath(strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
 }
 
-func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
-	return routeForPath(r.policy, strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/"))
-}
-
-func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
+func routeForPath(lookupPath string) (httpcache.Route, error) {
 	if lookupPath == "." || lookupPath == "" {
 		lookupPath = "simple/"
 	}
@@ -165,95 +76,43 @@ func routeForPath(policy *Policy, lookupPath string) (httpcache.Route, error) {
 	}
 	switch {
 	case lookupPath == "simple" || lookupPath == "simple/":
-		return httpcache.Route{
-			ObjectPath:   "pypi/simple/root.html",
-			UpstreamPath: "simple/",
-			Policy:       policy.IndexPolicy,
-			FreshFor:     policy.IndexFreshFor,
-			BusyPolicy:   policy.IndexBusyPolicy,
-			RewriteKind:  "pypi-simple",
-		}, nil
+		return httpcache.Route{Class: httpcache.ClassMetadata, ObjectPath: "pypi/simple/root.html", UpstreamPath: "simple/"}, nil
 	case strings.HasPrefix(lookupPath, "simple/"):
 		trimmed := strings.TrimPrefix(lookupPath, "simple/")
 		if strings.HasSuffix(trimmed, "/json") {
 			name := normalizeProjectName(strings.TrimSuffix(trimmed, "/json"))
-			if policy.ProxyJSON == nil || !*policy.ProxyJSON {
-				return httpcache.Route{}, errors.New("json simple api is disabled")
-			}
 			return httpcache.Route{
+				Class:          httpcache.ClassMetadata,
 				ObjectPath:     "pypi/simple/" + name + ".json",
 				UpstreamPath:   "simple/" + name + "/",
-				Policy:         policy.IndexPolicy,
-				FreshFor:       policy.IndexFreshFor,
-				BusyPolicy:     policy.IndexBusyPolicy,
 				RequestHeaders: map[string]string{"Accept": "application/vnd.pypi.simple.v1+json"},
-				RewriteKind:    "pypi-simple",
 			}, nil
 		}
 		name := normalizeProjectName(strings.TrimSuffix(trimmed, "/"))
-		return httpcache.Route{
-			ObjectPath:   "pypi/simple/" + name + ".html",
-			UpstreamPath: "simple/" + name + "/",
-			Policy:       policy.IndexPolicy,
-			FreshFor:     policy.IndexFreshFor,
-			BusyPolicy:   policy.IndexBusyPolicy,
-			RewriteKind:  "pypi-simple",
-		}, nil
+		return httpcache.Route{Class: httpcache.ClassMetadata, ObjectPath: "pypi/simple/" + name + ".html", UpstreamPath: "simple/" + name + "/"}, nil
 	case strings.HasPrefix(lookupPath, "files/"):
 		sourceURL, err := decodeSourceURL(path.Base(lookupPath))
 		if err != nil {
 			return httpcache.Route{}, err
 		}
-		return fileRoute(policy, lookupPath, sourceURL), nil
+		return pypiFileRoute(lookupPath, sourceURL), nil
 	default:
-		return fileRoute(policy, lookupPath, lookupPath), nil
+		return pypiFileRoute(lookupPath, lookupPath), nil
 	}
 }
 
-func fileRoute(policy *Policy, lookupPath, rawURL string) httpcache.Route {
+func pypiFileRoute(lookupPath, rawURL string) httpcache.Route {
 	objectPath := "pypi/files/" + path.Base(lookupPath)
 	if !strings.HasPrefix(lookupPath, "files/") {
 		objectPath = "pypi/files/" + encodeSourceURL(rawURL)
 	}
-	route := httpcache.Route{
-		ObjectPath: objectPath,
-		Policy:     policy.FilePolicy,
-		BusyPolicy: config.BusyPolicyJoin,
-	}
+	route := httpcache.Route{Class: httpcache.ClassContent, ObjectPath: objectPath}
 	if parsed, err := url.Parse(rawURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		route.TargetURL = rawURL
-		if isAuxiliaryPath(rawURL, policy) {
-			route.Policy = policy.CompanionPolicy
-			route.FreshFor = policy.CompanionFreshFor
-			route.BusyPolicy = policy.CompanionBusyPolicy
-		}
-		return route
+	} else {
+		route.UpstreamPath = lookupPath
 	}
-	route.UpstreamPath = lookupPath
 	return route
-}
-
-func isAuxiliaryPath(rawURL string, policy *Policy) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	cleanPath := strings.ToLower(parsed.Path)
-	if policy.ProxySignatures {
-		for _, suffix := range []string{".asc", ".sig", ".minisig"} {
-			if strings.HasSuffix(cleanPath, suffix) {
-				return true
-			}
-		}
-	}
-	if policy.ProxyCoreMetadata {
-		for _, suffix := range []string{".metadata", ".json", ".attestation", ".provenance"} {
-			if strings.HasSuffix(cleanPath, suffix) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func normalizeProjectName(name string) string {

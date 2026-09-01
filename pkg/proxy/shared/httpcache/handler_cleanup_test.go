@@ -33,7 +33,7 @@ func TestCleanupContinuesFromInspectionCursor(t *testing.T) {
 	handler := NewHandler("test", RuntimeConfig{
 		Mode:        "test",
 		ExpireAfter: config.Expiration(time.Hour),
-	}, store, literalResolver{}, NewStats(prometheus.NewRegistry()), nil)
+	}, store, literalResolver{}, NewStats(prometheus.NewRegistry()))
 	opts := config.CleanupConfig{BatchSize: 1}
 	require.NoError(t, handler.Cleanup(ctx, opts))
 	_, err = store.StatObject(ctx, "test", "z-expired")

@@ -24,28 +24,12 @@ type SumDBConfig struct {
 }
 
 type Config struct {
-	SumDB                    *SumDBConfig     `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
-	GOPrivate                []string         `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
-	DisableModuleFetchHeader bool             `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
-	ModulePolicy             string           `json:"modulePolicy,omitempty" yaml:"module_policy,omitempty"`
-	ModuleFreshFor           config.Freshness `json:"moduleFreshFor,omitempty" yaml:"module_fresh_for,omitempty"`
-	ModuleBusyPolicy         string           `json:"moduleBusyPolicy,omitempty" yaml:"module_busy_policy,omitempty"`
-	ZipPolicy                string           `json:"zipPolicy,omitempty" yaml:"zip_policy,omitempty"`
-	SumDBFreshFor            config.Freshness `json:"sumdbFreshFor,omitempty" yaml:"sumdb_fresh_for,omitempty"`
-	SumDBBusyPolicy          string           `json:"sumdbBusyPolicy,omitempty" yaml:"sumdb_busy_policy,omitempty"`
+	SumDB                    *SumDBConfig `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
+	GOPrivate                []string     `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
+	DisableModuleFetchHeader bool         `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
 }
 
-type Policy = Config
-
-type Block struct {
-	ExpireAfter config.Expiration `yaml:"expire_after"`
-	Route       struct {
-		Path string `yaml:"path"`
-	} `yaml:"route"`
-	Proxies   []string                `yaml:"proxies"`
-	Transport *config.TransportConfig `yaml:"transport,omitempty"`
-	Config    `yaml:",inline"`
-}
+type Options = Config
 
 type Driver struct{}
 
@@ -53,25 +37,18 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModeGo }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var block Block
-	if err := plan.Decode(&block); err != nil {
+	var options Config
+	if err := plan.Decode(&options); err != nil {
 		return err
 	}
-	applyDefaults(&block.Config)
-	if err := validateBlock(block.Proxies, &block.Config); err != nil {
+	applyDefaults(&options)
+	if err := validateBlock(plan.Upstreams(), &options); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
-	}
-	if err := config.ValidateTransport(block.Transport); err != nil {
-		return fmt.Errorf("instance %s: go transport: %w", plan.Name(), err)
 	}
 	if !plan.Enabled() {
 		return nil
 	}
-	expireAfter := block.ExpireAfter
-	if expireAfter.IsUnset() {
-		expireAfter = config.DefaultExpireAfter
-	}
-	handler, err := NewHandler(plan.Name(), expireAfter, block.Proxies, block.Transport, &block.Config, plan.Store(), plan.Stats(), plan.UpstreamGate())
+	handler, err := NewHandler(plan.Name(), plan.Retention(), plan.MetadataTTL(), plan.Upstreams(), plan.Transport(), &options, plan.Store(), plan.Stats(), plan.UpstreamGate())
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
@@ -82,32 +59,13 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
-	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindPath(block.Route.Path, expireAfter, proxyruntime.HandlerInstance{
+	return plan.BindPath(plan.Path(), plan.Retention(), proxyruntime.HandlerInstance{
 		Handler:      handler,
 		CloseContext: handler.CloseContext,
 	})
 }
 
 func applyDefaults(cfg *Config) {
-	if cfg.ModulePolicy == "" {
-		cfg.ModulePolicy = config.PolicyRevalidate
-	}
-	if cfg.ModuleFreshFor == 0 {
-		cfg.ModuleFreshFor = config.Freshness(time.Minute)
-	}
-	if cfg.ModuleBusyPolicy == "" {
-		cfg.ModuleBusyPolicy = config.BusyPolicyStale
-	}
-	if cfg.ZipPolicy == "" {
-		cfg.ZipPolicy = config.PolicyImmutable
-	}
-	if cfg.SumDBFreshFor == 0 {
-		cfg.SumDBFreshFor = config.Freshness(30 * time.Second)
-	}
-	if cfg.SumDBBusyPolicy == "" {
-		cfg.SumDBBusyPolicy = config.BusyPolicyJoin
-	}
 	if cfg.SumDB == nil {
 		cfg.SumDB = &SumDBConfig{Enabled: true, Name: "sum.golang.org", URL: "https://sum.golang.org"}
 		return
@@ -154,22 +112,6 @@ func validateBlock(proxies []string, cfg *Config) error {
 		if strings.ContainsAny(pattern, "\r\n") {
 			return fmt.Errorf("go goprivate %d must not contain line breaks", i)
 		}
-	}
-	for _, value := range []string{cfg.ModulePolicy, cfg.ZipPolicy} {
-		if value != config.PolicyBypass && value != config.PolicyImmutable && value != config.PolicyRevalidate {
-			return fmt.Errorf("invalid go cache policy %q", value)
-		}
-	}
-	for _, value := range []string{cfg.ModuleBusyPolicy, cfg.SumDBBusyPolicy} {
-		if !config.ValidBusyPolicy(value) {
-			return fmt.Errorf("invalid go busy policy %q", value)
-		}
-	}
-	if cfg.ModuleFreshFor > 0 && cfg.ModuleFreshFor.Duration() < time.Second {
-		return errors.New("go module fresh_for must be at least 1s")
-	}
-	if cfg.SumDBFreshFor > 0 && cfg.SumDBFreshFor.Duration() < time.Second {
-		return errors.New("go sumdb fresh_for must be at least 1s")
 	}
 	return nil
 }

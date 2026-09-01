@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
 	containername "github.com/google/go-containerregistry/pkg/name"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
@@ -15,18 +15,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
-type Policy struct {
-	Auth          *AuthConfig      `json:"auth,omitempty" yaml:"auth,omitempty"`
-	DefaultPolicy string           `json:"defaultPolicy,omitempty" yaml:"default_policy,omitempty"`
-	FreshFor      config.Freshness `json:"freshFor,omitempty" yaml:"fresh_for,omitempty"`
-	BusyPolicy    string           `json:"busyPolicy,omitempty" yaml:"busy_policy,omitempty"`
-	Rules         []Rule           `json:"rules" yaml:"rules"`
-}
-
-type Rule struct {
-	Match       string            `json:"match" yaml:"match"`
-	Policy      string            `json:"policy,omitempty" yaml:"policy,omitempty"`
-	ExpireAfter config.Expiration `json:"expireAfter,omitempty" yaml:"expire_after,omitempty"`
+type Options struct {
+	Auth *AuthConfig `json:"auth,omitempty" yaml:"auth,omitempty"`
 }
 
 type AuthConfig struct {
@@ -37,12 +27,10 @@ type AuthConfig struct {
 }
 
 type Block struct {
-	ExpireAfter config.Expiration       `yaml:"expire_after"`
-	Bind        string                  `yaml:"bind"`
-	DisplayURL  string                  `yaml:"display_url,omitempty"`
-	Upstream    string                  `yaml:"upstream"`
-	Transport   *config.TransportConfig `yaml:"transport,omitempty"`
-	Policy      `yaml:",inline"`
+	Upstream    string
+	Transport   *config.TransportConfig
+	MetadataTTL time.Duration
+	Options
 }
 
 type Driver struct{}
@@ -51,36 +39,22 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModeOCI }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var block Block
-	if err := plan.Decode(&block); err != nil {
+	var options Options
+	if err := plan.Decode(&options); err != nil {
 		return err
 	}
-	if block.Upstream == "" {
-		return fmt.Errorf("instance %s: oci mode requires one upstream", plan.Name())
-	}
-	if block.DefaultPolicy == "" {
-		block.DefaultPolicy = config.PolicyBypass
-	}
-	if block.BusyPolicy == "" {
-		block.BusyPolicy = config.BusyPolicyJoin
-	}
-	if err := validateConfig(block.Upstream, &block.Policy); err != nil {
+	upstream := strings.TrimSpace(plan.Upstreams()[0])
+	if err := validateConfig(upstream, &options); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
-	}
-	if err := config.ValidateTransport(block.Transport); err != nil {
-		return fmt.Errorf("instance %s: oci transport: %w", plan.Name(), err)
 	}
 	if !plan.Enabled() {
 		return nil
 	}
-	expireAfter := config.DefaultExpireAfter
-	if !block.ExpireAfter.IsUnset() {
-		expireAfter = block.ExpireAfter
-	}
-	handler := newHandler(plan.Name(), block, expireAfter, plan.Store(), plan.Stats(), plan.UpstreamGate())
-	plan.SetHomeSnippet(plan.RenderSnippet())
-	if block.DisplayURL != "" {
-		plan.SetHomeDisplayURL(block.DisplayURL)
+	handler := newHandler(plan.Name(), Block{
+		Upstream: upstream, Transport: plan.Transport(), MetadataTTL: plan.MetadataTTL(), Options: options,
+	}, plan.Retention(), plan.Store(), plan.Stats(), plan.UpstreamGate())
+	if plan.DisplayURL() != "" {
+		plan.SetHomeDisplayURL(plan.DisplayURL())
 	}
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
@@ -89,10 +63,10 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
 		},
 	})
-	return plan.BindAddr(block.Bind, expireAfter, handler)
+	return plan.BindAddr(plan.Bind(), plan.Retention(), handler)
 }
 
-func validateConfig(upstream string, policy *Policy) error {
+func validateConfig(upstream string, options *Options) error {
 	if err := config.ValidateHTTPUpstream(upstream); err != nil {
 		return fmt.Errorf("oci upstream URL is invalid: %w", err)
 	}
@@ -103,46 +77,25 @@ func validateConfig(upstream string, policy *Policy) error {
 			return fmt.Errorf("invalid oci registry %q: %w", host, err)
 		}
 	}
-	if !config.ValidPolicy(policy.DefaultPolicy) {
-		return fmt.Errorf("invalid oci default policy %q", policy.DefaultPolicy)
-	}
-	if !config.ValidBusyPolicy(policy.BusyPolicy) {
-		return fmt.Errorf("invalid oci busy policy %q", policy.BusyPolicy)
-	}
-	if policy.FreshFor > 0 && policy.FreshFor.Duration() < time.Second {
-		return errors.New("oci fresh_for must be at least 1s")
-	}
-	for i, rule := range policy.Rules {
-		if strings.TrimSpace(rule.Match) == "" {
-			return fmt.Errorf("oci rule %d: match is empty", i)
-		}
-		if !doublestar.ValidatePattern(rule.Match) {
-			return fmt.Errorf("oci rule %d: invalid match %q", i, rule.Match)
-		}
-		if rule.Policy == "" {
-			rule.Policy = config.PolicyBypass
-		}
-		if !config.ValidPolicy(rule.Policy) {
-			return fmt.Errorf("oci rule %d: invalid policy %q", i, rule.Policy)
-		}
-		policy.Rules[i] = rule
-	}
-	if policy.Auth == nil {
+	if options.Auth == nil {
 		return nil
 	}
-	switch strings.ToLower(policy.Auth.Type) {
+	switch strings.ToLower(options.Auth.Type) {
 	case "", "none":
-		policy.Auth = nil
+		options.Auth = nil
 	case "basic":
-		if policy.Auth.Username == "" || policy.Auth.Password == "" {
+		options.Auth.Username = os.ExpandEnv(options.Auth.Username)
+		options.Auth.Password = os.ExpandEnv(options.Auth.Password)
+		if options.Auth.Username == "" || options.Auth.Password == "" {
 			return errors.New("oci basic auth requires username and password")
 		}
 	case "bearer":
-		if policy.Auth.Token == "" {
+		options.Auth.Token = os.ExpandEnv(options.Auth.Token)
+		if options.Auth.Token == "" {
 			return errors.New("oci bearer auth requires token")
 		}
 	default:
-		return fmt.Errorf("unsupported oci auth type %q", policy.Auth.Type)
+		return fmt.Errorf("unsupported oci auth type %q", options.Auth.Type)
 	}
 	return nil
 }

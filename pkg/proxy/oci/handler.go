@@ -28,6 +28,9 @@ type tokenCacheEntry struct {
 }
 
 func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) *handler {
+	if block.MetadataTTL <= 0 {
+		block.MetadataTTL = 2 * time.Minute
+	}
 	client := utils.DefaultHTTPClientWrapper()
 	httpcache.ConfigureClientTransport(client, name, block.Transport)
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
@@ -35,7 +38,8 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 		name:            name,
 		upstream:        strings.TrimRight(block.Upstream, "/"),
 		expireAfter:     expireAfter,
-		policy:          &block.Policy,
+		metadataTTL:     block.MetadataTTL,
+		options:         &block.Options,
 		store:           store,
 		stats:           stats,
 		client:          client,
@@ -178,66 +182,47 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) || refsBusy || h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
 		return err
 	}
-	err = fs.WalkDir(h.store.TenantFS(h.name), "oci/manifests", func(current string, entry fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
-			return fs.SkipAll
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
+	cleanupObjects := func(root, objectKind string, busy func(string) bool) error {
+		walkErr := fs.WalkDir(h.store.TenantFS(h.name), root, func(current string, entry fs.DirEntry, err error) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+				return fs.SkipAll
+			}
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || busy(current) {
+				return nil
+			}
+			removed, err := h.cleanupExpiredObject(ctx, current, objectKind, opts)
+			if removed {
+				deleted++
+			}
+			return err
+		})
+		if errors.Is(walkErr, fs.ErrNotExist) {
 			return nil
 		}
-		if _, referenced := referencedManifests[current]; referenced {
-			return nil
+		return walkErr
+	}
+	err = cleanupObjects("oci/manifests", "manifest", func(objectPath string) bool {
+		if _, referenced := referencedManifests[objectPath]; referenced {
+			return true
 		}
 		h.manifestMu.Lock()
-		active := h.manifestReaders[current] > 0
+		active := h.manifestReaders[objectPath] > 0
 		h.manifestMu.Unlock()
-		if active {
-			return nil
-		}
-		removed, cleanupErr := h.cleanupExpiredObject(ctx, current, "manifest", opts)
-		if removed {
-			deleted++
-		}
-		return cleanupErr
+		return active
 	})
-	if errors.Is(err, fs.ErrNotExist) {
-		err = nil
-	}
 	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) {
 		return err
 	}
-	err = fs.WalkDir(h.store.TenantFS(h.name), "oci/blobs", func(current string, entry fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
-			return fs.SkipAll
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		if _, busy := h.downloads.Load(current); busy {
-			return nil
-		}
-		removed, cleanupErr := h.cleanupExpiredObject(ctx, current, "blob", opts)
-		if removed {
-			deleted++
-		}
-		return cleanupErr
+	return cleanupObjects("oci/blobs", "blob", func(objectPath string) bool {
+		_, busy := h.downloads.Load(objectPath)
+		return busy
 	})
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	return err
 }
 
 func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKind string, opts config.CleanupConfig) (bool, error) {
@@ -272,7 +257,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	defer h.wait.Done()
 
-	resolved, err := resolveRequest(req, h.policy)
+	resolved, err := resolveRequest(req, h.options)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", http.StatusNotFound, 0)
@@ -300,7 +285,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
-	if resolved.match.policy == config.PolicyBypass || resolved.kind == requestPing || resolved.kind == requestTags || resolved.kind == requestBypass {
+	if resolved.kind == requestPing || resolved.kind == requestTags || resolved.kind == requestBypass {
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	switch resolved.kind {
@@ -326,13 +311,10 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	staleState := state
 	lock := h.refLocks.Get(statePath)
 	if !lock.TryLock() {
-		if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
+		if staleState.Repo != "" {
 			if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, staleState, "STALE"); cacheErr == nil {
 				return status, "STALE", bytes, nil
 			}
-		}
-		if resolved.match.busyPolicy == config.BusyPolicyBypass {
-			return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", map[string]string{"Accept": manifestAccept})
 		}
 		lock.Lock()
 	}
@@ -352,7 +334,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 		slog.Debug("oci manifest fetched", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 		return status, cache, bytes, nil
 	}
-	if resolved.match.busyPolicy == config.BusyPolicyStale && staleState.Repo != "" {
+	if staleState.Repo != "" {
 		slog.Debug("oci manifest fetch failed, serving stale", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", fetchErr)
 		if staleStatus, staleBytes, cacheErr := h.serveManifestState(ctx, w, req, staleState, "STALE"); cacheErr == nil {
 			return staleStatus, "STALE", staleBytes, nil
@@ -401,13 +383,10 @@ func (h *handler) manifestFresh(resolved request, state refState) bool {
 	if h.stateExpired(state) {
 		return false
 	}
-	if resolved.match.policy == config.PolicyImmutable || isSHA256Digest(resolved.ref) {
+	if isSHA256Digest(resolved.ref) {
 		return true
 	}
-	if h.policy.FreshFor.IsForever() {
-		return true
-	}
-	return !h.policy.FreshFor.IsUnset() && time.Since(state.FetchedAt) <= h.policy.FreshFor.Duration()
+	return h.metadataTTL > 0 && time.Since(state.FetchedAt) <= h.metadataTTL
 }
 
 func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
@@ -502,7 +481,7 @@ func (h *handler) storeObject(ctx context.Context, objectPath string, body io.Re
 }
 
 func (h *handler) refStatePath(repo, ref string) string {
-	return path.Join(h.refDir(repo, ref), "state.yaml")
+	return path.Join("oci/refs", repo, httpcache.HashKey(ref), "state.yaml")
 }
 
 func (h *handler) manifestPath(digest string) string {
@@ -512,8 +491,4 @@ func (h *handler) manifestPath(digest string) string {
 
 func (h *handler) blobPath(digest string) string {
 	return path.Join("oci/blobs", strings.ReplaceAll(digest, ":", "/"))
-}
-
-func (h *handler) refDir(repo, ref string) string {
-	return path.Join("oci/refs", repo, httpcache.HashKey(ref))
 }

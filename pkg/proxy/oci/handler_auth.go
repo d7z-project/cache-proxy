@@ -33,17 +33,17 @@ func (h *handler) authorizationForChallenge(ctx context.Context, challenge ociCh
 }
 
 func (h *handler) staticAuthorization() string {
-	if h.policy.Auth == nil || strings.ToLower(h.policy.Auth.Type) != "bearer" || h.policy.Auth.Token == "" {
+	if h.options.Auth == nil || strings.ToLower(h.options.Auth.Type) != "bearer" || h.options.Auth.Token == "" {
 		return ""
 	}
-	return "Bearer " + h.policy.Auth.Token
+	return "Bearer " + h.options.Auth.Token
 }
 
 func (h *handler) basicAuthorization() string {
-	if h.policy.Auth == nil || strings.ToLower(h.policy.Auth.Type) != "basic" {
+	if h.options.Auth == nil || strings.ToLower(h.options.Auth.Type) != "basic" {
 		return ""
 	}
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(h.policy.Auth.Username+":"+h.policy.Auth.Password))
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(h.options.Auth.Username+":"+h.options.Auth.Password))
 }
 
 func (h *handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (string, error) {

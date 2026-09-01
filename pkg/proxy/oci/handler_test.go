@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,33 +24,35 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
-func TestResolveRequestMatchesRepoPolicy(t *testing.T) {
-	cfg := &Policy{
-		DefaultPolicy: config.PolicyRevalidate,
-		BusyPolicy:    config.BusyPolicyStale,
-		Rules: []Rule{
-			{Match: "library/*", Policy: config.PolicyImmutable, ExpireAfter: config.Expiration(2 * time.Hour)},
-			{Match: "org/**", Policy: config.PolicyBypass},
-		},
-	}
-
+func TestResolveRequestClassifiesManifest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
-	resolved, err := resolveRequest(req, cfg)
+	resolved, err := resolveRequest(req, &Options{})
 	require.NoError(t, err)
 	require.Equal(t, requestManifest, resolved.kind)
 	require.Equal(t, "library/alpine", resolved.repo)
 	require.Equal(t, "latest", resolved.ref)
-	require.Equal(t, config.PolicyImmutable, resolved.match.policy)
-	require.Equal(t, config.BusyPolicyStale, resolved.match.busyPolicy)
-	require.Equal(t, config.Expiration(2*time.Hour), resolved.match.expireAfter)
 }
 
-func TestOCIDigestManifestIsImmutableAndJoined(t *testing.T) {
+func TestValidateConfigExpandsAuthEnvironment(t *testing.T) {
+	t.Setenv("OCI_TEST_USERNAME", "registry-user")
+	t.Setenv("OCI_TEST_PASSWORD", "registry-password")
+	options := Options{Auth: &AuthConfig{
+		Type:     "basic",
+		Username: "${OCI_TEST_USERNAME}",
+		Password: "${OCI_TEST_PASSWORD}",
+	}}
+
+	require.NoError(t, validateConfig("https://registry.example", &options))
+	require.Equal(t, "registry-user", options.Auth.Username)
+	require.Equal(t, "registry-password", options.Auth.Password)
+}
+
+func TestOCIClassifiesDigestManifest(t *testing.T) {
 	digest := sha256Digest("manifest")
-	resolved, err := resolveRequest(httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/"+digest, nil), &Policy{DefaultPolicy: config.PolicyRevalidate})
+	resolved, err := resolveRequest(httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/"+digest, nil), &Options{})
 	require.NoError(t, err)
-	require.Equal(t, config.PolicyImmutable, resolved.match.policy)
-	require.Equal(t, config.BusyPolicyJoin, resolved.match.busyPolicy)
+	require.Equal(t, requestManifest, resolved.kind)
+	require.Equal(t, digest, resolved.ref)
 }
 
 func TestOCIRevalidatesTagManifestWithConditionalGet(t *testing.T) {
@@ -70,11 +73,7 @@ func TestOCIRevalidatesTagManifestWithConditionalGet(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	handler := newHandler("oci", Block{Upstream: upstream.URL, Policy: Policy{
-		DefaultPolicy: config.PolicyRevalidate,
-		FreshFor:      config.Freshness(time.Nanosecond),
-		BusyPolicy:    config.BusyPolicyJoin,
-	}}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	handler := newHandler("oci", Block{Upstream: upstream.URL, MetadataTTL: time.Nanosecond}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
@@ -113,11 +112,7 @@ func TestOCIRevalidationStateFailureServesCommittedManifest(t *testing.T) {
 	store, err = blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	handler := newHandler("oci", Block{Upstream: upstream.URL, Policy: Policy{
-		DefaultPolicy: config.PolicyRevalidate,
-		FreshFor:      config.Freshness(time.Nanosecond),
-		BusyPolicy:    config.BusyPolicyJoin,
-	}}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	handler := newHandler("oci", Block{Upstream: upstream.URL, MetadataTTL: time.Nanosecond}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	statePath = handler.refStatePath("library/alpine", "latest")
 
 	first := httptest.NewRecorder()
@@ -147,10 +142,10 @@ func TestOCIBearerTokenSingleflight(t *testing.T) {
 
 	handler := newHandler("oci", Block{
 		Upstream: "https://registry.example",
-		Policy: Policy{
+		Options: Options{
 			Auth: &AuthConfig{Type: "basic", Username: "user", Password: "pass"},
 		},
-	}, config.DefaultExpireAfter, nil, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	}, config.DefaultRetention, nil, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	challenge := ociChallenge{
 		scheme: "Bearer",
 		realm:  tokenServer.URL + "/token",
@@ -204,8 +199,7 @@ func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testi
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: registry.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyBypass},
-	}, config.DefaultExpireAfter, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	}, config.DefaultRetention, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Header.Set("User-Agent", browserUserAgent)
@@ -247,8 +241,7 @@ func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
 	})
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyBypass},
-	}, config.DefaultExpireAfter, store, httpcache.NewStats(prometheus.NewRegistry()), limiter)
+	}, config.DefaultRetention, store, httpcache.NewStats(prometheus.NewRegistry()), limiter)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/", nil))
@@ -291,11 +284,7 @@ func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy: Policy{
-			DefaultPolicy: config.PolicyImmutable,
-			BusyPolicy:    config.BusyPolicyStale,
-		},
-	}, config.DefaultExpireAfter, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	}, config.DefaultRetention, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	for range 2 {
 		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
@@ -358,10 +347,6 @@ func TestOCIBlobCacheIsIndependentFromRefExpiry(t *testing.T) {
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy: Policy{
-			DefaultPolicy: config.PolicyImmutable,
-			BusyPolicy:    config.BusyPolicyStale,
-		},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
@@ -417,9 +402,6 @@ func TestOCICachesDigestBlobWithoutActiveRef(t *testing.T) {
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy: Policy{
-			DefaultPolicy: config.PolicyImmutable,
-		},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	blobDigest := sha256Digest("blob-data")
@@ -460,7 +442,6 @@ func TestOCIBlobFetchClearsBusyStateOnUpstreamError(t *testing.T) {
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/blobs/"+blobDigest, nil)
@@ -489,7 +470,6 @@ func TestOCIManifestDigestMismatchFails(t *testing.T) {
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
@@ -512,7 +492,6 @@ func TestOCIManifestPersistenceFailureReturnsVerifiedResponse(t *testing.T) {
 	require.NoError(t, err)
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	require.NoError(t, store.Close())
 
@@ -521,6 +500,48 @@ func TestOCIManifestPersistenceFailureReturnsVerifiedResponse(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
 	require.Equal(t, body, rec.Body.String())
+}
+
+func TestOCICachePreparationFailureBypassesForManifestAndBlob(t *testing.T) {
+	manifest := `{"schemaVersion":2}`
+	manifestDigest := sha256Digest(manifest)
+	blob := "blob-data"
+	blobDigest := sha256Digest(blob)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/v2/library/alpine/manifests/latest":
+			w.Header().Set("Docker-Content-Digest", manifestDigest)
+			_, _ = io.WriteString(w, manifest)
+		case "/v2/library/alpine/blobs/" + blobDigest:
+			_, _ = io.WriteString(w, blob)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+	tempPath := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(tempPath, []byte("x"), 0o600))
+	t.Setenv("TMPDIR", tempPath)
+
+	for _, test := range []struct {
+		path string
+		body string
+	}{
+		{path: "/v2/library/alpine/manifests/latest", body: manifest},
+		{path: "/v2/library/alpine/blobs/" + blobDigest, body: blob},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, test.path, nil))
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.Equal(t, "BYPASS", recorder.Header().Get("X-Cache"))
+		require.Equal(t, test.body, recorder.Body.String())
+	}
 }
 
 func TestOCIStateCommitFailureDoesNotFailUpstreamResponse(t *testing.T) {
@@ -537,7 +558,6 @@ func TestOCIStateCommitFailureDoesNotFailUpstreamResponse(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	statePath := handler.refStatePath("library/alpine", "latest")
 	require.NoError(t, store.MkdirAll(handler.name+"/"+statePath, 0o755))
@@ -566,7 +586,6 @@ func TestOCIManifestHitUsesOnlyStateDigest(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 	oldDigest := sha256Digest(oldBody)
 	require.NoError(t, handler.storeObject(context.Background(), handler.manifestPath(oldDigest), strings.NewReader(oldBody), map[string]string{
@@ -610,7 +629,6 @@ func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
 
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
@@ -630,7 +648,6 @@ func TestOCIBlobDigestMismatchIsNotCached(t *testing.T) {
 func TestOCIRejectsMalformedBlobDigest(t *testing.T) {
 	handler := newHandler("oci", Block{
 		Upstream: "https://registry.example",
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), nil, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()
@@ -664,10 +681,6 @@ func TestOCIConcurrentManifestMissPublishesOneConsistentWriter(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy: Policy{
-			DefaultPolicy: config.PolicyImmutable,
-			BusyPolicy:    config.BusyPolicyBypass,
-		},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
@@ -677,12 +690,19 @@ func TestOCIConcurrentManifestMissPublishesOneConsistentWriter(t *testing.T) {
 		firstDone <- rec
 	}()
 	<-firstStarted
-	second := httptest.NewRecorder()
-	handler.ServeHTTP(second, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
-	require.Equal(t, "BYPASS", second.Header().Get("X-Cache"))
-	require.Equal(t, bodyB, second.Body.String())
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+		secondDone <- rec
+	}()
 	close(releaseFirst)
-	require.Equal(t, http.StatusOK, (<-firstDone).Code)
+	first := <-firstDone
+	second := <-secondDone
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, bodyA, second.Body.String())
+	require.EqualValues(t, 1, requests.Load())
 
 	state, err := handler.readState(ctx, handler.refStatePath("library/alpine", "latest"))
 	require.NoError(t, err)
@@ -769,7 +789,6 @@ func TestOCIRejectsOversizedManifest(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler := newHandler("oci", Block{
 		Upstream: upstream.URL,
-		Policy:   Policy{DefaultPolicy: config.PolicyImmutable},
 	}, config.Expiration(time.Hour), store, httpcache.NewStats(prometheus.NewRegistry()), nil)
 
 	rec := httptest.NewRecorder()

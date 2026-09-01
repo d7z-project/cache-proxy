@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/module"
 	"gopkg.d7z.net/blobfs"
@@ -31,10 +32,10 @@ const (
 )
 
 type Handler struct {
-	name   string
-	policy *Policy
-	store  *blobfs.Store
-	base   *httpcache.Handler
+	name    string
+	options *Options
+	store   *blobfs.Store
+	base    *httpcache.Handler
 }
 
 type moduleRequest struct {
@@ -44,29 +45,28 @@ type moduleRequest struct {
 	cacheKey   string
 }
 
-func NewHandler(name string, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, policy *Policy, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) (*Handler, error) {
-	if policy == nil {
-		policy = &Policy{}
+func NewHandler(name string, expireAfter config.Expiration, metadataTTL time.Duration, upstreams []string, transport *config.TransportConfig, options *Options, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) (*Handler, error) {
+	if options == nil {
+		options = &Options{}
 	}
-	applyDefaults(policy)
+	applyDefaults(options)
 	base := httpcache.NewHandler(name, httpcache.RuntimeConfig{
 		Mode:               config.ModeGo,
 		ExpireAfter:        expireAfter,
+		MetadataTTL:        metadataTTL,
 		Upstreams:          append([]string(nil), upstreams...),
 		Transport:          transport,
-		BusyPolicy:         policy.ModuleBusyPolicy,
-		DefaultFreshFor:    policy.ModuleFreshFor,
-		AllowedTargetHosts: sumDBTargetHosts(policy),
+		AllowedTargetHosts: sumDBTargetHosts(options),
 		UpstreamGate:       upstreamGate,
-	}, store, &resolver{policy: policy}, stats, nil)
-	return &Handler{name: name, policy: policy, store: store, base: base}, nil
+	}, store, &resolver{options: options}, stats)
+	return &Handler{name: name, options: options, store: store, base: base}, nil
 }
 
-func sumDBTargetHosts(policy *Policy) []string {
-	if policy == nil || policy.SumDB == nil || !policy.SumDB.Enabled {
+func sumDBTargetHosts(options *Options) []string {
+	if options == nil || options.SumDB == nil || !options.SumDB.Enabled {
 		return nil
 	}
-	parsed, err := url.Parse(strings.TrimSpace(policy.SumDB.URL))
+	parsed, err := url.Parse(strings.TrimSpace(options.SumDB.URL))
 	if err != nil || parsed.Host == "" {
 		return nil
 	}
@@ -75,11 +75,11 @@ func sumDBTargetHosts(policy *Policy) []string {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
-	if modulePath, ok := modulePathFromTarget(target); ok && matchesPrivateModule(h.policy, modulePath) {
+	if modulePath, ok := modulePathFromTarget(target); ok && matchesPrivateModule(h.options, modulePath) {
 		http.NotFound(w, req)
 		return
 	}
-	route, err := (&resolver{policy: h.policy}).Resolve(req)
+	route, err := (&resolver{options: h.options}).Resolve(req)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -88,7 +88,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return
 	}
-	if req.Header.Get(disableModuleFetchHeader) != "" && h.policy.DisableModuleFetchHeader {
+	if req.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader {
 		reader, err := h.store.OpenObject(req.Context(), h.name, route.ObjectPath)
 		if err != nil {
 			http.NotFound(w, req)
@@ -108,7 +108,7 @@ func (h *Handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error 
 }
 
 type resolver struct {
-	policy *Policy
+	options *Options
 }
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
@@ -124,38 +124,33 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		return httpcache.Route{}, err
 	}
 	route := httpcache.Route{
+		Class:        httpcache.ClassMetadata,
 		ObjectPath:   "go/" + moduleReq.cacheKey,
 		UpstreamPath: moduleReq.cacheKey,
-		Policy:       r.policy.ModulePolicy,
-		FreshFor:     r.policy.ModuleFreshFor,
-		BusyPolicy:   r.policy.ModuleBusyPolicy,
 	}
 	if moduleReq.kind == moduleRequestInfo || moduleReq.kind == moduleRequestMod || moduleReq.kind == moduleRequestZip {
-		route.Policy = r.policy.ZipPolicy
-		route.BusyPolicy = config.BusyPolicyJoin
+		route.Class = httpcache.ClassContent
 	}
 	return route, nil
 }
 
 func (r *resolver) resolveSumDB(target string) (httpcache.Route, error) {
-	if r.policy == nil || r.policy.SumDB == nil || !r.policy.SumDB.Enabled {
+	if r.options == nil || r.options.SumDB == nil || !r.options.SumDB.Enabled {
 		return httpcache.Route{}, fs.ErrNotExist
 	}
-	name := strings.TrimSpace(r.policy.SumDB.Name)
+	name := strings.TrimSpace(r.options.SumDB.Name)
 	prefix := "sumdb/" + name + "/"
 	if name == "" || !strings.HasPrefix(target, prefix) {
 		return httpcache.Route{}, fs.ErrNotExist
 	}
-	baseURL, err := url.Parse(strings.TrimSpace(r.policy.SumDB.URL))
+	baseURL, err := url.Parse(strings.TrimSpace(r.options.SumDB.URL))
 	if err != nil {
 		return httpcache.Route{}, err
 	}
 	return httpcache.Route{
+		Class:      httpcache.ClassMetadata,
 		ObjectPath: "go/" + target,
 		TargetURL:  baseURL.JoinPath(strings.TrimPrefix(target, prefix)).String(),
-		Policy:     config.PolicyRevalidate,
-		FreshFor:   r.policy.SumDBFreshFor,
-		BusyPolicy: r.policy.SumDBBusyPolicy,
 	}, nil
 }
 

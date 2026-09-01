@@ -9,363 +9,95 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestExpirationYAML(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    Expiration
-		wantErr bool
-	}{
-		{name: "unset", input: "", want: 0},
-		{name: "null", input: "null", want: 0},
-		{name: "never", input: "never", want: ExpirationNever},
-		{name: "zero", input: "0", want: ExpirationNever},
-		{name: "duration", input: "720h", want: Expiration(720 * time.Hour)},
-		{name: "negative", input: "-1h", wantErr: true},
-		{name: "invalid", input: "abc", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var got Expiration
-			err := yaml.Unmarshal([]byte(tt.input), &got)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestFreshnessYAML(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    Freshness
-		wantErr bool
-	}{
-		{name: "unset", input: "", want: 0},
-		{name: "forever", input: "forever", want: FreshnessForever},
-		{name: "zero", input: "0", want: FreshnessForever},
-		{name: "duration", input: "5m", want: Freshness(5 * time.Minute)},
-		{name: "negative", input: "-1m", wantErr: true},
-		{name: "invalid", input: "abc", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var got Freshness
-			err := yaml.Unmarshal([]byte(tt.input), &got)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestDecodeDocument(t *testing.T) {
+func TestDecodeCommonInstance(t *testing.T) {
 	doc, err := Decode(strings.NewReader(`
-server:
-  bind: 127.0.0.1:8080
-  backend: /tmp/cache
-  status:
-    disk_sample_interval: 15m
-    disk_history_window: 24h
-    event_limit: 500
-metrics:
-  path: /metrics
-  token: secret
-storage:
-  gc:
-    blob: 24h
-  cleanup:
-    dry_run: true
-    batch_size: 100
-  download:
-    max_active: 32
-    max_active_per_host: 4
-    hosts:
-      packages.d7z.net:
-        max_active: 16
+cache:
+  metadata_ttl: 2m
+  retention: 720h
 instances:
-  - name: files
+  - name: packages
     enabled: true
-    file:
-      expire_after: 720h
-      route:
-        path: /files
-      upstreams:
-        - https://example.com
-      default_policy: immutable
+    mode: npm
+    path: /npm
+    upstreams:
+      - https://registry.npmjs.org
+    transport:
+      header_timeout: 30s
+    options: {}
 `))
 	require.NoError(t, err)
-	require.Equal(t, "127.0.0.1:8080", doc.Server.Bind)
-	require.Equal(t, "/tmp/cache", doc.Server.Backend)
-	require.Equal(t, Duration(15*time.Minute), doc.Server.Status.DiskSampleInterval)
-	require.Equal(t, Duration(24*time.Hour), doc.Server.Status.DiskHistoryWindow)
-	require.Equal(t, 500, doc.Server.Status.EventLimit)
-	require.Equal(t, "/metrics", doc.Metrics.Path)
-	require.Equal(t, "secret", doc.Metrics.Token)
-	require.Equal(t, 32, doc.Storage.Download.MaxActive)
-	require.Equal(t, 4, doc.Storage.Download.MaxActivePerHost)
-	host := doc.Storage.Download.Hosts["packages.d7z.net"]
-	require.Equal(t, 16, host.MaxActive)
+	require.Equal(t, Duration(2*time.Minute), doc.Cache.MetadataTTL)
+	require.Equal(t, Expiration(720*time.Hour), doc.Cache.Retention)
 	require.Len(t, doc.Instances, 1)
-	spec, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	require.Equal(t, ModeFile, spec.Mode)
-	require.True(t, spec.Enabled)
-	require.NotNil(t, spec.Block)
+	instance := doc.Instances[0]
+	require.Equal(t, ModeNPM, instance.Mode)
+	require.Equal(t, "/npm", instance.Path)
+	require.Equal(t, []string{"https://registry.npmjs.org"}, instance.Upstreams)
 
-	var cfg struct {
-		ExpireAfter string `yaml:"expire_after"`
-		Route       struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstreams     []string `yaml:"upstreams"`
-		DefaultPolicy string   `yaml:"default_policy"`
-	}
-	require.NoError(t, spec.Block.DecodeStrict(&cfg))
-	require.Equal(t, "720h", cfg.ExpireAfter)
-	require.Equal(t, "/files", cfg.Route.Path)
-	require.Equal(t, []string{"https://example.com"}, cfg.Upstreams)
-	require.Equal(t, "immutable", cfg.DefaultPolicy)
+	instance.MetadataTTL = doc.Cache.MetadataTTL
+	instance.Retention = doc.Cache.Retention
+	selected, err := instance.SelectMode()
+	require.NoError(t, err)
+	require.Equal(t, ModeNPM, selected.Mode)
+	var options struct{}
+	require.NoError(t, selected.Options.DecodeStrict(&options))
 }
 
-func TestDecodeRejectsNilReader(t *testing.T) {
-	_, err := Decode(nil)
-	require.ErrorContains(t, err, "reader is nil")
-}
-
-func TestDecodeTransportHealthPatch(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: files
-    enabled: true
-    file:
-      route:
-        path: /files
-      upstreams:
-        - https://example.com
-      transport:
-        health:
-          enabled: false
-`))
-	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	var cfg struct {
-		Route struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstreams []string         `yaml:"upstreams"`
-		Transport *TransportConfig `yaml:"transport"`
-	}
-	require.NoError(t, selected.Block.DecodeStrict(&cfg))
-	require.NotNil(t, cfg.Transport)
-	require.NotNil(t, cfg.Transport.Health)
-	require.NotNil(t, cfg.Transport.Health.Enabled)
-	require.False(t, *cfg.Transport.Health.Enabled)
-}
-
-func TestDecodePackageRepositoryConfig(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: linux
-    enabled: true
-    deb:
-      expire_after: 720h
-      route:
-        path: /deb
-      upstreams:
-        - https://deb.example.com/debian
-      refresh_interval: 1h
-      artifact_policy: immutable
-`))
-	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	var block struct {
-		ExpireAfter Expiration `yaml:"expire_after"`
-		Route       struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstreams       []string `yaml:"upstreams"`
-		RefreshInterval Duration `yaml:"refresh_interval"`
-		ArtifactPolicy  string   `yaml:"artifact_policy"`
-	}
-	require.NoError(t, selected.Block.DecodeStrict(&block))
-	require.Equal(t, Duration(time.Hour), block.RefreshInterval)
-	require.Equal(t, []string{"https://deb.example.com/debian"}, block.Upstreams)
-}
-
-func TestDecodeRejectsUnknownServerStatusField(t *testing.T) {
+func TestDecodeRejectsUnknownFields(t *testing.T) {
 	_, err := Decode(strings.NewReader(`
-server:
-  status:
-    sample_every: 15m
-instances: []
+instances:
+  - name: packages
+    enabled: true
+    mode: npm
+    path: /npm
+    upstreams: [https://registry.npmjs.org]
+    mystery: true
 `))
-	require.ErrorContains(t, err, "field sample_every not found")
+	require.ErrorContains(t, err, "field mystery not found")
 }
 
-func TestDecodeRejectsMultipleYAMLDocuments(t *testing.T) {
-	_, err := Decode(strings.NewReader("instances: []\n---\ninstances: []\n"))
-	require.ErrorContains(t, err, "exactly one YAML document")
-}
-
-func TestValidateHTTPURL(t *testing.T) {
-	for _, valid := range []string{
-		"http://registry.example",
-		" https://registry.example:8443/base/path ",
-	} {
-		require.NoError(t, ValidateHTTPURL(valid), valid)
+func TestSelectModeValidatesCommonDeclaration(t *testing.T) {
+	tests := []struct {
+		name     string
+		instance Instance
+		contains string
+	}{
+		{name: "unknown mode", instance: Instance{Name: "x", Mode: "unknown", Path: "/x", Upstreams: []string{"https://example.test"}}, contains: "unsupported mode"},
+		{name: "missing bind", instance: Instance{Name: "x", Mode: ModeNPM, Upstreams: []string{"https://example.test"}}, contains: "exactly one of path or bind"},
+		{name: "both binds", instance: Instance{Name: "x", Mode: ModeOCI, Path: "/x", Bind: ":5000", Upstreams: []string{"https://example.test"}}, contains: "exactly one of path or bind"},
+		{name: "no upstream", instance: Instance{Name: "x", Mode: ModeNPM, Path: "/x"}, contains: "at least one"},
+		{name: "spaced mode still enforces origin count", instance: Instance{Name: "x", Mode: " npm ", Path: "/x", Upstreams: []string{"https://one.test", "https://two.test"}}, contains: "exactly one upstream"},
+		{name: "bad upstream", instance: Instance{Name: "x", Mode: ModeNPM, Path: "/x", Upstreams: []string{"file:///tmp"}}, contains: "valid absolute URL"},
 	}
-	for _, invalid := range []string{
-		"",
-		"registry.example",
-		"/relative/path",
-		"file:///tmp/repository",
-		"mailto:user@example.com",
-	} {
-		require.Error(t, ValidateHTTPURL(invalid), invalid)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := test.instance.SelectMode()
+			require.ErrorContains(t, err, test.contains)
+		})
 	}
 }
 
-func TestValidateHTTPUpstreamRejectsQueryAndFragment(t *testing.T) {
-	require.NoError(t, ValidateHTTPUpstream("https://registry.example/base"))
-	require.Error(t, ValidateHTTPUpstream("https://registry.example/base?mirror=one"))
-	require.Error(t, ValidateHTTPUpstream("https://registry.example/base#fragment"))
-}
-
-func TestValidateTransport(t *testing.T) {
-	require.NoError(t, ValidateTransport(nil))
-	require.NoError(t, ValidateTransport(&TransportConfig{
-		Proxy:        "socks5://127.0.0.1:1080",
-		DialTimeout:  Duration(time.Second),
-		MaxIdleConns: 10,
-	}))
-
-	for name, transport := range map[string]*TransportConfig{
-		"relative proxy":      {Proxy: "127.0.0.1:8080"},
-		"unsupported proxy":   {Proxy: "file:///tmp/proxy"},
-		"negative timeout":    {HeaderTimeout: -1},
-		"negative idle conns": {MaxIdleConns: -1},
-	} {
-		t.Run(name, func(t *testing.T) { require.Error(t, ValidateTransport(transport)) })
-	}
-	err := ValidateTransport(&TransportConfig{DialTimeout: -1, HeaderTimeout: -1})
-	require.ErrorContains(t, err, "dial_timeout")
-}
-
-func TestDecodeGoProxyConfig(t *testing.T) {
+func TestOptionsCannotOverrideCommonFields(t *testing.T) {
 	doc, err := Decode(strings.NewReader(`
 instances:
-  - name: golang
+  - name: packages
     enabled: true
-    go:
-      expire_after: 720h
-      route:
-        path: /go
-      proxies:
-        - https://proxy.golang.org
-      module_policy: revalidate
-      zip_policy: immutable
+    mode: npm
+    path: /npm
+    upstreams: [https://registry.npmjs.org]
+    options:
+      upstream: https://attacker.invalid
 `))
 	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	var block struct {
-		ExpireAfter Expiration `yaml:"expire_after"`
-		Route       struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Proxies      []string `yaml:"proxies"`
-		ModulePolicy string   `yaml:"module_policy"`
-		ZipPolicy    string   `yaml:"zip_policy"`
-	}
-	require.NoError(t, selected.Block.DecodeStrict(&block))
-	require.Equal(t, []string{"https://proxy.golang.org"}, block.Proxies)
-	require.Equal(t, "revalidate", block.ModulePolicy)
-	require.Equal(t, "immutable", block.ZipPolicy)
+	_, err = doc.Instances[0].SelectMode()
+	require.ErrorContains(t, err, `options field "upstream" is not supported`)
 }
 
-func TestDecodePyPIConfig(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: python
-    enabled: true
-    pypi:
-      expire_after: 720h
-      route:
-        path: /pypi
-      upstream: https://pypi.org
-      index_policy: revalidate
-      file_policy: immutable
-      proxy_json: false
-`))
-	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	var block struct {
-		ExpireAfter Expiration `yaml:"expire_after"`
-		Route       struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstream    string `yaml:"upstream"`
-		IndexPolicy string `yaml:"index_policy"`
-		FilePolicy  string `yaml:"file_policy"`
-		ProxyJSON   *bool  `yaml:"proxy_json"`
-	}
-	require.NoError(t, selected.Block.DecodeStrict(&block))
-	require.Equal(t, "https://pypi.org", block.Upstream)
-	require.Equal(t, "revalidate", block.IndexPolicy)
-	require.Equal(t, "immutable", block.FilePolicy)
-	require.NotNil(t, block.ProxyJSON)
-	require.False(t, *block.ProxyJSON)
-}
-
-func TestDecodeFlatpakConfig(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: flathub
-    enabled: true
-    flatpak:
-      route:
-        path: /flathub
-      upstreams:
-        - https://dl.flathub.org/repo
-      refresh_interval: 5m
-      cleanup_interval: 6h
-      descriptor_rewrite: true
-      verify_objects: true
-      cache_deltas: true
-      delta_expire_after: 240h
-`))
-	require.NoError(t, err)
-	selected, err := doc.Instances[0].SelectMode()
-	require.NoError(t, err)
-	require.Equal(t, ModeFlatpak, selected.Mode)
-	var block struct {
-		Route struct {
-			Path string `yaml:"path"`
-		} `yaml:"route"`
-		Upstreams         []string   `yaml:"upstreams"`
-		RefreshInterval   Duration   `yaml:"refresh_interval"`
-		CleanupInterval   Duration   `yaml:"cleanup_interval"`
-		DescriptorRewrite bool       `yaml:"descriptor_rewrite"`
-		VerifyObjects     bool       `yaml:"verify_objects"`
-		CacheDeltas       bool       `yaml:"cache_deltas"`
-		DeltaExpireAfter  Expiration `yaml:"delta_expire_after"`
-	}
-	require.NoError(t, selected.Block.DecodeStrict(&block))
-	require.Equal(t, "/flathub", block.Route.Path)
-	require.Equal(t, []string{"https://dl.flathub.org/repo"}, block.Upstreams)
-	require.True(t, block.DescriptorRewrite)
-	require.True(t, block.VerifyObjects)
-	require.True(t, block.CacheDeltas)
-	require.Equal(t, Expiration(240*time.Hour), block.DeltaExpireAfter)
+func TestDurationAndExpiration(t *testing.T) {
+	var duration Duration
+	require.NoError(t, duration.UnmarshalYAML(&yaml.Node{Kind: yaml.ScalarNode, Value: "3m"}))
+	require.Equal(t, 3*time.Minute, duration.Duration())
+	var expiration Expiration
+	require.NoError(t, expiration.UnmarshalYAML(&yaml.Node{Kind: yaml.ScalarNode, Value: "never"}))
+	require.True(t, expiration.IsNever())
 }

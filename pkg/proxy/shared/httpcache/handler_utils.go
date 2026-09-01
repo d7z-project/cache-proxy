@@ -18,19 +18,11 @@ import (
 )
 
 var internalHeaders = map[string]struct{}{
-	"fetched-at":                {},
-	"mode":                      {},
-	"cache":                     {},
-	"indexed":                   {},
-	"indexed-identity":          {},
-	"indexed-root":              {},
-	"indexed-generation":        {},
-	"indexed-upstream":          {},
-	"indexed-digest-algorithm":  {},
-	"indexed-digest":            {},
-	"indexed-digest-verifiable": {},
-	"source-upstream":           {},
-	UserAgentReviewedOption:     {},
+	"fetched-at":            {},
+	"mode":                  {},
+	"cache":                 {},
+	"source-upstream":       {},
+	UserAgentReviewedOption: {},
 }
 
 func StripInternal(headers map[string]string) {
@@ -40,25 +32,18 @@ func StripInternal(headers map[string]string) {
 }
 
 func (h *Handler) addCacheDebugHeaders(headers map[string]string, route Route, fetchedAt string) {
-	headers["X-Cache-Policy"] = route.Policy
+	headers["X-Cache-Class"] = route.Class.String()
 	t, err := utils.ParseFetchedAt(fetchedAt)
 	if err != nil {
 		return
 	}
 	headers["X-Cache-Fetched-At"] = t.UTC().Format(time.RFC3339)
-	expireAfter := route.ExpireAfter
-	if expireAfter.IsUnset() {
-		expireAfter = h.config.ExpireAfter
-	}
+	expireAfter := h.config.ExpireAfter
 	if !expireAfter.IsNever() && !expireAfter.IsUnset() {
 		headers["X-Cache-Expires-At"] = t.Add(expireAfter.Duration()).UTC().Format(time.RFC3339)
 	}
-	freshFor := route.FreshFor
-	if freshFor.IsUnset() {
-		freshFor = h.config.DefaultFreshFor
-	}
-	if freshFor > 0 && !freshFor.IsForever() {
-		headers["X-Cache-Fresh-Until"] = t.Add(freshFor.Duration()).UTC().Format(time.RFC3339)
+	if route.Class == ClassMetadata && h.config.MetadataTTL > 0 {
+		headers["X-Cache-Fresh-Until"] = t.Add(h.config.MetadataTTL).UTC().Format(time.RFC3339)
 	}
 }
 
@@ -72,10 +57,7 @@ func redactedURL(rawURL string) string {
 }
 
 func (h *Handler) expired(route Route, options map[string]string) bool {
-	expireAfter := route.ExpireAfter
-	if expireAfter.IsUnset() {
-		expireAfter = h.config.ExpireAfter
-	}
+	expireAfter := h.config.ExpireAfter
 	if expireAfter.IsNever() || expireAfter.IsUnset() {
 		return false
 	}
@@ -84,25 +66,8 @@ func (h *Handler) expired(route Route, options map[string]string) bool {
 }
 
 func (h *Handler) fresh(route Route, headers map[string]string) bool {
-	freshFor := route.FreshFor
-	if freshFor.IsUnset() {
-		freshFor = h.config.DefaultFreshFor
-	}
-	if freshFor.IsUnset() {
-		return false
-	}
-	if freshFor.IsForever() {
-		return true
-	}
 	fetchedAt, err := utils.ParseFetchedAt(headers["fetched-at"])
-	return err == nil && time.Since(fetchedAt) <= freshFor.Duration()
-}
-
-func (h *Handler) busyPolicy(route Route) string {
-	if route.BusyPolicy != "" {
-		return route.BusyPolicy
-	}
-	return h.config.BusyPolicy
+	return err == nil && h.config.MetadataTTL > 0 && time.Since(fetchedAt) <= h.config.MetadataTTL
 }
 
 func setContentType(headers map[string]string, objectPath string) {

@@ -34,17 +34,16 @@ jobs:
             go test "$1" -run='^$' -fuzz="^$2$" -fuzztime=2s
           }
           fuzz ./pkg/config FuzzConfigDecoders
-          fuzz ./pkg/proxy/apk FuzzParseIndex
           fuzz ./pkg/proxy/cargo FuzzCrateDownloadRoute
-          fuzz ./pkg/proxy/deb FuzzDebianMetadataParsers
-          fuzz ./pkg/proxy/flatpak FuzzMetadataStateDecoders
+          fuzz ./pkg/proxy/deb FuzzReleaseManifest
+          fuzz ./pkg/proxy/deb FuzzDebianPathClassification
+          fuzz ./pkg/proxy/flatpak FuzzFlatpakPathClassification
           fuzz ./pkg/proxy/gomod FuzzParseModuleRequest
           fuzz ./pkg/proxy/oci FuzzOCIRequestParsers
-          fuzz ./pkg/proxy/pacman FuzzParseDesc
-          fuzz ./pkg/proxy/rpm FuzzRPMMetadataParsers
+          fuzz ./pkg/proxy/pacman FuzzMetadataName
+          fuzz ./pkg/proxy/rpm FuzzRepomd
+          fuzz ./pkg/proxy/rpm FuzzRPMPathClassification
           fuzz ./pkg/proxy/shared/httpcache FuzzMetadataRewriters
-          fuzz ./pkg/repo/filerepo FuzzPathIndexBuilder
-          fuzz ./pkg/repo/filerepo FuzzGenerationStateDecoders
 
   docker:
     runs-on: ubuntu-latest

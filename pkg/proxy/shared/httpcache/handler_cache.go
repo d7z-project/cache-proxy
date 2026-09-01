@@ -1,20 +1,17 @@
 package httpcache
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -27,8 +24,11 @@ func (h *Handler) handleRequest(ctx context.Context, req *http.Request) (*utils.
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("proxy route resolved", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "object", route.ObjectPath, "upstream_path", route.UpstreamPath, "policy", route.Policy)
-	if route.Policy == config.PolicyBypass {
+	if route.Class == ClassUnspecified {
+		return nil, errors.New("resolver did not classify request")
+	}
+	slog.Debug("proxy route resolved", "instance", h.name, "mode", h.config.Mode, "method", req.Method, "path", req.URL.Path, "object", route.ObjectPath, "upstream_path", route.UpstreamPath, "class", route.Class)
+	if route.Class == ClassPassthrough {
 		return h.bypass(ctx, req, route)
 	}
 
@@ -54,7 +54,7 @@ func (h *Handler) handleFlightLeader(ctx context.Context, req *http.Request, rou
 		slog.Debug("cache miss", "instance", h.name, "object", route.ObjectPath, "err", err)
 		return h.streamDownload(req, route, "MISS", flight)
 	}
-	if route.Policy == config.PolicyImmutable {
+	if route.Class == ClassContent {
 		cached.Headers["X-Cache"] = "HIT"
 		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, cached), nil)
 	}
@@ -64,30 +64,18 @@ func (h *Handler) handleFlightLeader(ctx context.Context, req *http.Request, rou
 	}
 	response, err := h.revalidateCached(ctx, req, route, flight, cached)
 	if err != nil {
-		_ = cached.Close()
 		slog.Debug("cache validation error, serving stale", "instance", h.name, "object", route.ObjectPath, "err", err)
-		staleCached, openErr := h.openCached(ctx, req, route)
-		if openErr == nil {
-			staleCached.Headers["X-Cache"] = "STALE"
-			return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, staleCached), nil)
-		}
-		return h.finishFlight(route.ObjectPath, flight, ErrorResponse(http.StatusServiceUnavailable, err), nil)
+		cached.Headers["X-Cache"] = "STALE"
+		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, cached), nil)
 	}
 	return response, nil
 }
 
 func (h *Handler) followFlight(ctx context.Context, req *http.Request, route Route, flight *objectFlight) (*utils.ResponseWrapper, error) {
-	busyPolicy := h.busyPolicy(route)
-	if busyPolicy == config.BusyPolicyBypass {
-		return h.bypass(ctx, req, route)
-	}
-	if busyPolicy == config.BusyPolicyStale && req.Header.Get("Range") == "" {
+	if route.Class == ClassMetadata && req.Header.Get("Range") == "" {
 		cached, err := h.openCached(ctx, req, route)
 		if err == nil {
 			cached.Headers["X-Cache"] = "STALE"
-			if route.Policy == config.PolicyImmutable {
-				cached.Headers["X-Cache"] = "HIT"
-			}
 			if h.fresh(route, cached.Headers) {
 				cached.Headers["X-Cache"] = "FRESH"
 			}
@@ -167,7 +155,7 @@ func (h *Handler) openValidCached(ctx context.Context, req *http.Request, route 
 	if err != nil {
 		return nil, err
 	}
-	if route.Policy == config.PolicyImmutable {
+	if route.Class == ClassContent {
 		return cached, nil
 	}
 	if h.fresh(route, cached.Headers) {
@@ -208,12 +196,16 @@ func (h *Handler) revalidateCached(ctx context.Context, req *http.Request, route
 		h.addCacheDebugHeaders(cached.Headers, route, time.Now().UTC().Format(time.RFC3339Nano))
 		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, cached), nil)
 	case http.StatusOK:
-		_ = cached.Close()
 		if !h.client.UserAgentConfigured && utils.VariesByUserAgent(resp.Headers["Vary"]) {
+			_ = cached.Close()
 			resp.Headers["X-Cache"] = "BYPASS"
 			return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 		}
-		return h.streamResponse(req, route, "REFRESH", flight, resp)
+		response, streamErr := h.streamResponse(req, route, "REFRESH", flight, resp)
+		if streamErr == nil {
+			_ = cached.Close()
+		}
+		return response, streamErr
 	case http.StatusNotFound, http.StatusGone:
 		_ = cached.Close()
 		_ = h.store.DeleteObject(h.lifecycleCtx, h.name, route.ObjectPath)
@@ -269,8 +261,9 @@ func (h *Handler) streamResponse(req *http.Request, route Route, status string, 
 
 	if parent := path.Dir(route.ObjectPath); parent != "." {
 		if err := h.store.MkdirAll(h.name+"/"+parent, 0o755); err != nil {
-			_ = resp.Close()
-			return h.finishFlight(route.ObjectPath, flight, nil, err)
+			slog.Warn("cache path preparation failed; serving upstream response", "instance", h.name, "object", route.ObjectPath, "err", err)
+			resp.Headers["X-Cache"] = "BYPASS"
+			return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 		}
 	}
 
@@ -304,7 +297,9 @@ func (h *Handler) streamResponse(req *http.Request, route Route, status string, 
 		},
 	})
 	if err != nil {
-		return h.finishFlight(route.ObjectPath, flight, nil, err)
+		slog.Warn("cache stream preparation failed; serving upstream response", "instance", h.name, "object", route.ObjectPath, "err", err)
+		resp.Headers["X-Cache"] = "BYPASS"
+		return h.finishFlight(route.ObjectPath, flight, h.rewriteResponse(req, route, resp), nil)
 	}
 	reader, err := spool.Reader()
 	if err != nil {
@@ -338,81 +333,8 @@ func (h *Handler) remoteOptionsForRoute(route Route, record bool, req *http.Requ
 }
 
 func (h *Handler) rewriteResponse(req *http.Request, route Route, response *utils.ResponseWrapper) *utils.ResponseWrapper {
-	if route.RewriteKind == "" || req.Method == http.MethodHead || response.Body == nil {
-		return response
+	if h.config.ResponseTransform != nil {
+		return h.config.ResponseTransform(req, route, response)
 	}
-	const maxRewriteBody = 50 << 20
-	if route.RewriteKind == "npm-metadata" {
-		limited := &io.LimitedReader{R: response.Body, N: maxRewriteBody + 1}
-		tempFile, err := os.CreateTemp("", "cache-proxy-npm-metadata-*")
-		if err != nil {
-			_ = response.Body.Close()
-			return ErrorResponse(http.StatusBadGateway, err)
-		}
-		removeTemp := true
-		defer func() {
-			if removeTemp {
-				_ = tempFile.Close()
-				_ = os.Remove(tempFile.Name())
-			}
-		}()
-		err = RewriteNPMMetadata(limited, tempFile, h.config.Upstreams, publicBaseURL(req))
-		_ = response.Body.Close()
-		if err != nil {
-			return ErrorResponse(http.StatusBadGateway, err)
-		}
-		if limited.N == 0 {
-			return ErrorResponse(http.StatusBadGateway, errors.New("response body too large to rewrite"))
-		}
-		info, err := tempFile.Stat()
-		if err != nil {
-			return ErrorResponse(http.StatusBadGateway, err)
-		}
-		if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-			return ErrorResponse(http.StatusBadGateway, err)
-		}
-		response.Headers["Content-Length"] = strconv.FormatInt(info.Size(), 10)
-		response.Body = &temporaryFileBody{File: tempFile, path: tempFile.Name()}
-		removeTemp = false
-		return response
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxRewriteBody+1))
-	_ = response.Body.Close()
-	if err != nil {
-		return ErrorResponse(http.StatusBadGateway, err)
-	}
-	if len(body) > maxRewriteBody {
-		return ErrorResponse(http.StatusBadGateway, errors.New("response body too large to rewrite"))
-	}
-	switch route.RewriteKind {
-	case "cargo-config":
-		body, err = rewriteCargoConfig(req, body, route.AuthRequired)
-		if err != nil {
-			return ErrorResponse(http.StatusBadGateway, err)
-		}
-		response.Headers["Content-Type"] = "application/json"
-		response.Headers["Content-Length"] = strconv.Itoa(len(body))
-	case "pypi-simple":
-		body, response.Headers, err = rewritePyPISimple(req, h.config.Upstreams, route, response.Headers, body)
-		if err != nil {
-			return ErrorResponse(http.StatusBadGateway, err)
-		}
-		response.Headers["Content-Length"] = strconv.Itoa(len(body))
-	}
-	response.Body = io.NopCloser(bytes.NewReader(body))
 	return response
-}
-
-type temporaryFileBody struct {
-	*os.File
-	path string
-}
-
-func (b *temporaryFileBody) Close() error {
-	err := b.File.Close()
-	removeErr := os.Remove(b.path)
-	if err != nil {
-		return err
-	}
-	return removeErr
 }

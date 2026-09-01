@@ -1,13 +1,10 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
-	"path"
 	"sync"
 	"time"
 
@@ -20,8 +17,6 @@ import (
 )
 
 const statusAPIPath = "/-/status/"
-const statusTenant = "_status"
-const statusStatePath = "status/state.json"
 
 type statusSummary struct {
 	Healthy            bool   `json:"healthy"`
@@ -57,11 +52,7 @@ type appStatus struct {
 	diskSampleInterval time.Duration
 	diskHistoryWindow  time.Duration
 	eventLimit         int
-	blobStore          *blobfs.Store
-	persistCh          chan struct{}
-	ctx                context.Context
 	wg                 sync.WaitGroup
-	persistMu          sync.Mutex
 }
 
 type statusStore struct {
@@ -76,13 +67,7 @@ type statusStore struct {
 	eventFilled bool
 }
 
-type persistedStatus struct {
-	Version int          `json:"version"`
-	Disk    []diskSample `json:"disk"`
-	Events  []taskEvent  `json:"events"`
-}
-
-func newAppStatus(cfg config.ServerStatusConfig, store *blobfs.Store) *appStatus {
+func newAppStatus(cfg config.ServerStatusConfig, _ *blobfs.Store) *appStatus {
 	diskInterval := cfg.DiskSampleInterval.Duration()
 	diskWindow := cfg.DiskHistoryWindow.Duration()
 	diskCapacity := int(diskWindow / diskInterval)
@@ -97,19 +82,10 @@ func newAppStatus(cfg config.ServerStatusConfig, store *blobfs.Store) *appStatus
 		diskSampleInterval: diskInterval,
 		diskHistoryWindow:  diskWindow,
 		eventLimit:         cfg.EventLimit,
-		blobStore:          store,
-		persistCh:          make(chan struct{}, 1),
 	}
 }
 
 func (s *appStatus) start(ctx context.Context, app *App) {
-	s.ctx = ctx
-	s.restore()
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.persistLoop()
-	}()
 	s.recordDiskUsage(ctx, app)
 	s.wg.Add(1)
 	go func() {
@@ -134,13 +110,17 @@ func (s *appStatus) stop(ctx context.Context) error {
 	if err := utils.WaitGroupContext(ctx, &s.wg); err != nil {
 		return err
 	}
-	return s.persistContext(ctx)
+	return nil
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 	target := run.Key.RootID()
 	if target == "" {
 		target = "/"
+	}
+	message := run.Message
+	if message == "" {
+		message = run.Err
 	}
 	s.appendEvent(taskEvent{
 		Storage:    run.Key.Instance(),
@@ -152,15 +132,8 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 		Result:     run.Result,
 		ReasonCode: run.ReasonCode,
 		Detail:     run.Detail,
-		Message:    taskRunMessage(run),
+		Message:    message,
 	})
-}
-
-func taskRunMessage(run scheduler.TaskRun) string {
-	if run.Message != "" {
-		return run.Message
-	}
-	return run.Err
 }
 
 func (s *appStatus) appendEvent(event taskEvent) {
@@ -174,7 +147,6 @@ func (s *appStatus) appendEvent(event taskEvent) {
 		s.store.eventFilled = true
 	}
 	s.store.eventMu.Unlock()
-	s.markDirty()
 }
 
 func (s *appStatus) summary(app *App) statusSummary {
@@ -184,8 +156,8 @@ func (s *appStatus) summary(app *App) statusSummary {
 		DiskHistoryWindow:  int64(s.diskHistoryWindow / time.Second),
 		EventLimit:         s.eventLimit,
 	}
-	if snapshot := s.latestDiskSample(); snapshot != nil {
-		summary.LastSampleAt = snapshot.At
+	if samples := s.diskSamples(); len(samples) > 0 {
+		summary.LastSampleAt = samples[len(samples)-1].At
 	}
 	if app.store == nil {
 		return summary
@@ -224,17 +196,6 @@ func (s *appStatus) taskEvents(limit int) []taskEvent {
 	return append([]taskEvent(nil), all...)
 }
 
-func (s *appStatus) latestDiskSample() *diskSample {
-	s.store.diskMu.RLock()
-	defer s.store.diskMu.RUnlock()
-	items := s.store.diskSnapshotLocked()
-	if len(items) == 0 {
-		return nil
-	}
-	last := items[len(items)-1]
-	return &last
-}
-
 func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
 	if app.store == nil {
 		return
@@ -255,7 +216,6 @@ func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
 		s.store.diskFilled = true
 	}
 	s.store.diskMu.Unlock()
-	s.markDirty()
 }
 
 func (s *statusStore) diskSnapshotLocked() []diskSample {
@@ -307,111 +267,6 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 	default:
 		http.NotFound(w, req)
 	}
-}
-
-func (s *appStatus) markDirty() {
-	select {
-	case s.persistCh <- struct{}{}:
-	default:
-	}
-}
-
-func (s *appStatus) persistLoop() {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-s.persistCh:
-			s.persist()
-		}
-	}
-}
-
-func (s *appStatus) persist() {
-	if err := s.persistContext(context.Background()); err != nil {
-		slog.Warn("failed to persist app status", "err", err)
-	}
-}
-
-func (s *appStatus) persistContext(parent context.Context) error {
-	if s.blobStore == nil {
-		return nil
-	}
-	s.persistMu.Lock()
-	defer s.persistMu.Unlock()
-	state := persistedStatus{
-		Version: 1,
-		Disk:    s.diskSamples(),
-		Events:  s.taskEvents(s.eventLimit),
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
-	defer cancel()
-	if err := s.blobStore.MkdirAll(path.Join(statusTenant, path.Dir(statusStatePath)), 0o755); err != nil {
-		return err
-	}
-	_, err = s.blobStore.Put(ctx, statusTenant, statusStatePath, bytes.NewReader(data), map[string]string{
-		"content-type": "application/json",
-	})
-	return err
-}
-
-func (s *appStatus) restore() {
-	if s.blobStore == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	reader, err := s.blobStore.OpenObject(ctx, statusTenant, statusStatePath)
-	if err != nil {
-		return
-	}
-	defer func() { _ = reader.Close() }()
-	var state persistedStatus
-	if err := json.NewDecoder(reader).Decode(&state); err != nil {
-		return
-	}
-	s.restoreDisk(state.Disk)
-	s.restoreEvents(state.Events)
-}
-
-func (s *appStatus) restoreDisk(samples []diskSample) {
-	if len(s.store.disk) == 0 || len(samples) == 0 {
-		return
-	}
-	if len(samples) > len(s.store.disk) {
-		samples = samples[len(samples)-len(s.store.disk):]
-	}
-	s.store.diskMu.Lock()
-	copy(s.store.disk, samples)
-	s.store.diskNext = len(samples)
-	s.store.diskFilled = false
-	if len(samples) == len(s.store.disk) {
-		s.store.diskNext = 0
-		s.store.diskFilled = true
-	}
-	s.store.diskMu.Unlock()
-}
-
-func (s *appStatus) restoreEvents(events []taskEvent) {
-	if len(s.store.events) == 0 || len(events) == 0 {
-		return
-	}
-	if len(events) > len(s.store.events) {
-		events = events[len(events)-len(s.store.events):]
-	}
-	s.store.eventMu.Lock()
-	copy(s.store.events, events)
-	s.store.eventNext = len(events)
-	s.store.eventFilled = false
-	if len(events) == len(s.store.events) {
-		s.store.eventNext = 0
-		s.store.eventFilled = true
-	}
-	s.store.eventMu.Unlock()
 }
 
 func parseStatusLimit(req *http.Request, fallback int) int {

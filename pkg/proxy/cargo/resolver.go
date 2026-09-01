@@ -7,18 +7,17 @@ import (
 	"path"
 	"strings"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 const maxCargoRouteValueSize = 256
 
 type resolver struct {
-	policy *Policy
+	options *Options
 }
 
-func newResolver(policy *Policy) *resolver {
-	return &resolver{policy: policy}
+func newResolver(options *Options) *resolver {
+	return &resolver{options: options}
 }
 
 func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
@@ -33,11 +32,8 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		return httpcache.Route{
 			ObjectPath:   "cargo/index/config.json",
 			UpstreamPath: "config.json",
-			Policy:       config.PolicyRevalidate,
-			FreshFor:     r.policy.IndexFreshFor,
-			BusyPolicy:   r.policy.IndexBusyPolicy,
-			RewriteKind:  "cargo-config",
-			AuthRequired: r.policy.AuthRequired,
+			Class:        httpcache.ClassMetadata,
+			AuthRequired: r.options.AuthRequired,
 		}, nil
 	}
 	if strings.HasPrefix(lookupPath, "api/v1/crates/") {
@@ -46,9 +42,7 @@ func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	return httpcache.Route{
 		ObjectPath:   "cargo/index/" + lookupPath,
 		UpstreamPath: lookupPath,
-		Policy:       config.PolicyRevalidate,
-		FreshFor:     r.policy.IndexFreshFor,
-		BusyPolicy:   r.policy.IndexBusyPolicy,
+		Class:        httpcache.ClassMetadata,
 	}, nil
 }
 
@@ -100,8 +94,7 @@ func (r *resolver) resolveCrateDownload(lookupPath string) (httpcache.Route, err
 		ObjectPath:   path.Join("cargo/crates", strings.ToLower(parts[0]), parts[1], httpcache.HashKey(targetURL)+".crate"),
 		UpstreamPath: lookupPath,
 		TargetURL:    targetURL,
-		Policy:       r.policy.CratePolicy,
-		BusyPolicy:   config.BusyPolicyJoin,
+		Class:        httpcache.ClassContent,
 	}, nil
 }
 

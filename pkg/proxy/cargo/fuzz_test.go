@@ -23,7 +23,7 @@ func FuzzCrateDownloadRoute(f *testing.F) {
 		if err != nil {
 			return
 		}
-		route, err := newResolver(&Policy{}).Resolve(req)
+		route, err := newResolver(&Options{}).Resolve(req)
 		if err == nil && route.TargetURL == "" {
 			t.Fatal("resolved crate route has no target URL")
 		}

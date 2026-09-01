@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -32,12 +33,13 @@ func TestCargoConfigRouteDoesNotDependOnCachePublication(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	policy := &Policy{IndexBusyPolicy: config.BusyPolicyStale, CratePolicy: config.PolicyImmutable}
+	options := &Options{}
 	handler := httpcache.NewHandler("cargo", httpcache.RuntimeConfig{
-		Mode: config.ModeCargo, ExpireAfter: config.DefaultExpireAfter,
+		Mode: config.ModeCargo, ExpireAfter: config.DefaultRetention, MetadataTTL: time.Minute,
 		Upstreams: []string{indexServer.URL}, AllowedTargetHosts: []string{strings.TrimPrefix(crateServer.URL, "http://")},
-		UpstreamGate: httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{MaxActive: 8, MaxActivePerHost: 8}),
-	}, store, newResolver(policy), httpcache.NewStats(prometheus.NewRegistry()), nil)
+		UpstreamGate:      httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{MaxActive: 8, MaxActivePerHost: 8}),
+		ResponseTransform: httpcache.CargoResponseTransform,
+	}, store, newResolver(options), httpcache.NewStats(prometheus.NewRegistry()))
 	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
 
 	configResponse := httptest.NewRecorder()
@@ -60,7 +62,7 @@ func TestCrateDownloadRouteUsesEncodedTemplate(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, needsChecksum)
 
-	resolved, err := newResolver(&Policy{}).Resolve(httptest.NewRequest(
+	resolved, err := newResolver(&Options{}).Resolve(httptest.NewRequest(
 		http.MethodGet,
 		"/api/v1/crates/MyCrate/1.2.3/download/"+token,
 		nil,
@@ -76,7 +78,7 @@ func TestCrateDownloadRouteCarriesCargoChecksum(t *testing.T) {
 	require.True(t, needsChecksum)
 	checksum := strings.Repeat("ab", 32)
 
-	resolved, err := newResolver(&Policy{}).Resolve(httptest.NewRequest(
+	resolved, err := newResolver(&Options{}).Resolve(httptest.NewRequest(
 		http.MethodGet,
 		"/api/v1/crates/example/1.0.0/download/"+token+"/"+checksum,
 		nil,
@@ -94,7 +96,7 @@ func TestCrateDownloadRouteRejectsMalformedValues(t *testing.T) {
 		"/api/v1/crates/example/1.0.0/download/" + token + "/unexpected",
 		"/api/v1/crates/ex%7Bample/1.0.0/download/" + token,
 	} {
-		_, err := newResolver(&Policy{}).Resolve(httptest.NewRequest(http.MethodGet, requestPath, nil))
+		_, err := newResolver(&Options{}).Resolve(httptest.NewRequest(http.MethodGet, requestPath, nil))
 		require.Error(t, err, requestPath)
 	}
 }

@@ -224,17 +224,11 @@ func (h *Handler) openTargetURL(ctx context.Context, method string, options remo
 		release()
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, statsUpstream, method, 0, latency, 0)
-			if h.health != nil {
-				h.health.RecordFailure(options.TargetURL, err)
-			}
 		}
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
 		_ = h.upstreamGate.RateLimited(options.TargetURL, response.Header.Get("Retry-After"))
-	}
-	if options.Record && h.health != nil {
-		h.health.RecordResult(options.TargetURL, response.StatusCode, latency)
 	}
 	slog.Debug("target url success", "instance", h.name, "method", method, "url", redactedURL(options.TargetURL), "status", response.StatusCode, "latency", latency)
 	result := responseFromHTTP(h.client, response)
@@ -333,9 +327,6 @@ func (h *Handler) tryUpstream(
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, 0, latency, 0)
 		}
-		if h.health != nil {
-			h.health.RecordFailure(candidate.URL, err)
-		}
 		slog.Debug("upstream request failed", "instance", h.name, "method", method, "url", redactedURL(targetURL), "err", err)
 		if idx+1 < total {
 			slog.Debug("upstream failover retry", "instance", h.name, "method", method, "from", redactedURL(targetURL))
@@ -346,9 +337,6 @@ func (h *Handler) tryUpstream(
 		_ = h.upstreamGate.RateLimited(candidate.URL, response.Header.Get("Retry-After"))
 	}
 	slog.Debug("upstream response received", "instance", h.name, "method", method, "url", redactedURL(targetURL), "upstream", redactedURL(candidate.URL), "status", response.StatusCode, "latency", latency)
-	if h.health != nil {
-		h.health.RecordResult(candidate.URL, response.StatusCode, latency)
-	}
 	if options.AcceptErrors && upstreamStatusIsFailure(response.StatusCode) {
 		if options.Record {
 			h.stats.RecordUpstreamRequest(h.name, h.config.Mode, candidate.URL, method, response.StatusCode, latency, 0)

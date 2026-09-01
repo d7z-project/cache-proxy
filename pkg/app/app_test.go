@@ -24,8 +24,8 @@ import (
 
 func TestValidateRejectsConflictingPaths(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "one", "/files", "https://example.com", file.Policy{}),
-		fileInstance(t, "two", "/files", "https://example.org", file.Policy{}),
+		fileInstance(t, "one", "/files", "https://example.com", file.Options{}),
+		fileInstance(t, "two", "/files", "https://example.org", file.Options{}),
 	})
 	err := Validate(doc)
 	require.ErrorContains(t, err, "listen path /files conflicts")
@@ -39,11 +39,9 @@ server:
 instances:
   - name: my proxy
     enabled: true
-    file:
-      route:
-        path: /files
-      upstreams:
-        - https://example.com
+    mode: file
+    path: /files
+    upstreams: [https://example.com]
 `))
 	require.ErrorContains(t, err, "invalid instance name")
 }
@@ -60,10 +58,7 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	defer upstream.Close()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Policy{
-			DefaultPolicy: config.PolicyImmutable,
-			BusyPolicy:    config.BusyPolicyJoin,
-		}),
+		fileInstance(t, "files", "/files", upstream.URL, file.Options{}),
 	})
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
@@ -100,11 +95,9 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{
-			DefaultPolicy: config.PolicyImmutable,
-			BusyPolicy:    config.BusyPolicyStale,
+		fileInstance(t, "files", "/files", "https://example.com", file.Options{
 			Rules: []file.Rule{
-				{Match: "**/*.tgz", Policy: config.PolicyRevalidate},
+				{Match: "**/*.tgz", Class: "metadata"},
 			},
 		}),
 	})
@@ -142,7 +135,7 @@ func TestHomePageUsesPublicURL(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Options{}),
 	})
 	doc.Server.PublicURL = "https://cache.home.lan"
 	app := openApp(t, ctx, doc)
@@ -159,15 +152,11 @@ func TestHomePageUsesPublicURL(t *testing.T) {
 
 func TestHomePageShowsBindDisplayURL(t *testing.T) {
 	entry := &proxyruntime.Entry{
-		Name:    "registry",
-		Mode:    "oci",
-		Enabled: true,
-		Bind:    "127.0.0.1:5000",
-		Home: proxyruntime.HomeEntry{
-			Name:       "registry",
-			Mode:       "oci",
-			DisplayURL: "https://cache.home.lan:5000",
-		},
+		Name:       "registry",
+		Mode:       "oci",
+		Enabled:    true,
+		Bind:       "127.0.0.1:5000",
+		DisplayURL: "https://cache.home.lan:5000",
 	}
 
 	app := &App{
@@ -271,19 +260,17 @@ server:
 instances:
   - name: files
     enabled: true
-    file:
-      expire_after: 720h
-      route:
-        path: /files
-      upstreams:
-        - https://example.com
+    mode: file
+    path: /files
+    upstreams: [https://example.com]
+    options:
       default_polciy: immutable
 `))
 	require.NoError(t, err)
 
 	err = Validate(doc)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "field default_polciy not found")
+	require.ErrorContains(t, err, `options field "default_polciy" is not supported`)
 }
 
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
@@ -389,10 +376,6 @@ func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
 				_, _ = io.WriteString(w, req.URL.Path)
 			}),
 		},
-		Home: proxyruntime.HomeEntry{
-			Name: "registry",
-			Mode: config.ModeOCI,
-		},
 	}
 	app := &App{
 		config: &config.Document{
@@ -435,10 +418,6 @@ func TestBindHomePageHeadReturnsOK(t *testing.T) {
 				_, _ = io.WriteString(w, "proxy")
 			}),
 		},
-		Home: proxyruntime.HomeEntry{
-			Name: "registry",
-			Mode: config.ModeOCI,
-		},
 	}
 	app := &App{
 		config: &config.Document{
@@ -477,7 +456,7 @@ func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
 	defer func() { driverSet = prev }()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Options{}),
 	})
 
 	_, err := Open(ctx, doc)
@@ -492,15 +471,11 @@ func TestOpenRejectsFileModeWithoutUpstreams(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{{
-		Name:    "files",
-		Enabled: true,
-		File: &config.ModeBlock{Node: yamlNode(t, map[string]any{
-			"route": map[string]any{"path": "/files"},
-		})},
+		Name: "files", Enabled: true, Mode: config.ModeFile, Path: "/files",
 	}})
 
 	_, err := Open(ctx, doc)
-	require.ErrorContains(t, err, "file mode requires at least one upstream")
+	require.ErrorContains(t, err, "upstreams must contain at least one URL")
 }
 
 func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
@@ -508,7 +483,7 @@ func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://example.com", file.Policy{}),
+		fileInstance(t, "files", "/files", "https://example.com", file.Options{}),
 	})
 	doc.Storage.Cleanup = config.CleanupConfig{
 		DryRun:    true,
@@ -574,7 +549,7 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	defer cancel()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", "https://mirror.example.test/repo", file.Policy{}),
+		fileInstance(t, "files", "/files", "https://mirror.example.test/repo", file.Options{}),
 	})
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
@@ -584,10 +559,9 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	defer release()
 	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "HIT", http.StatusOK, 2048)
 	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "FRESH", http.StatusOK, 512)
-	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "GENERATION", http.StatusOK, 512)
+	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "REVALIDATED", http.StatusOK, 512)
 	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "MISS", http.StatusOK, 256)
 	app.stats.RecordUpstreamRequest("files", config.ModeFile, upstream, http.MethodGet, http.StatusBadGateway, 25*time.Millisecond, 1024)
-	app.stats.SetUpstreamObservation("files", config.ModeFile, upstream, 0.5, 0.025)
 
 	req := httptest.NewRequest(http.MethodGet, "/-/status/network", nil)
 	rec := httptest.NewRecorder()
@@ -623,15 +597,14 @@ func TestStatusNetworkEndpointCombinesSharedHostObservations(t *testing.T) {
 
 	upstream := "https://mirror.example.test/repo"
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files-a", "/files-a", upstream, file.Policy{}),
-		fileInstance(t, "files-b", "/files-b", upstream, file.Policy{}),
+		fileInstance(t, "files-a", "/files-a", upstream, file.Options{}),
+		fileInstance(t, "files-b", "/files-b", upstream, file.Options{}),
 	})
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
 
 	for _, name := range []string{"files-a", "files-b"} {
 		app.stats.RecordUpstreamRequest(name, config.ModeFile, upstream, http.MethodGet, http.StatusBadGateway, 0, 0)
-		app.stats.SetUpstreamObservation(name, config.ModeFile, upstream, 1, 0)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/-/status/network", nil)
@@ -652,7 +625,7 @@ func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
 
 	upstream := "https://mirror.example.test/repo"
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", upstream, file.Policy{}),
+		fileInstance(t, "files", "/files", upstream, file.Options{}),
 	})
 	app := openApp(t, ctx, doc)
 	defer closeApp(t, app)
@@ -769,59 +742,6 @@ func TestValidateRejectsInvalidServerStatusWindow(t *testing.T) {
 	require.ErrorContains(t, err, "disk_history_window must be greater than or equal")
 }
 
-func TestStatusPersistsAndRestoresHistory(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
-	defer closeApp(t, app)
-
-	app.status.observeTaskRun(scheduler.TaskRun{
-		Key:        scheduler.NewTaskKey("files", scheduler.TypeExpireCleanup, "/pool"),
-		StartedAt:  time.Unix(1710000000, 0).UTC(),
-		FinishedAt: time.Unix(1710000004, 0).UTC(),
-		Duration:   4 * time.Second,
-		Result:     "updated",
-		ReasonCode: "published",
-		Detail:     "generation=abc upstream=https://example.test",
-		Message:    "metadata published",
-	})
-	app.status.recordDiskUsage(ctx, app)
-	app.status.persist()
-
-	restored := newAppStatus(app.config.Server.Status, app.store)
-	restored.restore()
-
-	require.NotEmpty(t, restored.diskSamples())
-	events := restored.taskEvents(app.config.Server.Status.EventLimit)
-	require.Len(t, events, 1)
-	require.Equal(t, "files", events[0].Storage)
-	require.Equal(t, "expire_cleanup", events[0].TaskType)
-	require.Equal(t, "updated", events[0].Result)
-	require.Equal(t, "published", events[0].ReasonCode)
-	require.Equal(t, "generation=abc upstream=https://example.test", events[0].Detail)
-	require.Equal(t, "metadata published", events[0].Message)
-}
-
-func TestAppCloseWaitsForFinalStatusPersistence(t *testing.T) {
-	backend := t.TempDir()
-	app := openApp(t, context.Background(), testDocument(backend, nil))
-	app.status.observeTaskRun(scheduler.TaskRun{
-		Key:    scheduler.NewTaskKey("files", scheduler.TypeExpireCleanup, ""),
-		Result: "success",
-	})
-	require.NoError(t, app.Close(context.Background()))
-
-	store, err := blobfs.Open(backend, blobfs.DefaultConfig())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	restored := newAppStatus(app.config.Server.Status, store)
-	restored.restore()
-	events := restored.taskEvents(app.config.Server.Status.EventLimit)
-	require.Len(t, events, 1)
-	require.Equal(t, "files", events[0].Storage)
-}
-
 func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
 	t.Helper()
 	app, err := Open(ctx, doc)
@@ -849,32 +769,18 @@ func testDocument(backend string, instances []config.Instance) *config.Document 
 	}
 }
 
-func fileInstance(t *testing.T, name, path, upstream string, policy file.Policy) config.Instance {
+func fileInstance(t *testing.T, name, path, upstream string, policy file.Options) config.Instance {
 	t.Helper()
-	mode := map[string]any{
-		"expire_after": config.Expiration(time.Hour),
-		"route":        map[string]any{"path": path},
-		"upstreams":    []string{upstream},
-	}
+	options := map[string]any{}
 	if len(policy.PassHeaders) > 0 {
-		mode["pass_headers"] = policy.PassHeaders
-	}
-	if policy.DefaultPolicy != "" {
-		mode["default_policy"] = policy.DefaultPolicy
-	}
-	if policy.FreshFor != 0 {
-		mode["fresh_for"] = policy.FreshFor
-	}
-	if policy.BusyPolicy != "" {
-		mode["busy_policy"] = policy.BusyPolicy
+		options["pass_headers"] = policy.PassHeaders
 	}
 	if policy.Rules != nil {
-		mode["rules"] = policy.Rules
+		options["rules"] = policy.Rules
 	}
 	return config.Instance{
-		Name:    name,
-		Enabled: true,
-		File:    &config.ModeBlock{Node: yamlNode(t, mode)},
+		Name: name, Enabled: true, Mode: config.ModeFile, Path: path,
+		Upstreams: []string{upstream}, Options: &config.OptionsBlock{Node: yamlNode(t, options)},
 	}
 }
 

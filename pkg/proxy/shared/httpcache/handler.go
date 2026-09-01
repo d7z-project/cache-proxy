@@ -8,28 +8,50 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 type Route struct {
+	Class              ObjectClass
 	ObjectPath         string
 	UpstreamPath       string
 	TargetURL          string
 	AllowedTargetHosts []string
-	Policy             string
-	FreshFor           config.Freshness
-	BusyPolicy         string
-	ExpireAfter        config.Expiration
 	RequestHeaders     map[string]string
-	RewriteKind        string
 	AuthRequired       bool
 	PreferredUpstream  string
+	ExpectedSize       int64
+	ExpectedDigestType string
+	ExpectedDigest     string
+}
+
+type ObjectClass uint8
+
+const (
+	ClassUnspecified ObjectClass = iota
+	ClassPassthrough
+	ClassMetadata
+	ClassContent
+)
+
+func (c ObjectClass) String() string {
+	switch c {
+	case ClassPassthrough:
+		return "passthrough"
+	case ClassMetadata:
+		return "metadata"
+	case ClassContent:
+		return "content"
+	default:
+		return "unspecified"
+	}
 }
 
 type Resolver interface {
@@ -39,14 +61,14 @@ type Resolver interface {
 type RuntimeConfig struct {
 	Mode               string
 	ExpireAfter        config.Expiration
+	MetadataTTL        time.Duration
 	Upstreams          []string
 	Transport          *config.TransportConfig
-	BusyPolicy         string
-	DefaultFreshFor    config.Freshness
 	PassHeaders        []string
 	AllowedTargetHosts []string
 	MetadataFunc       func(*http.Request, Route, map[string]string, string) map[string]string
 	VerifyFunc         func(*http.Request, Route, io.ReadSeeker) error
+	ResponseTransform  func(*http.Request, Route, *utils.ResponseWrapper) *utils.ResponseWrapper
 	UpstreamGate       *UpstreamGate
 }
 
@@ -57,7 +79,6 @@ type Handler struct {
 	client              *utils.HTTPClientWrapper
 	resolver            Resolver
 	stats               *Stats
-	health              *health.ServiceHealth
 	lifecycleCtx        context.Context
 	cancel              context.CancelFunc
 	wait                sync.WaitGroup
@@ -96,7 +117,7 @@ func CacheSupportsRequestUserAgent(client *utils.HTTPClientWrapper, req *http.Re
 	return options[UserAgentReviewedOption] == "true" && !utils.VariesByUserAgent(options["vary"])
 }
 
-func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats, svcHealth *health.ServiceHealth) *Handler {
+func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolver Resolver, stats *Stats) *Handler {
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	client := utils.DefaultHTTPClientWrapper()
 	ConfigureClientTransport(client, name, runtime.Transport)
@@ -106,7 +127,7 @@ func NewHandler(name string, runtime RuntimeConfig, store *blobfs.Store, resolve
 			hosts = append(hosts, pu.Host)
 		}
 	}
-	return &Handler{name: name, config: runtime, store: store, client: client, resolver: resolver, stats: stats, health: svcHealth, lifecycleCtx: lifecycleCtx, cancel: cancel, upstreamGate: runtime.UpstreamGate, parsedUpstreamHosts: hosts}
+	return &Handler{name: name, config: runtime, store: store, client: client, resolver: resolver, stats: stats, lifecycleCtx: lifecycleCtx, cancel: cancel, upstreamGate: runtime.UpstreamGate, parsedUpstreamHosts: hosts}
 }
 
 func ConfigureClientTransport(client *utils.HTTPClientWrapper, name string, transport *config.TransportConfig) {
@@ -125,7 +146,7 @@ func ConfigureClientTransport(client *utils.HTTPClientWrapper, name string, tran
 		return
 	}
 	if transport.Proxy != "" {
-		if proxyURL, err := url.Parse(transport.Proxy); err == nil {
+		if proxyURL, err := url.Parse(strings.TrimSpace(transport.Proxy)); err == nil {
 			baseTransport.Proxy = http.ProxyURL(proxyURL)
 		} else {
 			slog.Warn("invalid transport proxy URL", "instance", name, "proxy", transport.Proxy, "err", err)
@@ -197,14 +218,6 @@ func (h *Handler) beginOperation() bool {
 	return true
 }
 
-func (h *Handler) Busy(objectPath string) bool {
-	return h.flights.active(objectPath)
-}
-
-func (h *Handler) ProxyPassthrough(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) {
-	h.ProxyPassthroughStatus(resp, req, upstreamPath, preferredUpstream)
-}
-
 // ProxyPassthroughStatus proxies the request and returns the downstream status code.
 func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Request, upstreamPath string, preferredUpstream string) int {
 	if !h.beginOperation() {
@@ -215,7 +228,7 @@ func (h *Handler) ProxyPassthroughStatus(resp http.ResponseWriter, req *http.Req
 
 	route := Route{
 		UpstreamPath:      upstreamPath,
-		Policy:            config.PolicyBypass,
+		Class:             ClassPassthrough,
 		PreferredUpstream: preferredUpstream,
 	}
 	result, err := h.bypass(req.Context(), req, route)

@@ -6,19 +6,14 @@ import (
 	"path"
 	"strings"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
-type Resolver struct {
-	cfg *Policy
-}
+type Resolver struct{}
 
 const abbreviatedMetadataType = "application/vnd.npm.install-v1+json"
 
-func New(cfg *Policy) *Resolver {
-	return &Resolver{cfg: cfg}
-}
+func New() *Resolver { return &Resolver{} }
 
 func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
@@ -35,8 +30,7 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		return httpcache.Route{
 			ObjectPath:   "npm/tarballs/" + objectPath,
 			UpstreamPath: upstreamPath,
-			Policy:       r.cfg.TarballPolicy,
-			BusyPolicy:   config.BusyPolicyJoin,
+			Class:        httpcache.ClassContent,
 		}, nil
 	}
 	requestHeaders := map[string]string(nil)
@@ -48,9 +42,6 @@ func (r *Resolver) Resolve(req *http.Request) (httpcache.Route, error) {
 		ObjectPath:     "npm/metadata/" + httpcache.HashKey(objectPath),
 		UpstreamPath:   upstreamPath,
 		RequestHeaders: requestHeaders,
-		Policy:         r.cfg.MetadataPolicy,
-		BusyPolicy:     r.cfg.MetadataBusyPolicy,
-		FreshFor:       r.cfg.MetadataFreshFor,
-		RewriteKind:    "npm-metadata",
+		Class:          httpcache.ClassMetadata,
 	}, nil
 }

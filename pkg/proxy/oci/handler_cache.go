@@ -77,8 +77,19 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		return status, "BYPASS", bytes, copyErr
 	}
 
-	tempFile, size, err := utils.TempFileFromReader(io.LimitReader(response.Body, maxManifestSize+1))
+	tempFile, err := os.CreateTemp("", "cache-proxy-oci-manifest-*")
 	if err != nil {
+		slog.Warn("oci manifest cache preparation failed; serving upstream response", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", err)
+		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+		return status, "BYPASS", bytes, copyErr
+	}
+	size, err := io.Copy(tempFile, io.LimitReader(response.Body, maxManifestSize+1))
+	if err == nil {
+		_, err = tempFile.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
 		return 0, "", 0, err
 	}
 	_ = response.Body.Close()
@@ -108,7 +119,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		}
 	}
 
-	expireAfter := effectiveExpire(resolved.match.expireAfter, h.expireAfter)
+	expireAfter := h.expireAfter
 	if isSHA256Digest(resolved.ref) {
 		expireAfter = config.ExpirationNever
 	}
@@ -219,7 +230,10 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		},
 	})
 	if err != nil {
-		return 0, "", 0, err
+		slog.Warn("oci blob cache preparation failed; serving upstream response", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest, "err", err)
+		defer func() { _ = response.Body.Close() }()
+		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+		return status, "BYPASS", bytes, copyErr
 	}
 	defer func() { _ = pr.Close() }()
 	cleanupDownload = false
@@ -299,7 +313,10 @@ func (h *handler) validRefState(state refState) bool {
 }
 
 func (h *handler) stateExpired(state refState) bool {
-	expireAfter := effectiveExpire(state.ExpireAfter, h.expireAfter)
+	expireAfter := state.ExpireAfter
+	if expireAfter.IsUnset() {
+		expireAfter = h.expireAfter
+	}
 	return !expireAfter.IsNever() && !expireAfter.IsUnset() && time.Now().After(state.FetchedAt.Add(expireAfter.Duration()))
 }
 
@@ -323,13 +340,6 @@ func (h *handler) deleteTree(ctx context.Context, prefix string) error {
 		}
 	}
 	return nil
-}
-
-func effectiveExpire(current, fallback config.Expiration) config.Expiration {
-	if current.IsUnset() {
-		return fallback
-	}
-	return current
 }
 
 func objectHeaders(headers http.Header, length int, cache string) map[string]string {

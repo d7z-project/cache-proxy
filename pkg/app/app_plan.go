@@ -23,6 +23,7 @@ const DefaultUpstreamStartInterval = 5 * time.Millisecond
 const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500
+const DefaultMetadataTTL = 2 * time.Minute
 
 var driverSet = builtinDrivers
 
@@ -74,7 +75,10 @@ func planEntries(
 	)
 	plan.ReservePathPrefix(statusAPIPath, "status API")
 	drivers := driverSet()
-	for _, decl := range doc.Instances {
+	for _, configured := range doc.Instances {
+		decl := configured
+		decl.MetadataTTL = doc.Cache.MetadataTTL
+		decl.Retention = doc.Cache.Retention
 		selected, err := decl.SelectMode()
 		if err != nil {
 			return nil, err
@@ -98,7 +102,7 @@ func planEntries(
 	entries := make(map[string]*proxyruntime.Entry, len(result.Entries))
 	for _, entry := range result.Entries {
 		if entry.ExpireAfter.IsUnset() {
-			entry.ExpireAfter = config.DefaultExpireAfter
+			entry.ExpireAfter = config.DefaultRetention
 		}
 		entries[entry.Name] = entry
 	}
@@ -106,6 +110,12 @@ func planEntries(
 }
 
 func normalizeDocument(doc *config.Document) {
+	if doc.Cache.MetadataTTL == 0 {
+		doc.Cache.MetadataTTL = config.Duration(DefaultMetadataTTL)
+	}
+	if doc.Cache.Retention.IsUnset() {
+		doc.Cache.Retention = config.DefaultRetention
+	}
 	if strings.TrimSpace(doc.Server.Bind) == "" {
 		doc.Server.Bind = DefaultBind
 	}
@@ -115,20 +125,20 @@ func normalizeDocument(doc *config.Document) {
 	if strings.TrimSpace(doc.Metrics.Path) == "" {
 		doc.Metrics.Path = DefaultMetricsPath
 	}
-	if doc.Server.Status.DiskSampleInterval <= 0 {
+	if doc.Server.Status.DiskSampleInterval == 0 {
 		doc.Server.Status.DiskSampleInterval = config.Duration(DefaultStatusDiskSampleInterval)
 	}
-	if doc.Server.Status.DiskHistoryWindow <= 0 {
+	if doc.Server.Status.DiskHistoryWindow == 0 {
 		doc.Server.Status.DiskHistoryWindow = config.Duration(DefaultStatusDiskHistoryWindow)
 	}
-	if doc.Server.Status.EventLimit <= 0 {
+	if doc.Server.Status.EventLimit == 0 {
 		doc.Server.Status.EventLimit = DefaultStatusEventLimit
 	}
-	if doc.Storage.GC.Blob <= 0 {
+	if doc.Storage.GC.Blob == 0 {
 		doc.Storage.GC.Blob = config.Duration(DefaultGCInterval)
 	}
 	defaults := config.DefaultCleanupConfig()
-	if doc.Storage.Cleanup.BatchSize <= 0 {
+	if doc.Storage.Cleanup.BatchSize == 0 {
 		doc.Storage.Cleanup.BatchSize = defaults.BatchSize
 	}
 	if doc.Storage.Download.MaxActive == 0 {
@@ -143,6 +153,12 @@ func normalizeDocument(doc *config.Document) {
 }
 
 func validateServerConfig(doc *config.Document) error {
+	if doc.Cache.MetadataTTL < config.Duration(time.Second) {
+		return errors.New("cache metadata_ttl must be at least 1s")
+	}
+	if doc.Cache.Retention.IsNever() || doc.Cache.Retention.Duration() < time.Minute {
+		return errors.New("cache retention must be at least 1m")
+	}
 	if err := proxyruntime.ValidateBindAddress(doc.Server.Bind); err != nil {
 		return fmt.Errorf("server bind: %w", err)
 	}
@@ -166,6 +182,12 @@ func validateServerConfig(doc *config.Document) error {
 	}
 	if doc.Storage.Download.MinInterval < 0 {
 		return errors.New("download min_interval must not be negative")
+	}
+	if doc.Storage.GC.Blob <= 0 {
+		return errors.New("storage gc blob interval must be positive")
+	}
+	if doc.Storage.Cleanup.BatchSize <= 0 {
+		return errors.New("storage cleanup batch_size must be positive")
 	}
 	seenHosts := map[string]string{}
 	for configuredHost, override := range doc.Storage.Download.Hosts {

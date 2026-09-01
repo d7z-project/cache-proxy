@@ -11,6 +11,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport"
+
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 type singleLoader struct {
@@ -39,6 +41,12 @@ func (h *gitHandler) proxyBootstrap(w http.ResponseWriter, request *http.Request
 		http.NotFound(w, request)
 		return
 	}
+	releaseAdmission, err := h.upstreamGate.Acquire(request.Context(), h.upstream, httpcache.AdmissionForeground)
+	if err != nil {
+		h.writeAdmissionError(w, err)
+		return
+	}
+	defer releaseAdmission()
 	upstreamURL, err := url.Parse(h.upstream)
 	if err != nil || (upstreamURL.Scheme != "http" && upstreamURL.Scheme != "https") {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
@@ -71,6 +79,9 @@ func (h *gitHandler) proxyBootstrap(w http.ResponseWriter, request *http.Request
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode == http.StatusTooManyRequests {
+		h.upstreamGate.RateLimited(h.upstream, response.Header.Get("Retry-After"))
+	}
 	for key, values := range response.Header {
 		if isGitHopHeader(key) {
 			continue

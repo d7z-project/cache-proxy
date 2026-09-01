@@ -2,34 +2,12 @@ package npm
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
-	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
-
-const defaultMetadataFreshFor = time.Minute
-
-type Policy struct {
-	MetadataPolicy     string           `json:"metadataPolicy,omitempty" yaml:"metadata_policy,omitempty"`
-	MetadataFreshFor   config.Freshness `json:"metadataFreshFor,omitempty" yaml:"metadata_fresh_for,omitempty"`
-	MetadataBusyPolicy string           `json:"metadataBusyPolicy,omitempty" yaml:"metadata_busy_policy,omitempty"`
-	TarballPolicy      string           `json:"tarballPolicy,omitempty" yaml:"tarball_policy,omitempty"`
-}
-
-type Block struct {
-	ExpireAfter config.Expiration `yaml:"expire_after"`
-	Route       struct {
-		Path string `yaml:"path"`
-	} `yaml:"route"`
-	Upstream  string                  `yaml:"upstream"`
-	Transport *config.TransportConfig `yaml:"transport,omitempty"`
-	Policy    `yaml:",inline"`
-}
 
 type Driver struct{}
 
@@ -37,66 +15,18 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModeNPM }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var block Block
-	if err := plan.Decode(&block); err != nil {
-		return err
-	}
-	if strings.TrimSpace(block.Upstream) == "" {
-		return fmt.Errorf("instance %s: npm mode requires one upstream", plan.Name())
-	}
-	if err := config.ValidateHTTPUpstream(block.Upstream); err != nil {
-		return fmt.Errorf("instance %s: npm upstream URL is invalid: %w", plan.Name(), err)
-	}
-	if err := config.ValidateTransport(block.Transport); err != nil {
-		return fmt.Errorf("instance %s: npm transport: %w", plan.Name(), err)
-	}
-	if block.MetadataPolicy == "" {
-		block.MetadataPolicy = config.PolicyRevalidate
-	}
-	if block.MetadataBusyPolicy == "" {
-		block.MetadataBusyPolicy = config.BusyPolicyStale
-	}
-	if block.MetadataFreshFor.IsUnset() {
-		block.MetadataFreshFor = config.Freshness(defaultMetadataFreshFor)
-	}
-	if block.TarballPolicy == "" {
-		block.TarballPolicy = config.PolicyImmutable
-	}
-	if err := validatePolicy(&block.Policy); err != nil {
-		return fmt.Errorf("instance %s: %w", plan.Name(), err)
-	}
 	if !plan.Enabled() {
 		return nil
 	}
-	expireAfter := block.ExpireAfter
-	if expireAfter.IsUnset() {
-		expireAfter = config.DefaultExpireAfter
-	}
+	upstream := strings.TrimSpace(plan.Upstreams()[0])
 	handler := httpcache.NewHandler(plan.Name(), httpcache.RuntimeConfig{
-		Mode:            config.ModeNPM,
-		ExpireAfter:     expireAfter,
-		Upstreams:       []string{strings.TrimSpace(block.Upstream)},
-		Transport:       block.Transport,
-		BusyPolicy:      block.MetadataBusyPolicy,
-		DefaultFreshFor: block.MetadataFreshFor,
-		UpstreamGate:    plan.UpstreamGate(),
-	}, plan.Store(), New(&block.Policy), plan.Stats(), nil)
-	plan.SetHomeSnippet(plan.RenderSnippet())
-	return plan.BindHTTPPath(block.Route.Path, expireAfter, handler)
-}
-
-func validatePolicy(policy *Policy) error {
-	if !config.ValidPolicy(policy.MetadataPolicy) {
-		return fmt.Errorf("invalid npm metadata policy %q", policy.MetadataPolicy)
-	}
-	if !config.ValidPolicy(policy.TarballPolicy) {
-		return fmt.Errorf("invalid npm tarball policy %q", policy.TarballPolicy)
-	}
-	if !config.ValidBusyPolicy(policy.MetadataBusyPolicy) {
-		return fmt.Errorf("invalid npm metadata busy policy %q", policy.MetadataBusyPolicy)
-	}
-	if policy.MetadataFreshFor > 0 && policy.MetadataFreshFor.Duration() < time.Second {
-		return errors.New("npm metadata fresh_for must be at least 1s")
-	}
-	return nil
+		Mode:              config.ModeNPM,
+		ExpireAfter:       plan.Retention(),
+		MetadataTTL:       plan.MetadataTTL(),
+		Upstreams:         []string{upstream},
+		Transport:         plan.Transport(),
+		UpstreamGate:      plan.UpstreamGate(),
+		ResponseTransform: httpcache.NPMResponseTransform([]string{upstream}),
+	}, plan.Store(), New(), plan.Stats())
+	return plan.BindHTTPPath(plan.Path(), plan.Retention(), handler)
 }

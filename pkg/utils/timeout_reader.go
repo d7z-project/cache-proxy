@@ -10,15 +10,15 @@ import (
 var ErrIdleBodyTimeout = errors.New("idle body timeout")
 
 type IdleTimeoutReadCloser struct {
-	rc             io.ReadCloser
-	timeout        time.Duration
-	timer          *time.Timer
-	mu             sync.Mutex
-	close          sync.Once
-	closeErr       error
-	readGeneration uint64
-	fired          bool
-	closed         bool
+	rc           io.ReadCloser
+	timeout      time.Duration
+	timer        *time.Timer
+	mu           sync.Mutex
+	close        sync.Once
+	closeErr     error
+	readSequence uint64
+	fired        bool
+	closed       bool
 }
 
 func NewIdleTimeoutReadCloser(rc io.ReadCloser, timeout time.Duration) io.ReadCloser {
@@ -41,9 +41,9 @@ func (r *IdleTimeoutReadCloser) Read(p []byte) (int, error) {
 	if r.timer != nil {
 		r.timer.Stop()
 	}
-	r.readGeneration++
-	generation := r.readGeneration
-	r.timer = time.AfterFunc(r.timeout, func() { r.timeoutClose(generation) })
+	r.readSequence++
+	sequence := r.readSequence
+	r.timer = time.AfterFunc(r.timeout, func() { r.timeoutClose(sequence) })
 	r.mu.Unlock()
 
 	n, err := r.rc.Read(p)
@@ -53,7 +53,7 @@ func (r *IdleTimeoutReadCloser) Read(p []byte) (int, error) {
 		r.timer.Stop()
 		r.timer = nil
 	}
-	r.readGeneration++
+	r.readSequence++
 	fired := r.fired
 	r.mu.Unlock()
 	if fired {
@@ -65,7 +65,7 @@ func (r *IdleTimeoutReadCloser) Read(p []byte) (int, error) {
 func (r *IdleTimeoutReadCloser) Close() error {
 	r.mu.Lock()
 	r.closed = true
-	r.readGeneration++
+	r.readSequence++
 	if r.timer != nil {
 		r.timer.Stop()
 		r.timer = nil
@@ -74,9 +74,9 @@ func (r *IdleTimeoutReadCloser) Close() error {
 	return r.closeUnderlying()
 }
 
-func (r *IdleTimeoutReadCloser) timeoutClose(generation uint64) {
+func (r *IdleTimeoutReadCloser) timeoutClose(sequence uint64) {
 	r.mu.Lock()
-	if r.closed || generation != r.readGeneration {
+	if r.closed || sequence != r.readSequence {
 		r.mu.Unlock()
 		return
 	}

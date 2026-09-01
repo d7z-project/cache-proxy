@@ -113,11 +113,18 @@ func (s *appStatus) network(app *App) networkStatus {
 			continue
 		}
 		stats := snapshot.Instances[entry.Name]
+		route := entry.Path
+		if route == "" {
+			route = entry.Bind
+		}
+		if route == "" {
+			route = "/"
+		}
 		instance := networkInstance{
 			ID:                     "instance:" + entry.Name,
 			Name:                   entry.Name,
 			Mode:                   entry.Mode,
-			Route:                  entryRoute(entry),
+			Route:                  route,
 			Requests:               stats.Requests,
 			ResponseBytes:          stats.ResponseBytes,
 			UpstreamRequests:       stats.UpstreamRequests,
@@ -159,7 +166,12 @@ func (s *appStatus) network(app *App) networkStatus {
 			status.Summary.RateLimitedUpstreams++
 		}
 	}
-	for _, key := range sortedNetworkKeys(upstreamNodes) {
+	upstreamKeys := make([]string, 0, len(upstreamNodes))
+	for key := range upstreamNodes {
+		upstreamKeys = append(upstreamKeys, key)
+	}
+	sort.Strings(upstreamKeys)
+	for _, key := range upstreamKeys {
 		upstream := *upstreamNodes[key]
 		status.Upstreams = append(status.Upstreams, upstream)
 	}
@@ -182,8 +194,13 @@ func (s *networkStatus) addNetworkEdge(
 	if upstreamURL == "" {
 		return
 	}
-	host := upstreamHost(upstreamURL)
+	parsed, err := url.Parse(upstreamURL)
+	host := upstreamURL
+	if err == nil && parsed.Host != "" {
+		host = strings.ToLower(parsed.Host)
+	}
 	upstreamID := "upstream:" + host
+	upstreamErrorRate := errorRate(upstream.Requests, upstream.Errors)
 	edge := networkEdge{
 		ID:                     instance.ID + "->" + upstreamID + ":" + upstreamURL,
 		From:                   instance.ID,
@@ -196,7 +213,7 @@ func (s *networkStatus) addNetworkEdge(
 		Errors:                 upstream.Errors,
 		ResponseBytes:          upstream.ResponseBytes,
 		ActiveUpstreamRequests: upstream.ActiveRequests,
-		ErrorRate:              upstream.ErrorRate,
+		ErrorRate:              upstreamErrorRate,
 		LatencyMS:              upstream.LatencySeconds * 1000,
 		LastStatus:             upstream.LastStatus,
 		LastError:              upstream.LastError,
@@ -215,39 +232,12 @@ func (s *networkStatus) addNetworkEdge(
 	node.Errors += upstream.Errors
 	node.ResponseBytes += upstream.ResponseBytes
 	node.ActiveUpstreamRequests += upstream.ActiveRequests
-	if upstream.ErrorRate > node.ErrorRate {
-		node.ErrorRate = upstream.ErrorRate
+	if upstreamErrorRate > node.ErrorRate {
+		node.ErrorRate = upstreamErrorRate
 	}
 	if latencyMS := upstream.LatencySeconds * 1000; latencyMS > node.LatencyMS {
 		node.LatencyMS = latencyMS
 	}
-}
-
-func sortedNetworkKeys(items map[string]*networkUpstream) []string {
-	keys := make([]string, 0, len(items))
-	for key := range items {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func entryRoute(entry *proxyruntime.Entry) string {
-	if entry.Path != "" {
-		return entry.Path
-	}
-	if entry.Bind != "" {
-		return entry.Bind
-	}
-	return "/"
-}
-
-func upstreamHost(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Host == "" {
-		return rawURL
-	}
-	return strings.ToLower(parsed.Host)
 }
 
 func networkHitRate(cache map[string]uint64) float64 {

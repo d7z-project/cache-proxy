@@ -20,6 +20,11 @@ func (testResolver) Resolve(*http.Request) (httpcache.Route, error) {
 	return httpcache.Route{}, nil
 }
 
+func TestInstancePlanNormalizesUpstreams(t *testing.T) {
+	plan := &InstancePlan{decl: config.Instance{Upstreams: []string{" https://one.test/base ", "https://two.test"}}}
+	require.Equal(t, []string{"https://one.test/base", "https://two.test"}, plan.Upstreams())
+}
+
 func TestBindHTTPPathRegistersCleanupAndRuntime(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
@@ -37,11 +42,11 @@ func TestBindHTTPPathRegistersCleanupAndRuntime(t *testing.T) {
 
 	handler := httpcache.NewHandler("cache", httpcache.RuntimeConfig{
 		Mode:        config.ModeFile,
-		ExpireAfter: config.DefaultExpireAfter,
-	}, store, testResolver{}, stats, nil)
+		ExpireAfter: config.DefaultRetention,
+	}, store, testResolver{}, stats)
 	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
 
-	require.NoError(t, instance.BindHTTPPath("/cache", config.DefaultExpireAfter, handler))
+	require.NoError(t, instance.BindHTTPPath("/cache", config.DefaultRetention, handler))
 	result, err := plan.Finalize()
 	require.NoError(t, err)
 	require.Len(t, result.Entries, 1)

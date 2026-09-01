@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"gopkg.d7z.net/blobfs"
-	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
@@ -25,39 +24,9 @@ type Instance interface {
 	Stop(context.Context) error
 }
 
-// StatusSource allows an Instance to provide custom dashboard status
-// for modes that don't use httpcache stats or health.ServiceHealth.
+// StatusSource allows an Instance to provide custom dashboard status.
 type StatusSource interface {
 	DashboardStatus() (color, label, extra string)
-}
-
-type RepositoryAttribute struct {
-	LabelKey string
-	Value    string
-}
-
-type RepositoryStatus struct {
-	ID              string
-	Path            string
-	DisplayName     string
-	Layout          string
-	PrimaryMetadata []string
-	Attributes      []RepositoryAttribute
-	Generation      string
-	HasCurrent      bool
-	Published       time.Time
-	Upstream        string
-	ArtifactCount   int
-	MetadataCount   int
-	State           string
-	Refreshing      bool
-	LastError       string
-	LastSuccessAt   time.Time
-	LastRefreshAt   time.Time
-}
-
-type RepositoryStatusSource interface {
-	RepositoryStatuses() []RepositoryStatus
 }
 
 type HandlerInstance struct {
@@ -83,22 +52,15 @@ type ModeDriver interface {
 	Plan(context.Context, *InstancePlan) error
 }
 
-type HomeEntry struct {
-	Name       string
-	Mode       string
-	Snippet    string
-	DisplayURL string
-}
-
 type Entry struct {
 	Name        string
 	Mode        string
 	Enabled     bool
 	Path        string
 	Bind        string
+	DisplayURL  string
 	ExpireAfter config.Expiration
 	Runtime     Instance
-	Home        HomeEntry
 	Ctx         context.Context
 	Cancel      context.CancelFunc
 }
@@ -167,10 +129,6 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 		Name:    name,
 		Mode:    selected.Mode,
 		Enabled: selected.Enabled,
-		Home: HomeEntry{
-			Name: name,
-			Mode: selected.Mode,
-		},
 	}
 	p.entries[name] = entry
 	return &InstancePlan{ctx: p, decl: decl, selected: selected, entry: entry}, nil
@@ -195,12 +153,6 @@ func (p *PlanContext) Finalize() (*Result, error) {
 	return &Result{Entries: entries}, nil
 }
 
-func (p *PlanContext) Store() *blobfs.Store                  { return p.store }
-func (p *PlanContext) Stats() *httpcache.Stats               { return p.stats }
-func (p *PlanContext) UpstreamGate() *httpcache.UpstreamGate { return p.upstreamGate }
-func (p *PlanContext) CleanupConfig() config.CleanupConfig   { return p.cleanup }
-func (p *PlanContext) Scheduler() *scheduler.Scheduler       { return p.scheduler }
-
 func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
 	if normalized := normalizeRoutePath(pathValue); normalized != "" && normalized != "/" {
 		p.reservedPathPrefixes[normalized] = owner
@@ -208,19 +160,32 @@ func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
 }
 
 func (i *InstancePlan) Name() string                          { return i.entry.Name }
-func (i *InstancePlan) Mode() string                          { return i.entry.Mode }
 func (i *InstancePlan) Enabled() bool                         { return i.entry.Enabled }
 func (i *InstancePlan) Store() *blobfs.Store                  { return i.ctx.store }
 func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.stats }
 func (i *InstancePlan) UpstreamGate() *httpcache.UpstreamGate { return i.ctx.upstreamGate }
 func (i *InstancePlan) CleanupConfig() config.CleanupConfig   { return i.ctx.cleanup }
 func (i *InstancePlan) Scheduler() *scheduler.Scheduler       { return i.ctx.scheduler }
+func (i *InstancePlan) MetadataTTL() time.Duration            { return i.decl.MetadataTTL.Duration() }
+func (i *InstancePlan) Retention() config.Expiration          { return i.decl.Retention }
+func (i *InstancePlan) Path() string                          { return strings.TrimSpace(i.decl.Path) }
+func (i *InstancePlan) Bind() string                          { return strings.TrimSpace(i.decl.Bind) }
+func (i *InstancePlan) DisplayURL() string                    { return strings.TrimSpace(i.decl.DisplayURL) }
+func (i *InstancePlan) Transport() *config.TransportConfig    { return i.decl.Transport }
+
+func (i *InstancePlan) Upstreams() []string {
+	upstreams := make([]string, len(i.decl.Upstreams))
+	for index, upstream := range i.decl.Upstreams {
+		upstreams[index] = strings.TrimSpace(upstream)
+	}
+	return upstreams
+}
 
 func (i *InstancePlan) Decode(target any) error {
-	if i.selected.Block == nil {
-		return fmt.Errorf("instance %s: missing %s block", i.entry.Name, i.entry.Mode)
+	if i.selected.Options == nil {
+		return nil
 	}
-	if err := i.selected.Block.DecodeStrict(target); err != nil {
+	if err := i.selected.Options.DecodeStrict(target); err != nil {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
@@ -237,6 +202,15 @@ func (i *InstancePlan) BindPath(pathValue string, expireAfter config.Expiration,
 // expiration cleanup. Modes with additional lifecycle behavior should use
 // BindPath directly.
 func (i *InstancePlan) BindHTTPPath(pathValue string, expireAfter config.Expiration, handler *httpcache.Handler) error {
+	return i.BindCachePath(pathValue, expireAfter, handler, HandlerInstance{
+		Handler:      handler,
+		CloseContext: handler.CloseContext,
+	})
+}
+
+// BindCachePath binds a protocol wrapper around a shared cache handler while
+// keeping expiration cleanup and cache shutdown owned by the shared handler.
+func (i *InstancePlan) BindCachePath(pathValue string, expireAfter config.Expiration, handler *httpcache.Handler, runtime http.Handler) error {
 	i.ctx.scheduler.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(i.entry.Name, scheduler.TypeExpireCleanup, ""),
 		Interval: httpCacheCleanupInterval,
@@ -245,7 +219,7 @@ func (i *InstancePlan) BindHTTPPath(pathValue string, expireAfter config.Expirat
 		},
 	})
 	return i.BindPath(pathValue, expireAfter, HandlerInstance{
-		Handler:      handler,
+		Handler:      runtime,
 		CloseContext: handler.CloseContext,
 	})
 }
@@ -257,20 +231,8 @@ func (i *InstancePlan) BindAddr(addr string, expireAfter config.Expiration, runt
 	return nil
 }
 
-func (i *InstancePlan) SetHomeSnippet(snippet string) {
-	i.entry.Home.Snippet = strings.TrimSpace(snippet)
-}
-
 func (i *InstancePlan) SetHomeDisplayURL(url string) {
-	i.entry.Home.DisplayURL = strings.TrimSpace(url)
-}
-
-func (i *InstancePlan) RenderSnippet() string {
-	data, err := yaml.Marshal(i.decl)
-	if err != nil {
-		return "unable to render instance YAML"
-	}
-	return strings.TrimSpace(string(data))
+	i.entry.DisplayURL = strings.TrimSpace(url)
 }
 
 func (i *InstancePlan) bind(pathValue, addr string, expireAfter config.Expiration, runtime Instance) error {

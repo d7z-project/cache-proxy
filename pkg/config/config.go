@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/health"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,23 +34,7 @@ const (
 	ModeDEB     = "deb"
 	ModeRPM     = "rpm"
 	ModePacman  = "pacman"
-
-	PolicyBypass     = "bypass"
-	PolicyImmutable  = "immutable"
-	PolicyRevalidate = "revalidate"
-
-	BusyPolicyBypass = "bypass"
-	BusyPolicyJoin   = "join"
-	BusyPolicyStale  = "stale"
 )
-
-func ValidPolicy(v string) bool {
-	return v == PolicyBypass || v == PolicyImmutable || v == PolicyRevalidate
-}
-
-func ValidBusyPolicy(v string) bool {
-	return v == "" || v == BusyPolicyBypass || v == BusyPolicyJoin || v == BusyPolicyStale
-}
 
 func ValidateHTTPURL(raw string) error {
 	_, err := parseHTTPURL(raw)
@@ -80,13 +63,19 @@ func ValidateHTTPUpstream(raw string) error {
 	return nil
 }
 
-const DefaultExpireAfter Expiration = Expiration(720 * time.Hour)
+const DefaultRetention Expiration = Expiration(720 * time.Hour)
 
 type Document struct {
 	Server    ServerConfig  `yaml:"server"`
 	Metrics   MetricsConfig `yaml:"metrics"`
 	Storage   StorageConfig `yaml:"storage"`
+	Cache     CacheConfig   `yaml:"cache"`
 	Instances []Instance    `yaml:"instances"`
+}
+
+type CacheConfig struct {
+	MetadataTTL Duration   `yaml:"metadata_ttl"`
+	Retention   Expiration `yaml:"retention"`
 }
 
 type ServerConfig struct {
@@ -143,32 +132,27 @@ func DefaultCleanupConfig() CleanupConfig {
 }
 
 type Instance struct {
-	Name    string     `yaml:"name"`
-	Enabled bool       `yaml:"enabled"`
-	File    *ModeBlock `yaml:"file,omitempty"`
-	Git     *ModeBlock `yaml:"git,omitempty"`
-	OCI     *ModeBlock `yaml:"oci,omitempty"`
-	NPM     *ModeBlock `yaml:"npm,omitempty"`
-	Go      *ModeBlock `yaml:"go,omitempty"`
-	Maven   *ModeBlock `yaml:"maven,omitempty"`
-	Cargo   *ModeBlock `yaml:"cargo,omitempty"`
-	PyPI    *ModeBlock `yaml:"pypi,omitempty"`
-	Flatpak *ModeBlock `yaml:"flatpak,omitempty"`
-	APK     *ModeBlock `yaml:"apk,omitempty"`
-	DEB     *ModeBlock `yaml:"deb,omitempty"`
-	RPM     *ModeBlock `yaml:"rpm,omitempty"`
-	Pacman  *ModeBlock `yaml:"pacman,omitempty"`
+	Name        string           `yaml:"name"`
+	Enabled     bool             `yaml:"enabled"`
+	Mode        string           `yaml:"mode"`
+	Path        string           `yaml:"path,omitempty"`
+	Bind        string           `yaml:"bind,omitempty"`
+	DisplayURL  string           `yaml:"display_url,omitempty"`
+	Upstreams   []string         `yaml:"upstreams"`
+	Transport   *TransportConfig `yaml:"transport,omitempty"`
+	Options     *OptionsBlock    `yaml:"options,omitempty"`
+	MetadataTTL Duration         `yaml:"-"`
+	Retention   Expiration       `yaml:"-"`
 }
 
 type TransportConfig struct {
-	Proxy              string              `yaml:"proxy,omitempty"`
-	UserAgent          string              `yaml:"ua,omitempty"`
-	DialTimeout        Duration            `yaml:"dial_timeout,omitempty"`
-	HeaderTimeout      Duration            `yaml:"header_timeout,omitempty"`
-	IdleBodyTimeout    Duration            `yaml:"idle_body_timeout,omitempty"`
-	MaxRequestDuration Duration            `yaml:"max_request_duration,omitempty"`
-	MaxIdleConns       int                 `yaml:"max_idle_conns,omitempty"`
-	Health             *health.ConfigPatch `yaml:"health,omitempty"`
+	Proxy              string   `yaml:"proxy,omitempty"`
+	UserAgent          string   `yaml:"ua,omitempty"`
+	DialTimeout        Duration `yaml:"dial_timeout,omitempty"`
+	HeaderTimeout      Duration `yaml:"header_timeout,omitempty"`
+	IdleBodyTimeout    Duration `yaml:"idle_body_timeout,omitempty"`
+	MaxRequestDuration Duration `yaml:"max_request_duration,omitempty"`
+	MaxIdleConns       int      `yaml:"max_idle_conns,omitempty"`
 }
 
 func ValidateTransport(transport *TransportConfig) error {
@@ -209,14 +193,14 @@ type SelectedMode struct {
 	Name    string
 	Enabled bool
 	Mode    string
-	Block   *ModeBlock
+	Options *OptionsBlock
 }
 
-type ModeBlock struct {
+type OptionsBlock struct {
 	Node *yaml.Node
 }
 
-func (b *ModeBlock) UnmarshalYAML(value *yaml.Node) error {
+func (b *OptionsBlock) UnmarshalYAML(value *yaml.Node) error {
 	if value == nil {
 		b.Node = nil
 		return nil
@@ -226,7 +210,7 @@ func (b *ModeBlock) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-func (b *ModeBlock) DecodeStrict(target any) error {
+func (b *OptionsBlock) DecodeStrict(target any) error {
 	if b == nil || b.Node == nil {
 		return nil
 	}
@@ -244,43 +228,93 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 	if !ValidInstanceName(name) {
 		return SelectedMode{}, fmt.Errorf("invalid instance name %q: must match %s", i.Name, validNameRE.String())
 	}
-	candidates := []struct {
-		mode  string
-		block *ModeBlock
-	}{
-		{mode: ModeFile, block: i.File},
-		{mode: ModeGit, block: i.Git},
-		{mode: ModeOCI, block: i.OCI},
-		{mode: ModeNPM, block: i.NPM},
-		{mode: ModeGo, block: i.Go},
-		{mode: ModeMaven, block: i.Maven},
-		{mode: ModeCargo, block: i.Cargo},
-		{mode: ModePyPI, block: i.PyPI},
-		{mode: ModeFlatpak, block: i.Flatpak},
-		{mode: ModeAPK, block: i.APK},
-		{mode: ModeDEB, block: i.DEB},
-		{mode: ModeRPM, block: i.RPM},
-		{mode: ModePacman, block: i.Pacman},
+	mode := strings.TrimSpace(i.Mode)
+	if !validMode(mode) {
+		return SelectedMode{}, fmt.Errorf("instance %q has unsupported mode %q", i.Name, mode)
 	}
-	var selected SelectedMode
-	for _, candidate := range candidates {
-		if candidate.block == nil || candidate.block.Node == nil {
-			continue
-		}
-		if selected.Mode != "" {
-			return SelectedMode{}, fmt.Errorf("instance %q must define exactly one mode block", i.Name)
-		}
-		selected = SelectedMode{
-			Name:    name,
-			Mode:    candidate.mode,
-			Enabled: i.Enabled,
-			Block:   candidate.block,
+	i.Mode = mode
+	if err := i.validateDeclaration(); err != nil {
+		return SelectedMode{}, fmt.Errorf("instance %q: %w", i.Name, err)
+	}
+	return SelectedMode{Name: name, Enabled: i.Enabled, Mode: mode, Options: i.Options}, nil
+}
+
+func validMode(mode string) bool {
+	switch mode {
+	case ModeFile, ModeGit, ModeOCI, ModeNPM, ModeGo, ModeMaven, ModeCargo,
+		ModePyPI, ModeFlatpak, ModeAPK, ModeDEB, ModeRPM, ModePacman:
+		return true
+	default:
+		return false
+	}
+}
+
+func (i Instance) validateDeclaration() error {
+	if (strings.TrimSpace(i.Path) == "") == (strings.TrimSpace(i.Bind) == "") {
+		return errors.New("must define exactly one of path or bind")
+	}
+	if i.Mode == ModeOCI && strings.TrimSpace(i.Bind) == "" {
+		return errors.New("oci mode requires bind")
+	}
+	if i.Mode != ModeOCI && strings.TrimSpace(i.Path) == "" {
+		return fmt.Errorf("%s mode requires path", i.Mode)
+	}
+	if len(i.Upstreams) == 0 {
+		return errors.New("upstreams must contain at least one URL")
+	}
+	switch i.Mode {
+	case ModeGit, ModeOCI, ModeNPM, ModeMaven, ModeCargo, ModePyPI, ModeDEB, ModeRPM:
+		if len(i.Upstreams) != 1 {
+			return fmt.Errorf("%s mode requires exactly one upstream", i.Mode)
 		}
 	}
-	if selected.Mode == "" {
-		return SelectedMode{}, fmt.Errorf("instance %q must define one mode block", i.Name)
+	for index, upstream := range i.Upstreams {
+		if err := ValidateHTTPUpstream(upstream); err != nil {
+			return fmt.Errorf("upstream %d: %w", index, err)
+		}
 	}
-	return selected, nil
+	if err := ValidateTransport(i.Transport); err != nil {
+		return fmt.Errorf("transport: %w", err)
+	}
+
+	if i.Options != nil && i.Options.Node != nil {
+		if i.Options.Node.Kind != yaml.MappingNode {
+			return errors.New("options must be a mapping")
+		}
+		var options map[string]any
+		data, err := yaml.Marshal(i.Options.Node)
+		if err != nil {
+			return err
+		}
+		if err := yaml.Unmarshal(data, &options); err != nil {
+			return fmt.Errorf("options must be a mapping: %w", err)
+		}
+		var fields []string
+		switch i.Mode {
+		case ModeFile:
+			fields = []string{"pass_headers", "rules"}
+		case ModeGit:
+			fields = []string{"auth", "sync_interval", "operation_timeout"}
+		case ModeOCI:
+			fields = []string{"auth"}
+		case ModeGo:
+			fields = []string{"sumdb", "goprivate", "disable_module_fetch_header"}
+		case ModeCargo:
+			fields = []string{"auth_required", "allowed_crate_hosts"}
+		case ModePyPI:
+			fields = []string{"allowed_file_hosts"}
+		}
+		allowed := make(map[string]struct{}, len(fields))
+		for _, field := range fields {
+			allowed[field] = struct{}{}
+		}
+		for key := range options {
+			if _, ok := allowed[key]; !ok {
+				return fmt.Errorf("options field %q is not supported by %s mode", key, i.Mode)
+			}
+		}
+	}
+	return nil
 }
 
 func LoadFile(path string) (*Document, error) {
@@ -385,54 +419,5 @@ func (e *Expiration) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("expiration must not be negative: %q", value.Value)
 	}
 	*e = Expiration(parsed)
-	return nil
-}
-
-type Freshness time.Duration
-
-const FreshnessForever Freshness = -1
-
-func (f Freshness) Duration() time.Duration { return time.Duration(f) }
-func (f Freshness) IsForever() bool         { return f == FreshnessForever }
-func (f Freshness) IsUnset() bool           { return f == 0 }
-
-func (f Freshness) String() string {
-	if f == FreshnessForever {
-		return "forever"
-	}
-	if f == 0 {
-		return ""
-	}
-	return time.Duration(f).String()
-}
-
-func (f Freshness) MarshalYAML() (any, error) {
-	if f == FreshnessForever {
-		return "forever", nil
-	}
-	if f == 0 {
-		return nil, nil
-	}
-	return time.Duration(f).String(), nil
-}
-
-func (f *Freshness) UnmarshalYAML(value *yaml.Node) error {
-	if value == nil || value.Value == "" {
-		*f = 0
-		return nil
-	}
-	switch value.Value {
-	case "forever", "0", "always", "infinite":
-		*f = FreshnessForever
-		return nil
-	}
-	parsed, err := time.ParseDuration(value.Value)
-	if err != nil {
-		return fmt.Errorf("invalid freshness %q: %w", value.Value, err)
-	}
-	if parsed < 0 {
-		return fmt.Errorf("freshness must not be negative: %q", value.Value)
-	}
-	*f = Freshness(parsed)
 	return nil
 }

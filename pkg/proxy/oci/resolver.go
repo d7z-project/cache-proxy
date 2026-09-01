@@ -6,9 +6,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/bmatcuk/doublestar/v4"
-
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
@@ -29,16 +26,9 @@ type request struct {
 	ref          string
 	digest       string
 	upstreamPath string
-	match        repoMatch
 }
 
-type repoMatch struct {
-	policy      string
-	busyPolicy  string
-	expireAfter config.Expiration
-}
-
-func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
+func resolveRequest(req *http.Request, _ *Options) (request, error) {
 	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
 	if cleanPath == "v2" || cleanPath == "v2/" {
 		return request{kind: requestPing, upstreamPath: "v2"}, nil
@@ -57,18 +47,7 @@ func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
 			if repo == "" || ref == "" {
 				return request{}, errors.New("invalid OCI manifest path")
 			}
-			match := matchRepo(cfg, repo)
-			if isSHA256Digest(ref) {
-				match.policy = config.PolicyImmutable
-				match.busyPolicy = config.BusyPolicyJoin
-			}
-			return request{
-				kind:         requestManifest,
-				repo:         repo,
-				ref:          ref,
-				upstreamPath: cleanPath,
-				match:        match,
-			}, nil
+			return request{kind: requestManifest, repo: repo, ref: ref, upstreamPath: cleanPath}, nil
 		}
 		if part == "blobs" && i+1 < len(parts) {
 			repo := strings.Join(parts[1:i], "/")
@@ -76,58 +55,11 @@ func resolveRequest(req *http.Request, cfg *Policy) (request, error) {
 			if repo == "" || !isSHA256Digest(digest) {
 				return request{}, errors.New("invalid OCI blob path")
 			}
-			match := matchRepo(cfg, repo)
-			match.policy = config.PolicyImmutable
-			match.busyPolicy = config.BusyPolicyJoin
-			return request{
-				kind:         requestBlob,
-				repo:         repo,
-				digest:       digest,
-				upstreamPath: cleanPath,
-				match:        match,
-			}, nil
+			return request{kind: requestBlob, repo: repo, digest: digest, upstreamPath: cleanPath}, nil
 		}
 		if part == "tags" && i+1 < len(parts) && parts[i+1] == "list" {
-			repo := strings.Join(parts[1:i], "/")
-			return request{
-				kind:         requestTags,
-				repo:         repo,
-				upstreamPath: cleanPath,
-				match:        matchRepo(cfg, repo),
-			}, nil
+			return request{kind: requestTags, repo: strings.Join(parts[1:i], "/"), upstreamPath: cleanPath}, nil
 		}
 	}
 	return request{kind: requestBypass, upstreamPath: cleanPath}, nil
-}
-
-func matchRepo(cfg *Policy, repoName string) repoMatch {
-	if cfg == nil {
-		return repoMatch{policy: config.PolicyBypass, busyPolicy: config.BusyPolicyBypass}
-	}
-	for _, rule := range cfg.Rules {
-		if !doublestar.MatchUnvalidated(rule.Match, repoName) {
-			continue
-		}
-		match := repoMatch{
-			policy:      rule.Policy,
-			busyPolicy:  cfg.BusyPolicy,
-			expireAfter: rule.ExpireAfter,
-		}
-		if match.policy == "" {
-			match.policy = config.PolicyBypass
-		}
-		return match
-	}
-	match := repoMatch{
-		policy:      cfg.DefaultPolicy,
-		busyPolicy:  cfg.BusyPolicy,
-		expireAfter: 0,
-	}
-	if match.policy == "" {
-		match.policy = config.PolicyBypass
-	}
-	if match.busyPolicy == "" {
-		match.busyPolicy = config.BusyPolicyJoin
-	}
-	return match
 }

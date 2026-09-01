@@ -40,8 +40,9 @@ server:
 instances:
   - name: disabled-cargo
     enabled: false
-    cargo:
-      upstream: https://index.example
+    mode: cargo
+    path: /cargo
+    upstreams: [https://index.example]
 `))
 	require.NoError(t, err)
 
@@ -59,6 +60,24 @@ instances:
 
 func TestValidateServerConfigRejectsInvalidDownloadSettings(t *testing.T) {
 	tests := map[string]func(*config.Document){
+		"negative metadata TTL": func(doc *config.Document) {
+			doc.Cache.MetadataTTL = -1
+		},
+		"negative blob GC interval": func(doc *config.Document) {
+			doc.Storage.GC.Blob = -1
+		},
+		"negative cleanup batch": func(doc *config.Document) {
+			doc.Storage.Cleanup.BatchSize = -1
+		},
+		"negative status sample interval": func(doc *config.Document) {
+			doc.Server.Status.DiskSampleInterval = -1
+		},
+		"negative status history window": func(doc *config.Document) {
+			doc.Server.Status.DiskHistoryWindow = -1
+		},
+		"negative status event limit": func(doc *config.Document) {
+			doc.Server.Status.EventLimit = -1
+		},
 		"negative global capacity": func(doc *config.Document) {
 			doc.Storage.Download.MaxActive = -1
 		},
@@ -104,11 +123,28 @@ func TestPlanRejectsRoutesOverlappingStatusAPI(t *testing.T) {
 instances:
   - name: files
     enabled: true
-    file:
-      route: { path: ` + route + ` }
-      upstreams: [https://files.example]
+    mode: file
+    path: ` + route + `
+    upstreams: [https://files.example]
 `))
 		require.NoError(t, err)
 		require.ErrorContains(t, Validate(doc), "conflicts with status API", route)
+	}
+}
+
+func TestPlanRejectsNegativeGitDurations(t *testing.T) {
+	for _, field := range []string{"sync_interval", "operation_timeout"} {
+		doc, err := config.Decode(strings.NewReader(`
+instances:
+  - name: source
+    enabled: true
+    mode: git
+    path: /source
+    upstreams: [https://git.example/repo.git]
+    options:
+      ` + field + `: -1s
+`))
+		require.NoError(t, err)
+		require.ErrorContains(t, Validate(doc), "must not be negative")
 	}
 }

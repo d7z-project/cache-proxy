@@ -51,7 +51,8 @@ type handler struct {
 	name            string
 	upstream        string
 	expireAfter     config.Expiration
-	policy          *Policy
+	metadataTTL     time.Duration
+	options         *Options
 	store           *blobfs.Store
 	stats           *httpcache.Stats
 	client          *utils.HTTPClientWrapper

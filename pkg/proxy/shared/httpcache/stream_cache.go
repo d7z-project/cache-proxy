@@ -37,7 +37,6 @@ func StreamToCache(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error)
 func startCacheStream(ctx context.Context, cfg StreamConfig) (*growingFile, error) {
 	spool, err := newGrowingFile()
 	if err != nil {
-		_ = cfg.Body.Close()
 		return nil, err
 	}
 
