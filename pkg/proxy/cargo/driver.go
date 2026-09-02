@@ -4,70 +4,55 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strings"
+	"path/filepath"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
-
-type Options struct {
-	AuthRequired      bool     `json:"authRequired,omitempty" yaml:"auth_required,omitempty"`
-	AllowedCrateHosts []string `json:"allowedCrateHosts,omitempty" yaml:"allowed_crate_hosts,omitempty"`
-}
 
 type Driver struct{}
 
 func NewDriver() proxyruntime.ModeDriver { return Driver{} }
-
-func (Driver) Mode() string { return config.ModeCargo }
+func (Driver) Mode() string              { return config.ModeCargo }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var options Options
+	var options struct{}
 	if err := plan.Decode(&options); err != nil {
-		return err
-	}
-	if err := validateOptions(plan.Name(), &options); err != nil {
 		return err
 	}
 	if !plan.Enabled() {
 		return nil
 	}
-	runtime := httpcache.RuntimeConfig{
-		Mode:               config.ModeCargo,
-		ExpireAfter:        plan.Retention(),
-		MetadataTTL:        plan.MetadataTTL(),
-		Upstreams:          plan.Upstreams(),
-		Transport:          plan.Transport(),
-		UpstreamGate:       plan.UpstreamGate(),
-		AllowedTargetHosts: append([]string(nil), options.AllowedCrateHosts...),
-		ResponseTransform:  httpcache.CargoResponseTransform,
+	origin, err := url.Parse(plan.Upstream())
+	if err != nil {
+		return fmt.Errorf("instance %s: parse Cargo upstream: %w", plan.Name(), err)
 	}
-	h := httpcache.NewHandler(
-		plan.Name(),
-		runtime,
-		plan.Store(),
-		newResolver(&options),
-		plan.Stats(),
-	)
-	return plan.BindHTTPPath(plan.Path(), plan.Retention(), h)
+	client, err := transport.NewPlanClient(plan, config.ModeCargo)
+	if err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	handler, err := newHandler(origin, filepath.Join(plan.StoreRoot(), "state"), filepath.Join(plan.StoreRoot(), "work"), plan.Store(), client)
+	if err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), cargoTenant, plan.Store(), plan.CleanupConfig())
+	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{Handler: handler, CloseContext: handler.CloseContext})
 }
 
-func validateOptions(instance string, options *Options) error {
-	seenHosts := make(map[string]struct{}, len(options.AllowedCrateHosts))
-	for index, host := range options.AllowedCrateHosts {
-		host = strings.TrimSpace(host)
-		parsed, err := url.Parse("//" + host)
-		if err != nil || host == "" || parsed.Host != host || parsed.Hostname() == "" || parsed.User != nil ||
-			parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return fmt.Errorf("instance %s: invalid cargo allowed_crate_hosts entry %q", instance, host)
-		}
-		host = strings.ToLower(parsed.Host)
-		if _, exists := seenHosts[host]; exists {
-			return fmt.Errorf("instance %s: duplicate cargo allowed_crate_hosts entry %q", instance, host)
-		}
-		seenHosts[host] = struct{}{}
-		options.AllowedCrateHosts[index] = host
+func cratePrefix(name string) string {
+	characters := []rune(name)
+	switch len(characters) {
+	case 0:
+		return ""
+	case 1:
+		return "1"
+	case 2:
+		return "2"
+	case 3:
+		return "3/" + string(characters[:1])
+	default:
+		return string(characters[:2]) + "/" + string(characters[2:4])
 	}
-	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,13 +70,7 @@ type Document struct {
 	Server    ServerConfig  `yaml:"server"`
 	Metrics   MetricsConfig `yaml:"metrics"`
 	Storage   StorageConfig `yaml:"storage"`
-	Cache     CacheConfig   `yaml:"cache"`
 	Instances []Instance    `yaml:"instances"`
-}
-
-type CacheConfig struct {
-	MetadataTTL Duration   `yaml:"metadata_ttl"`
-	Retention   Expiration `yaml:"retention"`
 }
 
 type ServerConfig struct {
@@ -113,10 +108,12 @@ type CleanupConfig struct {
 }
 
 type DownloadConfig struct {
-	MaxActive        int                           `yaml:"max_active"`
-	MaxActivePerHost int                           `yaml:"max_active_per_host"`
-	MinInterval      Duration                      `yaml:"min_interval"`
-	Hosts            map[string]DownloadHostConfig `yaml:"hosts,omitempty"`
+	MaxActive          int                           `yaml:"max_active"`
+	MaxActivePerHost   int                           `yaml:"max_active_per_host"`
+	MinInterval        Duration                      `yaml:"min_interval"`
+	MaxCacheObjectSize ByteSize                      `yaml:"max_cache_object_size"`
+	MaxActiveSpoolSize ByteSize                      `yaml:"max_active_spool_size"`
+	Hosts              map[string]DownloadHostConfig `yaml:"hosts,omitempty"`
 }
 
 type DownloadHostConfig struct {
@@ -132,17 +129,15 @@ func DefaultCleanupConfig() CleanupConfig {
 }
 
 type Instance struct {
-	Name        string           `yaml:"name"`
-	Enabled     bool             `yaml:"enabled"`
-	Mode        string           `yaml:"mode"`
-	Path        string           `yaml:"path,omitempty"`
-	Bind        string           `yaml:"bind,omitempty"`
-	DisplayURL  string           `yaml:"display_url,omitempty"`
-	Upstreams   []string         `yaml:"upstreams"`
-	Transport   *TransportConfig `yaml:"transport,omitempty"`
-	Options     *OptionsBlock    `yaml:"options,omitempty"`
-	MetadataTTL Duration         `yaml:"-"`
-	Retention   Expiration       `yaml:"-"`
+	Name       string           `yaml:"name"`
+	Enabled    bool             `yaml:"enabled"`
+	Mode       string           `yaml:"mode"`
+	Path       string           `yaml:"path,omitempty"`
+	Bind       string           `yaml:"bind,omitempty"`
+	DisplayURL string           `yaml:"display_url,omitempty"`
+	Upstream   string           `yaml:"upstream"`
+	Transport  *TransportConfig `yaml:"transport,omitempty"`
+	Options    *OptionsBlock    `yaml:"options,omitempty"`
 }
 
 type TransportConfig struct {
@@ -259,19 +254,11 @@ func (i Instance) validateDeclaration() error {
 	if i.Mode != ModeOCI && strings.TrimSpace(i.Path) == "" {
 		return fmt.Errorf("%s mode requires path", i.Mode)
 	}
-	if len(i.Upstreams) == 0 {
-		return errors.New("upstreams must contain at least one URL")
+	if strings.TrimSpace(i.Upstream) == "" {
+		return errors.New("upstream is required")
 	}
-	switch i.Mode {
-	case ModeGit, ModeOCI, ModeNPM, ModeMaven, ModeCargo, ModePyPI, ModeDEB, ModeRPM:
-		if len(i.Upstreams) != 1 {
-			return fmt.Errorf("%s mode requires exactly one upstream", i.Mode)
-		}
-	}
-	for index, upstream := range i.Upstreams {
-		if err := ValidateHTTPUpstream(upstream); err != nil {
-			return fmt.Errorf("upstream %d: %w", index, err)
-		}
+	if err := ValidateHTTPUpstream(i.Upstream); err != nil {
+		return fmt.Errorf("upstream: %w", err)
 	}
 	if err := ValidateTransport(i.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)
@@ -299,10 +286,6 @@ func (i Instance) validateDeclaration() error {
 			fields = []string{"auth"}
 		case ModeGo:
 			fields = []string{"sumdb", "goprivate", "disable_module_fetch_header"}
-		case ModeCargo:
-			fields = []string{"auth_required", "allowed_crate_hosts"}
-		case ModePyPI:
-			fields = []string{"allowed_file_hosts"}
 		}
 		allowed := make(map[string]struct{}, len(fields))
 		for _, field := range fields {
@@ -371,6 +354,62 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*d = Duration(parsed)
 	return nil
+}
+
+type ByteSize int64
+
+func (b ByteSize) Bytes() int64 { return int64(b) }
+
+func (b ByteSize) String() string {
+	value := int64(b)
+	if value == 0 {
+		return "0B"
+	}
+	for _, unit := range []struct {
+		name string
+		size int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}} {
+		if value%unit.size == 0 {
+			return strconv.FormatInt(value/unit.size, 10) + unit.name
+		}
+	}
+	return strconv.FormatInt(value, 10) + "B"
+}
+
+func (b ByteSize) MarshalYAML() (any, error) {
+	if b <= 0 {
+		return nil, errors.New("byte size must be positive")
+	}
+	return b.String(), nil
+}
+
+func (b *ByteSize) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil {
+		*b = 0
+		return nil
+	}
+	if value.Kind != yaml.ScalarNode || strings.TrimSpace(value.Value) == "" {
+		return errors.New("byte size must be a non-empty scalar")
+	}
+	raw := strings.TrimSpace(value.Value)
+	units := []struct {
+		suffix     string
+		multiplier int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}, {"B", 1}}
+	for _, unit := range units {
+		suffix, multiplier := unit.suffix, unit.multiplier
+		if !strings.HasSuffix(raw, suffix) {
+			continue
+		}
+		number := strings.TrimSuffix(raw, suffix)
+		parsed, err := strconv.ParseInt(number, 10, 64)
+		if err != nil || parsed <= 0 || parsed > int64(^uint64(0)>>1)/multiplier {
+			return fmt.Errorf("invalid byte size %q", value.Value)
+		}
+		*b = ByteSize(parsed * multiplier)
+		return nil
+	}
+	return fmt.Errorf("invalid byte size %q: use B, KiB, MiB, GiB, or TiB", value.Value)
 }
 
 type Expiration time.Duration

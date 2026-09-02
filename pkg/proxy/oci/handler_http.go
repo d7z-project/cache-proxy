@@ -2,6 +2,7 @@ package oci
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,29 +11,27 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *handler) remoteRequest(admissionCtx, transferCtx context.Context, method, upstreamPath, userAgent string, headers map[string]string) (*http.Response, error) {
-	targetURL := h.upstream + "/" + httpcache.EscapePath(strings.TrimLeft(upstreamPath, "/"))
+func (h *handler) remoteRead(admissionCtx, transferCtx context.Context, method, upstreamPath, rawQuery, userAgent string, headers map[string]string) (*http.Response, error) {
+	if method != http.MethodGet && method != http.MethodHead {
+		return nil, errors.New("oci upstream read must use GET or HEAD")
+	}
+	targetURL := h.upstream + "/" + transport.EscapePathSegments(strings.TrimLeft(upstreamPath, "/"))
+	if rawQuery != "" {
+		targetURL += "?" + rawQuery
+	}
 	if userAgent == "" {
 		userAgent = h.client.UserAgent
 	}
 	send := func(authorization string) (*http.Response, error) {
-		releaseAdmission, err := h.upstreamGate.Acquire(admissionCtx, h.upstream, httpcache.AdmissionForeground)
-		if err != nil {
-			return nil, err
-		}
-		if err := admissionCtx.Err(); err != nil {
-			releaseAdmission()
-			return nil, err
-		}
 		request, err := http.NewRequestWithContext(transferCtx, method, targetURL, nil)
 		if err != nil {
-			releaseAdmission()
 			return nil, err
 		}
+		request = transport.WithAdmission(admissionCtx, request, transport.AdmissionForeground)
 		for key, value := range headers {
 			request.Header.Set(key, value)
 		}
@@ -50,19 +49,14 @@ func (h *handler) remoteRequest(admissionCtx, transferCtx context.Context, metho
 		latency := time.Since(start)
 		if err != nil {
 			releaseStats()
-			releaseAdmission()
 			h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, 0, latency, 0)
 			return nil, err
-		}
-		if response.StatusCode == http.StatusTooManyRequests {
-			_ = h.upstreamGate.RateLimited(h.upstream, response.Header.Get("Retry-After"))
 		}
 		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
 		counted := &countingReadCloser{ReadCloser: utils.NewRateLimitReader(h.client.WrapBody(response.Body))}
 		status := response.StatusCode
 		response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
 			releaseStats()
-			releaseAdmission()
 			h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, status, latency, counted.bytes)
 		}}
 		return response, nil
@@ -85,6 +79,9 @@ func (h *handler) remoteRequest(admissionCtx, transferCtx context.Context, metho
 	if err != nil || authorization == "" {
 		return nil, err
 	}
+	h.auth.tokenMu.Lock()
+	h.auth.preemptive = authorization
+	h.auth.tokenMu.Unlock()
 	return send(authorization)
 }
 
@@ -112,7 +109,14 @@ func (b *closeCallbackBody) Close() error {
 }
 
 func (h *handler) copyRemote(w http.ResponseWriter, req *http.Request, response *http.Response, cache string) (int, uint64, error) {
-	return h.writeResponse(w, req.Method, response.StatusCode, objectHeaders(response.Header, int(response.ContentLength), cache), response.Body)
+	transport.CopyEndToEndHeaders(w.Header(), response.Header)
+	w.Header().Set("X-Cache", cache)
+	w.WriteHeader(response.StatusCode)
+	if req.Method == http.MethodHead {
+		return response.StatusCode, uint64(max(response.ContentLength, 0)), nil
+	}
+	written, err := io.Copy(w, response.Body)
+	return response.StatusCode, uint64(written), err
 }
 
 func (h *handler) writeResponse(w http.ResponseWriter, method string, status int, headers map[string]string, body io.Reader) (int, uint64, error) {
@@ -123,7 +127,7 @@ func (h *handler) writeResponse(w http.ResponseWriter, method string, status int
 	}
 	w.WriteHeader(status)
 	if method == http.MethodHead || body == nil {
-		return status, httpcache.ResponseBytes(headers), nil
+		return status, responseBytes(headers), nil
 	}
 	written, err := io.Copy(w, body)
 	return status, uint64(written), err

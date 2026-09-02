@@ -20,8 +20,9 @@ import (
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/spf13/afero"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
+	proxytransport "gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 type gitConfig struct {
@@ -31,7 +32,7 @@ type gitConfig struct {
 	auth             transport.AuthMethod
 	proxyURL         string
 	operationTimeout time.Duration
-	upstreamGate     *httpcache.UpstreamGate
+	upstreamGate     *proxytransport.UpstreamGate
 }
 
 type gitHandler struct {
@@ -42,30 +43,37 @@ type gitHandler struct {
 	operationTimeout time.Duration
 	billyFs          *billyAdapter
 	bootstrapClient  *http.Client
-	upstreamGate     *httpcache.UpstreamGate
+	upstreamGate     *proxytransport.UpstreamGate
 
 	repositoryMu sync.RWMutex
 	repository   *gitlib.Repository
 	server       transport.Transport
 	syncing      bool
 	lastError    string
-
-	requestMu sync.Mutex
-	closing   bool
-	requests  sync.WaitGroup
+	lifecycle    *storeio.Lifecycle
 }
 
 func newGitHandler(cfg gitConfig) *gitHandler {
+	if cfg.operationTimeout <= 0 {
+		cfg.operationTimeout = defaultOperationTimeout
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	transport.MaxResponseHeaderBytes = 1 << 20
 	if cfg.proxyURL != "" {
 		if proxyURL, err := url.Parse(cfg.proxyURL); err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
+	bootstrapClient := &http.Client{
+		Transport: transport, Timeout: cfg.operationTimeout,
+		CheckRedirect: proxytransport.CheckReadOnlyRedirect,
+	}
+	proxytransport.ConfigureAdmission(bootstrapClient, cfg.upstreamGate)
 	return &gitHandler{
 		name: cfg.name, upstream: cfg.upstream, auth: cfg.auth, proxyURL: cfg.proxyURL,
 		operationTimeout: cfg.operationTimeout, billyFs: cfg.billyFs,
-		bootstrapClient: &http.Client{Transport: transport, Timeout: cfg.operationTimeout}, upstreamGate: cfg.upstreamGate,
+		bootstrapClient: bootstrapClient, upstreamGate: cfg.upstreamGate, lifecycle: storeio.NewLifecycle(),
 	}
 }
 
@@ -86,30 +94,30 @@ func (h *gitHandler) Start(context.Context) error {
 }
 
 func (h *gitHandler) Stop(ctx context.Context) error {
-	h.requestMu.Lock()
-	h.closing = true
-	h.requestMu.Unlock()
-	return utils.WaitGroupContext(ctx, &h.requests)
+	h.bootstrapClient.CloseIdleConnections()
+	return h.lifecycle.Close(ctx)
 }
 
 func (h *gitHandler) Sync(ctx context.Context) error {
-	releaseAdmission, err := h.upstreamGate.Acquire(ctx, h.upstream, httpcache.AdmissionRefresh)
-	if err != nil {
-		return err
+	if h.operationTimeout <= 0 {
+		return h.syncRepository(ctx)
 	}
-	defer releaseAdmission()
+	operationCtx, cancel := context.WithTimeout(ctx, h.operationTimeout)
+	defer cancel()
+	return h.syncRepository(operationCtx)
+}
 
+func (h *gitHandler) syncRepository(ctx context.Context) error {
 	h.repositoryMu.Lock()
 	defer h.repositoryMu.Unlock()
 	h.syncing = true
 	defer func() { h.syncing = false }()
 
-	operationCtx := ctx
-	cancel := func() {}
-	if h.operationTimeout > 0 {
-		operationCtx, cancel = context.WithTimeout(ctx, h.operationTimeout)
+	releaseAdmission, err := h.upstreamGate.Acquire(ctx, h.upstream, proxytransport.AdmissionRefresh)
+	if err != nil {
+		return err
 	}
-	defer cancel()
+	defer releaseAdmission()
 
 	if h.repository == nil {
 		if err := h.clearRepository(); err != nil {
@@ -120,7 +128,7 @@ func (h *gitHandler) Sync(ctx context.Context) error {
 		if h.proxyURL != "" {
 			options.ProxyOptions = proxyOptions(h.proxyURL)
 		}
-		repository, err := gitlib.CloneContext(operationCtx, storage, nil, options)
+		repository, err := gitlib.CloneContext(ctx, storage, nil, options)
 		if err != nil {
 			h.lastError = err.Error()
 			return err
@@ -143,7 +151,7 @@ func (h *gitHandler) Sync(ctx context.Context) error {
 	if h.proxyURL != "" {
 		options.ProxyOptions = proxyOptions(h.proxyURL)
 	}
-	err = h.repository.FetchContext(operationCtx, options)
+	err = h.repository.FetchContext(ctx, options)
 	if errors.Is(err, gitlib.NoErrAlreadyUpToDate) {
 		err = nil
 	}
@@ -169,24 +177,40 @@ func (h *gitHandler) clearRepository() error {
 }
 
 func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	h.requestMu.Lock()
-	if h.closing {
-		h.requestMu.Unlock()
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, "repository handler is stopping", http.StatusServiceUnavailable)
+	if _, err := storeio.CleanURLPath(req.URL); err != nil {
+		http.Error(w, "invalid Git path", http.StatusBadRequest)
 		return
 	}
-	h.requests.Add(1)
-	h.requestMu.Unlock()
-	defer h.requests.Done()
+	if !isGitReadRequest(req) {
+		if req.Method == http.MethodGet && req.URL.Path == "/info/refs" && req.URL.Query().Get("service") != "" {
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		if !proxyruntime.RequireReadMethod(w, req.Method) {
+			return
+		}
+		http.NotFound(w, req)
+		return
+	}
+	_, done, err := h.lifecycle.Begin()
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		proxytransport.WriteError(w, http.StatusServiceUnavailable)
+		return
+	}
+	defer done()
+	if shouldProxyGitRead(req) {
+		h.proxyGitRead(w, req)
+		return
+	}
 
 	if !h.repositoryMu.TryRLock() {
-		h.proxyBootstrap(w, req)
+		h.proxyGitRead(w, req)
 		return
 	}
 	if h.server == nil {
 		h.repositoryMu.RUnlock()
-		h.proxyBootstrap(w, req)
+		h.proxyGitRead(w, req)
 		return
 	}
 	serveGitHTTP(w, req, h.server, h.name)
@@ -194,7 +218,9 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *gitHandler) DashboardStatus() (color, label, extra string) {
-	h.repositoryMu.RLock()
+	if !h.repositoryMu.TryRLock() {
+		return "blue", "syncing", ""
+	}
 	defer h.repositoryMu.RUnlock()
 	if h.repository != nil {
 		if h.syncing {
@@ -215,14 +241,14 @@ func (h *gitHandler) redactedUpstream() string { return redactURL(h.upstream) }
 
 func (h *gitHandler) writeAdmissionError(w http.ResponseWriter, err error) {
 	status := http.StatusServiceUnavailable
-	var limited *httpcache.UpstreamRateLimitError
+	var limited *proxyruntime.UpstreamRateLimitError
 	if errors.As(err, &limited) {
 		status = http.StatusTooManyRequests
 	}
-	if seconds, ok := httpcache.AdmissionRetryAfterSeconds(err); ok {
+	if seconds, ok := proxyruntime.AdmissionRetryAfterSeconds(err); ok {
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
-	http.Error(w, http.StatusText(status), status)
+	proxytransport.WriteError(w, status)
 }
 
 func proxyOptions(rawURL string) transport.ProxyOptions {

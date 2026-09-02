@@ -7,20 +7,24 @@ import (
 	"time"
 )
 
-func CleanStaleTempFiles(maxAge time.Duration) {
-	entries, err := os.ReadDir(os.TempDir())
-	if err != nil {
-		return
-	}
+// CleanStaleWorkFiles removes abandoned downloads from per-instance work
+// directories without touching protocol state or arbitrary operator files.
+func CleanStaleWorkFiles(instancesRoot string, maxAge time.Duration) {
 	cutoff := time.Now().Add(-maxAge)
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "cache-proxy-") {
-			continue
+	_ = filepath.WalkDir(instancesRoot, func(name string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() || filepath.Base(filepath.Dir(name)) != "work" {
+			return nil
+		}
+		if !strings.HasPrefix(entry.Name(), ".cache-proxy-tmp-") {
+			return nil
 		}
 		info, err := entry.Info()
-		if err != nil || info.ModTime().After(cutoff) {
-			continue
+		if err == nil && info.ModTime().Before(cutoff) {
+			_ = os.Remove(name)
 		}
-		_ = os.Remove(filepath.Join(os.TempDir(), entry.Name()))
-	}
+		return nil
+	})
 }

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"strconv"
 	"strings"
 
@@ -80,30 +79,20 @@ func formatBytes(n int64) string {
 	}
 }
 
-func collectTenantUsage(ctx context.Context, tenants []string, store *blobfs.Store) map[string]int64 {
+func collectInstanceUsage(ctx context.Context, instances []string, stores map[string]*blobfs.Store) map[string]int64 {
 	usage := make(map[string]int64)
-	if store == nil {
-		return usage
-	}
-	for _, tenant := range tenants {
-		var total int64
-		_ = fs.WalkDir(store.TenantFS(tenant), ".", func(path string, d fs.DirEntry, err error) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			info, statErr := d.Info()
-			if statErr != nil {
-				return nil
-			}
-			total += info.Size()
-			return nil
-		})
-		usage[tenant] = total
+	for _, instance := range instances {
+		if ctx.Err() != nil {
+			break
+		}
+		store := stores[instance]
+		if store == nil {
+			continue
+		}
+		stats, err := store.Stats(ctx)
+		if err == nil && stats != nil {
+			usage[instance] = stats.Bytes.LogicalObjectBytes
+		}
 	}
 	return usage
 }

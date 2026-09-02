@@ -8,10 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.d7z.net/blobfs"
-
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
@@ -67,7 +65,7 @@ type statusStore struct {
 	eventFilled bool
 }
 
-func newAppStatus(cfg config.ServerStatusConfig, _ *blobfs.Store) *appStatus {
+func newAppStatus(cfg config.ServerStatusConfig) *appStatus {
 	diskInterval := cfg.DiskSampleInterval.Duration()
 	diskWindow := cfg.DiskHistoryWindow.Duration()
 	diskCapacity := int(diskWindow / diskInterval)
@@ -159,7 +157,7 @@ func (s *appStatus) summary(app *App) statusSummary {
 	if samples := s.diskSamples(); len(samples) > 0 {
 		summary.LastSampleAt = samples[len(samples)-1].At
 	}
-	if app.store == nil {
+	if len(app.stores) == 0 {
 		return summary
 	}
 	baseCtx := app.lifecycleCtx
@@ -168,19 +166,20 @@ func (s *appStatus) summary(app *App) statusSummary {
 	}
 	ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 	defer cancel()
-	stats, err := app.store.Stats(ctx)
-	if err != nil || stats == nil {
-		return summary
+	for _, store := range app.stores {
+		stats, err := store.Stats(ctx)
+		if err == nil && stats != nil {
+			summary.DegradedObjects += stats.DegradedObjects
+		}
 	}
-	summary.DegradedObjects = stats.DegradedObjects
-	summary.Healthy = stats.DegradedObjects == 0
+	summary.Healthy = summary.DegradedObjects == 0
 	return summary
 }
 
 func (s *appStatus) diskSamples() []diskSample {
 	s.store.diskMu.RLock()
 	defer s.store.diskMu.RUnlock()
-	return append([]diskSample(nil), s.store.diskSnapshotLocked()...)
+	return ringSnapshot(s.store.disk, s.store.diskNext, s.store.diskFilled)
 }
 
 func (s *appStatus) taskEvents(limit int) []taskEvent {
@@ -189,27 +188,30 @@ func (s *appStatus) taskEvents(limit int) []taskEvent {
 	}
 	s.store.eventMu.RLock()
 	defer s.store.eventMu.RUnlock()
-	all := s.store.eventSnapshotLocked()
+	all := ringSnapshot(s.store.events, s.store.eventNext, s.store.eventFilled)
 	if len(all) > limit {
 		all = all[len(all)-limit:]
 	}
-	return append([]taskEvent(nil), all...)
+	return all
 }
 
 func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
-	if app.store == nil {
+	if len(app.stores) == 0 {
 		return
 	}
 	sampleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	stats, err := app.store.Stats(sampleCtx)
-	if err != nil || stats == nil {
-		return
+	var total int64
+	for _, store := range app.stores {
+		stats, err := store.Stats(sampleCtx)
+		if err == nil && stats != nil {
+			total += stats.Bytes.LogicalObjectBytes
+		}
 	}
 	s.store.diskMu.Lock()
 	s.store.disk[s.store.diskNext] = diskSample{
 		At:         time.Now().Format(time.RFC3339),
-		TotalBytes: stats.Bytes.LogicalObjectBytes,
+		TotalBytes: total,
 	}
 	s.store.diskNext = (s.store.diskNext + 1) % len(s.store.disk)
 	if s.store.diskNext == 0 {
@@ -218,30 +220,16 @@ func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
 	s.store.diskMu.Unlock()
 }
 
-func (s *statusStore) diskSnapshotLocked() []diskSample {
-	if len(s.disk) == 0 {
+func ringSnapshot[T any](items []T, next int, filled bool) []T {
+	if len(items) == 0 {
 		return nil
 	}
-	if !s.diskFilled {
-		return append([]diskSample(nil), s.disk[:s.diskNext]...)
+	if !filled {
+		return append([]T(nil), items[:next]...)
 	}
-	items := make([]diskSample, 0, len(s.disk))
-	items = append(items, s.disk[s.diskNext:]...)
-	items = append(items, s.disk[:s.diskNext]...)
-	return items
-}
-
-func (s *statusStore) eventSnapshotLocked() []taskEvent {
-	if len(s.events) == 0 {
-		return nil
-	}
-	if !s.eventFilled {
-		return append([]taskEvent(nil), s.events[:s.eventNext]...)
-	}
-	items := make([]taskEvent, 0, len(s.events))
-	items = append(items, s.events[s.eventNext:]...)
-	items = append(items, s.events[:s.eventNext]...)
-	return items
+	snapshot := make([]T, 0, len(items))
+	snapshot = append(snapshot, items[next:]...)
+	return append(snapshot, items[:next]...)
 }
 
 func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
@@ -252,7 +240,7 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if a.status == nil {
-		writeStatusError(w, req, http.StatusNotFound, errors.New("status endpoint disabled"))
+		writeStatusError(w, http.StatusNotFound, errors.New("status endpoint disabled"))
 		return
 	}
 	switch req.URL.Path {
@@ -293,7 +281,7 @@ func parseStatusLimit(req *http.Request, fallback int) int {
 func writeStatusJSON(w http.ResponseWriter, req *http.Request, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		writeStatusError(w, req, http.StatusInternalServerError, err)
+		writeStatusError(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -305,7 +293,10 @@ func writeStatusJSON(w http.ResponseWriter, req *http.Request, payload any) {
 	_, _ = w.Write(data)
 }
 
-func writeStatusError(w http.ResponseWriter, req *http.Request, status int, err error) {
-	resp := httpcache.ErrorResponse(status, err)
-	_ = resp.FlushClose(req, w)
+func writeStatusError(w http.ResponseWriter, status int, err error) {
+	if status >= 500 {
+		proxyruntime.WriteError(w, status)
+		return
+	}
+	http.Error(w, err.Error(), status)
 }

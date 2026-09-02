@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,6 +30,8 @@ type Block struct {
 	OperationTimeout config.Duration `yaml:"operation_timeout"`
 }
 
+const defaultOperationTimeout = 2 * time.Minute
+
 type Driver struct{}
 
 func NewDriver() proxyruntime.ModeDriver { return Driver{} }
@@ -46,7 +49,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if block.OperationTimeout < 0 {
 		return fmt.Errorf("instance %s: git operation_timeout must not be negative", plan.Name())
 	}
-	upstream := strings.TrimSpace(plan.Upstreams()[0])
+	upstream := plan.Upstream()
 	if _, err := transport.NewEndpoint(upstream); err != nil {
 		return fmt.Errorf("instance %s: invalid git upstream: %w", plan.Name(), err)
 	}
@@ -64,7 +67,11 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return nil
 	}
 
-	baseFs := afero.NewBasePathFs(plan.Store(), "git/"+plan.Name())
+	repositoryRoot := filepath.Join(plan.StoreRoot(), "repository")
+	if err := os.MkdirAll(repositoryRoot, 0o755); err != nil {
+		return fmt.Errorf("instance %s: create git repository directory: %w", plan.Name(), err)
+	}
+	baseFs := afero.NewBasePathFs(afero.NewOsFs(), repositoryRoot)
 	billyFs := newBillyAdapter(baseFs, "")
 
 	handler := newGitHandler(gitConfig{
@@ -90,7 +97,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 			return nil, handler.Sync(ctx)
 		},
 	})
-	return plan.BindPath(plan.Path(), plan.Retention(), handler)
+	return plan.BindPath(plan.Path(), handler)
 }
 
 func buildAuth(cfg *AuthConfig) (transport.AuthMethod, error) {

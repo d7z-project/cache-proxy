@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/mod/module"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func FuzzParseModuleRequest(f *testing.F) {
@@ -25,6 +25,7 @@ func FuzzParseModuleRequest(f *testing.F) {
 		}
 		require.NoError(t, module.CheckPath(result.modulePath))
 		require.NotEmpty(t, result.cacheKey)
-		require.True(t, httpcache.SafePath(result.cacheKey))
+		_, err = storeio.CleanRelative(result.cacheKey)
+		require.NoError(t, err)
 	})
 }

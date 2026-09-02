@@ -1,0 +1,13 @@
+pkgname=e2e-apk
+pkgver=1.0.0
+pkgrel=0
+pkgdesc="cache-proxy end-to-end fixture"
+url="https://example.invalid"
+arch="noarch"
+license="MIT"
+options="!check"
+
+package() {
+	mkdir -p "$pkgdir/usr/share/e2e-apk"
+	echo cache-proxy-e2e >"$pkgdir/usr/share/e2e-apk/payload.txt"
+}

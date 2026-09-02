@@ -41,7 +41,7 @@ instances:
     enabled: true
     mode: file
     path: /files
-    upstreams: [https://example.com]
+    upstream: https://example.com
 `))
 	require.ErrorContains(t, err, "invalid instance name")
 }
@@ -51,16 +51,16 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	defer cancel()
 
 	var upstreamRequests atomic.Int64
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		upstreamRequests.Add(1)
 		_, _ = io.WriteString(w, "hello")
 	}))
 	defer upstream.Close()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
-		fileInstance(t, "files", "/files", upstream.URL, file.Options{}),
+		fileInstance(t, "files", "/files", upstream.URL, file.Options{Rules: []file.Rule{{Match: "**", Policy: "immutable"}}}),
 	})
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	require.Equal(t, "hello", requestBody(t, app, http.MethodGet, "/files/a.txt"))
@@ -75,7 +75,7 @@ func TestMetricsRequireBearerToken(t *testing.T) {
 	doc := testDocument(t.TempDir(), nil)
 	doc.Metrics.Token = "secret"
 
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -97,11 +97,11 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", "https://example.com", file.Options{
 			Rules: []file.Rule{
-				{Match: "**/*.tgz", Class: "metadata"},
+				{Match: "**/*.tgz", Policy: "http_cache"},
 			},
 		}),
 	})
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -116,11 +116,26 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, "http://proxy.example.test/files")
 	require.Contains(t, body, `class="badge badge-file"`)
 	require.Contains(t, body, "copyToClipboard")
+	require.Contains(t, body, "--bg:")
 	require.Contains(t, body, `id="lang-select"`)
 	require.Contains(t, body, `data-lang="ja"`)
 	require.Contains(t, body, `data-lang="ko"`)
 	require.Contains(t, body, `data-lang="de"`)
 	require.Contains(t, body, `data-lang="fr"`)
+}
+
+func TestBackendLockCoversProcessLifetime(t *testing.T) {
+	backend := t.TempDir()
+	first, err := lockBackend(backend)
+	require.NoError(t, err)
+
+	_, err = lockBackend(backend)
+	require.ErrorContains(t, err, "already opened")
+	require.NoError(t, first.Close())
+
+	second, err := lockBackend(backend)
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
 }
 
 func TestCloseIsIdempotentOnPartialApp(t *testing.T) {
@@ -138,7 +153,7 @@ func TestHomePageUsesPublicURL(t *testing.T) {
 		fileInstance(t, "files", "/files", "https://example.com", file.Options{}),
 	})
 	doc.Server.PublicURL = "https://cache.home.lan"
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -148,6 +163,14 @@ func TestHomePageUsesPublicURL(t *testing.T) {
 	body := rec.Body.String()
 	require.Contains(t, body, "https://cache.home.lan/files")
 	require.NotContains(t, body, "http://127.0.0.1")
+}
+
+func TestExternalBaseIgnoresUntrustedForwardedHeaders(t *testing.T) {
+	app := &App{config: &config.Document{}}
+	request := httptest.NewRequest(http.MethodGet, "http://cache.example/npm/pkg", nil)
+	request.Header.Set("X-Forwarded-Host", "attacker.example")
+	request.Header.Set("X-Forwarded-Proto", "https")
+	require.Equal(t, "http://cache.example", app.publicBaseURL(request))
 }
 
 func TestHomePageShowsBindDisplayURL(t *testing.T) {
@@ -262,7 +285,7 @@ instances:
     enabled: true
     mode: file
     path: /files
-    upstreams: [https://example.com]
+    upstream: https://example.com
     options:
       default_polciy: immutable
 `))
@@ -278,7 +301,7 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	require.NoError(t, err)
 	app := &App{
 		stopRuntime: func() {},
-		store:       store,
+		stores:      map[string]*blobfs.Store{"test": store},
 		handlers: []proxyruntime.Instance{
 			blockingInstance{},
 		},
@@ -414,7 +437,7 @@ func TestBindHomePageHeadReturnsOK(t *testing.T) {
 		Enabled: true,
 		Bind:    "127.0.0.1:5000",
 		Runtime: proxyruntime.HandlerInstance{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = io.WriteString(w, "proxy")
 			}),
 		},
@@ -466,7 +489,7 @@ func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
 	require.Equal(t, first, runs.Load())
 }
 
-func TestOpenRejectsFileModeWithoutUpstreams(t *testing.T) {
+func TestOpenRejectsFileModeWithoutUpstream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -475,7 +498,7 @@ func TestOpenRejectsFileModeWithoutUpstreams(t *testing.T) {
 	}})
 
 	_, err := Open(ctx, doc)
-	require.ErrorContains(t, err, "upstreams must contain at least one URL")
+	require.ErrorContains(t, err, "upstream is required")
 }
 
 func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
@@ -499,7 +522,7 @@ func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 	}
 	defer func() { driverSet = prev }()
 
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	require.Equal(t, doc.Storage.Cleanup, got)
@@ -509,7 +532,7 @@ func TestStatusEndpointsReturnJSON(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
+	app := openApp(ctx, t, testDocument(t.TempDir(), nil))
 	defer closeApp(t, app)
 
 	app.status.observeTaskRun(scheduler.TaskRun{
@@ -536,7 +559,7 @@ func TestStatusSummaryDefaultsHealthyWhenStoreUnavailable(t *testing.T) {
 		DiskSampleInterval: config.Duration(time.Minute),
 		DiskHistoryWindow:  config.Duration(time.Hour),
 		EventLimit:         8,
-	}, nil)
+	})
 
 	summary := status.summary(&App{})
 
@@ -551,7 +574,7 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", "https://mirror.example.test/repo", file.Options{}),
 	})
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	upstream := "https://mirror.example.test/repo"
@@ -600,7 +623,7 @@ func TestStatusNetworkEndpointCombinesSharedHostObservations(t *testing.T) {
 		fileInstance(t, "files-a", "/files-a", upstream, file.Options{}),
 		fileInstance(t, "files-b", "/files-b", upstream, file.Options{}),
 	})
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	for _, name := range []string{"files-a", "files-b"} {
@@ -627,7 +650,7 @@ func TestStatusNetworkEndpointReportsHostCooldown(t *testing.T) {
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", upstream, file.Options{}),
 	})
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 	require.NotNil(t, app.upstreamGate.RateLimited(upstream, "60"))
 
@@ -648,7 +671,7 @@ func TestStatusEventsEndpointClampsLimit(t *testing.T) {
 
 	doc := testDocument(t.TempDir(), nil)
 	doc.Server.Status.EventLimit = 2
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	now := time.Now().UTC()
@@ -688,7 +711,7 @@ func TestStatusEndpointRejectsUnsupportedMethod(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	app := openApp(t, ctx, testDocument(t.TempDir(), nil))
+	app := openApp(ctx, t, testDocument(t.TempDir(), nil))
 	defer closeApp(t, app)
 
 	req := httptest.NewRequest(http.MethodPost, "/-/status/summary", nil)
@@ -705,7 +728,7 @@ func TestStatusEventsEndpointFallsBackOnInvalidLimit(t *testing.T) {
 
 	doc := testDocument(t.TempDir(), nil)
 	doc.Server.Status.EventLimit = 2
-	app := openApp(t, ctx, doc)
+	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
 
 	now := time.Now().UTC()
@@ -742,7 +765,32 @@ func TestValidateRejectsInvalidServerStatusWindow(t *testing.T) {
 	require.ErrorContains(t, err, "disk_history_window must be greater than or equal")
 }
 
-func openApp(t *testing.T, ctx context.Context, doc *config.Document) *App {
+func TestDownstreamWriteDeadlineStartsOnResponseWrite(t *testing.T) {
+	writer := &deadlineResponseWriter{header: make(http.Header)}
+	handler := downstreamWriteIdle(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		require.Empty(t, writer.deadlines)
+		w.WriteHeader(http.StatusNoContent)
+	}), time.Minute)
+	handler.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/", nil))
+	require.Len(t, writer.deadlines, 2)
+	require.False(t, writer.deadlines[0].IsZero())
+	require.True(t, writer.deadlines[1].IsZero())
+}
+
+type deadlineResponseWriter struct {
+	header    http.Header
+	deadlines []time.Time
+}
+
+func (w *deadlineResponseWriter) Header() http.Header          { return w.header }
+func (*deadlineResponseWriter) WriteHeader(int)                {}
+func (*deadlineResponseWriter) Write(body []byte) (int, error) { return len(body), nil }
+func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func openApp(ctx context.Context, t *testing.T, doc *config.Document) *App {
 	t.Helper()
 	app, err := Open(ctx, doc)
 	require.NoError(t, err)
@@ -780,7 +828,7 @@ func fileInstance(t *testing.T, name, path, upstream string, policy file.Options
 	}
 	return config.Instance{
 		Name: name, Enabled: true, Mode: config.ModeFile, Path: path,
-		Upstreams: []string{upstream}, Options: &config.OptionsBlock{Node: yamlNode(t, options)},
+		Upstream: upstream, Options: &config.OptionsBlock{Node: yamlNode(t, options)},
 	}
 }
 
@@ -862,7 +910,7 @@ func (d startFailingDriver) Plan(_ context.Context, plan *proxyruntime.InstanceP
 			return nil, nil
 		},
 	})
-	return plan.BindPath("/files", config.Expiration(time.Hour), startContextInstance{
+	return plan.BindPath("/files", startContextInstance{
 		onStart: func(context.Context) error {
 			return fmt.Errorf("boom")
 		},
@@ -877,5 +925,5 @@ func (d cleanupConfigDriver) Plan(_ context.Context, plan *proxyruntime.Instance
 	if d.seen != nil {
 		*d.seen = plan.CleanupConfig()
 	}
-	return plan.BindPath("/files", config.Expiration(time.Hour), startContextInstance{})
+	return plan.BindPath("/files", startContextInstance{})
 }

@@ -1,6 +1,9 @@
 package rpm
 
 import (
+	"bytes"
+	"compress/gzip"
+	"context"
 	"strings"
 	"testing"
 
@@ -14,21 +17,26 @@ func FuzzRepomd(f *testing.F) {
 		if len(input) > 256<<10 {
 			t.Skip()
 		}
-		items, err := parseRepomdReader(strings.NewReader(input))
+		items, err := parseRepomdReader(context.Background(), strings.NewReader(input))
 		if err == nil {
 			require.LessOrEqual(t, len(items), len(input)+1)
 		}
 	})
 }
 
-func FuzzRPMPathClassification(f *testing.F) {
-	f.Add("repo/repodata/repomd.xml")
-	f.Add("repo/Packages/a.rpm")
-	f.Fuzz(func(t *testing.T, input string) {
-		if len(input) > 4096 {
-			t.Skip()
+func FuzzRPMMetadataDecompression(f *testing.F) {
+	plain := []byte(`<metadata><package><location href="Packages/demo.rpm"/></package></metadata>`)
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, _ = writer.Write(plain)
+	_ = writer.Close()
+	f.Add(plain, "repodata/primary.xml")
+	f.Add(compressed.Bytes(), "repodata/primary.xml.gz")
+	f.Fuzz(func(_ *testing.T, data []byte, location string) {
+		if len(data) > 1<<20 || len(location) > 256 {
+			return
 		}
-		_, _, _ = repomdAnchor(input)
-		_ = classifyPath(input)
+		item := repomdItem{Type: "primary", Location: location, Size: -1, OpenSize: -1}
+		_ = inspectOpenMetadataReader(context.Background(), bytes.NewReader(data), int64(len(data)), item)
 	})
 }

@@ -4,18 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
+	"path/filepath"
 	"strings"
-	"time"
 
 	"golang.org/x/mod/module"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
-	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
-
-const defaultCleanupInterval = 6 * time.Hour
 
 type SumDBConfig struct {
 	Enabled bool   `json:"enabled" yaml:"enabled"`
@@ -29,8 +26,6 @@ type Config struct {
 	DisableModuleFetchHeader bool         `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
 }
 
-type Options = Config
-
 type Driver struct{}
 
 func NewDriver() proxyruntime.ModeDriver { return Driver{} }
@@ -42,24 +37,19 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return err
 	}
 	applyDefaults(&options)
-	if err := validateBlock(plan.Upstreams(), &options); err != nil {
+	if err := validateOptions(&options); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
 	if !plan.Enabled() {
 		return nil
 	}
-	handler, err := NewHandler(plan.Name(), plan.Retention(), plan.MetadataTTL(), plan.Upstreams(), plan.Transport(), &options, plan.Store(), plan.Stats(), plan.UpstreamGate())
+	handler, err := newHandler(plan.Name(), plan.Upstream(), plan.Transport(), &options, plan.Store(), plan.Stats(), plan.UpstreamGate(), filepath.Join(plan.StoreRoot(), "work"))
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	plan.Scheduler().Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
-		Interval: defaultCleanupInterval,
-		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
-		},
-	})
-	return plan.BindPath(plan.Path(), plan.Retention(), proxyruntime.HandlerInstance{
+	handler.client.SetSpooler(storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget()))
+	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), goTenant, plan.Store(), plan.CleanupConfig())
+	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{
 		Handler:      handler,
 		CloseContext: handler.CloseContext,
 	})
@@ -83,15 +73,7 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
-func validateBlock(proxies []string, cfg *Config) error {
-	if len(proxies) == 0 {
-		return errors.New("go proxy requires at least one proxy")
-	}
-	for i, raw := range proxies {
-		if err := config.ValidateHTTPUpstream(raw); err != nil {
-			return fmt.Errorf("go proxy %d: %w", i, err)
-		}
-	}
+func validateOptions(cfg *Config) error {
 	if cfg.SumDB != nil && cfg.SumDB.Enabled {
 		name := strings.TrimSpace(cfg.SumDB.Name)
 		if name == "" {
@@ -131,20 +113,4 @@ func matchesPrivateModule(cfg *Config, modulePath string) bool {
 		return false
 	}
 	return module.MatchPrefixPatterns(strings.Join(patterns, ","), modulePath)
-}
-
-func modulePathFromTarget(target string) (string, bool) {
-	target = strings.TrimPrefix(path.Clean("/"+target), "/")
-	if target == "." || target == "" || strings.HasPrefix(target, "sumdb/") {
-		return "", false
-	}
-	modulePath, _, ok := strings.Cut(target, "/@")
-	if !ok || modulePath == "" {
-		return "", false
-	}
-	unescaped, err := module.UnescapePath(modulePath)
-	if err != nil || unescaped == "" {
-		return "", false
-	}
-	return unescaped, true
 }

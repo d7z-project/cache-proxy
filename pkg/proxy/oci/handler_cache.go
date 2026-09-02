@@ -8,10 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -21,12 +19,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const (
 	maxManifestSize          = 50 << 20
+	maxRefStateSize          = 64 << 10
 	ociRefStateSchemaVersion = 1
 )
 
@@ -38,8 +38,12 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 
 	slog.Debug("oci fetch manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "upstream", h.upstream)
 	userAgent, _ := h.client.RequestUserAgent(req)
-	requestHeaders := map[string]string{"Accept": manifestAccept}
-	statePath := h.refStatePath(resolved.repo, resolved.ref)
+	representation := req.Header.Get("Accept")
+	if representation == "" {
+		representation = manifestAccept
+	}
+	requestHeaders := map[string]string{"Accept": representation}
+	statePath := h.refStatePath(resolved.repo, resolved.ref, representation)
 	previousState, previousStateErr := h.readState(ctx, statePath)
 	if previousStateErr == nil {
 		if previousState.ETag != "" {
@@ -49,12 +53,12 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 			requestHeaders["If-Modified-Since"] = previousState.LastModified
 		}
 	}
-	response, err := h.remoteRequest(req.Context(), h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, requestHeaders)
+	response, err := h.remoteRead(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, requestHeaders)
 	if err != nil {
 		return 0, "", 0, err
 	}
 	defer func() { _ = response.Body.Close() }()
-	cacheCtx := h.lifecycleCtx
+	cacheCtx := h.lifecycle.Context()
 	if response.StatusCode == http.StatusNotModified {
 		if previousStateErr != nil {
 			return 0, "", 0, previousStateErr
@@ -76,28 +80,24 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
-
-	tempFile, err := os.CreateTemp("", "cache-proxy-oci-manifest-*")
-	if err != nil {
-		slog.Warn("oci manifest cache preparation failed; serving upstream response", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", err)
+	if !transport.ResponseCacheable(response, false) {
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
-	size, err := io.Copy(tempFile, io.LimitReader(response.Body, maxManifestSize+1))
-	if err == nil {
-		_, err = tempFile.Seek(0, io.SeekStart)
-	}
+
+	spool, err := h.spooler.SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxManifestSize, response.ContentLength)
 	if err != nil {
-		_ = tempFile.Close()
-		_ = os.Remove(tempFile.Name())
+		slog.Warn("oci manifest cache preparation failed; serving upstream response", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", err)
+		if storeio.SpoolBodyUntouched(err) {
+			status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+			return status, "BYPASS", bytes, copyErr
+		}
 		return 0, "", 0, err
 	}
 	_ = response.Body.Close()
-	defer func() { _ = tempFile.Close() }()
-	defer func() { _ = os.Remove(tempFile.Name()) }()
-	if size > maxManifestSize {
-		return 0, "", 0, errors.New("oci manifest exceeds size limit")
-	}
+	defer spool.Close()
+	tempFile := spool.File
+	size := spool.Size
 
 	manifestDigest := response.Header.Get("Docker-Content-Digest")
 	if manifestDigest != "" {
@@ -129,6 +129,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		SourceUpstream: h.upstream,
 		Repo:           resolved.repo,
 		Ref:            resolved.ref,
+		Representation: representation,
 		FetchedAt:      fetchedAt,
 		ExpireAfter:    expireAfter,
 		ManifestDigest: manifestDigest,
@@ -140,11 +141,11 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 
 	meta := map[string]string{
-		"content-type":                    state.ContentType,
-		"content-length":                  strconv.FormatInt(size, 10),
-		"fetched-at":                      fetchedAt.Format(time.RFC3339Nano),
-		"docker-content-digest":           manifestDigest,
-		httpcache.UserAgentReviewedOption: "true",
+		"content-type":          state.ContentType,
+		"content-length":        strconv.FormatInt(size, 10),
+		"fetched-at":            fetchedAt.Format(time.RFC3339Nano),
+		"docker-content-digest": manifestDigest,
+		userAgentReviewedOption: "true",
 	}
 	manifestPath := h.manifestPath(manifestDigest)
 	info, statErr := h.store.StatObject(cacheCtx, h.name, manifestPath)
@@ -194,7 +195,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	}()
 
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRequest(req.Context(), h.lifecycleCtx, http.MethodGet, resolved.upstreamPath, userAgent, nil)
+	response, err := h.remoteRead(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, nil)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -208,16 +209,23 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
+	if !transport.ResponseCacheable(response, false) {
+		defer func() { _ = response.Body.Close() }()
+		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
+		return status, "BYPASS", bytes, copyErr
+	}
 
 	contentLen := response.ContentLength
 	respHeader := response.Header
 
-	pr, err := httpcache.StreamToCache(h.lifecycleCtx, httpcache.StreamConfig{
-		Body:       response.Body,
-		ObjectPath: objectPath,
-		Wait:       &h.wait,
-		StatsStart: func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
-		StatsDone:  func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
+	pr, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+		Body:         response.Body,
+		ObjectPath:   objectPath,
+		Spooler:      h.spooler,
+		Lifecycle:    h.lifecycle,
+		ExpectedSize: &response.ContentLength,
+		StatsStart:   func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
+		StatsDone:    func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
 		Done: func(error) {
 			close(ready)
 			h.downloads.Delete(objectPath)
@@ -238,7 +246,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	defer func() { _ = pr.Close() }()
 	cleanupDownload = false
 
-	headers := objectHeaders(respHeader, int(contentLen), "MISS")
+	headers := objectHeaders(respHeader, contentLen, "MISS")
 	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, pr)
 	return status, "MISS", bytes, err
 }
@@ -274,9 +282,25 @@ func (h *handler) readState(ctx context.Context, objectPath string) (refState, e
 		return refState{}, err
 	}
 	defer func() { _ = reader.Close() }()
-	var state refState
-	if err := yaml.NewDecoder(reader).Decode(&state); err != nil {
+	data, err := io.ReadAll(io.LimitReader(reader, maxRefStateSize+1))
+	if err != nil {
 		return refState{}, err
+	}
+	if len(data) > maxRefStateSize {
+		return refState{}, fmt.Errorf("oci ref state exceeds %d bytes", maxRefStateSize)
+	}
+	var state refState
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&state); err != nil {
+		return refState{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return refState{}, errors.New("oci ref state contains multiple documents")
+		}
+		return refState{}, fmt.Errorf("decode trailing oci ref state: %w", err)
 	}
 	if !h.validRefState(state) {
 		return refState{}, errors.New("invalid oci ref state")
@@ -294,7 +318,10 @@ func (h *handler) writeState(ctx context.Context, state refState) error {
 	if err != nil {
 		return err
 	}
-	statePath := h.refStatePath(state.Repo, state.Ref)
+	if len(data) > maxRefStateSize {
+		return fmt.Errorf("oci ref state exceeds %d bytes", maxRefStateSize)
+	}
+	statePath := h.refStatePath(state.Repo, state.Ref, state.Representation)
 	tempPath := statePath + ".tmp." + strconv.FormatUint(ociStateTempSequence.Add(1), 36)
 	if err := h.storeObject(ctx, tempPath, bytes.NewReader(data), map[string]string{"content-type": "application/yaml"}); err != nil {
 		return fmt.Errorf("write oci ref state staging object: %w", err)
@@ -320,29 +347,7 @@ func (h *handler) stateExpired(state refState) bool {
 	return !expireAfter.IsNever() && !expireAfter.IsUnset() && time.Now().After(state.FetchedAt.Add(expireAfter.Duration()))
 }
 
-func (h *handler) deleteTree(ctx context.Context, prefix string) error {
-	var objects []string
-	if err := fs.WalkDir(h.store.TenantFS(h.name), prefix, func(current string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		objects = append(objects, current)
-		return nil
-	}); err != nil {
-		return err
-	}
-	for _, objectPath := range objects {
-		if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
-	}
-	return nil
-}
-
-func objectHeaders(headers http.Header, length int, cache string) map[string]string {
+func objectHeaders(headers http.Header, length int64, cache string) map[string]string {
 	result := map[string]string{
 		"Content-Type":   headers.Get("Content-Type"),
 		"Content-Length": headers.Get("Content-Length"),
@@ -352,7 +357,7 @@ func objectHeaders(headers http.Header, length int, cache string) map[string]str
 		"X-Cache":        cache,
 	}
 	if length >= 0 && result["Content-Length"] == "" {
-		result["Content-Length"] = strconv.Itoa(length)
+		result["Content-Length"] = strconv.FormatInt(length, 10)
 	}
 	if digest := headers.Get("Docker-Content-Digest"); digest != "" {
 		result["Docker-Content-Digest"] = digest

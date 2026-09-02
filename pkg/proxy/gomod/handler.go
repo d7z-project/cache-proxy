@@ -1,24 +1,35 @@
 package gomod
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
-	"path"
+	"os"
 	"strings"
 	"time"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	modzip "golang.org/x/mod/zip"
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 const disableModuleFetchHeader = "Disable-Module-Fetch"
+const goTenant = "go"
 
 type moduleRequestKind uint8
 
@@ -31,13 +42,6 @@ const (
 	moduleRequestZip
 )
 
-type Handler struct {
-	name    string
-	options *Options
-	store   *blobfs.Store
-	base    *httpcache.Handler
-}
-
 type moduleRequest struct {
 	kind       moduleRequestKind
 	modulePath string
@@ -45,119 +49,366 @@ type moduleRequest struct {
 	cacheKey   string
 }
 
-func NewHandler(name string, expireAfter config.Expiration, metadataTTL time.Duration, upstreams []string, transport *config.TransportConfig, options *Options, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) (*Handler, error) {
+type handler struct {
+	name      string
+	options   *Config
+	origin    *url.URL
+	sumDB     *url.URL
+	store     *blobfs.Store
+	client    *transport.Client
+	stats     *metrics.Stats
+	workDir   string
+	lifecycle *storeio.Lifecycle
+	flights   storeio.FlightGroup
+}
+
+func newHandler(name, upstream string, transportConfig *config.TransportConfig, options *Config, store *blobfs.Store, stats *metrics.Stats, gate *transport.UpstreamGate, workDir string) (*handler, error) {
 	if options == nil {
-		options = &Options{}
+		options = &Config{}
 	}
 	applyDefaults(options)
-	base := httpcache.NewHandler(name, httpcache.RuntimeConfig{
-		Mode:               config.ModeGo,
-		ExpireAfter:        expireAfter,
-		MetadataTTL:        metadataTTL,
-		Upstreams:          append([]string(nil), upstreams...),
-		Transport:          transport,
-		AllowedTargetHosts: sumDBTargetHosts(options),
-		UpstreamGate:       upstreamGate,
-	}, store, &resolver{options: options}, stats)
-	return &Handler{name: name, options: options, store: store, base: base}, nil
-}
-
-func sumDBTargetHosts(options *Options) []string {
-	if options == nil || options.SumDB == nil || !options.SumDB.Enabled {
-		return nil
-	}
-	parsed, err := url.Parse(strings.TrimSpace(options.SumDB.URL))
-	if err != nil || parsed.Host == "" {
-		return nil
-	}
-	return []string{parsed.Host}
-}
-
-func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
-	if modulePath, ok := modulePathFromTarget(target); ok && matchesPrivateModule(h.options, modulePath) {
-		http.NotFound(w, req)
-		return
-	}
-	route, err := (&resolver{options: h.options}).Resolve(req)
+	origin, err := url.Parse(upstream)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("parse Go upstream: %w", err)
 	}
-	if req.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader {
-		reader, err := h.store.OpenObject(req.Context(), h.name, route.ObjectPath)
-		if err != nil {
-			http.NotFound(w, req)
-			return
-		}
-		_ = reader.Close()
+	var sumDB *url.URL
+	if options.SumDB != nil && options.SumDB.Enabled {
+		sumDB, _ = url.Parse(options.SumDB.URL)
 	}
-	h.base.ServeHTTP(w, req)
-}
-
-func (h *Handler) CloseContext(ctx context.Context) error {
-	return h.base.CloseContext(ctx)
-}
-
-func (h *Handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
-	return h.base.Cleanup(ctx, opts)
-}
-
-type resolver struct {
-	options *Options
-}
-
-func (r *resolver) Resolve(req *http.Request) (httpcache.Route, error) {
-	target := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
-	if !httpcache.SafePath(target) {
-		return httpcache.Route{}, fs.ErrNotExist
-	}
-	if strings.HasPrefix(target, "sumdb/") {
-		return r.resolveSumDB(target)
-	}
-	moduleReq, err := parseModuleRequest(target)
+	client, err := transport.NewClient(name, config.ModeGo, transportConfig, gate, stats)
 	if err != nil {
-		return httpcache.Route{}, err
+		return nil, err
 	}
-	route := httpcache.Route{
-		Class:        httpcache.ClassMetadata,
-		ObjectPath:   "go/" + moduleReq.cacheKey,
-		UpstreamPath: moduleReq.cacheKey,
-	}
-	if moduleReq.kind == moduleRequestInfo || moduleReq.kind == moduleRequestMod || moduleReq.kind == moduleRequestZip {
-		route.Class = httpcache.ClassContent
-	}
-	return route, nil
-}
-
-func (r *resolver) resolveSumDB(target string) (httpcache.Route, error) {
-	if r.options == nil || r.options.SumDB == nil || !r.options.SumDB.Enabled {
-		return httpcache.Route{}, fs.ErrNotExist
-	}
-	name := strings.TrimSpace(r.options.SumDB.Name)
-	prefix := "sumdb/" + name + "/"
-	if name == "" || !strings.HasPrefix(target, prefix) {
-		return httpcache.Route{}, fs.ErrNotExist
-	}
-	baseURL, err := url.Parse(strings.TrimSpace(r.options.SumDB.URL))
-	if err != nil {
-		return httpcache.Route{}, err
-	}
-	return httpcache.Route{
-		Class:      httpcache.ClassMetadata,
-		ObjectPath: "go/" + target,
-		TargetURL:  baseURL.JoinPath(strings.TrimPrefix(target, prefix)).String(),
+	return &handler{
+		name: name, options: options, origin: origin, sumDB: sumDB, store: store, stats: stats, workDir: workDir,
+		client: client, lifecycle: storeio.NewLifecycle(),
 	}, nil
 }
 
+func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	if !proxyruntime.RequireReadMethod(w, request.Method) {
+		h.stats.RecordRequest(h.name, config.ModeGo, request.Method, "REJECTED", http.StatusMethodNotAllowed, 0)
+		return
+	}
+	status, result := h.serve(w, request)
+	h.stats.RecordRequest(h.name, config.ModeGo, request.Method, result, status, 0)
+}
+
+func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, string) {
+	decodedTarget, pathErr := storeio.DecodeCanonicalURLPath(request.URL)
+	if pathErr != nil {
+		http.Error(w, "invalid Go module path", http.StatusBadRequest)
+		return http.StatusBadRequest, "ERROR"
+	}
+	target := strings.TrimPrefix(decodedTarget, "/")
+	if target == "" {
+		http.NotFound(w, request)
+		return http.StatusNotFound, "BYPASS"
+	}
+	if strings.HasPrefix(target, "sumdb/") {
+		return h.serveSumDB(w, request, target)
+	}
+	parsed, err := parseModuleRequest(target)
+	if err != nil || matchesPrivateModule(h.options, parsed.modulePath) {
+		http.NotFound(w, request)
+		return http.StatusNotFound, "BYPASS"
+	}
+	key := "objects/" + hashKey(h.origin.String()+"\x00"+parsed.cacheKey+"\x00"+goCredentialScope(request))
+	var cached *storeio.ResponseObject
+	if object, err := storeio.OpenResponse(request.Context(), h.store, goTenant, key); err == nil {
+		cached = object
+		freshness := time.Minute
+		if parsed.kind == moduleRequestMod || parsed.kind == moduleRequestZip {
+			freshness = 24 * time.Hour
+		}
+		fresh := time.Since(cached.Fetched) < freshness
+		if request.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader || fresh {
+			return serveStoredGoResponse(w, request, cached, "HIT"), "HIT"
+		}
+		_ = cached.Reader.Close()
+	} else if request.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader {
+		http.NotFound(w, request)
+		return http.StatusNotFound, "BYPASS"
+	}
+	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
+		return h.forwardModule(w, request, parsed.cacheKey)
+	}
+	flight, leader := h.flights.Begin(key)
+	if leader {
+		if current, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+			if cached == nil || current.Fetched.After(cached.Fetched) {
+				h.flights.Finish(key, flight, nil)
+				return serveStoredGoResponse(w, request, current, "HIT"), "HIT"
+			}
+			_ = current.Reader.Close()
+		}
+		return h.fetchModule(w, request, parsed, key, flight, cached)
+	}
+	if err := h.flights.Wait(request.Context(), flight); err != nil {
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	if cached, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+		return serveStoredGoResponse(w, request, cached, "COALESCED"), "COALESCED"
+	}
+	transport.WriteError(w, http.StatusBadGateway)
+	return http.StatusBadGateway, "ERROR"
+}
+
+func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, parsed moduleRequest, key string, flight *storeio.Flight, cached *storeio.ResponseObject) (int, string) {
+	upstreamHeader := request.Header.Clone()
+	if cached != nil && cached.Origin == h.origin.String() {
+		if value := cached.Header.Get("ETag"); value != "" {
+			upstreamHeader.Set("If-None-Match", value)
+		}
+		if value := cached.Header.Get("Last-Modified"); value != "" {
+			upstreamHeader.Set("If-Modified-Since", value)
+		}
+	}
+	response, err := h.open(h.lifecycle.Context(), h.origin, http.MethodGet, parsed.cacheKey, upstreamHeader)
+	if err != nil {
+		h.flights.Finish(key, flight, err)
+		if cached != nil {
+			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+			}
+		}
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	if response.StatusCode == http.StatusNotModified && cached != nil {
+		_ = response.Body.Close()
+		updateErr := storeio.TouchResponse(h.lifecycle.Context(), h.store, goTenant, key, response.Header)
+		h.flights.Finish(key, flight, updateErr)
+		if refreshed, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+			return serveStoredGoResponse(w, request, refreshed, "REVALIDATED"), "REVALIDATED"
+		}
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	if response.StatusCode != http.StatusOK {
+		if response.StatusCode >= http.StatusInternalServerError && cached != nil {
+			_ = response.Body.Close()
+			h.flights.Finish(key, flight, nil)
+			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+			}
+		}
+		h.flights.Finish(key, flight, nil)
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+	}
+	if !goCacheable(request, response) {
+		h.flights.Finish(key, flight, nil)
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+	}
+	maxSize := int64(64 << 20)
+	switch parsed.kind {
+	case moduleRequestInfo, moduleRequestLatest:
+		maxSize = 1 << 20
+	case moduleRequestMod:
+		maxSize = 16 << 20
+	case moduleRequestZip:
+		maxSize = 2 << 30
+	}
+	if response.ContentLength > maxSize {
+		h.flights.Finish(key, flight, errors.New("go module response exceeds size limit"))
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+	}
+	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+		Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), MaxBytes: maxSize, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+		VerifyFn: func(reader io.ReadSeeker) error {
+			size, err := reader.Seek(0, io.SeekEnd)
+			if err != nil {
+				return err
+			}
+			if size > maxSize {
+				return errors.New("go module response exceeds size limit")
+			}
+			if _, err = reader.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			file, ok := reader.(*os.File)
+			if !ok {
+				return errors.New("go module verifier requires a file")
+			}
+			return validateModuleResponse(parsed, file)
+		},
+		StoreFn: func(ctx context.Context, body io.Reader) error {
+			return storeio.PutResponse(ctx, h.store, goTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
+		},
+		Done: func(err error) { h.flights.Finish(key, flight, err) },
+	})
+	if err != nil {
+		h.flights.Finish(key, flight, err)
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+	}
+	defer func() { _ = reader.Close() }()
+	transport.CopyEndToEndHeaders(w.Header(), response.Header)
+	w.Header().Set("X-Cache", "MISS")
+	w.WriteHeader(http.StatusOK)
+	if request.Method != http.MethodHead {
+		_, _ = io.Copy(w, reader)
+	}
+	return http.StatusOK, "MISS"
+}
+
+func (h *handler) forwardModule(w http.ResponseWriter, request *http.Request, target string) (int, string) {
+	response, err := h.open(request.Context(), h.origin, request.Method, target, request.Header)
+	if err != nil {
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+}
+
+func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, target string) (int, string) {
+	if h.sumDB == nil || h.options.SumDB == nil {
+		http.NotFound(w, request)
+		return http.StatusNotFound, "BYPASS"
+	}
+	prefix := "sumdb/" + h.options.SumDB.Name + "/"
+	if !strings.HasPrefix(target, prefix) {
+		http.NotFound(w, request)
+		return http.StatusNotFound, "BYPASS"
+	}
+	sumTarget := strings.TrimPrefix(target, prefix)
+	stable := strings.HasPrefix(sumTarget, "lookup/") || strings.HasPrefix(sumTarget, "tile/")
+	key := "sumdb/" + hashKey(h.sumDB.String()+"\x00"+sumTarget)
+	object, _ := storeio.OpenResponse(request.Context(), h.store, goTenant, key)
+	if object != nil {
+		if stable || time.Since(object.Fetched) < time.Minute {
+			status := serveStoredGoResponse(w, request, object, "HIT")
+			return status, "HIT"
+		}
+		_ = object.Reader.Close()
+	}
+	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
+		response, err := h.open(request.Context(), h.sumDB, request.Method, sumTarget, request.Header)
+		if err != nil {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+	}
+	flight, leader := h.flights.Begin(key)
+	if !leader {
+		_ = h.flights.Wait(request.Context(), flight)
+		if joined, err := storeio.OpenResponse(request.Context(), h.store, goTenant, key); err == nil {
+			return serveStoredGoResponse(w, request, joined, "COALESCED"), "COALESCED"
+		}
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	defer h.flights.Finish(key, flight, nil)
+	if current, err := storeio.OpenResponse(request.Context(), h.store, goTenant, key); err == nil {
+		if object == nil || current.Fetched.After(object.Fetched) {
+			return serveStoredGoResponse(w, request, current, "HIT"), "HIT"
+		}
+		_ = current.Reader.Close()
+	}
+	upstreamHeader := request.Header.Clone()
+	if object != nil && object.Origin == h.sumDB.String() {
+		if value := object.Header.Get("ETag"); value != "" {
+			upstreamHeader.Set("If-None-Match", value)
+		}
+		if value := object.Header.Get("Last-Modified"); value != "" {
+			upstreamHeader.Set("If-Modified-Since", value)
+		}
+	}
+	response, err := h.open(h.lifecycle.Context(), h.sumDB, http.MethodGet, sumTarget, upstreamHeader)
+	if err != nil {
+		if object != nil {
+			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+			}
+		}
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	if response.StatusCode == http.StatusNotModified && object != nil {
+		_ = response.Body.Close()
+		_ = storeio.TouchResponse(h.lifecycle.Context(), h.store, goTenant, key, response.Header)
+		if refreshed, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+			return serveStoredGoResponse(w, request, refreshed, "REVALIDATED"), "REVALIDATED"
+		}
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	if response.StatusCode >= http.StatusInternalServerError && object != nil {
+		_ = response.Body.Close()
+		if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+			return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+		}
+	}
+	if response.StatusCode != http.StatusOK {
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+	}
+	defer func() { _ = response.Body.Close() }()
+	spool, err := h.client.EnsureSpooler(h.workDir).SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, 64<<20, response.ContentLength)
+	if err != nil {
+		if storeio.SpoolBodyUntouched(err) {
+			return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+		}
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
+	}
+	defer func() { _ = spool.Close() }()
+	_, _ = spool.File.Seek(0, io.SeekStart)
+	result := "MISS"
+	if object != nil {
+		result = "REFRESH"
+	}
+	if err := storeio.PutResponse(h.lifecycle.Context(), h.store, goTenant, key, h.sumDB.String(), http.StatusOK, response.Header, spool.SHA256, spool.File); err != nil {
+		result = "BYPASS"
+	}
+	_, _ = spool.File.Seek(0, io.SeekStart)
+	transport.CopyEndToEndHeaders(w.Header(), response.Header)
+	w.Header().Set("X-Cache", result)
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, spool.File)
+	return http.StatusOK, result
+}
+
+func (h *handler) open(ctx context.Context, origin *url.URL, method, target string, headers http.Header) (*http.Response, error) {
+	escaped := strings.Join(strings.Split(target, "/"), "/")
+	targetURL, err := transport.JoinURL(origin, escaped, "")
+	if err != nil {
+		return nil, err
+	}
+	upstream, err := http.NewRequestWithContext(ctx, method, targetURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"Accept", "Authorization", "User-Agent", "If-None-Match", "If-Modified-Since"} {
+		for _, value := range headers.Values(name) {
+			upstream.Header.Add(name, value)
+		}
+	}
+	return h.client.DoRead(ctx, upstream, transport.AdmissionForeground)
+}
+
+func (h *handler) CloseContext(ctx context.Context) error {
+	h.client.CloseIdleConnections()
+	return h.lifecycle.Close(ctx)
+}
+
+func serveStoredGoResponse(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) int {
+	defer func() { _ = object.Reader.Close() }()
+	transport.CopyEndToEndHeaders(w.Header(), object.Header)
+	w.Header().Set("X-Cache", result)
+	http.ServeContent(w, request, "", object.Fetched, object.Reader)
+	return http.StatusOK
+}
+
 func parseModuleRequest(target string) (moduleRequest, error) {
-	target = strings.TrimPrefix(path.Clean("/"+target), "/")
-	if target == "." || target == "" || strings.HasPrefix(target, "sumdb/") {
+	target = strings.TrimPrefix(target, "/")
+	if target == "" || strings.HasPrefix(target, "sumdb/") || strings.Contains(target, "//") {
 		return moduleRequest{}, fs.ErrNotExist
+	}
+	for _, segment := range strings.Split(target, "/") {
+		if segment == "" || segment == "." || segment == ".." || strings.ContainsRune(segment, '\x00') || strings.Contains(segment, "\\") {
+			return moduleRequest{}, fs.ErrNotExist
+		}
 	}
 	modulePath, suffix, ok := strings.Cut(target, "/@")
 	if !ok || modulePath == "" {
@@ -180,27 +431,72 @@ func parseModuleRequest(target string) (moduleRequest, error) {
 	for _, candidate := range []struct {
 		kind   moduleRequestKind
 		suffix string
-	}{
-		{kind: moduleRequestInfo, suffix: ".info"},
-		{kind: moduleRequestMod, suffix: ".mod"},
-		{kind: moduleRequestZip, suffix: ".zip"},
-	} {
+	}{{moduleRequestInfo, ".info"}, {moduleRequestMod, ".mod"}, {moduleRequestZip, ".zip"}} {
 		if strings.HasSuffix(versionFile, candidate.suffix) {
 			version := strings.TrimSuffix(versionFile, candidate.suffix)
-			if version == "" || strings.Contains(version, "/") {
-				return moduleRequest{}, errors.New("invalid go module version")
-			}
-			if candidate.kind != moduleRequestList && candidate.kind != moduleRequestLatest {
-				if normalized := module.CanonicalVersion(version); normalized == "" || normalized != version {
-					return moduleRequest{}, fmt.Errorf(
-						"go module query %q requires direct source resolution, which this proxy disables: %w",
-						version,
-						fs.ErrNotExist,
-					)
-				}
+			if version == "" || strings.Contains(version, "/") || module.CanonicalVersion(version) != version {
+				return moduleRequest{}, fs.ErrNotExist
 			}
 			return moduleRequest{kind: candidate.kind, modulePath: unescapedModulePath, version: version, cacheKey: target}, nil
 		}
 	}
 	return moduleRequest{}, fs.ErrNotExist
+}
+
+func hashKey(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func goCredentialScope(request *http.Request) string {
+	value := request.Header.Get("Authorization") + "\x00" + request.Header.Get("Cookie")
+	if value == "\x00" {
+		return "anonymous"
+	}
+	return hashKey(value)
+}
+
+func goCacheable(request *http.Request, response *http.Response) bool {
+	return transport.ResponseCacheable(response, goCredentialScope(request) != "anonymous")
+}
+
+func validateModuleResponse(parsed moduleRequest, file *os.File) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	switch parsed.kind {
+	case moduleRequestList:
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			version := strings.TrimSpace(scanner.Text())
+			if version != "" && module.CanonicalVersion(version) != version {
+				return errors.New("invalid module version list")
+			}
+		}
+		return scanner.Err()
+	case moduleRequestLatest, moduleRequestInfo:
+		var info struct {
+			Version string `json:"Version"`
+			Time    string `json:"Time"`
+		}
+		if err := json.NewDecoder(file).Decode(&info); err != nil || module.CanonicalVersion(info.Version) != info.Version {
+			return errors.New("invalid module info response")
+		}
+		if parsed.kind == moduleRequestInfo && info.Version != parsed.version {
+			return errors.New("module info version mismatch")
+		}
+		return nil
+	case moduleRequestMod:
+		body, err := io.ReadAll(file)
+		if err != nil {
+			return err
+		}
+		_, err = modfile.Parse("go.mod", body, nil)
+		return err
+	case moduleRequestZip:
+		_, err := modzip.CheckZip(module.Version{Path: parsed.modulePath, Version: parsed.version}, file.Name())
+		return err
+	default:
+		return errors.New("invalid module response kind")
+	}
 }

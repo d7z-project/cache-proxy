@@ -1,6 +1,7 @@
 package deb
 
 import (
+	"context"
 	"encoding/hex"
 	"slices"
 	"strings"
@@ -8,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func FuzzReleaseManifest(f *testing.F) {
@@ -18,17 +19,26 @@ func FuzzReleaseManifest(f *testing.F) {
 		if len(input) > 256<<10 {
 			t.Skip()
 		}
-		manifest, err := parseReleaseManifest(strings.NewReader(input))
+		manifest, err := parseReleaseManifest(context.Background(), strings.NewReader(input))
 		if err != nil {
 			return
 		}
 		paths := make([]string, 0, len(manifest.Entries))
 		for _, entry := range manifest.Entries {
-			require.True(t, httpcache.SafePath(entry.Path))
-			require.GreaterOrEqual(t, entry.Size, int64(0))
-			digest, err := hex.DecodeString(entry.SHA256)
+			_, err := storeio.CleanRelative(entry.Path)
 			require.NoError(t, err)
-			require.Len(t, digest, 32)
+			require.GreaterOrEqual(t, entry.Size, int64(0))
+			if entry.SHA256 != "" {
+				digest, err := hex.DecodeString(entry.SHA256)
+				require.NoError(t, err)
+				require.Len(t, digest, 32)
+			}
+			if entry.SHA512 != "" {
+				digest, err := hex.DecodeString(entry.SHA512)
+				require.NoError(t, err)
+				require.Len(t, digest, 64)
+			}
+			require.True(t, entry.SHA256 != "" || entry.SHA512 != "")
 			paths = append(paths, entry.Path)
 		}
 		require.True(t, slices.IsSorted(paths))
@@ -42,7 +52,7 @@ func FuzzDebianPathClassification(f *testing.F) {
 		if len(input) > 4096 {
 			t.Skip()
 		}
-		_, _, _ = distributionAnchor(input)
-		_ = classifyPath(input)
+		_ = isAnchorPath(input)
+		_ = isMetadataPath(input)
 	})
 }

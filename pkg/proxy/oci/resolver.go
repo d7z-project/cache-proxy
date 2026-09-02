@@ -3,10 +3,9 @@ package oci
 import (
 	"errors"
 	"net/http"
-	"path"
 	"strings"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 type requestKind uint8
@@ -29,17 +28,24 @@ type request struct {
 }
 
 func resolveRequest(req *http.Request, _ *Options) (request, error) {
-	cleanPath := strings.TrimPrefix(path.Clean("/"+req.URL.Path), "/")
+	if req == nil || req.URL == nil {
+		return request{}, errors.New("invalid oci request URL")
+	}
+	decodedPath, err := storeio.DecodeCanonicalURLPath(req.URL)
+	if err != nil {
+		return request{}, errors.New("invalid oci request path")
+	}
+	cleanPath := strings.TrimPrefix(decodedPath, "/")
 	if cleanPath == "v2" || cleanPath == "v2/" {
 		return request{kind: requestPing, upstreamPath: "v2"}, nil
 	}
-	if !httpcache.SafePath(cleanPath) || !strings.HasPrefix(cleanPath, "v2/") {
+	if !safePath(cleanPath) || !strings.HasPrefix(cleanPath, "v2/") {
 		return request{}, errors.New("invalid OCI request path")
 	}
 	parts := strings.Split(cleanPath, "/")
 	for i, part := range parts {
-		if part == "blobs" && i+2 < len(parts) && parts[i+1] == "uploads" {
-			return request{}, errors.New("oci blob uploads are not proxied")
+		if part == "blobs" && i+1 < len(parts) && parts[i+1] == "uploads" {
+			return request{}, errors.New("oci upload paths are not readable")
 		}
 		if part == "manifests" && i+1 < len(parts) {
 			repo := strings.Join(parts[1:i], "/")

@@ -2,31 +2,32 @@ package utils
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestCleanStaleTempFiles(t *testing.T) {
-	fakeOldFile, err := os.CreateTemp("", "cache-proxy-old")
-	require.NoError(t, err)
-	require.NoError(t, fakeOldFile.Close())
-	t.Cleanup(func() { _ = os.Remove(fakeOldFile.Name()) })
+func TestCleanStaleWorkFilesOnlyRemovesOwnedFiles(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "demo", "file-v4", "work")
+	require.NoError(t, os.MkdirAll(work, 0o755))
+	old := filepath.Join(work, ".cache-proxy-tmp-stream-old")
+	foreign := filepath.Join(work, "operator.data")
+	state := filepath.Join(root, "demo", "file-v4", "state", ".cache-proxy-tmp-stream-state")
+	require.NoError(t, os.MkdirAll(filepath.Dir(state), 0o755))
+	for _, name := range []string{old, foreign, state} {
+		require.NoError(t, os.WriteFile(name, []byte("x"), 0o600))
+		require.NoError(t, os.Chtimes(name, time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)))
+	}
 
-	oldTime := time.Now().Add(-48 * time.Hour)
-	require.NoError(t, os.Chtimes(fakeOldFile.Name(), oldTime, oldTime))
+	CleanStaleWorkFiles(root, 24*time.Hour)
 
-	fakeNewFile, err := os.CreateTemp("", "cache-proxy-new")
-	require.NoError(t, err)
-	require.NoError(t, fakeNewFile.Close())
-	t.Cleanup(func() { _ = os.Remove(fakeNewFile.Name()) })
-
-	CleanStaleTempFiles(24 * time.Hour)
-
-	_, err = os.Stat(fakeOldFile.Name())
-	require.True(t, os.IsNotExist(err))
-
-	_, err = os.Stat(fakeNewFile.Name())
-	require.NoError(t, err)
+	_, err := os.Stat(old)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	for _, name := range []string{foreign, state} {
+		_, err := os.Stat(name)
+		require.NoError(t, err)
+	}
 }

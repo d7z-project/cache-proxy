@@ -3,6 +3,8 @@ package gomod
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,29 +22,42 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 )
 
 const testModulePath = "example.com/cacheproxy/gomod"
 const testModuleVersion = "v1.0.0"
 
+func TestGoProxyReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
+	var requests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer upstream.Close()
+	handler := newTestHandler(t, newTestStore(t), upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	response := requestGoProxyMethod(t, handler, http.MethodPut, "/example.com/mod/@v/v1.0.0.mod", false)
+	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
+	require.Zero(t, requests.Load())
+}
+
 func TestVersionedModuleFilesAreImmutableAndJoined(t *testing.T) {
-	options := &Options{}
 	for _, suffix := range []string{".info", ".mod", ".zip"} {
-		route, err := (&resolver{options: options}).Resolve(httptest.NewRequest(http.MethodGet, "/example.com/mod/@v/v1.0.0"+suffix, nil))
+		route, err := parseModuleRequest("example.com/mod/@v/v1.0.0" + suffix)
 		require.NoError(t, err)
-		require.Equal(t, httpcache.ClassContent, route.Class, suffix)
+		require.NotEqual(t, moduleRequestInvalid, route.kind, suffix)
 	}
 }
 
+func TestGoCacheabilityHonorsNoStore(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/example.com/mod/@v/list", nil)
+	response := &http.Response{Header: http.Header{"Cache-Control": {"no-store"}}}
+	require.False(t, goCacheable(request, response))
+}
+
 func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	var upstreamRequests atomic.Int64
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.Expiration(time.Hour), []string{upstream.URL}, nil, &Options{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
 	target := "/" + testModulePath + "/@v/" + testModuleVersion + ".mod"
 
 	first := requestGoProxy(t, handler, target, false)
@@ -50,18 +65,32 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	require.Contains(t, first.Body.String(), "module "+testModulePath)
 	require.Equal(t, int64(1), upstreamRequests.Load())
 
-	require.Eventually(t, func() bool {
-		reader, openErr := store.OpenObject(ctx, "gomod", "go/"+testModulePath+"/@v/"+testModuleVersion+".mod")
-		if openErr != nil {
-			return false
-		}
-		return reader.Close() == nil
-	}, time.Second, 5*time.Millisecond)
-
 	second := requestGoProxy(t, handler, target, false)
 	require.Equal(t, http.StatusOK, second.Code)
 	require.Contains(t, second.Body.String(), "module "+testModulePath)
 	require.Equal(t, int64(1), upstreamRequests.Load())
+}
+
+func TestGoModuleCacheCommitFailurePreservesUpstreamResponse(t *testing.T) {
+	var upstreamRequests atomic.Int64
+	upstream := newGoProxyUpstream(t, &upstreamRequests)
+	defer upstream.Close()
+	store := newTestStore(t)
+	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	target := testModulePath + "/@v/" + testModuleVersion + ".mod"
+	parsed, err := parseModuleRequest(target)
+	require.NoError(t, err)
+	key := "objects/" + hashKey(handler.origin.String()+"\x00"+parsed.cacheKey+"\x00anonymous")
+	digest := sha256.Sum256([]byte(key))
+	encoded := hex.EncodeToString(digest[:])
+	require.NoError(t, store.MkdirAll(goTenant+"/responses/"+encoded[:2]+"/"+encoded[2:4]+"/"+encoded, 0o755))
+
+	response := requestGoProxy(t, handler, "/"+target, false)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "MISS", response.Header().Get("X-Cache"))
+	require.Contains(t, response.Body.String(), "module "+testModulePath)
+	require.Equal(t, int64(1), upstreamRequests.Load())
+	require.NoError(t, handler.CloseContext(context.Background()))
 }
 
 func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
@@ -69,14 +98,14 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.Expiration(time.Hour), []string{upstream.URL}, nil, &Options{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true})
+	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true})
 
 	target := "/" + testModulePath + "/@v/list"
 	blocked := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusNotFound, blocked.Code)
 	require.Zero(t, upstreamRequests.Load())
 
-	handler = newTestHandler(t, store, config.Expiration(time.Hour), []string{upstream.URL}, nil, &Options{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: false})
+	handler = newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: false})
 	allowed := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusOK, allowed.Code)
 	require.Equal(t, "v1.0.0\n", allowed.Body.String())
@@ -88,7 +117,7 @@ func TestGoModuleHandlerServesCachedModuleWhenFetchDisabled(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.Expiration(time.Hour), []string{upstream.URL}, nil, &Options{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
 
 	target := "/" + testModulePath + "/@v/list"
 	require.Equal(t, http.StatusOK, requestGoProxy(t, handler, target, false).Code)
@@ -105,7 +134,7 @@ func TestGoModuleHandlerSkipsPrivateModules(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.Expiration(time.Hour), []string{upstream.URL}, nil, &Options{
+	handler := newTestHandler(t, store, upstream.URL, nil, &Config{
 		SumDB:     &SumDBConfig{Enabled: false},
 		GOPrivate: []string{"example.com/cacheproxy/*"},
 	})
@@ -116,8 +145,8 @@ func TestGoModuleHandlerSkipsPrivateModules(t *testing.T) {
 }
 
 func TestGoModuleMatchesPrivateModule(t *testing.T) {
-	require.True(t, matchesPrivateModule(&Options{GOPrivate: []string{"example.com/cacheproxy/*"}}, "example.com/cacheproxy/gomod"))
-	require.False(t, matchesPrivateModule(&Options{GOPrivate: []string{"corp.example.com/*"}}, "example.com/cacheproxy/gomod"))
+	require.True(t, matchesPrivateModule(&Config{GOPrivate: []string{"example.com/cacheproxy/*"}}, "example.com/cacheproxy/gomod"))
+	require.False(t, matchesPrivateModule(&Config{GOPrivate: []string{"corp.example.com/*"}}, "example.com/cacheproxy/gomod"))
 }
 
 func TestGoModuleHandlerServesLatestAndHead(t *testing.T) {
@@ -125,7 +154,7 @@ func TestGoModuleHandlerServesLatestAndHead(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.Expiration(time.Hour), []string{upstream.URL}, nil, &Options{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
 
 	latest := requestGoProxyMethod(t, handler, http.MethodGet, "/"+testModulePath+"/@latest", false)
 	require.Equal(t, http.StatusOK, latest.Code)
@@ -149,7 +178,7 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 	defer sumdb.Close()
 
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, config.Expiration(time.Hour), []string{"https://proxy.golang.org"}, nil, &Options{
+	handler := newTestHandler(t, store, "https://proxy.golang.org", nil, &Config{
 		SumDB: &SumDBConfig{
 			Enabled: true,
 			Name:    "sum.corp.example",
@@ -163,9 +192,9 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 	require.Equal(t, int64(1), sumdbRequests.Load())
 }
 
-func newTestHandler(t *testing.T, store *blobfs.Store, expireAfter config.Expiration, upstreams []string, transport *config.TransportConfig, options *Options) *Handler {
+func newTestHandler(t *testing.T, store *blobfs.Store, upstream string, transport *config.TransportConfig, options *Config) *handler {
 	t.Helper()
-	handler, err := NewHandler("gomod", expireAfter, time.Minute, upstreams, transport, options, store, httpcache.NewStats(prometheus.NewRegistry()), nil)
+	handler, err := newHandler("gomod", upstream, transport, options, store, metrics.NewStats(prometheus.NewRegistry()), nil, t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
 	return handler

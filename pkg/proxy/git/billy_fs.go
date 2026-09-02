@@ -110,11 +110,11 @@ func (b *billyAdapter) Lstat(name string) (os.FileInfo, error) {
 	return b.fs.Stat(name)
 }
 
-func (b *billyAdapter) Symlink(target, link string) error {
+func (b *billyAdapter) Symlink(_, _ string) error {
 	return errors.New("symlink not supported")
 }
 
-func (b *billyAdapter) Readlink(link string) (string, error) {
+func (b *billyAdapter) Readlink(_ string) (string, error) {
 	return "", errors.New("symlink not supported")
 }
 

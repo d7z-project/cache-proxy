@@ -4,63 +4,70 @@
 [![Release](https://github.com/d7z-project/cache-proxy/actions/workflows/release.yml/badge.svg)](https://github.com/d7z-project/cache-proxy/releases)
 [![License](https://img.shields.io/github/license/d7z-project/cache-proxy)](LICENSE)
 
-`cache-proxy` is a self-hosted streaming cache for package registries, Linux repositories, OCI registries, Flatpak/OSTree repositories, Git smart HTTP, and generic HTTP files.
+`cache-proxy` is a self-hosted, read-only caching proxy for package registries,
+Linux repositories, OCI registries, Flatpak/OSTree repositories, Git smart
+HTTP, and ordinary HTTP files.
 
-It stores large responses without buffering them in memory, coalesces concurrent cache fills, revalidates mutable metadata, and verifies content when the upstream protocol provides a digest.
+It understands each supported protocol instead of treating every request as a
+generic HTTP cache entry. This preserves repository metadata consistency,
+verifies content when the protocol provides a digest, and keeps package
+downloads available independently of metadata refreshes.
 
-## Features
+## Highlights
 
-- One process can expose multiple independently configured proxy instances.
-- Metadata, immutable content, and passthrough requests use fixed cache semantics.
-- Concurrent downloads share one upstream transfer while clients stream the result.
-- Global and per-host admission limits control upstream concurrency and request rate.
-- Debian, RPM, OCI, Flatpak, Cargo, and other digest-aware modes verify content before publication.
-- Prometheus metrics, JSON status endpoints, and a built-in instance dashboard are included.
-- Configuration is strict YAML; unknown fields fail validation.
+- Thirteen package and repository modes in one process.
+- Streaming downloads with bounded object size, spool usage, and upstream
+  concurrency.
+- Concurrent cache misses for the same object share one upstream transfer when
+  supported by the mode.
+- Digest verification before immutable objects are committed to storage.
+- Atomic metadata generations for Linux repositories and Flatpak/OSTree.
+- Conditional revalidation for mutable objects and finite retention for
+  unverified content.
+- Strict YAML configuration, isolated instance storage, backend locking, and
+  bounded cleanup jobs.
+- Prometheus metrics, JSON status endpoints, and a built-in dashboard.
+- Read-only upstream behavior: publishing, pushing, deleting, and other
+  mutation operations are rejected locally.
 
-## Supported modes
+## Supported Modes
 
-| Mode | Upstreams | Purpose |
-|---|---:|---|
-| `file` | one or more | Generic HTTP files with configurable path rules |
-| `git` | one | Git smart HTTP backed by a local bare mirror |
-| `oci` | one | OCI/Docker registry manifests and blobs |
-| `npm` | one | npm registry metadata and tarballs |
-| `go` | one | Go module proxy and optional checksum database proxy |
-| `maven` | one | Maven metadata and artifacts |
-| `cargo` | one | Cargo sparse index and crate downloads |
-| `pypi` | one | PyPI Simple API and package files |
-| `flatpak` | one or more | Flatpak descriptors and OSTree content |
-| `apk` | one or more | Alpine repositories |
-| `deb` | one | Debian repositories with Release-anchored metadata verification |
-| `rpm` | one | RPM repositories with repomd-anchored metadata verification |
-| `pacman` | one or more | Arch Linux repositories |
+| Mode | Support |
+|---|---|
+| `file` | HTTP files with configurable cache policies |
+| `git` | Fetch-only Git smart HTTP and local bare mirrors |
+| `oci` | Pull-only OCI Distribution manifests and blobs |
+| `npm` | Packuments, verified tarballs, and audit queries |
+| `go` | Go module proxy and optional checksum database |
+| `maven` | Maven metadata, artifacts, and checksums |
+| `cargo` | Sparse indexes, verified crates, and fetch-only Git indexes |
+| `pypi` | PyPI Simple HTML/JSON and verified distributions |
+| `flatpak` | Flatpak/OSTree summaries, objects, and static deltas |
+| `apk` | Alpine indexes and packages |
+| `deb` | Debian standard, nested, and flat repositories |
+| `rpm` | rpm-md metadata and RPM artifacts |
+| `pacman` | Pacman databases, packages, deltas, and signatures |
+
+Repository layout, metadata roots, compression variants, and object types are
+detected by the selected mode. They do not require per-repository rules.
 
 ## Installation
 
-### Release binary
+### Container Image
 
-Linux binaries for `amd64`, `arm64`, and `loong64` are published on the [Releases](https://github.com/d7z-project/cache-proxy/releases) page.
-
-### Container image
-
-The `main` image tracks the default branch. Version tags are published for releases.
+The `main` image tracks the default branch. Releases are published with version
+tags.
 
 ```bash
 docker pull ghcr.io/d7z-project/cache-proxy:main
-
-docker run --name cache-proxy \
-  -p 18080:18080 \
-  -p 5000:5000 \
-  -v "$PWD/cache-proxy.yaml:/etc/cache-proxy.yaml:ro" \
-  -v cache-proxy-data:/data \
-  ghcr.io/d7z-project/cache-proxy:main \
-  -config /etc/cache-proxy.yaml
 ```
 
-Use `/data` as `server.backend` when running this container. Port `5000` is only needed when the configuration includes the OCI example below.
+### Release Binary
 
-### Build from source
+Linux binaries for `amd64`, `arm64`, and `loong64` are available from the
+[Releases](https://github.com/d7z-project/cache-proxy/releases) page.
+
+### Build From Source
 
 Go 1.25 or newer is required.
 
@@ -70,14 +77,15 @@ cd cache-proxy
 make cache-proxy
 ```
 
-## Quick start
+## Quick Start
 
 Create `cache-proxy.yaml`:
 
 ```yaml
 server:
   bind: 0.0.0.0:18080
-  backend: /tmp/cache-proxy
+  backend: /data
+  public_url: https://mirrors.example.com
   status:
     disk_sample_interval: 15m
     disk_history_window: 24h
@@ -85,11 +93,7 @@ server:
 
 metrics:
   path: /metrics
-  token: replace-me
-
-cache:
-  metadata_ttl: 2m
-  retention: 720h
+  token: ""
 
 storage:
   gc:
@@ -97,135 +101,177 @@ storage:
   cleanup:
     dry_run: false
     batch_size: 500
+  orphan_policy: report
   download:
     max_active: 256
     max_active_per_host: 16
     min_interval: 5ms
-    hosts:
-      registry.npmjs.org:
-        max_active: 24
+    max_cache_object_size: 2GiB
+    max_active_spool_size: 8GiB
 
 instances:
   - name: npm
     enabled: true
     mode: npm
     path: /npm
-    upstreams:
-      - https://registry.npmjs.org
+    upstream: https://registry.npmjs.org
 
   - name: debian
     enabled: true
     mode: deb
     path: /debian
-    upstreams:
-      - https://deb.debian.org/debian
+    upstream: https://deb.debian.org/debian
 
-  - name: registry
+  - name: docker_hub
     enabled: true
     mode: oci
     bind: 0.0.0.0:5000
     display_url: registry.example.com:5000
-    upstreams:
-      - https://registry-1.docker.io
+    upstream: https://registry-1.docker.io
 ```
 
-Validate the configuration before starting the service:
+Run the published image:
+
+```bash
+docker run --name cache-proxy \
+  -p 18080:18080 \
+  -p 5000:5000 \
+  -v "$PWD/cache-proxy.yaml:/etc/cache-proxy.yaml:ro" \
+  -v cache-proxy-data:/data \
+  ghcr.io/d7z-project/cache-proxy:main \
+  -config /etc/cache-proxy.yaml
+```
+
+Open `http://127.0.0.1:18080/` to view the dashboard and client setup
+commands.
+
+With a locally installed binary, validate a configuration without starting
+listeners:
 
 ```bash
 ./cache-proxy -config ./cache-proxy.yaml -validate
-./cache-proxy -config ./cache-proxy.yaml
 ```
-
-The home page at `http://localhost:18080/` lists configured instances and client setup commands.
 
 ## Configuration
 
-Configuration uses Go duration syntax such as `5ms`, `30s`, or `24h`. Environment references used by Git and OCI credentials are expanded when the configuration is loaded.
+Configuration uses strict YAML decoding. Unknown fields, invalid URLs,
+duplicate instance names, and conflicting listeners fail before startup. See
+[`config.local.yaml`](config.local.yaml) for a larger multi-instance example.
 
-### Defaults
+### Global Settings
 
-| Field | Default |
-|---|---:|
-| `server.bind` | `127.0.0.1:18080` |
-| `server.backend` | `/tmp/cache-proxy` |
-| `server.status.disk_sample_interval` | `15m` |
-| `server.status.disk_history_window` | `24h` |
-| `server.status.event_limit` | `500` |
-| `metrics.path` | `/metrics` |
-| `cache.metadata_ttl` | `2m` |
-| `cache.retention` | `720h` |
-| `storage.gc.blob` | `24h` |
-| `storage.cleanup.batch_size` | `500` |
-| `storage.download.max_active` | `256` |
-| `storage.download.max_active_per_host` | `16` |
-| `storage.download.min_interval` | `5ms` |
+| Field | Default | Description |
+|---|---:|---|
+| `server.bind` | `127.0.0.1:18080` | Main HTTP listener |
+| `server.backend` | `/tmp/cache-proxy` | Persistent storage root |
+| `server.public_url` | unset | Trusted external URL used in generated client configuration |
+| `server.status.disk_sample_interval` | `15m` | Disk history sampling interval |
+| `server.status.disk_history_window` | `24h` | Retained disk history |
+| `server.status.event_limit` | `500` | Maximum retained status events |
+| `metrics.path` | `/metrics` | Prometheus endpoint |
+| `metrics.token` | unset | Optional Bearer token for metrics |
+| `storage.gc.blob` | `24h` | Unreferenced blob retention |
+| `storage.cleanup.batch_size` | `500` | Objects inspected per cleanup pass |
+| `storage.orphan_policy` | `report` | `report` or `auto` cleanup of inactive instance stores |
+| `storage.download.max_active` | `256` | Process-wide active upstream requests |
+| `storage.download.max_active_per_host` | `16` | Active requests per upstream host |
+| `storage.download.min_interval` | `5ms` | Minimum request start interval per host |
+| `storage.download.max_cache_object_size` | `2GiB` | Maximum size of one cached object |
+| `storage.download.max_active_spool_size` | `8GiB` | Process-wide temporary spool budget |
 
-`metrics.token` enables Bearer authentication on the metrics endpoint. Orphan storage tenants are reported by default; `storage.orphan_policy: auto` deletes tenants that are absent from `instances`.
-
-Set `server.public_url` to the external HTTP(S) base URL when the service runs behind a reverse proxy. Entries in `storage.download.hosts` override `max_active` and `min_interval` for a normalized upstream host.
+Host-specific admission limits can be set below
+`storage.download.hosts.<host>`. Host keys are normalized names with an
+optional port.
 
 ### Instances
 
-Every instance requires `name`, `enabled`, `mode`, and at least one HTTP(S) entry in `upstreams`. Each instance uses exactly one listener field:
+Every instance requires `name`, `enabled`, `mode`, and one HTTP(S) `upstream`.
+It must define exactly one listener:
 
-- `path` mounts the instance below the main HTTP server.
-- `bind` opens a dedicated listener and is required by `oci` mode.
-- `display_url` sets the client-facing OCI registry address shown on the dashboard.
-- `transport` customizes upstream HTTP behavior.
-- `options` contains fields owned by the selected mode.
+- `path` mounts the instance below the main listener.
+- `bind` creates a dedicated listener and is required by `oci`.
+- `display_url` sets the client-facing OCI address shown by the dashboard.
+- `transport` configures `proxy`, `ua`, `dial_timeout`, `header_timeout`,
+  `idle_body_timeout`, `max_request_duration`, and `max_idle_conns`.
 
-Supported `transport` fields are `proxy`, `ua`, `dial_timeout`, `header_timeout`, `idle_body_timeout`, `max_request_duration`, and `max_idle_conns`. Proxy URLs may use `http`, `https`, `socks5`, or `socks5h`.
+An instance never combines repositories or fails over between configured
+mirrors. Use DNS or a load balancer in front of the configured upstream when
+upstream high availability is required. Protocol endpoints such as Go SumDB
+and an OCI registry's token realm remain separate from the instance's content
+upstream.
 
-### Mode options
+### Mode Options
 
 | Mode | Options |
 |---|---|
-| `file` | `pass_headers`; `rules[]` with `match` and `class` (`metadata`, `content`, or `passthrough`) |
+| `file` | `pass_headers`; `rules[]` with `match` and `policy` (`http_cache`, `immutable`, or `passthrough`) |
 | `git` | `auth`, `sync_interval`, `operation_timeout` |
-| `oci` | `auth` (`none`, `basic`, or `bearer`) |
+| `oci` | `auth` with type `none`, `basic`, or `bearer` |
 | `go` | `sumdb`, `goprivate`, `disable_module_fetch_header` |
-| `cargo` | `auth_required`, `allowed_crate_hosts` |
-| `pypi` | `allowed_file_hosts` |
 
-File rules are evaluated in declaration order and the last matching rule wins. Cargo and PyPI allowlists authorize external download hosts referenced by upstream metadata.
+Git and OCI credentials may reference environment variables. Cargo and PyPI
+authorize download targets from signed routes derived from upstream metadata;
+clients cannot supply arbitrary download hosts.
 
-Git auth accepts `type: basic` with `username` and `password`, or `type: token` with the token in `password`. OCI auth accepts `none`, `basic`, or `bearer`; bearer credentials use `token`. Go checksum database options contain `enabled`, `name`, and `url`. Host allowlists contain host names with optional ports, without schemes or paths.
+## Client Setup
 
-## Cache behavior
-
-- **Metadata** is served directly for `cache.metadata_ttl`. Expired entries use an origin-bound conditional request; `304 Not Modified` refreshes the stored timestamp, and transient upstream failures can serve stale content.
-- **Content** uses stable cache keys and expires according to `cache.retention`.
-- **Passthrough** requests are forwarded without cache publication.
-- Range requests use a valid local object when available and otherwise pass through upstream.
-- A real upstream `429 Too Many Requests` creates a host cooldown using `Retry-After`.
-
-Debian metadata is verified against the SHA-256 entries in the request's `InRelease` or `Release` file. RPM metadata is verified against the request's `repomd.xml`. OCI manifests and blobs, plus Flatpak OSTree objects, are verified before immutable cache publication.
-
-## Client examples
-
-For instances mounted at `/npm`, `/go`, and `/pypi`, with a dedicated OCI listener:
+Examples for path-mounted instances:
 
 ```bash
 npm config set registry https://mirrors.example.com/npm
 go env -w GOPROXY=https://mirrors.example.com/go
 pip install --index-url https://mirrors.example.com/pypi/simple PACKAGE
+```
+
+OCI instances use their dedicated listener:
+
+```bash
 docker pull registry.example.com:5000/IMAGE:TAG
 ```
 
-Repository modes use their normal client configuration with the instance URL as the repository or mirror base URL.
+Linux package managers use the instance URL as their repository or mirror
+base. Cargo sparse registry URLs must end in `/`. The dashboard provides the
+complete command for every configured instance.
 
-## Operations
+## Cache Behavior
+
+Each enabled instance stores its state below:
+
+```text
+<backend>/instances/<name>/<mode>-v4/
+  blobs/
+  state/
+  work/
+```
+
+Only one process may write to a backend. Downloads are streamed to clients
+while cache publication continues under bounded disk and concurrency limits.
+Mutable objects use validators from the same upstream; range responses are not
+stored as complete objects.
+
+Linux repository and Flatpak metadata is published as an atomic generation
+only after all required objects have been downloaded and verified. Clients
+therefore do not observe metadata assembled from different upstream versions.
+Packages and sidecars use stable object caches and remain available while a
+metadata refresh is pending or has failed.
+
+The proxy sends only read operations upstream. Git upload-pack, Cargo's
+fetch-only Git operation, and npm audit use protocol-required `POST` requests
+without mutating upstream state. Other mutation methods are rejected before
+authentication or an upstream connection.
+
+## Observability
 
 | Endpoint | Description |
 |---|---|
-| `/` | Instance dashboard and client setup commands |
+| `/` | Dashboard and client setup commands |
 | `/-/status/summary` | Service and storage summary |
-| `/-/status/disk` | Bounded disk-usage history |
+| `/-/status/disk` | Bounded disk usage history |
 | `/-/status/events` | Recent maintenance events; accepts `limit` |
 | `/-/status/network` | Instance, upstream, and admission statistics |
 | `metrics.path` | Prometheus metrics |
 
-Object expiration, blob garbage collection, and Git synchronization run in one in-memory serial scheduler. Send `SIGINT` or `SIGTERM` for graceful shutdown.
+Send `SIGINT` or `SIGTERM` for graceful shutdown.
 
 ## Development
 
@@ -235,11 +281,26 @@ make tidy
 make vet
 make test
 make test-race
-CGO_ENABLED=0 go build -trimpath -o /tmp/cache-proxy-build .
+make test-fuzz
 ```
 
-Parser and path-classification fuzz targets can be run with bounded `go test -fuzz` commands. CI runs smoke fuzzing for every active target.
+The fuzz smoke suite includes bounded parallel cache fills, joined flights,
+early client disconnects, declared-size mismatches, and upstream admission
+contention and lifecycle shutdown.
+
+Run the containerized end-to-end suite with Docker or Podman on native Linux:
+
+```bash
+make test-e2e
+E2E_RUNTIME=podman E2E_SUITE=deb-apk make test-e2e
+```
+
+`E2E_SUITE` accepts `registries`, `deb-apk`, `rpm-pacman`, or
+`git-oci-flatpak`. An unset suite runs all modes. The suite builds deterministic
+local repositories and runs every proxy, fixture, readiness probe, and native
+package client in host-network containers. It does not run package managers on
+the host.
 
 ## License
 
-This project is available under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE).

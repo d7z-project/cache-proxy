@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -101,18 +101,18 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if basic := h.basicAuthorization(); basic != "" {
 		request.Header.Set("Authorization", basic)
 	}
-	release, err := h.upstreamGate.Acquire(ctx, tokenURL.String(), httpcache.AdmissionForeground)
-	if err != nil {
-		return "", time.Time{}, err
-	}
+	request = transport.WithAdmission(ctx, request, transport.AdmissionForeground)
 	response, err := h.client.Do(request)
 	if err != nil {
-		release()
 		return "", time.Time{}, err
 	}
-	defer func() { _ = response.Body.Close(); release() }()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusTooManyRequests {
-		return "", time.Time{}, h.upstreamGate.RateLimited(tokenURL.String(), response.Header.Get("Retry-After"))
+		limitedURL := tokenURL.String()
+		if response.Request != nil && response.Request.URL != nil {
+			limitedURL = response.Request.URL.String()
+		}
+		return "", time.Time{}, h.upstreamGate.RateLimited(limitedURL, response.Header.Get("Retry-After"))
 	}
 	response.Body = utils.NewRateLimitReader(response.Body)
 	if response.StatusCode != http.StatusOK {
@@ -128,7 +128,6 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 		return "", time.Time{}, err
 	}
 	_ = response.Body.Close()
-	release()
 	token := payload.Token
 	if token == "" {
 		token = payload.AccessToken

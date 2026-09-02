@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func rewriteDescriptor(req *http.Request, data []byte) []byte {
@@ -21,11 +21,7 @@ func rewriteDescriptor(req *http.Request, data []byte) []byte {
 }
 
 func proxyBaseURL(req *http.Request) string {
-	prefix := strings.TrimSpace(req.Header.Get("X-Cache-Proxy-Prefix"))
-	if prefix == "" || prefix == "/" {
-		return httpcache.BaseURL(req)
-	}
-	return strings.TrimRight(httpcache.BaseURL(req), "/") + "/" + strings.Trim(strings.TrimPrefix(prefix, "/"), "/")
+	return proxyruntime.ExternalBaseURL(req)
 }
 
 func replaceINIValue(line, key, value string) string {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 type Options struct {
@@ -30,8 +32,15 @@ type Block struct {
 	Upstream    string
 	Transport   *config.TransportConfig
 	MetadataTTL time.Duration
+	WorkDir     string
+	Spooler     *storeio.Spooler
 	Options
 }
+
+const (
+	metadataTTL   = 2 * time.Minute
+	blobRetention = config.DefaultRetention
+)
 
 type Driver struct{}
 
@@ -43,7 +52,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.Decode(&options); err != nil {
 		return err
 	}
-	upstream := strings.TrimSpace(plan.Upstreams()[0])
+	upstream := plan.Upstream()
 	if err := validateConfig(upstream, &options); err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
@@ -51,8 +60,9 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return nil
 	}
 	handler := newHandler(plan.Name(), Block{
-		Upstream: upstream, Transport: plan.Transport(), MetadataTTL: plan.MetadataTTL(), Options: options,
-	}, plan.Retention(), plan.Store(), plan.Stats(), plan.UpstreamGate())
+		Upstream: upstream, Transport: plan.Transport(), MetadataTTL: metadataTTL, WorkDir: filepath.Join(plan.StoreRoot(), "work"),
+		Spooler: storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget()), Options: options,
+	}, blobRetention, plan.Store(), plan.Stats(), plan.UpstreamGate())
 	if plan.DisplayURL() != "" {
 		plan.SetHomeDisplayURL(plan.DisplayURL())
 	}
@@ -60,10 +70,15 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: 6 * time.Hour,
 		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, plan.CleanupConfig())
+			more, err := handler.Cleanup(ctx, plan.CleanupConfig())
+			outcome := &scheduler.TaskOutcome{Result: "success"}
+			if more {
+				outcome.ContinueAfter = 2 * time.Second
+			}
+			return outcome, err
 		},
 	})
-	return plan.BindAddr(plan.Bind(), plan.Retention(), handler)
+	return plan.BindAddr(plan.Bind(), handler)
 }
 
 func validateConfig(upstream string, options *Options) error {

@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
@@ -53,26 +54,29 @@ type ModeDriver interface {
 }
 
 type Entry struct {
-	Name        string
-	Mode        string
-	Enabled     bool
-	Path        string
-	Bind        string
-	DisplayURL  string
-	ExpireAfter config.Expiration
-	Runtime     Instance
-	Ctx         context.Context
-	Cancel      context.CancelFunc
+	Name       string
+	Mode       string
+	Enabled    bool
+	Path       string
+	Bind       string
+	DisplayURL string
+	Runtime    Instance
+	Ctx        context.Context
+	Cancel     context.CancelFunc
 }
 
 type Result struct {
 	Entries []*Entry
+	Stores  map[string]*blobfs.Store
 }
 
 type PlanContext struct {
-	store                *blobfs.Store
-	stats                *httpcache.Stats
-	upstreamGate         *httpcache.UpstreamGate
+	backend              string
+	stores               map[string]*blobfs.Store
+	stats                *metrics.Stats
+	upstreamGate         *UpstreamGate
+	spoolBudget          *SpoolBudget
+	maxCacheObjectSize   int64
 	cleanup              config.CleanupConfig
 	mainBind             string
 	metricsPath          string
@@ -88,24 +92,29 @@ type InstancePlan struct {
 	decl     config.Instance
 	selected config.SelectedMode
 	entry    *Entry
+	store    *blobfs.Store
+	root     string
 	bound    bool
 }
 
-const httpCacheCleanupInterval = 6 * time.Hour
-
 func NewPlanContext(
-	store *blobfs.Store,
-	stats *httpcache.Stats,
-	upstreamGate *httpcache.UpstreamGate,
+	backend string,
+	stats *metrics.Stats,
+	upstreamGate *UpstreamGate,
+	spoolBudget *SpoolBudget,
+	maxCacheObjectSize int64,
 	cleanup config.CleanupConfig,
 	mainBind string,
 	metricsPath string,
 	sched *scheduler.Scheduler,
 ) *PlanContext {
 	return &PlanContext{
-		store:                store,
+		backend:              backend,
+		stores:               map[string]*blobfs.Store{},
 		stats:                stats,
 		upstreamGate:         upstreamGate,
+		spoolBudget:          spoolBudget,
+		maxCacheObjectSize:   maxCacheObjectSize,
 		cleanup:              cleanup,
 		mainBind:             mainBind,
 		metricsPath:          metricsPath,
@@ -131,7 +140,24 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 		Enabled: selected.Enabled,
 	}
 	p.entries[name] = entry
-	return &InstancePlan{ctx: p, decl: decl, selected: selected, entry: entry}, nil
+	plan := &InstancePlan{ctx: p, decl: decl, selected: selected, entry: entry}
+	if !entry.Enabled {
+		return plan, nil
+	}
+	root := filepath.Join(p.backend, "instances", name, selected.Mode+"-v4")
+	for _, directory := range []string{"blobs", "state", "work"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
+			return nil, fmt.Errorf("instance %s: create %s directory: %w", name, directory, err)
+		}
+	}
+	store, err := blobfs.Open(filepath.Join(root, "blobs"), instanceBlobFSConfig())
+	if err != nil {
+		return nil, fmt.Errorf("instance %s: open blob store: %w", name, err)
+	}
+	plan.store = store
+	plan.root = root
+	p.stores[name] = store
+	return plan, nil
 }
 
 func (p *PlanContext) Finalize() (*Result, error) {
@@ -150,7 +176,14 @@ func (p *PlanContext) Finalize() (*Result, error) {
 		}
 		entries = append(entries, entry)
 	}
-	return &Result{Entries: entries}, nil
+	return &Result{Entries: entries, Stores: p.stores}, nil
+}
+
+func (p *PlanContext) CloseStores() {
+	for name, store := range p.stores {
+		_ = store.Close()
+		delete(p.stores, name)
+	}
 }
 
 func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
@@ -159,27 +192,35 @@ func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
 	}
 }
 
-func (i *InstancePlan) Name() string                          { return i.entry.Name }
-func (i *InstancePlan) Enabled() bool                         { return i.entry.Enabled }
-func (i *InstancePlan) Store() *blobfs.Store                  { return i.ctx.store }
-func (i *InstancePlan) Stats() *httpcache.Stats               { return i.ctx.stats }
-func (i *InstancePlan) UpstreamGate() *httpcache.UpstreamGate { return i.ctx.upstreamGate }
-func (i *InstancePlan) CleanupConfig() config.CleanupConfig   { return i.ctx.cleanup }
-func (i *InstancePlan) Scheduler() *scheduler.Scheduler       { return i.ctx.scheduler }
-func (i *InstancePlan) MetadataTTL() time.Duration            { return i.decl.MetadataTTL.Duration() }
-func (i *InstancePlan) Retention() config.Expiration          { return i.decl.Retention }
-func (i *InstancePlan) Path() string                          { return strings.TrimSpace(i.decl.Path) }
-func (i *InstancePlan) Bind() string                          { return strings.TrimSpace(i.decl.Bind) }
-func (i *InstancePlan) DisplayURL() string                    { return strings.TrimSpace(i.decl.DisplayURL) }
-func (i *InstancePlan) Transport() *config.TransportConfig    { return i.decl.Transport }
+func (i *InstancePlan) Name() string                        { return i.entry.Name }
+func (i *InstancePlan) Enabled() bool                       { return i.entry.Enabled }
+func (i *InstancePlan) Store() *blobfs.Store                { return i.store }
+func (i *InstancePlan) StoreRoot() string                   { return i.root }
+func (i *InstancePlan) Stats() *metrics.Stats               { return i.ctx.stats }
+func (i *InstancePlan) UpstreamGate() *UpstreamGate         { return i.ctx.upstreamGate }
+func (i *InstancePlan) SpoolBudget() *SpoolBudget           { return i.ctx.spoolBudget }
+func (i *InstancePlan) MaxCacheObjectSize() int64           { return i.ctx.maxCacheObjectSize }
+func (i *InstancePlan) CleanupConfig() config.CleanupConfig { return i.ctx.cleanup }
+func (i *InstancePlan) Scheduler() *scheduler.Scheduler     { return i.ctx.scheduler }
+func (i *InstancePlan) Path() string                        { return strings.TrimSpace(i.decl.Path) }
+func (i *InstancePlan) Bind() string                        { return strings.TrimSpace(i.decl.Bind) }
+func (i *InstancePlan) DisplayURL() string                  { return strings.TrimSpace(i.decl.DisplayURL) }
+func (i *InstancePlan) Transport() *config.TransportConfig  { return i.decl.Transport }
 
-func (i *InstancePlan) Upstreams() []string {
-	upstreams := make([]string, len(i.decl.Upstreams))
-	for index, upstream := range i.decl.Upstreams {
-		upstreams[index] = strings.TrimSpace(upstream)
+func instanceBlobFSConfig() blobfs.Config {
+	cfg := blobfs.DefaultConfig()
+	cfg.MaxOpenWriteSessions = 128
+	cfg.Chunking.MaxSize = 4 << 20
+	if cfg.Chunking.AvgSize > cfg.Chunking.MaxSize {
+		cfg.Chunking.AvgSize = cfg.Chunking.MaxSize
 	}
-	return upstreams
+	if cfg.Chunking.MinSize > cfg.Chunking.AvgSize {
+		cfg.Chunking.MinSize = cfg.Chunking.AvgSize
+	}
+	return cfg
 }
+
+func (i *InstancePlan) Upstream() string { return strings.TrimSpace(i.decl.Upstream) }
 
 func (i *InstancePlan) Decode(target any) error {
 	if i.selected.Options == nil {
@@ -191,41 +232,15 @@ func (i *InstancePlan) Decode(target any) error {
 	return nil
 }
 
-func (i *InstancePlan) BindPath(pathValue string, expireAfter config.Expiration, runtime Instance) error {
-	if err := i.bind(pathValue, "", expireAfter, runtime); err != nil {
+func (i *InstancePlan) BindPath(pathValue string, runtime Instance) error {
+	if err := i.bind(pathValue, "", runtime); err != nil {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
 }
 
-// BindHTTPPath binds a plain httpcache handler and registers its periodic
-// expiration cleanup. Modes with additional lifecycle behavior should use
-// BindPath directly.
-func (i *InstancePlan) BindHTTPPath(pathValue string, expireAfter config.Expiration, handler *httpcache.Handler) error {
-	return i.BindCachePath(pathValue, expireAfter, handler, HandlerInstance{
-		Handler:      handler,
-		CloseContext: handler.CloseContext,
-	})
-}
-
-// BindCachePath binds a protocol wrapper around a shared cache handler while
-// keeping expiration cleanup and cache shutdown owned by the shared handler.
-func (i *InstancePlan) BindCachePath(pathValue string, expireAfter config.Expiration, handler *httpcache.Handler, runtime http.Handler) error {
-	i.ctx.scheduler.Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(i.entry.Name, scheduler.TypeExpireCleanup, ""),
-		Interval: httpCacheCleanupInterval,
-		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Cleanup(ctx, i.ctx.cleanup)
-		},
-	})
-	return i.BindPath(pathValue, expireAfter, HandlerInstance{
-		Handler:      runtime,
-		CloseContext: handler.CloseContext,
-	})
-}
-
-func (i *InstancePlan) BindAddr(addr string, expireAfter config.Expiration, runtime Instance) error {
-	if err := i.bind("", addr, expireAfter, runtime); err != nil {
+func (i *InstancePlan) BindAddr(addr string, runtime Instance) error {
+	if err := i.bind("", addr, runtime); err != nil {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
@@ -235,9 +250,8 @@ func (i *InstancePlan) SetHomeDisplayURL(url string) {
 	i.entry.DisplayURL = strings.TrimSpace(url)
 }
 
-func (i *InstancePlan) bind(pathValue, addr string, expireAfter config.Expiration, runtime Instance) error {
+func (i *InstancePlan) bind(pathValue, addr string, runtime Instance) error {
 	if !i.entry.Enabled {
-		i.entry.ExpireAfter = expireAfter
 		return nil
 	}
 	if i.bound {
@@ -275,7 +289,6 @@ func (i *InstancePlan) bind(pathValue, addr string, expireAfter config.Expiratio
 		i.ctx.bindOwners[trimmed] = i.entry.Name
 		i.entry.Bind = trimmed
 	}
-	i.entry.ExpireAfter = expireAfter
 	i.entry.Runtime = runtime
 	i.bound = true
 	return nil

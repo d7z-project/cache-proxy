@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 //go:embed assets/home.html assets/style.css
@@ -79,7 +81,7 @@ func renderHome(w http.ResponseWriter, data homeData) {
 
 	tpl, err := homeTemplate.Clone()
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		proxyruntime.WriteError(w, http.StatusInternalServerError)
 		return
 	}
 	tpl.Funcs(template.FuncMap{

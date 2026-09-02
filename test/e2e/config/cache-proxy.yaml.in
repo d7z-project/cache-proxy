@@ -1,0 +1,98 @@
+server:
+  bind: 127.0.0.1:@PROXY_PORT@
+  backend: /data
+  public_url: @PROXY_URL@
+  status:
+    disk_sample_interval: 1m
+    disk_history_window: 1h
+    event_limit: 100
+metrics:
+  path: /metrics
+  token: ""
+storage:
+  gc:
+    blob: 24h
+  cleanup:
+    dry_run: false
+    batch_size: 100
+  orphan_policy: report
+  download:
+    max_active: 32
+    max_active_per_host: 16
+    min_interval: 1ms
+    max_cache_object_size: 256MiB
+    max_active_spool_size: 1GiB
+instances:
+  - name: file
+    enabled: true
+    mode: file
+    path: /file
+    upstream: @FIXTURE_URL@/file
+    options:
+      rules:
+        - match: "**"
+          policy: immutable
+  - name: git
+    enabled: true
+    mode: git
+    path: /git
+    upstream: @FIXTURE_URL@/git/repo.git
+    options:
+      sync_interval: 1h
+      operation_timeout: 30s
+  - name: oci
+    enabled: true
+    mode: oci
+    bind: 127.0.0.1:@OCI_PORT@
+    display_url: @OCI_URL@
+    upstream: @FIXTURE_URL@/oci
+  - name: npm
+    enabled: true
+    mode: npm
+    path: /npm
+    upstream: @FIXTURE_URL@/npm
+  - name: go
+    enabled: true
+    mode: go
+    path: /go
+    upstream: @FIXTURE_URL@/go
+  - name: maven
+    enabled: true
+    mode: maven
+    path: /maven
+    upstream: @FIXTURE_URL@/maven
+  - name: cargo
+    enabled: true
+    mode: cargo
+    path: /cargo
+    upstream: @FIXTURE_URL@/cargo
+  - name: pypi
+    enabled: true
+    mode: pypi
+    path: /pypi
+    upstream: @FIXTURE_URL@/pypi
+  - name: flatpak
+    enabled: true
+    mode: flatpak
+    path: /flatpak
+    upstream: @FIXTURE_URL@/flatpak/repo
+  - name: apk
+    enabled: true
+    mode: apk
+    path: /apk
+    upstream: @FIXTURE_URL@/apk
+  - name: deb
+    enabled: true
+    mode: deb
+    path: /deb
+    upstream: @FIXTURE_URL@/deb
+  - name: rpm
+    enabled: true
+    mode: rpm
+    path: /rpm
+    upstream: @FIXTURE_URL@/rpm
+  - name: pacman
+    enabled: true
+    mode: pacman
+    path: /pacman
+    upstream: @FIXTURE_URL@/pacman

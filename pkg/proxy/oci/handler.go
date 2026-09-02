@@ -16,7 +16,10 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
@@ -27,36 +30,36 @@ type tokenCacheEntry struct {
 	expire time.Time
 }
 
-func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *httpcache.Stats, upstreamGate *httpcache.UpstreamGate) *handler {
+func newHandler(name string, block Block, expireAfter config.Expiration, store *blobfs.Store, stats *metrics.Stats, upstreamGate *transport.UpstreamGate) *handler {
 	if block.MetadataTTL <= 0 {
 		block.MetadataTTL = 2 * time.Minute
 	}
+	if block.Spooler == nil {
+		block.Spooler = storeio.NewSpooler(block.WorkDir, 2<<30, nil)
+	}
 	client := utils.DefaultHTTPClientWrapper()
-	httpcache.ConfigureClientTransport(client, name, block.Transport)
-	lifecycleCtx, cancel := context.WithCancel(context.Background())
+	transport.ConfigureHTTPClient(client, name, block.Transport)
+	transport.ConfigureAdmission(client.Client, upstreamGate)
 	return &handler{
 		name:            name,
 		upstream:        strings.TrimRight(block.Upstream, "/"),
 		expireAfter:     expireAfter,
 		metadataTTL:     block.MetadataTTL,
+		workDir:         block.WorkDir,
+		spooler:         block.Spooler,
 		options:         &block.Options,
 		store:           store,
 		stats:           stats,
 		client:          client,
 		upstreamGate:    upstreamGate,
-		lifecycleCtx:    lifecycleCtx,
-		cancel:          cancel,
+		lifecycle:       storeio.NewLifecycle(),
 		auth:            authHandler{tokens: map[string]ociToken{}},
 		refLocks:        utils.NewRWLockGroup(),
 		manifestReaders: map[string]int{},
 	}
 }
 
-func (h *handler) Start(ctx context.Context) error {
-	h.cancel()
-	h.lifecycleCtx, h.cancel = context.WithCancel(ctx)
-	return nil
-}
+func (h *handler) Start(context.Context) error { return nil }
 
 func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 	for key, token := range h.auth.tokens {
@@ -90,139 +93,141 @@ func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 }
 
 func (h *handler) Stop(ctx context.Context) error {
-	h.closeMu.Lock()
-	h.closing = true
-	h.cancel()
-	h.closeMu.Unlock()
-	return utils.WaitGroupContext(ctx, &h.wait)
+	return h.lifecycle.Close(ctx)
 }
 
-func (h *handler) beginOperation() bool {
-	h.closeMu.Lock()
-	defer h.closeMu.Unlock()
-	if h.closing {
-		return false
+func (h *handler) beginOperation() (func(), bool) {
+	_, done, err := h.lifecycle.Begin()
+	return done, err == nil
+}
+
+func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool, error) {
+	h.cleanupMu.Lock()
+	defer h.cleanupMu.Unlock()
+	if h.cleanupPhase == "" {
+		h.cleanupPhase = "refs"
+		h.cleanupRefs = make(map[string]struct{})
 	}
-	h.wait.Add(1)
-	return true
+	batch := opts.BatchSize
+	if batch <= 0 {
+		batch = 500
+	}
+
+	for {
+		switch h.cleanupPhase {
+		case "refs":
+			complete, err := h.cleanupWalk(ctx, "oci/refs", batch, func(current string) (bool, error) {
+				baseName := path.Base(current)
+				if strings.HasPrefix(baseName, "state.yaml.tmp.") {
+					statePath := path.Join(path.Dir(current), "state.yaml")
+					lock := h.refLocks.Get(statePath)
+					if !lock.TryLock() {
+						return true, nil
+					}
+					defer lock.Unlock()
+					if opts.DryRun {
+						slog.Info("oci cleanup dry-run delete abandoned state", "instance", h.name, "path", current)
+						return false, nil
+					}
+					return false, h.store.DeleteObject(ctx, h.name, current)
+				}
+				if baseName != "state.yaml" {
+					return false, nil
+				}
+				lock := h.refLocks.Get(current)
+				if !lock.TryLock() {
+					return true, nil
+				}
+				defer lock.Unlock()
+				state, readErr := h.readState(ctx, current)
+				if readErr == nil && (!h.stateExpired(state) || opts.DryRun) {
+					h.cleanupRefs[h.manifestPath(state.ManifestDigest)] = struct{}{}
+				}
+				if readErr == nil && !h.stateExpired(state) {
+					return false, nil
+				}
+				if opts.DryRun {
+					slog.Info("oci cleanup dry-run delete", "instance", h.name, "prefix", path.Dir(current))
+					return false, nil
+				}
+				return false, h.store.DeleteObject(ctx, h.name, current)
+			})
+			if err != nil || !complete {
+				return !complete, err
+			}
+			h.cleanupPhase, h.cleanupCursor = "manifests", ""
+			if h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
+				h.cleanupPhase, h.cleanupRefs = "refs", nil
+				return false, nil
+			}
+		case "manifests":
+			complete, err := h.cleanupWalk(ctx, "oci/manifests", batch, func(current string) (bool, error) {
+				if _, referenced := h.cleanupRefs[current]; referenced {
+					return false, nil
+				}
+				h.manifestMu.Lock()
+				active := h.manifestReaders[current] > 0
+				h.manifestMu.Unlock()
+				if active {
+					return true, nil
+				}
+				_, err := h.cleanupExpiredObject(ctx, current, "manifest", opts)
+				return false, err
+			})
+			if err != nil || !complete {
+				return !complete, err
+			}
+			h.cleanupPhase, h.cleanupCursor = "blobs", ""
+		case "blobs":
+			complete, err := h.cleanupWalk(ctx, "oci/blobs", batch, func(current string) (bool, error) {
+				if _, active := h.downloads.Load(current); active {
+					return true, nil
+				}
+				_, err := h.cleanupExpiredObject(ctx, current, "blob", opts)
+				return false, err
+			})
+			if err != nil || !complete {
+				return !complete, err
+			}
+			h.cleanupPhase, h.cleanupCursor, h.cleanupRefs = "refs", "", nil
+			return false, nil
+		}
+	}
 }
 
-func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) error {
-	deleted := 0
-	referencedManifests := make(map[string]struct{})
-	refsBusy := false
-	err := fs.WalkDir(h.store.TenantFS(h.name), "oci/refs", func(current string, entry fs.DirEntry, err error) error {
-		if ctx.Err() != nil {
-			return ctx.Err()
+func (h *handler) cleanupWalk(ctx context.Context, root string, batch int, visit func(string) (retry bool, err error)) (bool, error) {
+	inspected := 0
+	complete := true
+	err := fs.WalkDir(h.store.TenantFS(h.name), root, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		if opts.BatchSize > 0 && deleted >= opts.BatchSize {
+		if entry.IsDir() || current <= h.cleanupCursor {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if inspected >= batch {
+			complete = false
 			return fs.SkipAll
 		}
+		retry, err := visit(current)
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return nil
+		if retry {
+			complete = false
+			return fs.SkipAll
 		}
-		baseName := path.Base(current)
-		if strings.HasPrefix(baseName, "state.yaml.tmp.") {
-			statePath := path.Join(path.Dir(current), "state.yaml")
-			lock := h.refLocks.Get(statePath)
-			if !lock.TryLock() {
-				refsBusy = true
-				return nil
-			}
-			defer lock.Unlock()
-			if opts.DryRun {
-				deleted++
-				slog.Info("oci cleanup dry-run delete abandoned state", "instance", h.name, "path", current)
-				return nil
-			}
-			if deleteErr := h.store.DeleteObject(ctx, h.name, current); deleteErr != nil {
-				return fmt.Errorf("delete abandoned OCI ref state %s: %w", current, deleteErr)
-			}
-			deleted++
-			return nil
-		}
-		if baseName != "state.yaml" {
-			return nil
-		}
-		lock := h.refLocks.Get(current)
-		if !lock.TryLock() {
-			refsBusy = true
-			return nil
-		}
-		state, readErr := h.readState(ctx, current)
-		expired := readErr != nil || h.stateExpired(state)
-		if !expired {
-			referencedManifests[h.manifestPath(state.ManifestDigest)] = struct{}{}
-			lock.Unlock()
-			return nil
-		}
-		if opts.DryRun {
-			if readErr == nil {
-				referencedManifests[h.manifestPath(state.ManifestDigest)] = struct{}{}
-			}
-			deleted++
-			slog.Info("oci cleanup dry-run delete", "instance", h.name, "prefix", path.Dir(current))
-			lock.Unlock()
-			return nil
-		}
-		if removeErr := h.deleteTree(ctx, path.Dir(current)); removeErr != nil {
-			lock.Unlock()
-			return fmt.Errorf("delete expired OCI ref %s: %w", path.Dir(current), removeErr)
-		}
-		deleted++
-		lock.Unlock()
+		h.cleanupCursor = current
+		inspected++
 		return nil
 	})
 	if errors.Is(err, fs.ErrNotExist) {
-		err = nil
+		return true, nil
 	}
-	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) || refsBusy || h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
-		return err
-	}
-	cleanupObjects := func(root, objectKind string, busy func(string) bool) error {
-		walkErr := fs.WalkDir(h.store.TenantFS(h.name), root, func(current string, entry fs.DirEntry, err error) error {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if opts.BatchSize > 0 && deleted >= opts.BatchSize {
-				return fs.SkipAll
-			}
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() || busy(current) {
-				return nil
-			}
-			removed, err := h.cleanupExpiredObject(ctx, current, objectKind, opts)
-			if removed {
-				deleted++
-			}
-			return err
-		})
-		if errors.Is(walkErr, fs.ErrNotExist) {
-			return nil
-		}
-		return walkErr
-	}
-	err = cleanupObjects("oci/manifests", "manifest", func(objectPath string) bool {
-		if _, referenced := referencedManifests[objectPath]; referenced {
-			return true
-		}
-		h.manifestMu.Lock()
-		active := h.manifestReaders[objectPath] > 0
-		h.manifestMu.Unlock()
-		return active
-	})
-	if err != nil || (opts.BatchSize > 0 && deleted >= opts.BatchSize) {
-		return err
-	}
-	return cleanupObjects("oci/blobs", "blob", func(objectPath string) bool {
-		_, busy := h.downloads.Load(objectPath)
-		return busy
-	})
+	return complete, err
 }
 
 func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKind string, opts config.CleanupConfig) (bool, error) {
@@ -245,17 +250,16 @@ func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKi
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", http.StatusMethodNotAllowed, 0)
+	if !proxyruntime.RequireReadMethod(w, req.Method) {
+		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "REJECTED", http.StatusMethodNotAllowed, 0)
 		return
 	}
-	if !h.beginOperation() {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+	done, ok := h.beginOperation()
+	if !ok {
+		transport.WriteError(w, http.StatusServiceUnavailable)
 		return
 	}
-	defer h.wait.Done()
+	defer done()
 
 	resolved, err := resolveRequest(req, h.options)
 	if err != nil {
@@ -267,17 +271,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		slog.Info("oci proxy failed", "instance", h.name, "method", req.Method, "path", req.URL.Path, "err", err)
 		status := http.StatusBadGateway
-		var limited *httpcache.UpstreamRateLimitError
+		var limited *proxyruntime.UpstreamRateLimitError
 		if errors.As(err, &limited) {
 			status = http.StatusTooManyRequests
 		}
-		if retryAfter, admissionError := httpcache.AdmissionRetryAfterSeconds(err); admissionError {
+		if retryAfter, admissionError := proxyruntime.AdmissionRetryAfterSeconds(err); admissionError {
 			if !errors.As(err, &limited) {
 				status = http.StatusServiceUnavailable
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
-		http.Error(w, http.StatusText(status), status)
+		transport.WriteError(w, status)
 		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "ERROR", status, 0)
 		return
 	}
@@ -285,7 +289,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
-	if resolved.kind == requestPing || resolved.kind == requestTags || resolved.kind == requestBypass {
+	if resolved.kind == requestPing {
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		w.Header().Set("X-Cache", "LOCAL")
+		w.WriteHeader(http.StatusOK)
+		return http.StatusOK, "LOCAL", 0, nil
+	}
+	if resolved.kind == requestTags || resolved.kind == requestBypass {
 		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	switch resolved.kind {
@@ -299,7 +309,7 @@ func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Re
 }
 
 func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
-	statePath := h.refStatePath(resolved.repo, resolved.ref)
+	statePath := h.refStatePath(resolved.repo, resolved.ref, req.Header.Get("Accept"))
 	state, err := h.readState(ctx, statePath)
 	if err == nil && h.manifestFresh(resolved, state) {
 		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
@@ -364,7 +374,7 @@ func (h *handler) serveManifestState(ctx context.Context, w http.ResponseWriter,
 	defer func() { _ = reader.Close() }()
 	info := reader.Info()
 	if info.Options["docker-content-digest"] != state.ManifestDigest ||
-		!httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
+		!cacheSupportsRequestUserAgent(h.client, req, info.Options) {
 		return 0, 0, errors.New("cached OCI manifest does not match committed state")
 	}
 	headers := map[string]string{
@@ -419,7 +429,7 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 	}
 	defer func() { _ = reader.Close() }()
 	info := reader.Info()
-	if !httpcache.CacheSupportsRequestUserAgent(h.client, req, info.Options) {
+	if !cacheSupportsRequestUserAgent(h.client, req, info.Options) {
 		return 0, 0, errors.New("cached OCI object has unknown or incompatible User-Agent variance")
 	}
 	headers := map[string]string{
@@ -441,7 +451,7 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 
 func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRequest(ctx, ctx, req.Method, upstreamPath, userAgent, headers)
+	response, err := h.remoteRead(ctx, ctx, req.Method, upstreamPath, req.URL.RawQuery, userAgent, headers)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -452,10 +462,12 @@ func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *h
 
 func (h *handler) putObjectFromReader(ctx context.Context, objectPath string, body io.Reader, size int64, headers http.Header, extra map[string]string) error {
 	meta := map[string]string{
-		"content-type":                    headers.Get("Content-Type"),
-		"content-length":                  strconv.FormatInt(size, 10),
-		"fetched-at":                      time.Now().UTC().Format(time.RFC3339Nano),
-		httpcache.UserAgentReviewedOption: "true",
+		"content-type":          headers.Get("Content-Type"),
+		"fetched-at":            time.Now().UTC().Format(time.RFC3339Nano),
+		userAgentReviewedOption: "true",
+	}
+	if size >= 0 {
+		meta["content-length"] = strconv.FormatInt(size, 10)
 	}
 	for _, key := range []string{"ETag", "Last-Modified", "Vary", "Docker-Content-Digest"} {
 		if value := headers.Get(key); value != "" {
@@ -480,8 +492,12 @@ func (h *handler) storeObject(ctx context.Context, objectPath string, body io.Re
 	return err
 }
 
-func (h *handler) refStatePath(repo, ref string) string {
-	return path.Join("oci/refs", repo, httpcache.HashKey(ref), "state.yaml")
+func (h *handler) refStatePath(repo, ref string, representation ...string) string {
+	accept := manifestAccept
+	if len(representation) > 0 && representation[0] != "" {
+		accept = representation[0]
+	}
+	return path.Join("oci/refs", repo, hashKey(ref+"\x00"+accept), "state.yaml")
 }
 
 func (h *handler) manifestPath(digest string) string {

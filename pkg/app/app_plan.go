@@ -8,10 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/blobfs"
-
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
@@ -20,10 +18,11 @@ const DefaultGCInterval = 24 * time.Hour
 const DefaultMaxActiveDownloads = 256
 const DefaultMaxActiveDownloadsPerHost = 16
 const DefaultUpstreamStartInterval = 5 * time.Millisecond
+const DefaultMaxCacheObjectSize = 2 << 30
+const DefaultMaxActiveSpoolSize = 8 << 30
 const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500
-const DefaultMetadataTTL = 2 * time.Minute
 
 var driverSet = builtinDrivers
 
@@ -39,16 +38,16 @@ func normalizeDownloadHost(value string) (string, error) {
 	return strings.ToLower(parsed.Host), nil
 }
 
-func upstreamGateConfig(download config.DownloadConfig) httpcache.UpstreamGateConfig {
-	hosts := make(map[string]httpcache.UpstreamHostGateConfig, len(download.Hosts))
+func upstreamGateConfig(download config.DownloadConfig) proxyruntime.UpstreamGateConfig {
+	hosts := make(map[string]proxyruntime.UpstreamHostGateConfig, len(download.Hosts))
 	for configuredHost, override := range download.Hosts {
 		host, _ := normalizeDownloadHost(configuredHost)
-		hosts[host] = httpcache.UpstreamHostGateConfig{
+		hosts[host] = proxyruntime.UpstreamHostGateConfig{
 			MaxActive:   override.MaxActive,
 			MinInterval: override.MinInterval.Duration(),
 		}
 	}
-	return httpcache.UpstreamGateConfig{
+	return proxyruntime.UpstreamGateConfig{
 		MaxActive:        download.MaxActive,
 		MaxActivePerHost: download.MaxActivePerHost,
 		MinInterval:      download.MinInterval.Duration(),
@@ -59,15 +58,16 @@ func upstreamGateConfig(download config.DownloadConfig) httpcache.UpstreamGateCo
 func planEntries(
 	ctx context.Context,
 	doc *config.Document,
-	store *blobfs.Store,
-	stats *httpcache.Stats,
-	upstreamGate *httpcache.UpstreamGate,
+	stats *metrics.Stats,
+	upstreamGate *proxyruntime.UpstreamGate,
 	sched *scheduler.Scheduler,
-) (map[string]*proxyruntime.Entry, error) {
+) (*proxyruntime.Result, error) {
 	plan := proxyruntime.NewPlanContext(
-		store,
+		doc.Server.Backend,
 		stats,
 		upstreamGate,
+		proxyruntime.NewSpoolBudget(doc.Storage.Download.MaxActiveSpoolSize.Bytes()),
+		doc.Storage.Download.MaxCacheObjectSize.Bytes(),
 		doc.Storage.Cleanup,
 		doc.Server.Bind,
 		doc.Metrics.Path,
@@ -77,45 +77,35 @@ func planEntries(
 	drivers := driverSet()
 	for _, configured := range doc.Instances {
 		decl := configured
-		decl.MetadataTTL = doc.Cache.MetadataTTL
-		decl.Retention = doc.Cache.Retention
 		selected, err := decl.SelectMode()
 		if err != nil {
+			plan.CloseStores()
 			return nil, err
 		}
 		driver, ok := drivers[selected.Mode]
 		if !ok {
+			plan.CloseStores()
 			return nil, fmt.Errorf("instance %s: unsupported mode %q", selected.Name, selected.Mode)
 		}
 		instancePlan, err := plan.Instance(decl, selected)
 		if err != nil {
+			plan.CloseStores()
 			return nil, err
 		}
 		if err := driver.Plan(ctx, instancePlan); err != nil {
+			plan.CloseStores()
 			return nil, err
 		}
 	}
 	result, err := plan.Finalize()
 	if err != nil {
+		plan.CloseStores()
 		return nil, err
 	}
-	entries := make(map[string]*proxyruntime.Entry, len(result.Entries))
-	for _, entry := range result.Entries {
-		if entry.ExpireAfter.IsUnset() {
-			entry.ExpireAfter = config.DefaultRetention
-		}
-		entries[entry.Name] = entry
-	}
-	return entries, nil
+	return result, nil
 }
 
 func normalizeDocument(doc *config.Document) {
-	if doc.Cache.MetadataTTL == 0 {
-		doc.Cache.MetadataTTL = config.Duration(DefaultMetadataTTL)
-	}
-	if doc.Cache.Retention.IsUnset() {
-		doc.Cache.Retention = config.DefaultRetention
-	}
 	if strings.TrimSpace(doc.Server.Bind) == "" {
 		doc.Server.Bind = DefaultBind
 	}
@@ -150,15 +140,15 @@ func normalizeDocument(doc *config.Document) {
 	if doc.Storage.Download.MinInterval == 0 {
 		doc.Storage.Download.MinInterval = config.Duration(DefaultUpstreamStartInterval)
 	}
+	if doc.Storage.Download.MaxCacheObjectSize == 0 {
+		doc.Storage.Download.MaxCacheObjectSize = config.ByteSize(DefaultMaxCacheObjectSize)
+	}
+	if doc.Storage.Download.MaxActiveSpoolSize == 0 {
+		doc.Storage.Download.MaxActiveSpoolSize = config.ByteSize(DefaultMaxActiveSpoolSize)
+	}
 }
 
 func validateServerConfig(doc *config.Document) error {
-	if doc.Cache.MetadataTTL < config.Duration(time.Second) {
-		return errors.New("cache metadata_ttl must be at least 1s")
-	}
-	if doc.Cache.Retention.IsNever() || doc.Cache.Retention.Duration() < time.Minute {
-		return errors.New("cache retention must be at least 1m")
-	}
 	if err := proxyruntime.ValidateBindAddress(doc.Server.Bind); err != nil {
 		return fmt.Errorf("server bind: %w", err)
 	}
@@ -183,11 +173,22 @@ func validateServerConfig(doc *config.Document) error {
 	if doc.Storage.Download.MinInterval < 0 {
 		return errors.New("download min_interval must not be negative")
 	}
+	if doc.Storage.Download.MaxCacheObjectSize <= 0 {
+		return errors.New("download max_cache_object_size must be positive")
+	}
+	if doc.Storage.Download.MaxActiveSpoolSize < doc.Storage.Download.MaxCacheObjectSize {
+		return errors.New("download max_active_spool_size must be greater than or equal to max_cache_object_size")
+	}
 	if doc.Storage.GC.Blob <= 0 {
 		return errors.New("storage gc blob interval must be positive")
 	}
 	if doc.Storage.Cleanup.BatchSize <= 0 {
 		return errors.New("storage cleanup batch_size must be positive")
+	}
+	switch doc.Storage.OrphanPolicy {
+	case "", "report", "auto":
+	default:
+		return errors.New("storage orphan_policy must be report or auto")
 	}
 	seenHosts := map[string]string{}
 	for configuredHost, override := range doc.Storage.Download.Hosts {

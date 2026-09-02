@@ -30,10 +30,10 @@ type RateLimitReader struct {
 }
 
 func NewRateLimitReader(inner io.ReadCloser) *RateLimitReader {
-	return NewRateLimitReaderWithConfig(inner, defaultMinBytesPerSec, defaultWindow)
+	return newRateLimitReader(inner, defaultMinBytesPerSec, defaultWindow)
 }
 
-func NewRateLimitReaderWithConfig(inner io.ReadCloser, minBytesPerSec int64, window time.Duration) *RateLimitReader {
+func newRateLimitReader(inner io.ReadCloser, minBytesPerSec int64, window time.Duration) *RateLimitReader {
 	return &RateLimitReader{
 		inner:          inner,
 		minBytesPerSec: minBytesPerSec,

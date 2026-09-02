@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 )
 
 func FuzzOCIRequestParsers(f *testing.F) {
@@ -28,9 +26,13 @@ func FuzzOCIRequestParsers(f *testing.F) {
 			}
 		case 1:
 			options := &Options{}
-			result, err := resolveRequest(&http.Request{URL: &url.URL{Path: input}}, options)
+			target, parseErr := url.ParseRequestURI(input)
+			if parseErr != nil {
+				return
+			}
+			result, err := resolveRequest(&http.Request{URL: target}, options)
 			if err == nil && result.upstreamPath != "" {
-				require.True(t, httpcache.SafePath(result.upstreamPath))
+				require.True(t, safePath(result.upstreamPath))
 			}
 		}
 	})

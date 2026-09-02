@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -88,7 +88,7 @@ type networkEdge struct {
 }
 
 func (s *appStatus) network(app *App) networkStatus {
-	snapshot := httpcache.StatsSnapshot{Instances: map[string]httpcache.InstanceStats{}}
+	snapshot := metrics.StatsSnapshot{Instances: map[string]metrics.InstanceStats{}}
 	if app.stats != nil {
 		snapshot = app.stats.Snapshot()
 	}
@@ -189,7 +189,7 @@ func (s *networkStatus) addNetworkEdge(
 	entry *proxyruntime.Entry,
 	upstreamNodes map[string]*networkUpstream,
 	upstreamURL string,
-	upstream httpcache.UpstreamStats,
+	upstream metrics.UpstreamStats,
 ) {
 	if upstreamURL == "" {
 		return

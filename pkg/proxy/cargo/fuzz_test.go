@@ -2,30 +2,38 @@ package cargo
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"github.com/stretchr/testify/require"
 )
 
-func FuzzCrateDownloadRoute(f *testing.F) {
-	token, _, _ := httpcache.EncodeCargoDownloadTemplate("https://cdn.example/{lowerprefix}/{crate}/{version}.crate")
-	f.Add("example", "1.0.0", token, "")
-	f.Add("crate_name", "2.0.0+meta", "invalid!", "")
-	f.Fuzz(func(t *testing.T, crate, version, routeToken, checksum string) {
-		if len(crate) > 512 || len(version) > 512 || len(routeToken) > 16<<10 || len(checksum) > 256 {
+func FuzzCargoSparseIndex(f *testing.F) {
+	f.Add("3/f/foo", "foo", `{"name":"foo","vers":"1.0.0","cksum":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`+"\n")
+	f.Add("ab/cd/abcd", "abcd", "{}\n")
+	f.Fuzz(func(t *testing.T, indexPath, crateName, body string) {
+		if len(indexPath) > 4096 || len(crateName) > 1024 || len(body) > 64<<10 {
 			t.Skip()
 		}
-		requestPath := "/api/v1/crates/" + crate + "/" + version + "/download/" + routeToken
-		if checksum != "" {
-			requestPath += "/" + checksum
+		_, _ = parseSparseIndex(strings.NewReader(body), indexPath)
+		_, _ = cargoDownloadURL("https://example.test/{prefix}/{crate}/{version}/{sha256-checksum}", crateName, "1.0.0", strings.Repeat("0", 64))
+	})
+}
+
+func FuzzCargoGitReadRequest(f *testing.F) {
+	f.Add(http.MethodGet, "info/refs", "service=git-upload-pack")
+	f.Add(http.MethodPost, "git-receive-pack", "")
+	f.Fuzz(func(t *testing.T, method, cleaned, rawQuery string) {
+		if len(method) > 32 || len(cleaned) > 4096 || len(rawQuery) > 4096 {
+			t.Skip()
 		}
-		req, err := http.NewRequest(http.MethodGet, requestPath, nil)
-		if err != nil {
-			return
-		}
-		route, err := newResolver(&Options{}).Resolve(req)
-		if err == nil && route.TargetURL == "" {
-			t.Fatal("resolved crate route has no target URL")
+		request := &http.Request{Method: method, URL: &url.URL{RawQuery: rawQuery}, Header: make(http.Header)}
+		if isCargoGitReadRequest(cleaned, request) || isCargoGitUploadPack(method, cleaned) {
+			require.Contains(t, []string{http.MethodGet, http.MethodHead, http.MethodPost}, method)
+			if method == http.MethodPost {
+				require.Equal(t, "git-upload-pack", cleaned)
+			}
 		}
 	})
 }

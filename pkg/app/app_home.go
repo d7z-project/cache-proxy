@@ -8,9 +8,7 @@ import (
 	urlpkg "net/url"
 	"strings"
 
-	"gopkg.d7z.net/blobfs"
-
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
@@ -53,14 +51,12 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		i18n = i18nMaps["en"]
 	}
 	baseURL := a.publicBaseURL(req)
-	var ss httpcache.StatsSnapshot
+	var ss metrics.StatsSnapshot
 	if a.stats != nil {
 		ss = a.stats.Snapshot()
 	}
-	var storeStats *blobfs.StatsSnapshot
 	var usage map[string]int64
-	if a.store != nil {
-		storeStats, _ = a.store.Stats(req.Context())
+	if len(a.stores) > 0 {
 		names := make([]string, 0, len(entries))
 		for _, entry := range entries {
 			names = append(names, entry.Name)
@@ -88,10 +84,13 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	i18nJSON, _ := json.Marshal(i18n)
 	healthy := true
 	var degraded int
-	if storeStats != nil {
-		healthy = storeStats.DegradedObjects == 0
-		degraded = storeStats.DegradedObjects
+	for _, store := range a.stores {
+		storeStats, err := store.Stats(req.Context())
+		if err == nil && storeStats != nil {
+			degraded += storeStats.DegradedObjects
+		}
 	}
+	healthy = degraded == 0
 	return homeData{
 		Instances:     instances,
 		Modes:         modes,
@@ -106,7 +105,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	}
 }
 
-func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s httpcache.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
+func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s metrics.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
 	instURL := instURL(entry, baseURL, req)
 	hi := homeInstance{
 		Name: entry.Name,
@@ -150,7 +149,11 @@ func (a *App) publicBaseURL(req *http.Request) string {
 	if url := strings.TrimRight(a.config.Server.PublicURL, "/"); url != "" {
 		return url
 	}
-	return httpcache.BaseURL(req)
+	scheme := "http"
+	if req.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + req.Host
 }
 
 func instURL(entry *proxyruntime.Entry, baseURL string, req *http.Request) string {
@@ -169,9 +172,6 @@ func bindURL(req *http.Request, bind string) string {
 		return "http://" + bind
 	}
 	baseHost := req.Host
-	if forwardedHost := req.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-		baseHost = forwardedHost
-	}
 	if parsedHost, _, err := net.SplitHostPort(baseHost); err == nil {
 		baseHost = parsedHost
 	}
@@ -179,7 +179,7 @@ func bindURL(req *http.Request, bind string) string {
 		host = baseHost
 	}
 	scheme := "http"
-	if req.TLS != nil || strings.EqualFold(req.Header.Get("X-Forwarded-Proto"), "https") {
+	if req.TLS != nil {
 		scheme = "https"
 	}
 	return scheme + "://" + net.JoinHostPort(host, port)

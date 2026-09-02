@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
 
 env:
   REGISTRY: ghcr.io
@@ -26,29 +28,57 @@ jobs:
         run: CGO_ENABLED=0 go build -v -o cache-proxy .
 
       - name: Run tests
-        run: go test -timeout 60s ./...
+        run: make test
+
+      - name: Run race tests
+        run: make test-race
 
       - name: Run fuzz smoke tests
-        run: |
-          fuzz() {
-            go test "$1" -run='^$' -fuzz="^$2$" -fuzztime=2s
-          }
-          fuzz ./pkg/config FuzzConfigDecoders
-          fuzz ./pkg/proxy/cargo FuzzCrateDownloadRoute
-          fuzz ./pkg/proxy/deb FuzzReleaseManifest
-          fuzz ./pkg/proxy/deb FuzzDebianPathClassification
-          fuzz ./pkg/proxy/flatpak FuzzFlatpakPathClassification
-          fuzz ./pkg/proxy/gomod FuzzParseModuleRequest
-          fuzz ./pkg/proxy/oci FuzzOCIRequestParsers
-          fuzz ./pkg/proxy/pacman FuzzMetadataName
-          fuzz ./pkg/proxy/rpm FuzzRepomd
-          fuzz ./pkg/proxy/rpm FuzzRPMPathClassification
-          fuzz ./pkg/proxy/shared/httpcache FuzzMetadataRewriters
+        run: make test-fuzz
+
+      - name: Vet
+        run: make vet
+
+  e2e-docker:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [registries, deb-apk, rpm-pacman, git-oci-flatpak]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run containerized end-to-end suite
+        env:
+          E2E_RUNTIME: docker
+          E2E_SUITE: ${{ matrix.suite }}
+        run: make test-e2e
+
+  e2e-podman:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    needs: build-and-test
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Run Podman smoke suite
+        env:
+          E2E_RUNTIME: podman
+          E2E_SUITE: registries
+        run: make test-e2e
 
   docker:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build-and-test
+    needs: [build-and-test, e2e-docker]
     permissions:
       packages: write
 

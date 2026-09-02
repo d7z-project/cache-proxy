@@ -13,7 +13,7 @@ import (
 func TestRateLimitReaderFastEnough(t *testing.T) {
 	data := strings.Repeat("x", 4096)
 	inner := io.NopCloser(strings.NewReader(data))
-	r := NewRateLimitReaderWithConfig(inner, 1024, 100*time.Millisecond)
+	r := newRateLimitReader(inner, 1024, 100*time.Millisecond)
 	defer func() { require.NoError(t, r.Close()) }()
 
 	time.Sleep(150 * time.Millisecond)
@@ -25,7 +25,7 @@ func TestRateLimitReaderFastEnough(t *testing.T) {
 func TestRateLimitReaderTooSlow(t *testing.T) {
 	data := strings.Repeat("x", 10)
 	inner := io.NopCloser(strings.NewReader(data))
-	r := NewRateLimitReaderWithConfig(inner, 4096, 50*time.Millisecond)
+	r := newRateLimitReader(inner, 4096, 50*time.Millisecond)
 	defer func() { require.NoError(t, r.Close()) }()
 
 	time.Sleep(100 * time.Millisecond)
@@ -36,7 +36,7 @@ func TestRateLimitReaderTooSlow(t *testing.T) {
 func TestRateLimitReaderGracePeriod(t *testing.T) {
 	data := strings.Repeat("x", 10)
 	inner := io.NopCloser(strings.NewReader(data))
-	r := NewRateLimitReaderWithConfig(inner, 4096, time.Hour)
+	r := newRateLimitReader(inner, 4096, time.Hour)
 	defer func() { require.NoError(t, r.Close()) }()
 
 	out, err := io.ReadAll(r)

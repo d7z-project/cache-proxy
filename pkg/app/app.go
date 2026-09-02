@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -22,24 +23,25 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const (
-	DefaultBackend     = "/tmp/cache-proxy"
-	DefaultBind        = "127.0.0.1:18080"
-	DefaultMetricsPath = "/metrics"
-	drainTimeout       = 10 * time.Second
+	DefaultBackend             = "/tmp/cache-proxy"
+	DefaultBind                = "127.0.0.1:18080"
+	DefaultMetricsPath         = "/metrics"
+	drainTimeout               = 10 * time.Second
+	downstreamWriteIdleTimeout = 2 * time.Minute
 )
 
 type App struct {
 	config       *config.Document
-	store        *blobfs.Store
-	stats        *httpcache.Stats
-	upstreamGate *httpcache.UpstreamGate
+	stores       map[string]*blobfs.Store
+	backendLock  *backendLock
+	stats        *metrics.Stats
+	upstreamGate *proxyruntime.UpstreamGate
 	metricsReg   *prometheus.Registry
 
 	scheduler *scheduler.Scheduler
@@ -64,6 +66,8 @@ type App struct {
 	tenantUsageCachedAt   time.Time
 	tenantUsageCache      map[string]int64
 	tenantUsageRefreshing atomic.Bool
+	tenantUsageClosing    bool
+	tenantUsageWG         sync.WaitGroup
 }
 
 func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
@@ -81,11 +85,20 @@ func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int6
 }
 
 func (a *App) refreshTenantUsage(parent context.Context, tenants []string) {
-	if a.store == nil || !a.tenantUsageRefreshing.CompareAndSwap(false, true) {
+	if len(a.stores) == 0 || !a.tenantUsageRefreshing.CompareAndSwap(false, true) {
 		return
 	}
+	a.tenantUsageMu.Lock()
+	if a.tenantUsageClosing {
+		a.tenantUsageMu.Unlock()
+		a.tenantUsageRefreshing.Store(false)
+		return
+	}
+	a.tenantUsageWG.Add(1)
+	a.tenantUsageMu.Unlock()
 	names := append([]string(nil), tenants...)
 	go func() {
+		defer a.tenantUsageWG.Done()
 		defer a.tenantUsageRefreshing.Store(false)
 		baseCtx := a.lifecycleCtx
 		if baseCtx == nil {
@@ -96,7 +109,7 @@ func (a *App) refreshTenantUsage(parent context.Context, tenants []string) {
 		}
 		ctx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 		defer cancel()
-		usage := collectTenantUsage(ctx, names, a.store)
+		usage := collectInstanceUsage(ctx, names, a.stores)
 		a.tenantUsageMu.Lock()
 		a.tenantUsageCache = usage
 		a.tenantUsageCachedAt = time.Now()
@@ -120,19 +133,19 @@ func Validate(doc *config.Document) error {
 	if err := validateServerConfig(&docCopy); err != nil {
 		return err
 	}
-	store, err := blobfs.Open(dir, appBlobFSConfig())
+	registry := prometheus.NewRegistry()
+	stats := metrics.NewStats(registry)
+	upstreamGate := proxyruntime.NewUpstreamGate(upstreamGateConfig(docCopy.Storage.Download))
+
+	sched, err := scheduler.NewPersistent(filepath.Join(docCopy.Server.Backend, "scheduler.json"))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = store.Close() }()
-
-	registry := prometheus.NewRegistry()
-	stats := httpcache.NewStats(registry)
-	upstreamGate := httpcache.NewUpstreamGate(upstreamGateConfig(docCopy.Storage.Download))
-
-	sched := scheduler.New(store, registry)
 	validateCtx, validateCancel := context.WithCancel(context.Background())
-	_, err = planEntries(context.Background(), &docCopy, store, stats, upstreamGate, sched)
+	result, err := planEntries(context.Background(), &docCopy, stats, upstreamGate, sched)
+	if result != nil {
+		defer closeStores(result.Stores)
+	}
 	sched.Start(validateCtx)
 	defer validateCancel()
 	defer func() { _ = sched.Stop(validateCtx) }()
@@ -144,7 +157,6 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		return nil, errors.New("config document is nil")
 	}
 	normalizeDocument(doc)
-	utils.CleanStaleTempFiles(24 * time.Hour)
 	if err := validateServerConfig(doc); err != nil {
 		return nil, err
 	}
@@ -152,18 +164,22 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		return nil, err
 	}
 
-	store, err := blobfs.Open(doc.Server.Backend, appBlobFSConfig())
+	backendLock, err := lockBackend(doc.Server.Backend)
 	if err != nil {
 		return nil, err
 	}
+	utils.CleanStaleWorkFiles(filepath.Join(doc.Server.Backend, "instances"), 24*time.Hour)
 	metricsReg := prometheus.NewRegistry()
-	metricsReg.MustRegister(metrics.NewBlobFSCollector(store))
-	stats := httpcache.NewStats(metricsReg)
-	upstreamGate := httpcache.NewUpstreamGate(upstreamGateConfig(doc.Storage.Download))
+	stats := metrics.NewStats(metricsReg)
+	upstreamGate := proxyruntime.NewUpstreamGate(upstreamGateConfig(doc.Storage.Download))
 
-	sched := scheduler.New(store, metricsReg)
+	sched, err := scheduler.NewPersistent(filepath.Join(doc.Server.Backend, "scheduler.json"))
+	if err != nil {
+		_ = backendLock.Close()
+		return nil, err
+	}
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
-	status := newAppStatus(doc.Server.Status, store)
+	status := newAppStatus(doc.Server.Status)
 	sched.SetRunObserver(status.observeTaskRun)
 
 	cleanupOpenFailure := func() {
@@ -171,18 +187,28 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 		defer cancel()
 		_ = sched.Stop(stopCtx)
-		_ = store.Close()
+		_ = backendLock.Close()
 	}
 
-	entries, err := planEntries(ctx, doc, store, stats, upstreamGate, sched)
+	result, err := planEntries(ctx, doc, stats, upstreamGate, sched)
 	if err != nil {
 		cleanupOpenFailure()
 		return nil, err
 	}
 
+	entries := make(map[string]*proxyruntime.Entry, len(result.Entries))
+	for _, entry := range result.Entries {
+		entries[entry.Name] = entry
+	}
+	for name, store := range result.Stores {
+		prometheus.WrapRegistererWith(prometheus.Labels{"instance": name}, metricsReg).
+			MustRegister(metrics.NewBlobFSCollector(store))
+	}
+
 	app := &App{
 		config:       doc,
-		store:        store,
+		stores:       result.Stores,
+		backendLock:  backendLock,
 		stats:        stats,
 		upstreamGate: upstreamGate,
 		metricsReg:   metricsReg,
@@ -196,20 +222,24 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		stopRuntime:  stopRuntime,
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
+		_ = closeStores(result.Stores)
 		cleanupOpenFailure()
 		return nil, err
 	}
 	sched.Start(lifecycleCtx)
 	status.start(lifecycleCtx, app)
 
-	sched.Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey("_system", scheduler.TypeBlobGC, ""),
-		Interval: doc.Storage.GC.Blob.Duration(),
-		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			_, err := app.store.RunGC(ctx, blobfs.GCOptions{Compact: true})
-			return nil, err
-		},
-	})
+	for name, store := range app.stores {
+		instanceName, instanceStore := name, store
+		sched.Register(scheduler.TaskDef{
+			Key:      scheduler.NewTaskKey(instanceName, scheduler.TypeBlobGC, ""),
+			Interval: doc.Storage.GC.Blob.Duration(),
+			Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
+				_, err := instanceStore.RunGC(ctx, blobfs.GCOptions{Compact: true})
+				return nil, err
+			},
+		})
+	}
 
 	app.mainServer = newHTTPServer(doc.Server.Bind, app)
 	app.checkOrphans(lifecycleCtx)
@@ -219,12 +249,9 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !a.ready.Load() {
 		w.Header().Set("Retry-After", "5")
-		http.Error(w, "proxy not ready", http.StatusServiceUnavailable)
+		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
 		return
 	}
-	a.routesMu.RLock()
-	defer a.routesMu.RUnlock()
-
 	if req.Method == http.MethodGet && req.URL.Path == "/" {
 		a.serveHome(w, req)
 		return
@@ -240,15 +267,17 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		)).ServeHTTP(w, req)
 		return
 	}
+	a.routesMu.RLock()
 	prefix := a.matchProxyPrefix(req.URL.Path)
 	handler := a.pathHandlers[prefix]
+	a.routesMu.RUnlock()
 	if handler == nil {
 		http.NotFound(w, req)
 		return
 	}
 	next := req.Clone(req.Context())
 	next.Header = req.Header.Clone()
-	next.Header.Set("X-Cache-Proxy-Prefix", prefix)
+	next = proxyruntime.WithExternalBaseURL(next, strings.TrimRight(a.publicBaseURL(req), "/")+prefix)
 	http.StripPrefix(prefix, handler).ServeHTTP(w, next)
 }
 
@@ -300,11 +329,36 @@ func (a *App) Start() error {
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           downstreamWriteIdle(handler, downstreamWriteIdleTimeout),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
 	}
+}
+
+type idleWriteResponseWriter struct {
+	http.ResponseWriter
+	timeout time.Duration
+}
+
+func (w *idleWriteResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *idleWriteResponseWriter) WriteHeader(status int) {
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(w.timeout))
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *idleWriteResponseWriter) Write(data []byte) (int, error) {
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(w.timeout))
+	return w.ResponseWriter.Write(data)
+}
+
+func downstreamWriteIdle(next http.Handler, timeout time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		controller := http.NewResponseController(w)
+		defer controller.SetWriteDeadline(time.Time{})
+		next.ServeHTTP(&idleWriteResponseWriter{ResponseWriter: w, timeout: timeout}, request)
+	})
 }
 
 func (a *App) Close(ctx context.Context) error {
@@ -337,6 +391,20 @@ func (a *App) Close(ctx context.Context) error {
 	if a.stopRuntime != nil {
 		a.stopRuntime()
 	}
+	a.tenantUsageMu.Lock()
+	a.tenantUsageClosing = true
+	a.tenantUsageMu.Unlock()
+	usageDone := make(chan struct{})
+	go func() {
+		a.tenantUsageWG.Wait()
+		close(usageDone)
+	}()
+	select {
+	case <-usageDone:
+	case <-ctx.Done():
+		joined = errors.Join(joined, ctx.Err())
+		drained = false
+	}
 	a.routesMu.RLock()
 	handlers := make([]proxyruntime.Instance, len(a.handlers))
 	copy(handlers, a.handlers)
@@ -354,12 +422,20 @@ func (a *App) Close(ctx context.Context) error {
 		}
 	}
 	if drained {
-		if a.store != nil {
-			joined = errors.Join(joined, a.store.Close())
-		}
+		joined = errors.Join(joined, closeStores(a.stores))
+		joined = errors.Join(joined, a.backendLock.Close())
 		if joined == nil {
 			a.closed.Store(true)
 		}
+	}
+	return joined
+}
+
+func closeStores(stores map[string]*blobfs.Store) error {
+	var joined error
+	for name, store := range stores {
+		joined = errors.Join(joined, store.Close())
+		delete(stores, name)
 	}
 	return joined
 }
@@ -386,7 +462,7 @@ type bindDispatchHandler struct {
 func (h bindDispatchHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !h.app.ready.Load() {
 		w.Header().Set("Retry-After", "5")
-		http.Error(w, "proxy not ready", http.StatusServiceUnavailable)
+		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
 		return
 	}
 	h.app.routesMu.RLock()
@@ -396,7 +472,7 @@ func (h bindDispatchHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		http.NotFound(w, req)
 		return
 	}
-	next.ServeHTTP(w, req)
+	next.ServeHTTP(w, proxyruntime.WithExternalBaseURL(req, h.app.publicBaseURL(req)))
 }
 
 func (a *App) prepareHandlers(ctx context.Context) error {

@@ -8,11 +8,14 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxytransport "gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 type singleLoader struct {
@@ -34,75 +37,76 @@ func serveGitHTTP(w http.ResponseWriter, r *http.Request, svr transport.Transpor
 	}
 }
 
-func (h *gitHandler) proxyBootstrap(w http.ResponseWriter, request *http.Request) {
-	validRequest := (request.Method == http.MethodGet && request.URL.Path == "/info/refs" && request.URL.Query().Get("service") == "git-upload-pack") ||
-		(request.Method == http.MethodPost && request.URL.Path == "/git-upload-pack")
-	if !validRequest {
+func (h *gitHandler) proxyGitRead(w http.ResponseWriter, request *http.Request) {
+	if !isGitReadRequest(request) {
 		http.NotFound(w, request)
 		return
 	}
-	releaseAdmission, err := h.upstreamGate.Acquire(request.Context(), h.upstream, httpcache.AdmissionForeground)
-	if err != nil {
-		h.writeAdmissionError(w, err)
-		return
-	}
-	defer releaseAdmission()
 	upstreamURL, err := url.Parse(h.upstream)
 	if err != nil || (upstreamURL.Scheme != "http" && upstreamURL.Scheme != "https") {
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		proxytransport.WriteError(w, http.StatusBadGateway)
 		return
 	}
 	upstreamURL.Path = strings.TrimRight(upstreamURL.Path, "/") + request.URL.Path
 	upstreamURL.RawQuery = request.URL.RawQuery
-	proxyRequest, err := http.NewRequestWithContext(request.Context(), request.Method, upstreamURL.String(), request.Body)
+	var body io.Reader
+	if request.Method == http.MethodPost {
+		body = request.Body
+	}
+	proxyRequest, err := http.NewRequestWithContext(request.Context(), request.Method, upstreamURL.String(), body)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		proxytransport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	for key, values := range request.Header {
-		if isGitHopHeader(key) {
-			continue
-		}
-		for _, value := range values {
-			proxyRequest.Header.Add(key, value)
-		}
+	proxytransport.CopyEndToEndHeaders(proxyRequest.Header, request.Header)
+	if request.Method == http.MethodPost {
+		proxytransport.SanitizeMethodOverrideHeaders(proxyRequest.Header)
+	} else {
+		proxytransport.SanitizeReadRequestHeaders(proxyRequest.Header)
 	}
 	if auth, ok := h.auth.(interface{ SetAuth(*http.Request) }); ok {
 		auth.SetAuth(proxyRequest)
 	}
+	proxyRequest = proxytransport.WithAdmission(request.Context(), proxyRequest, proxytransport.AdmissionForeground)
 	response, err := h.bootstrapClient.Do(proxyRequest)
 	if err != nil {
+		if _, ok := proxyruntime.AdmissionRetryAfterSeconds(err); ok {
+			h.writeAdmissionError(w, err)
+			return
+		}
 		if !errors.Is(err, request.Context().Err()) {
 			slog.Warn("git bootstrap proxy failed", "instance", h.name, "upstream", h.redactedUpstream(), "err", err)
 		}
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		proxytransport.WriteError(w, http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode == http.StatusTooManyRequests {
-		h.upstreamGate.RateLimited(h.upstream, response.Header.Get("Retry-After"))
-	}
-	for key, values := range response.Header {
-		if isGitHopHeader(key) {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	proxytransport.CopyEndToEndHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	if request.Method != http.MethodHead {
 		_, _ = io.Copy(w, response.Body)
 	}
 }
 
-func isGitHopHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
-		return true
-	default:
+func isGitReadRequest(request *http.Request) bool {
+	if _, err := storeio.CleanURLPath(request.URL); err != nil {
 		return false
 	}
+	services, serviceSet := request.URL.Query()["service"]
+	return request.Method == http.MethodGet && request.URL.Path == "/info/refs" && len(services) == 1 && services[0] == "git-upload-pack" ||
+		request.Method == http.MethodPost && request.URL.Path == "/git-upload-pack" ||
+		(request.Method == http.MethodGet || request.Method == http.MethodHead) && (!serviceSet || len(services) == 1 && services[0] == "") && isDumbGitPath(request.URL.Path)
+}
+
+func shouldProxyGitRead(request *http.Request) bool {
+	return strings.Contains(request.Header.Get("Git-Protocol"), "version=2") ||
+		(request.Method == http.MethodGet || request.Method == http.MethodHead) && request.URL.Query().Get("service") == "" && isDumbGitPath(request.URL.Path)
+}
+
+func isDumbGitPath(requestPath string) bool {
+	return requestPath == "/HEAD" || requestPath == "/info/refs" || requestPath == "/objects/info/packs" ||
+		requestPath == "/objects/info/alternates" || requestPath == "/objects/info/http-alternates" ||
+		strings.HasPrefix(requestPath, "/objects/pack/") || strings.HasPrefix(requestPath, "/objects/")
 }
 
 func handleInfoRefs(w http.ResponseWriter, r *http.Request, svr transport.Transport, name string) {
@@ -110,7 +114,7 @@ func handleInfoRefs(w http.ResponseWriter, r *http.Request, svr transport.Transp
 	session, err := svr.NewUploadPackSession(ep, nil)
 	if err != nil {
 		slog.Error("git info/refs session failed", "instance", name, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		proxytransport.WriteError(w, http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = session.Close() }() // Close error is non-actionable after session use
@@ -118,10 +122,10 @@ func handleInfoRefs(w http.ResponseWriter, r *http.Request, svr transport.Transp
 	ar, err := session.AdvertisedReferencesContext(r.Context())
 	if err != nil {
 		slog.Error("git info/refs advertised refs failed", "instance", name, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		proxytransport.WriteError(w, http.StatusInternalServerError)
 		return
 	}
-	ar.Prefix = [][]byte{[]byte("# service=git-upload-pack\n")}
+	ar.Prefix = [][]byte{[]byte("# service=git-upload-pack"), pktline.Flush}
 
 	w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -136,7 +140,7 @@ func handleUploadPack(w http.ResponseWriter, r *http.Request, svr transport.Tran
 	session, err := svr.NewUploadPackSession(ep, nil)
 	if err != nil {
 		slog.Error("git upload-pack session failed", "instance", name, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		proxytransport.WriteError(w, http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = session.Close() }() // Close error is non-actionable after session use
@@ -144,14 +148,14 @@ func handleUploadPack(w http.ResponseWriter, r *http.Request, svr transport.Tran
 	req := packp.NewUploadPackRequest()
 	if err := req.Decode(r.Body); err != nil {
 		slog.Error("git upload-pack decode failed", "instance", name, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		proxytransport.WriteError(w, http.StatusInternalServerError)
 		return
 	}
 
 	resp, err := session.UploadPack(r.Context(), req)
 	if err != nil {
 		slog.Error("git upload-pack failed", "instance", name, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		proxytransport.WriteError(w, http.StatusInternalServerError)
 		return
 	}
 

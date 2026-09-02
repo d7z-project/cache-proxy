@@ -1,22 +1,27 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"gopkg.d7z.net/blobfs"
 )
 
 type TaskType string
 
 const (
-	TypeBlobGC        TaskType = "blob_gc"
-	TypeExpireCleanup TaskType = "expire_cleanup"
-	TypeGitSync       TaskType = "git_sync"
+	TypeBlobGC          TaskType = "blob_gc"
+	TypeExpireCleanup   TaskType = "expire_cleanup"
+	TypeGitSync         TaskType = "git_sync"
+	TypeMetadataRefresh TaskType = "metadata_refresh"
+	TypeMetadataGC      TaskType = "metadata_gc"
 )
 
 type TaskStatus string
@@ -31,10 +36,11 @@ const (
 type TaskHandler func(context.Context) (*TaskOutcome, error)
 
 type TaskOutcome struct {
-	Result     string
-	ReasonCode string
-	Detail     string
-	Message    string
+	Result        string
+	ReasonCode    string
+	Detail        string
+	Message       string
+	ContinueAfter time.Duration
 }
 
 var ErrTaskSkipped = errors.New("task skipped")
@@ -85,24 +91,59 @@ type TaskRun struct {
 }
 
 type scheduledTask struct {
-	info    TaskInfo
-	handler TaskHandler
+	info      TaskInfo
+	handler   TaskHandler
+	triggered bool
 }
 
 type Scheduler struct {
-	mu       sync.Mutex
-	tasks    map[TaskKey]*scheduledTask
-	observer func(TaskRun)
-	wake     chan struct{}
-	done     chan struct{}
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
-	stopped  bool
+	mu        sync.Mutex
+	tasks     map[TaskKey]*scheduledTask
+	observer  func(TaskRun)
+	wake      chan struct{}
+	done      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	started   bool
+	stopped   bool
+	statePath string
+	persisted map[string]time.Time
+	persistMu sync.Mutex
 }
 
-func New(_ *blobfs.Store, _ prometheus.Registerer) *Scheduler {
+func newScheduler() *Scheduler {
 	return &Scheduler{tasks: make(map[TaskKey]*scheduledTask), wake: make(chan struct{}, 1), done: make(chan struct{})}
+}
+
+func NewPersistent(statePath string) (*Scheduler, error) {
+	s := newScheduler()
+	s.statePath = statePath
+	s.persisted = make(map[string]time.Time)
+	data, err := os.ReadFile(statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return s, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read scheduler state: %w", err)
+	}
+	var state struct {
+		Version int                  `json:"version"`
+		NextRun map[string]time.Time `json:"next_run"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return nil, fmt.Errorf("decode scheduler state: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("scheduler state contains trailing data")
+	}
+	if state.Version != 1 {
+		return nil, fmt.Errorf("unsupported scheduler state version %d", state.Version)
+	}
+	s.persisted = state.NextRun
+	return s, nil
 }
 
 func (s *Scheduler) Register(def TaskDef) {
@@ -118,19 +159,35 @@ func (s *Scheduler) Register(def TaskDef) {
 	if def.RunImmediately {
 		next = time.Now()
 	}
+	if persistentTask(def.Key.typ) {
+		if saved, ok := s.persisted[def.Key.String()]; ok && !saved.IsZero() {
+			next = saved
+		}
+	}
 	s.tasks[def.Key] = &scheduledTask{info: TaskInfo{Key: def.Key, Status: StatusIdle, NextRun: next, Interval: def.Interval}, handler: def.Handler}
 	s.mu.Unlock()
 	s.signal()
 }
 
-func (s *Scheduler) Info(key TaskKey) (TaskInfo, bool) {
+// TriggerNow makes a registered task eligible for the next scheduler
+// iteration. A trigger received while the task runs schedules another run.
+func (s *Scheduler) TriggerNow(key TaskKey) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	task, ok := s.tasks[key]
-	if !ok {
-		return TaskInfo{}, false
+	task := s.tasks[key]
+	if task == nil || s.stopped {
+		s.mu.Unlock()
+		return false
 	}
-	return task.info, true
+	if task.info.Status == StatusRunning {
+		task.triggered = true
+		s.mu.Unlock()
+		return true
+	}
+	task.info.NextRun = time.Now()
+	s.mu.Unlock()
+	_ = s.persist()
+	s.signal()
+	return true
 }
 
 func (s *Scheduler) Snapshot() []TaskInfo {
@@ -240,8 +297,10 @@ func (s *Scheduler) run(key TaskKey) {
 	cancel()
 	finished := time.Now()
 	run := TaskRun{Key: key, StartedAt: started, FinishedAt: finished, Duration: finished.Sub(started)}
+	var continueAfter time.Duration
 	if outcome != nil {
 		run.Result, run.ReasonCode, run.Detail, run.Message = outcome.Result, outcome.ReasonCode, outcome.Detail, outcome.Message
+		continueAfter = outcome.ContinueAfter
 	}
 	if run.Result == "" {
 		run.Result = "success"
@@ -254,7 +313,16 @@ func (s *Scheduler) run(key TaskKey) {
 	s.mu.Lock()
 	if current := s.tasks[key]; current != nil {
 		current.info.LastRun = finished
-		current.info.NextRun = finished.Add(interval)
+		next := interval
+		if continueAfter > 0 && continueAfter < next {
+			next = continueAfter
+		}
+		if current.triggered {
+			current.triggered = false
+			current.info.NextRun = finished
+		} else {
+			current.info.NextRun = finished.Add(next)
+		}
 		current.info.RunCount++
 		current.info.LastError = run.Err
 		if err != nil {
@@ -266,9 +334,66 @@ func (s *Scheduler) run(key TaskKey) {
 	}
 	observer := s.observer
 	s.mu.Unlock()
+	_ = s.persist()
 	if observer != nil {
 		observer(run)
 	}
+}
+
+func persistentTask(taskType TaskType) bool {
+	return taskType == TypeMetadataRefresh || taskType == TypeMetadataGC
+}
+
+func (s *Scheduler) persist() error {
+	if s.statePath == "" {
+		return nil
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.mu.Lock()
+	nextRun := make(map[string]time.Time)
+	for key, task := range s.tasks {
+		if persistentTask(key.typ) {
+			nextRun[key.String()] = task.info.NextRun
+		}
+	}
+	s.mu.Unlock()
+	data, err := json.Marshal(struct {
+		Version int                  `json:"version"`
+		NextRun map[string]time.Time `json:"next_run"`
+	}{Version: 1, NextRun: nextRun})
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(s.statePath), 0o755); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(s.statePath), ".scheduler-*")
+	if err != nil {
+		return err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, s.statePath); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(s.statePath))
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }
 
 func (s *Scheduler) signal() {

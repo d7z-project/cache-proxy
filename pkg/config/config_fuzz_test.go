@@ -10,16 +10,17 @@ import (
 
 func FuzzConfigDecoders(f *testing.F) {
 	f.Add(uint8(0), []byte("instances: []\n"))
-	f.Add(uint8(0), []byte("instances:\n  - name: npm\n    enabled: true\n    mode: npm\n    path: /npm\n    upstreams: [https://registry.npmjs.org]\n"))
+	f.Add(uint8(0), []byte("instances:\n  - name: npm\n    enabled: true\n    mode: npm\n    path: /npm\n    upstream: https://registry.npmjs.org\n"))
 	f.Add(uint8(0), []byte("instances: []\n---\ninstances: []\n"))
 	f.Add(uint8(1), []byte("30s"))
 	f.Add(uint8(2), []byte("never"))
+	f.Add(uint8(3), []byte("2GiB"))
 
 	f.Fuzz(func(t *testing.T, kind uint8, data []byte) {
 		if len(data) > 64<<10 {
 			t.Skip()
 		}
-		switch kind % 3 {
+		switch kind % 4 {
 		case 0:
 			doc, err := Decode(bytes.NewReader(data))
 			if err != nil {
@@ -38,6 +39,8 @@ func FuzzConfigDecoders(f *testing.F) {
 			fuzzYAMLRoundTrip(t, data, new(Duration))
 		case 2:
 			fuzzYAMLRoundTrip(t, data, new(Expiration))
+		case 3:
+			fuzzYAMLRoundTrip(t, data, new(ByteSize))
 		}
 	})
 }
@@ -45,6 +48,9 @@ func FuzzConfigDecoders(f *testing.F) {
 func fuzzYAMLRoundTrip(t *testing.T, data []byte, target any) {
 	t.Helper()
 	if yaml.Unmarshal(data, target) != nil {
+		return
+	}
+	if size, ok := target.(*ByteSize); ok && *size <= 0 {
 		return
 	}
 	encoded, err := yaml.Marshal(target)

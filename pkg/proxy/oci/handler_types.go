@@ -1,7 +1,6 @@
 package oci
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -9,16 +8,19 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.artifact.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v1+json, application/json"
 
 type authHandler struct {
-	tokenMu sync.Mutex
-	tokens  map[string]ociToken
-	group   singleflight.Group
+	tokenMu    sync.Mutex
+	tokens     map[string]ociToken
+	preemptive string
+	group      singleflight.Group
 }
 
 type refState struct {
@@ -26,6 +28,7 @@ type refState struct {
 	SourceUpstream string            `yaml:"source_upstream"`
 	Repo           string            `yaml:"repo"`
 	Ref            string            `yaml:"ref"`
+	Representation string            `yaml:"representation,omitempty"`
 	FetchedAt      time.Time         `yaml:"fetched_at"`
 	ExpireAfter    config.Expiration `yaml:"expire_after"`
 	ManifestDigest string            `yaml:"manifest_digest"`
@@ -52,19 +55,21 @@ type handler struct {
 	upstream        string
 	expireAfter     config.Expiration
 	metadataTTL     time.Duration
+	workDir         string
+	spooler         *storeio.Spooler
 	options         *Options
 	store           *blobfs.Store
-	stats           *httpcache.Stats
+	stats           *metrics.Stats
 	client          *utils.HTTPClientWrapper
-	upstreamGate    *httpcache.UpstreamGate
-	lifecycleCtx    context.Context
-	cancel          context.CancelFunc
-	wait            sync.WaitGroup
-	closeMu         sync.Mutex
-	closing         bool
+	upstreamGate    *transport.UpstreamGate
+	lifecycle       *storeio.Lifecycle
 	auth            authHandler
 	downloads       sync.Map
 	refLocks        *utils.RWLockGroup
 	manifestMu      sync.Mutex
 	manifestReaders map[string]int
+	cleanupMu       sync.Mutex
+	cleanupPhase    string
+	cleanupCursor   string
+	cleanupRefs     map[string]struct{}
 }

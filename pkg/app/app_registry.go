@@ -1,85 +1,69 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
-	"slices"
-	"time"
-
-	"gopkg.d7z.net/blobfs"
-	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"os"
+	"path/filepath"
 )
 
-const registryTenant = "_proxy_instances"
-
-type registryManifest struct {
-	Instances []string `json:"instances"`
-	UpdatedAt string   `json:"updated_at"`
-}
-
-func saveRegistry(ctx context.Context, store *blobfs.Store, doc *config.Document) {
-	var names []string
-	for _, inst := range doc.Instances {
-		names = append(names, inst.Name)
-	}
-	slices.Sort(names)
-	manifest := registryManifest{
-		Instances: names,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := store.MkdirAll(registryTenant+"/", 0o755); err != nil {
-		slog.Warn("failed to prepare registry tenant", "err", err)
-		return
-	}
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		slog.Warn("failed to encode registry manifest", "err", err)
-		return
-	}
-	_, err = store.Put(ctx, registryTenant, "manifest.json", bytes.NewReader(data), nil)
-	if err != nil {
-		slog.Warn("failed to save registry manifest", "err", err)
-	}
-}
-
 func (a *App) checkOrphans(ctx context.Context) {
-	dir, err := a.store.Open("/")
+	root := filepath.Join(a.config.Server.Backend, "instances")
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
-	defer func() { _ = dir.Close() }() // read-only dir, close error is harmless
-	entries, err := dir.Readdir(-1)
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		configuredSchema := ""
+		if configured, ok := a.entries[name]; ok && configured.Enabled {
+			configuredSchema = configured.Mode + "-v4"
+		}
+		if configuredSchema != "" {
+			a.checkOrphanSchemas(ctx, root, name, configuredSchema)
+			continue
+		}
+		instancePath := filepath.Join(root, name)
+		slog.Warn("orphan instance storage found", "instance", name, "path", instancePath)
+		if a.config.Storage.OrphanPolicy != "auto" {
+			continue
+		}
+		if err := os.RemoveAll(instancePath); err != nil {
+			slog.Warn("failed to clean orphan instance storage", "instance", name, "err", err)
+		} else {
+			slog.Info("cleaned orphan instance storage", "instance", name)
+		}
+	}
+}
+
+func (a *App) checkOrphanSchemas(ctx context.Context, root, instance, currentSchema string) {
+	instancePath := filepath.Join(root, instance)
+	entries, err := os.ReadDir(instancePath)
 	if err != nil {
 		return
 	}
-
-	expected := make(map[string]struct{}, len(a.entries))
-	for name := range a.entries {
-		expected[name] = struct{}{}
-	}
-	expected["_proxy_instances"] = struct{}{}
-
-	for _, e := range entries {
-		if !e.IsDir() {
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		if !entry.IsDir() || entry.Name() == currentSchema {
 			continue
 		}
-		name := e.Name()
-		if _, ok := expected[name]; ok {
+		path := filepath.Join(instancePath, entry.Name())
+		slog.Warn("orphan instance schema found", "instance", instance, "schema", entry.Name(), "path", path)
+		if a.config.Storage.OrphanPolicy != "auto" {
 			continue
 		}
-		usage := collectTenantUsage(ctx, []string{name}, a.store)
-		slog.Warn("orphan tenant found", "tenant", name, "size_bytes", usage[name])
-
-		if a.config.Storage.OrphanPolicy == "auto" {
-			if err := a.store.DeleteTenant(ctx, name); err != nil {
-				slog.Warn("failed to clean orphan tenant", "tenant", name, "err", err)
-			} else {
-				slog.Info("cleaned orphan tenant", "tenant", name)
-			}
+		if err := os.RemoveAll(path); err != nil {
+			slog.Warn("failed to clean orphan instance schema", "instance", instance, "schema", entry.Name(), "err", err)
+		} else {
+			slog.Info("cleaned orphan instance schema", "instance", instance, "schema", entry.Name())
 		}
 	}
-
-	saveRegistry(ctx, a.store, a.config)
 }

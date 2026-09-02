@@ -1,0 +1,38 @@
+package rpm
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"path/filepath"
+
+	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
+)
+
+type Driver struct{}
+
+func NewDriver() proxyruntime.ModeDriver { return Driver{} }
+func (Driver) Mode() string              { return config.ModeRPM }
+
+func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	if !plan.Enabled() {
+		return nil
+	}
+	origin, err := url.Parse(plan.Upstream())
+	if err != nil {
+		return fmt.Errorf("instance %s: parse RPM upstream: %w", plan.Name(), err)
+	}
+	client, err := transport.NewPlanClient(plan, config.ModeRPM)
+	if err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	handler, err := newHandler(plan.Name(), origin, filepath.Join(plan.StoreRoot(), "state"), filepath.Join(plan.StoreRoot(), "work"), plan.Store(), client, plan.Scheduler())
+	if err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
+	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), rpmArtifactTenant, plan.Store(), plan.CleanupConfig())
+	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{Handler: handler, CloseContext: handler.CloseContext})
+}

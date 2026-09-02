@@ -1,8 +1,6 @@
 package utils
 
 import (
-	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,12 +14,6 @@ const DefaultIdleBodyTimeout = 5 * time.Minute
 
 // DefaultUserAgent identifies cache-proxy to upstream services.
 const DefaultUserAgent = "cache-proxy/1"
-
-type ResponseWrapper struct {
-	StatusCode int
-	Headers    map[string]string
-	Body       io.ReadCloser
-}
 
 type HTTPClientWrapper struct {
 	*http.Client
@@ -76,13 +68,6 @@ func VariesByUserAgent(values ...string) bool {
 	return false
 }
 
-func DefaultDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dialer := net.Dialer{Timeout: timeout}
-		return dialer.DialContext(ctx, network, addr)
-	}
-}
-
 func DefaultHTTPClientWrapper() *HTTPClientWrapper {
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -96,8 +81,9 @@ func DefaultHTTPClientWrapper() *HTTPClientWrapper {
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 100
 	transport.IdleConnTimeout = 90 * time.Second
-	transport.DialContext = DefaultDialContext(3 * time.Second)
+	transport.DialContext = (&net.Dialer{Timeout: 3 * time.Second}).DialContext
 	transport.ResponseHeaderTimeout = DefaultHeaderTimeout
+	transport.MaxResponseHeaderBytes = 1 << 20
 	return &HTTPClientWrapper{
 		Client:          &http.Client{Transport: transport, Timeout: DefaultHTTPTimeout},
 		UserAgent:       DefaultUserAgent,
@@ -110,56 +96,6 @@ func (client *HTTPClientWrapper) WrapBody(body io.ReadCloser) io.ReadCloser {
 		return body
 	}
 	return NewIdleTimeoutReadCloser(body, client.IdleBodyTimeout)
-}
-
-func (response *ResponseWrapper) FlushClose(req *http.Request, resp http.ResponseWriter) error {
-	defer func() { _ = response.Close() }()
-	for key, value := range response.Headers {
-		resp.Header().Set(key, value)
-	}
-	if seeker, ok := response.Body.(io.ReadSeekCloser); ok {
-		lastModified := time.Time{}
-		if value := response.Headers["Last-Modified"]; value != "" {
-			if parsed, err := time.Parse(http.TimeFormat, value); err == nil {
-				lastModified = parsed
-			}
-		}
-		http.ServeContent(resp, req, "", lastModified, seeker)
-		return nil
-	}
-	resp.WriteHeader(response.StatusCode)
-	if req.Method == http.MethodHead {
-		return nil
-	}
-	buffer := make([]byte, 32<<10)
-	flushed := false
-	for {
-		n, readErr := response.Body.Read(buffer)
-		if n > 0 {
-			if _, err := resp.Write(buffer[:n]); err != nil {
-				return err
-			}
-			if !flushed {
-				flushed = true
-				if err := http.NewResponseController(resp).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-					return err
-				}
-			}
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return nil
-			}
-			return readErr
-		}
-	}
-}
-
-func (response *ResponseWrapper) Close() error {
-	if response.Body != nil {
-		return response.Body.Close()
-	}
-	return nil
 }
 
 func ParseFetchedAt(value string) (time.Time, error) {

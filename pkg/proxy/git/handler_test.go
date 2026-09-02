@@ -1,18 +1,25 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
+	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
 
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/shared/httpcache"
+	proxytransport "gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 func TestColdMirrorPassesThroughSmartHTTP(t *testing.T) {
@@ -29,6 +36,60 @@ func TestColdMirrorPassesThroughSmartHTTP(t *testing.T) {
 	require.NoError(t, handler.Stop(context.Background()))
 }
 
+func TestGitInfoRefsUsesSmartHTTPPreamble(t *testing.T) {
+	storage := memory.NewStorage()
+	branch := plumbing.NewBranchReferenceName("main")
+	hash := plumbing.NewHash(strings.Repeat("a", 40))
+	require.NoError(t, storage.SetReference(plumbing.NewHashReference(branch, hash)))
+	require.NoError(t, storage.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, branch)))
+
+	recorder := httptest.NewRecorder()
+	handleInfoRefs(recorder, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil), gitserver.NewServer(&singleLoader{storer: storage}), "test")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.True(t, bytes.HasPrefix(recorder.Body.Bytes(), []byte("001e# service=git-upload-pack\n0000")))
+}
+
+func TestGitReadOnlyProtocolSurface(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		require.Equal(t, http.MethodPost, request.Method)
+		require.Equal(t, "/repo/git-upload-pack", request.URL.Path)
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		require.Equal(t, "fetch", string(body))
+		_, _ = io.WriteString(w, "pack")
+	}))
+	defer upstream.Close()
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/git-upload-pack", strings.NewReader("fetch")))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "pack", response.Body.String())
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/git-receive-pack", strings.NewReader("push")))
+	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
+	require.Equal(t, int32(1), requests.Load())
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-receive-pack", nil))
+	require.Equal(t, http.StatusForbidden, response.Code)
+	require.Equal(t, int32(1), requests.Load())
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack&service=git-receive-pack", nil))
+	require.Equal(t, http.StatusForbidden, response.Code)
+	require.Equal(t, int32(1), requests.Load())
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/objects/../config", nil))
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	require.Equal(t, int32(1), requests.Load())
+}
+
 func TestSyncingMirrorPassesThroughWithSharedAdmission(t *testing.T) {
 	upstreamRequest := make(chan struct{}, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -37,8 +98,8 @@ func TestSyncingMirrorPassesThroughWithSharedAdmission(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gate := httpcache.NewUpstreamGate(httpcache.UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
-	release, err := gate.Acquire(context.Background(), upstream.URL, httpcache.AdmissionForeground)
+	gate := proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+	release, err := gate.Acquire(context.Background(), upstream.URL, proxytransport.AdmissionForeground)
 	require.NoError(t, err)
 	handler := newGitHandler(gitConfig{
 		name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), ""), upstreamGate: gate,
@@ -79,4 +140,20 @@ func TestBuildAuthExpandsEnvironmentAndRejectsEmptyCredentials(t *testing.T) {
 
 	_, err = buildAuth(&AuthConfig{Type: "token", Password: "${GIT_TEST_MISSING}"})
 	require.ErrorContains(t, err, "requires password")
+}
+
+func TestGitHandlerAppliesDefaultOperationTimeout(t *testing.T) {
+	handler := newGitHandler(gitConfig{billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	require.Equal(t, defaultOperationTimeout, handler.operationTimeout)
+	require.Equal(t, defaultOperationTimeout, handler.bootstrapClient.Timeout)
+}
+
+func TestGitHandlerRejectsRequestsAfterStop(t *testing.T) {
+	handler := newGitHandler(gitConfig{billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	require.NoError(t, handler.Stop(context.Background()))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil))
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, "1", recorder.Header().Get("Retry-After"))
 }

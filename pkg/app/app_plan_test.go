@@ -42,7 +42,7 @@ instances:
     enabled: false
     mode: cargo
     path: /cargo
-    upstreams: [https://index.example]
+    upstream: https://index.example
 `))
 	require.NoError(t, err)
 
@@ -60,14 +60,14 @@ instances:
 
 func TestValidateServerConfigRejectsInvalidDownloadSettings(t *testing.T) {
 	tests := map[string]func(*config.Document){
-		"negative metadata TTL": func(doc *config.Document) {
-			doc.Cache.MetadataTTL = -1
-		},
 		"negative blob GC interval": func(doc *config.Document) {
 			doc.Storage.GC.Blob = -1
 		},
 		"negative cleanup batch": func(doc *config.Document) {
 			doc.Storage.Cleanup.BatchSize = -1
+		},
+		"unknown orphan policy": func(doc *config.Document) {
+			doc.Storage.OrphanPolicy = "delete"
 		},
 		"negative status sample interval": func(doc *config.Document) {
 			doc.Server.Status.DiskSampleInterval = -1
@@ -125,7 +125,7 @@ instances:
     enabled: true
     mode: file
     path: ` + route + `
-    upstreams: [https://files.example]
+    upstream: https://files.example
 `))
 		require.NoError(t, err)
 		require.ErrorContains(t, Validate(doc), "conflicts with status API", route)
@@ -140,7 +140,7 @@ instances:
     enabled: true
     mode: git
     path: /source
-    upstreams: [https://git.example/repo.git]
+    upstream: https://git.example/repo.git
     options:
       ` + field + `: -1s
 `))
