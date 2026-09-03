@@ -14,7 +14,7 @@ test-fuzz:
 	for file in $$(find . -type f -name '*_test.go' -exec grep -l '^func Fuzz' {} +); do \
 		package=./$$(dirname "$$file"); \
 		for target in $$(awk '/^func Fuzz/{name=$$2; sub(/\(.*/, "", name); print name}' "$$file"); do \
-			go test -timeout 30s "$$package" -run='^$$' -fuzz="^$$target$$" -fuzztime=1s; \
+			go test -timeout 30s "$$package" -run='^$$' -fuzz="^$$target$$" -fuzztime=1000x; \
 		done; \
 	done
 
