@@ -95,11 +95,6 @@ func (h *handler) Stop(ctx context.Context) error {
 	return h.lifecycle.Close(ctx)
 }
 
-func (h *handler) beginOperation() (func(), bool) {
-	_, done, err := h.lifecycle.Begin()
-	return done, err == nil
-}
-
 func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool, error) {
 	h.cleanupMu.Lock()
 	defer h.cleanupMu.Unlock()
@@ -256,8 +251,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.stats.RecordRequest(h.name, config.ModeOCI, req.Method, "REJECTED", http.StatusMethodNotAllowed, 0)
 		return
 	}
-	done, ok := h.beginOperation()
-	if !ok {
+	_, done, err := h.lifecycle.Begin()
+	if err != nil {
 		transport.WriteError(w, http.StatusServiceUnavailable)
 		return
 	}

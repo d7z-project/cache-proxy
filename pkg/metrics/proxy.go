@@ -153,7 +153,7 @@ func (s *Stats) RecordUpstreamRequest(
 	if status == 0 {
 		statusText = "error"
 	}
-	failed := upstreamStatusIsError(status)
+	failed := status == 0 || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 	s.metrics.upstreamRequestsTotal.WithLabelValues(instance, mode, method, statusText).Inc()
 
 	entry := s.getOrCreateEntry(instance, mode)
@@ -197,10 +197,6 @@ func (s *Stats) RecordUpstreamRequest(
 	if failed {
 		s.totalUpstreamErrors.Add(1)
 	}
-}
-
-func upstreamStatusIsError(status int) bool {
-	return status == 0 || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 func (s *Stats) BeginUpstreamRequest(instance, mode, upstream string) func() {

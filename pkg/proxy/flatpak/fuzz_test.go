@@ -8,19 +8,22 @@ import (
 )
 
 func FuzzOSTreePathClassification(f *testing.F) {
-	for _, seed := range []string{"summary", "summary.idx", "summaries/156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e.gz", "objects/ab/cdef.file", "objects/00/00000000000000000000000000000000000000000000000000000000000000.commitmeta", "deltas/ab/cd/superblock", "delta-indexes/_1/CNHDS81donGnhBJHDT9ww12oUNEP9E2v1eWqzmuqg.index", "config", "refs/heads/stable"} {
+	for _, seed := range []string{"summary", "summary.idx", "summaries/156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e.gz", "summaries/0000000000000000000000000000000000000000000000000000000000000000-156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e.delta", "objects/ab/cdef.file", "objects/00/00000000000000000000000000000000000000000000000000000000000000.commitmeta", "deltas/ab/cd/superblock", "delta-indexes/_1/CNHDS81donGnhBJHDT9ww12oUNEP9E2v1eWqzmuqg.index", "config", "refs/heads/stable"} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, path string) {
 		if len(path) > 4096 {
 			t.Skip()
 		}
-		_, _ = metadataAnchorPath(path)
+		_, metadata := metadataAnchorPath(path)
 		_ = isDescriptorPath(path)
-		_ = isDeltaPath(path)
+		delta := isDeltaPath(path)
 		_ = isDeltaIndexPath(path)
 		_ = isObjectPath(path)
 		_, _, _ = objectDigestFromPath(path)
+		if isIndexedSummaryDeltaPath(path) && (metadata || !delta) {
+			t.Fatal("indexed summary delta classifications overlap or are incomplete")
+		}
 	})
 }
 

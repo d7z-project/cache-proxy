@@ -40,9 +40,6 @@ func metadataAnchorPath(cleanPath string) (string, bool) {
 	case strings.HasSuffix(name, ".idx.sig"):
 		digest := strings.TrimSuffix(name, ".idx.sig")
 		return "summary.idx", len(digest) == 64 && isLowerHex(digest)
-	case strings.HasSuffix(name, ".delta"):
-		digests := strings.Split(strings.TrimSuffix(name, ".delta"), "-")
-		return "summary.idx", len(digests) == 2 && len(digests[0]) == 64 && len(digests[1]) == 64 && isLowerHex(digests[0]) && isLowerHex(digests[1])
 	default:
 		return "", false
 	}
@@ -53,7 +50,16 @@ func isDescriptorPath(cleanPath string) bool {
 }
 
 func isDeltaPath(cleanPath string) bool {
-	return cleanPath == "deltas" || strings.HasPrefix(cleanPath, "deltas/") || isDeltaIndexPath(cleanPath)
+	return cleanPath == "deltas" || strings.HasPrefix(cleanPath, "deltas/") || isDeltaIndexPath(cleanPath) || isIndexedSummaryDeltaPath(cleanPath)
+}
+
+func isIndexedSummaryDeltaPath(cleanPath string) bool {
+	const prefix = "summaries/"
+	if !strings.HasPrefix(cleanPath, prefix) || !strings.HasSuffix(cleanPath, ".delta") {
+		return false
+	}
+	digests := strings.TrimSuffix(strings.TrimPrefix(cleanPath, prefix), ".delta")
+	return len(digests) == 129 && digests[64] == '-' && isLowerHex(digests[:64]) && isLowerHex(digests[65:])
 }
 
 func isDeltaIndexPath(cleanPath string) bool {

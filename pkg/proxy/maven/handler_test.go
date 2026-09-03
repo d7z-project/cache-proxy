@@ -75,7 +75,7 @@ func TestMavenMetadataPublishesUpstreamUpdate(t *testing.T) {
 	target := "/org/example/tool/maven-metadata.xml"
 	key := mavenKey(h.origin, strings.TrimPrefix(target, "/"), httptest.NewRequest(http.MethodGet, target, nil))
 	cachedBody := func() string {
-		object, err := storeio.OpenResponse(context.Background(), h.store, mavenTenant, key)
+		object, err := storeio.OpenResponse(context.Background(), h.artifacts.Store, mavenTenant, key)
 		if err != nil {
 			return ""
 		}

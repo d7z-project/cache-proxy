@@ -14,7 +14,7 @@ const (
 	defaultIdleBodyTimeout = 5 * time.Minute
 
 	// DefaultUserAgent identifies cache-proxy to upstream services.
-	DefaultUserAgent = "cache-proxy/1"
+	DefaultUserAgent = "cache-proxy"
 )
 
 // UpstreamHTTPClient carries the HTTP settings needed by the OCI transport,

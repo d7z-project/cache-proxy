@@ -182,6 +182,26 @@ func TestOSTreeDeltaIndexPathValidation(t *testing.T) {
 	}
 }
 
+func TestFlatpakIndexedSummaryDeltaPathValidation(t *testing.T) {
+	oldDigest := strings.Repeat("0", 64)
+	newDigest := strings.Repeat("f", 64)
+	valid := "summaries/" + oldDigest + "-" + newDigest + ".delta"
+	require.True(t, isIndexedSummaryDeltaPath(valid))
+	require.True(t, isDeltaPath(valid))
+	_, metadata := metadataAnchorPath(valid)
+	require.False(t, metadata)
+
+	for _, invalid := range []string{
+		"summaries/" + strings.Repeat("0", 63) + "-" + newDigest + ".delta",
+		"summaries/" + oldDigest + newDigest + ".delta",
+		"summaries/" + oldDigest + "-" + strings.Repeat("F", 64) + ".delta",
+		"summaries/" + oldDigest + "-" + newDigest + ".delta/extra",
+		"summaries/nested/" + oldDigest + "-" + newDigest + ".delta",
+	} {
+		require.False(t, isIndexedSummaryDeltaPath(invalid), invalid)
+	}
+}
+
 func TestFlatpakDescriptorUsesDownstreamRepresentationCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("ETag", `"source"`)
@@ -277,6 +297,61 @@ func TestFlatpakIndexedSummaryPublishesVerifiedClosure(t *testing.T) {
 	require.Equal(t, int32(4), requests.Load())
 }
 
+func TestFlatpakIndexedSummaryDeltaRemainsMutableAfterGenerationPublish(t *testing.T) {
+	index, compressedSummary := flatpakIndexedSummaryFixture(t)
+	const summaryDigest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"
+	deltaPath := "/summaries/" + strings.Repeat("0", 64) + "-" + summaryDigest + ".delta"
+	deltaBody := []byte("opaque indexed summary delta")
+	var deltaAvailable atomic.Bool
+	var deltaRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/summary.idx":
+			_, _ = w.Write(index)
+		case "/summaries/" + summaryDigest + ".gz":
+			_, _ = w.Write(compressedSummary)
+		case deltaPath:
+			deltaRequests.Add(1)
+			if !deltaAvailable.Load() {
+				http.NotFound(w, request)
+				return
+			}
+			w.Header().Set("X-Upstream-Resource", "indexed-summary-delta")
+			_, _ = w.Write(deltaBody)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	h := newFlatpakTestHandler(t, server.URL)
+
+	anchor := httptest.NewRecorder()
+	h.ServeHTTP(anchor, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
+	require.Equal(t, http.StatusOK, anchor.Code)
+	_, err := h.metadata.Refresh(context.Background(), 10)
+	require.NoError(t, err)
+
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, deltaPath, nil))
+	require.Equal(t, http.StatusNotFound, missing.Code)
+	require.Equal(t, "BYPASS", missing.Header().Get("X-Cache"))
+
+	deltaAvailable.Store(true)
+	for index, expectedCache := range []string{"MISS", "HIT"} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, deltaPath, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		if index == 0 {
+			require.Equal(t, expectedCache, response.Header().Get("X-Cache"))
+		} else {
+			require.Contains(t, []string{expectedCache, "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+		require.Equal(t, "indexed-summary-delta", response.Header().Get("X-Upstream-Resource"))
+		require.Equal(t, deltaBody, response.Body.Bytes())
+	}
+	require.Equal(t, int32(2), deltaRequests.Load())
+}
+
 func TestFlatpakSummaryPublishesUpstreamGenerationUpdate(t *testing.T) {
 	var revision atomic.Int32
 	revision.Store(1)
@@ -304,6 +379,9 @@ func TestFlatpakSummaryPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.NotNil(t, previous)
 
 	revision.Store(2)
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
 	_, err = h.metadata.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	current := h.metadata.Current("flatpak:summary")
@@ -354,6 +432,9 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.NotNil(t, previous)
 
 	revision.Store(2)
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
 	_, err = h.metadata.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	current := h.metadata.Current("flatpak:summary.idx")

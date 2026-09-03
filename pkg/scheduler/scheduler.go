@@ -181,7 +181,6 @@ func (s *Scheduler) TriggerNow(key TaskKey) bool {
 	}
 	task.info.NextRun = time.Now()
 	s.mu.Unlock()
-	_ = s.persist()
 	s.signal()
 	return true
 }

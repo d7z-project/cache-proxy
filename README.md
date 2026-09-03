@@ -241,13 +241,31 @@ the complete client command for every configured instance.
 Mutable protocol pointers use conditional requests against their configured
 upstream. A client request with `Cache-Control: no-cache` or `max-age=0`
 requests revalidation. Updated content is published atomically; a transient
-upstream error can continue serving the committed response.
+upstream error can continue serving the committed response. Maven and Linux
+package artifacts share coalesced streaming fills and conditional refreshes,
+while each protocol retains its own path classification and cache identity.
 
-Linux repository and Flatpak metadata is exposed only from a complete,
+Linux repository and Flatpak metadata are exposed only from a complete,
 verified generation. Packages and sidecars use stable cache keys, so they
 remain available while a metadata refresh is pending or has failed. Repository
 metadata refresh runs every 15 minutes and can be scheduled immediately by
-revalidating the current anchor.
+revalidating the current anchor. Each generation is bound to the exact
+configured upstream; changing that URL invalidates its current and pending
+commit markers so the new upstream must publish a complete generation.
+
+Debian Release entries are validated per physical representation. A listed
+uncompressed index may be absent when a compressed sibling is available, as
+permitted by the repository format. Acquire-By-Hash repositories prefer the
+by-hash location and fall back to the same upstream canonical path only for a
+missing object; fallback bytes must still match the Release size and digest.
+Failed candidate generations use bounded retry delays and revalidate their
+anchor before resuming, while committed metadata remains available.
+
+RPM generations contain `repomd.xml` and its exact referenced closure;
+unreferenced same-origin `repodata` resources remain transparent. Flatpak
+indexed-summary deltas use a finite mutable cache outside the summary
+generation and remain opaque to the proxy; Flatpak verifies the reconstructed
+summary.
 
 Request paths are classified after one percent-decoding pass. Equivalent legal
 encodings share a cache identity, while encoded separators and parent traversal
@@ -273,8 +291,8 @@ Each enabled instance uses an isolated directory:
 
 Backend contents are private application state. Use a dedicated persistent
 volume and allow only one `cache-proxy` process to write to it. Downloads are
-streamed while cache publication continues within the configured disk and
-concurrency limits.
+streamed while cache publication continues. Every protocol handler uses the
+configured per-object limit and the shared process-wide temporary spool budget.
 
 ### Upstream Access
 
@@ -287,7 +305,7 @@ authentication or an upstream connection.
 
 | Endpoint | Description |
 |---|---|
-| `/` | Dashboard and generated client commands |
+| `/` | Aggregate dashboard, interactive runtime status, and generated client commands |
 | `/-/status/summary` | Service and storage summary |
 | `/-/status/disk` | Bounded disk usage history |
 | `/-/status/events` | Recent maintenance events; accepts `limit` |

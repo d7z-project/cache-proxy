@@ -36,9 +36,24 @@ func TestSchedulerPersistsOnlyMetadataTiming(t *testing.T) {
 	scheduler, err := NewPersistent(statePath)
 	require.NoError(t, err)
 	metadataKey := NewTaskKey("deb", TypeMetadataRefresh, "deb")
-	scheduler.Register(TaskDef{Key: metadataKey, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) { return nil, nil }})
+	runs := make(chan struct{}, 1)
+	scheduler.Register(TaskDef{Key: metadataKey, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) {
+		runs <- struct{}{}
+		return nil, nil
+	}})
 	scheduler.Register(TaskDef{Key: NewTaskKey("deb", TypeExpireCleanup, ""), Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) { return nil, nil }})
 	require.True(t, scheduler.TriggerNow(metadataKey))
+	_, err = os.Stat(statePath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	ctx, cancel := context.WithCancel(context.Background())
+	scheduler.Start(ctx)
+	<-runs
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(statePath)
+		return statErr == nil
+	}, time.Second, time.Millisecond)
+	cancel()
+	require.NoError(t, scheduler.Stop(context.Background()))
 
 	restored, err := NewPersistent(statePath)
 	require.NoError(t, err)
@@ -47,7 +62,7 @@ func TestSchedulerPersistsOnlyMetadataTiming(t *testing.T) {
 	require.Len(t, infos, 1)
 	info := infos[0]
 	require.Equal(t, metadataKey, info.Key)
-	require.WithinDuration(t, time.Now(), info.NextRun, time.Second)
+	require.WithinDuration(t, time.Now().Add(time.Hour), info.NextRun, time.Second)
 
 	require.NoError(t, os.WriteFile(statePath, []byte(`{"next_run":{},"unknown":true}`), 0o644))
 	_, err = NewPersistent(statePath)

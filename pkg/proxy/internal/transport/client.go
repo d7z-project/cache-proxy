@@ -60,51 +60,15 @@ func NewClient(instance, mode string, cfg *config.TransportConfig, gate *Upstrea
 		return nil, fmt.Errorf("configure transport: %w", err)
 	}
 	baseClient := NewUpstreamHTTPClient()
-	httpTransport, ok := baseClient.Transport.(*http.Transport)
-	if !ok {
+	if _, ok := baseClient.Transport.(*http.Transport); !ok {
 		return nil, errors.New("default HTTP transport has unexpected type")
 	}
-	// Protocol digests are defined over the upstream wire representation. Keep
-	// content codings intact instead of allowing net/http to transparently
-	// decompress responses before a mode verifies or stores them.
-	httpTransport.DisableCompression = true
-	httpTransport.MaxResponseHeaderBytes = maxResponseHeaderBytes
-	if cfg != nil {
-		if cfg.Proxy != "" {
-			proxyURL, _ := url.Parse(strings.TrimSpace(cfg.Proxy))
-			httpTransport.Proxy = http.ProxyURL(proxyURL)
-		}
-		if cfg.DialTimeout > 0 {
-			httpTransport.DialContext = (&net.Dialer{Timeout: cfg.DialTimeout.Duration(), KeepAlive: 30 * time.Second}).DialContext
-		}
-		if cfg.HeaderTimeout > 0 {
-			httpTransport.ResponseHeaderTimeout = cfg.HeaderTimeout.Duration()
-		}
-		if cfg.MaxIdleConns > 0 {
-			httpTransport.MaxIdleConns = cfg.MaxIdleConns
-		}
-	}
-	client := &http.Client{
-		Transport:     httpTransport,
-		Timeout:       baseClient.Timeout,
-		CheckRedirect: CheckReadOnlyRedirect,
-	}
-	ConfigureAdmission(client, gate)
-	if cfg != nil && cfg.MaxRequestDuration > 0 {
-		client.Timeout = cfg.MaxRequestDuration.Duration()
-	}
+	ConfigureHTTPClient(baseClient, instance, cfg)
+	ConfigureAdmission(baseClient.Client, gate)
 	result := &Client{
-		instance: instance, mode: mode, httpClient: client, stats: stats,
-		userAgent: DefaultUserAgent, idleBodyTimeout: baseClient.IdleBodyTimeout,
-	}
-	if cfg != nil {
-		if cfg.UserAgent != "" {
-			result.userAgent = cfg.UserAgent
-			result.userAgentConfigured = true
-		}
-		if cfg.IdleBodyTimeout > 0 {
-			result.idleBodyTimeout = cfg.IdleBodyTimeout.Duration()
-		}
+		instance: instance, mode: mode, httpClient: baseClient.Client, stats: stats,
+		userAgent: baseClient.UserAgent, userAgentConfigured: baseClient.UserAgentConfigured,
+		idleBodyTimeout: baseClient.IdleBodyTimeout,
 	}
 	return result, nil
 }

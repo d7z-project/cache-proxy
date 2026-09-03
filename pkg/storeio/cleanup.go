@@ -96,10 +96,7 @@ func (c *responseCleaner) cleanBatch(ctx context.Context) (bool, error) {
 					return false, statErr
 				}
 				if statErr == nil {
-					var metadata struct {
-						DeleteAt   time.Time `json:"delete_at"`
-						LogicalKey string    `json:"logical_key"`
-					}
+					var metadata storedResponseMetadata
 					decodeErr := json.Unmarshal([]byte(info.Options["metadata"]), &metadata)
 					corrupt := decodeErr != nil || metadata.DeleteAt.IsZero() || metadata.LogicalKey == "" || responsePath(metadata.LogicalKey) != objectPath
 					if (corrupt || !now.Before(metadata.DeleteAt)) && !c.opts.DryRun {

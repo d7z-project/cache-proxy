@@ -20,6 +20,7 @@ import (
 	"github.com/ulikunitz/xz"
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/artifactcache"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -35,19 +36,32 @@ const (
 type handler struct {
 	origin    *url.URL
 	workDir   string
-	store     *blobfs.Store
 	client    *transport.Client
 	lifecycle *storeio.Lifecycle
 	flights   storeio.FlightGroup
 	metadata  *filerepo.GenerationManager
+	artifacts artifactcache.Cache
 }
 
 func newHandler(instance string, origin *url.URL, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, taskScheduler *scheduler.Scheduler) (*handler, error) {
-	h := &handler{origin: origin, workDir: workDir, store: blobs, client: client, lifecycle: storeio.NewLifecycle()}
+	h := &handler{origin: origin, workDir: workDir, client: client, lifecycle: storeio.NewLifecycle()}
+	h.artifacts = artifactcache.Cache{
+		Tenant:    rpmArtifactTenant,
+		Upstream:  origin.String(),
+		Freshness: rpmArtifactFreshness,
+		Store:     blobs,
+		Spooler:   client.EnsureSpooler(workDir),
+		Lifecycle: h.lifecycle,
+		Flights:   &h.flights,
+		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
+			return h.fetchUpstream(ctx, method, requestPath, rawQuery, header, transport.AdmissionForeground)
+		},
+		CacheKey: h.artifactKey,
+	}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "rpm", Tenant: "rpm-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxRepomdSize, Store: blobs, Scheduler: taskScheduler,
-		Fetch: func(ctx context.Context, _ string, requestPath string, header http.Header) (*http.Response, error) {
+		Instance: instance, Mode: "rpm", Tenant: "rpm-metadata", Upstream: origin.String(), StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxRepomdSize, Store: blobs, Scheduler: taskScheduler,
+		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
 		Build: h.buildSnapshot,
@@ -71,11 +85,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
-	if handled, _, _ := h.metadata.ServeCurrent(w, request, cleaned, isRPMMetadataPath(cleaned)); handled {
+	if handled, _, _ := h.metadata.ServeCurrent(w, request, cleaned, isRepomdPath(cleaned)); handled {
 		return
 	}
 	if isRPMArtifactPath(cleaned) && request.Header.Get("Authorization") == "" && request.Header.Get("Cookie") == "" {
-		h.serveArtifact(w, request, cleaned)
+		_, _ = h.artifacts.Serve(w, request, cleaned)
 		return
 	}
 	if request.Method != http.MethodGet || !isRepomdPath(cleaned) || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" {
@@ -126,7 +140,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)
 			finished = true
-			h.metadata.ScheduleDiscovery(h.lifecycle, root, root, cleaned, h.origin.String())
+			h.metadata.ScheduleDiscovery(h.lifecycle, root, root, cleaned)
 			transport.WriteResponse(w, request, response, "BYPASS")
 			return
 		}
@@ -140,7 +154,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	stageErr := parseErr
 	if parseErr == nil {
 		_, _ = spool.File.Seek(0, io.SeekStart)
-		stageErr = h.metadata.StageAnchor(h.lifecycle.Context(), root, cleaned, h.origin.String(), response.Header, spool.File)
+		stageErr = h.metadata.StageAnchor(h.lifecycle.Context(), root, cleaned, response.Header, spool.File)
 		if stageErr != nil {
 			slog.Warn("rpm metadata staging failed", "path", cleaned, "err", stageErr)
 		}
@@ -177,8 +191,17 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 			return err
 		}
 		if item.OpenChecksum != "" || item.OpenSize >= 0 {
-			if err := inspectOpenMetadata(ctx, blob, item); err != nil {
+			reader, err := blob.Open(ctx)
+			if err != nil {
 				return err
+			}
+			inspectErr := inspectOpenMetadataReader(ctx, reader, blob.Size(), item)
+			closeErr := reader.Close()
+			if inspectErr != nil {
+				return inspectErr
+			}
+			if closeErr != nil {
+				return closeErr
 			}
 		}
 	}
@@ -188,15 +211,6 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		}
 	}
 	return nil
-}
-
-func inspectOpenMetadata(ctx context.Context, blob *filerepo.Blob, item repomdItem) error {
-	reader, err := blob.Open(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = reader.Close() }()
-	return inspectOpenMetadataReader(ctx, reader, blob.Size(), item)
 }
 
 func inspectOpenMetadataReader(ctx context.Context, reader io.Reader, wireSize int64, item repomdItem) error {
@@ -309,13 +323,6 @@ func isRepomdPath(cleaned string) bool {
 	return path.Base(cleaned) == "repomd.xml" && path.Base(path.Dir(cleaned)) == "repodata"
 }
 
-func isRPMMetadataPath(cleaned string) bool {
-	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
-		return false
-	}
-	return isRepomdPath(cleaned) || strings.Contains(cleaned, "/repodata/")
-}
-
 func joinRoot(root, name string) string {
 	if root == "." || root == "" {
 		return strings.TrimPrefix(name, "/")
@@ -323,133 +330,9 @@ func joinRoot(root, name string) string {
 	return strings.TrimSuffix(root, "/") + "/" + strings.TrimPrefix(name, "/")
 }
 
-func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cleaned string) {
-	key := h.artifactKey(cleaned, request)
-	object, _ := storeio.OpenResponse(request.Context(), h.store, rpmArtifactTenant, key)
-	if object != nil {
-		fresh := time.Since(object.Fetched) < rpmArtifactFreshness && !transport.RequestForcesRevalidation(request)
-		if fresh {
-			serveRPMArtifactObject(w, request, object, "HIT")
-			return
-		}
-		if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-			_ = object.Reader.Close()
-			h.forwardUpstream(w, request, cleaned)
-			return
-		}
-
-		flightKey := "revalidate:" + key
-		flight, leader := h.flights.Begin(flightKey)
-		if !leader {
-			_ = h.flights.Wait(request.Context(), flight)
-			if updated, err := storeio.OpenResponse(request.Context(), h.store, rpmArtifactTenant, key); err == nil {
-				_ = object.Reader.Close()
-				serveRPMArtifactObject(w, request, updated, "COALESCED")
-				return
-			}
-			serveRPMArtifactObject(w, request, object, "STALE")
-			return
-		}
-
-		header := http.Header{}
-		header.Set("If-None-Match", object.Header.Get("ETag"))
-		header.Set("If-Modified-Since", object.Header.Get("Last-Modified"))
-		response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
-		if err != nil || response.StatusCode >= http.StatusInternalServerError {
-			if response != nil {
-				_ = response.Body.Close()
-			}
-			h.flights.Finish(flightKey, flight, err)
-			serveRPMArtifactObject(w, request, object, "STALE")
-			return
-		}
-		if response.StatusCode == http.StatusNotModified {
-			_ = response.Body.Close()
-			err = storeio.TouchResponse(h.lifecycle.Context(), h.store, rpmArtifactTenant, key, response.Header)
-			h.flights.Finish(flightKey, flight, err)
-			result := "REVALIDATED"
-			if err != nil {
-				result = "STALE"
-			}
-			serveRPMArtifactObject(w, request, object, result)
-			return
-		}
-		_ = object.Reader.Close()
-		if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) {
-			h.flights.Finish(flightKey, flight, nil)
-			_ = storeio.DeleteResponse(context.Background(), h.store, rpmArtifactTenant, key)
-			transport.WriteResponse(w, request, response, "BYPASS")
-			return
-		}
-		h.streamArtifact(w, request, response, key, flightKey, flight)
-		return
-	}
-
-	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		h.forwardUpstream(w, request, cleaned)
-		return
-	}
-	flight, leader := h.flights.Begin(key)
-	if !leader {
-		_ = h.flights.Wait(request.Context(), flight)
-		if cached, err := storeio.OpenResponse(request.Context(), h.store, rpmArtifactTenant, key); err == nil {
-			serveRPMArtifactObject(w, request, cached, "COALESCED")
-			return
-		}
-		h.forwardUpstream(w, request, cleaned)
-		return
-	}
-	if cached, err := storeio.OpenResponse(request.Context(), h.store, rpmArtifactTenant, key); err == nil {
-		h.flights.Finish(key, flight, nil)
-		serveRPMArtifactObject(w, request, cached, "HIT")
-		return
-	}
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
-	if err != nil {
-		h.flights.Finish(key, flight, err)
-		transport.WriteError(w, http.StatusBadGateway)
-		return
-	}
-	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) {
-		h.flights.Finish(key, flight, nil)
-		transport.WriteResponse(w, request, response, "BYPASS")
-		return
-	}
-	h.streamArtifact(w, request, response, key, key, flight)
-}
-
-func (h *handler) streamArtifact(w http.ResponseWriter, request *http.Request, response *http.Response, key, flightKey string, flight *storeio.Flight) {
-	header := response.Header.Clone()
-	header.Del("Content-Length")
-	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-		Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
-		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(ctx, h.store, rpmArtifactTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
-		},
-		Done: func(err error) { h.flights.Finish(flightKey, flight, err) },
-	})
-	if err != nil {
-		h.flights.Finish(flightKey, flight, err)
-		transport.WriteResponse(w, request, response, "BYPASS")
-		return
-	}
-	defer func() { _ = reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), header)
-	w.Header().Set("X-Cache", "MISS")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, reader)
-}
-
 func (h *handler) artifactKey(cleaned string, request *http.Request) string {
 	digest := sha256.Sum256([]byte(h.origin.String() + "\x00" + cleaned + "\x00" + request.URL.RawQuery + "\x00" + request.Header.Get("Accept-Encoding")))
 	return "refs/" + hex.EncodeToString(digest[:])
-}
-
-func serveRPMArtifactObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) {
-	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.Header)
-	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, path.Base(request.URL.Path), object.Fetched, object.Reader)
 }
 
 func isRPMArtifactPath(cleaned string) bool {

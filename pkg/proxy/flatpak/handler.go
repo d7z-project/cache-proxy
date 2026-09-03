@@ -44,8 +44,8 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 	h := &handler{origin: origin, workDir: workDir, store: store, client: client, lifecycle: storeio.NewLifecycle()}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "flatpak", Tenant: "flatpak-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), Store: store, Scheduler: taskScheduler,
-		Fetch: func(ctx context.Context, _ string, requestPath string, header http.Header) (*http.Response, error) {
+		Instance: instance, Mode: "flatpak", Tenant: "flatpak-metadata", Upstream: origin.String(), StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), Store: store, Scheduler: taskScheduler,
+		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, header, transport.AdmissionRefresh)
 		},
 		Build: func(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
@@ -179,7 +179,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)
 			finished = true
-			h.metadata.ScheduleDiscovery(h.lifecycle, rootID, ".", cleaned, h.origin.String())
+			h.metadata.ScheduleDiscovery(h.lifecycle, rootID, ".", cleaned)
 			transport.WriteResponse(w, request, response, "BYPASS")
 			return
 		}
@@ -190,7 +190,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 	}
 	defer func() { _ = spool.Close() }()
 	_, _ = spool.File.Seek(0, io.SeekStart)
-	stageErr := h.metadata.StageAnchorID(h.lifecycle.Context(), rootID, ".", cleaned, h.origin.String(), response.Header, spool.File)
+	stageErr := h.metadata.StageAnchorID(h.lifecycle.Context(), rootID, ".", cleaned, response.Header, spool.File)
 	if stageErr != nil {
 		slog.Warn("flatpak metadata staging failed", "path", cleaned, "err", stageErr)
 	}

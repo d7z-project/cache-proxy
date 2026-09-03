@@ -10,8 +10,6 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 const cacheStoreTimeout = 10 * time.Minute
@@ -19,7 +17,6 @@ const cacheStoreTimeout = 10 * time.Minute
 type StreamConfig struct {
 	Body       io.ReadCloser
 	ObjectPath string
-	WorkDir    string
 	Spooler    *Spooler
 	MaxBytes   int64
 	Lifecycle  *Lifecycle
@@ -46,15 +43,13 @@ func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 	if cfg.StoreFn == nil {
 		return nil, errors.New("stream store function is nil")
 	}
-	workDir := cfg.WorkDir
+	if cfg.Spooler == nil {
+		return nil, errors.New("stream spooler is nil")
+	}
+	workDir := cfg.Spooler.workDir
 	limit := cfg.MaxBytes
-	var budget *proxyruntime.SpoolBudget
-	if cfg.Spooler != nil {
-		workDir = cfg.Spooler.workDir
-		budget = cfg.Spooler.budget
-		if limit <= 0 || cfg.Spooler.maxObject > 0 && limit > cfg.Spooler.maxObject {
-			limit = cfg.Spooler.maxObject
-		}
+	if limit <= 0 || cfg.Spooler.maxObject > 0 && limit > cfg.Spooler.maxObject {
+		limit = cfg.Spooler.maxObject
 	}
 	if limit <= 0 {
 		limit = int64(^uint64(0) >> 1)
@@ -68,7 +63,7 @@ func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 		reserve = *cfg.ExpectedSize
 		spoolLimit = *cfg.ExpectedSize
 	}
-	reservation, ok := budget.TryReserve(reserve)
+	reservation, ok := cfg.Spooler.budget.TryReserve(reserve)
 	if !ok {
 		return nil, ErrSpoolBusy
 	}

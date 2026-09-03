@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"sort"
@@ -52,12 +53,14 @@ type Checksum struct {
 }
 
 type ObjectSpec struct {
-	Path         string
-	FetchPath    string
-	ExpectedSize *int64
-	MaxBytes     int64
-	Checksums    []Checksum
-	Optional     bool
+	Path              string
+	FetchPath         string
+	FallbackFetchPath string
+	Aliases           []string
+	ExpectedSize      *int64
+	MaxBytes          int64
+	Checksums         []Checksum
+	Optional          bool
 }
 
 type Object struct {
@@ -86,19 +89,19 @@ type Anchor struct {
 	RootID     string
 	Root       string
 	Path       string
-	Upstream   string
 	Generation string
 	Header     http.Header
 	blob       *Blob
 }
 
-type FetchFunc func(context.Context, string, string, http.Header) (*http.Response, error)
+type FetchFunc func(context.Context, string, http.Header) (*http.Response, error)
 type BuildFunc func(context.Context, *RefreshSession, Anchor) error
 
 type Config struct {
 	Instance       string
 	Mode           string
 	Tenant         string
+	Upstream       string
 	StateDir       string
 	WorkDir        string
 	Spooler        *storeio.Spooler
@@ -161,6 +164,7 @@ const (
 
 type retryWindow struct {
 	candidateID string
+	failures    int
 	notBefore   time.Time
 }
 
@@ -180,8 +184,9 @@ type GenerationManager struct {
 	discoveryPending  map[string]bool
 	refreshMu         sync.Mutex
 	refreshCursor     string
-	pollCursor        string
-	pollNext          bool
+	pollQueue         []string
+	pollQueued        map[string]bool
+	pollCycleActive   bool
 	gcMu              sync.Mutex
 	gcPhase           generationGCPhase
 	gcCursor          string
@@ -207,8 +212,12 @@ func (e *retryableRefreshError) Error() string { return e.err.Error() }
 func (e *retryableRefreshError) Unwrap() error { return e.err }
 
 func New(config Config) (*GenerationManager, error) {
-	if config.Store == nil || config.Fetch == nil || config.Build == nil || config.StateDir == "" || config.Tenant == "" {
+	if config.Store == nil || config.Fetch == nil || config.Build == nil || config.StateDir == "" || config.Tenant == "" || config.Upstream == "" {
 		return nil, errors.New("filerepo configuration is incomplete")
+	}
+	upstream, err := url.Parse(config.Upstream)
+	if err != nil || upstream.Host == "" || upstream.Scheme != "http" && upstream.Scheme != "https" {
+		return nil, errors.New("filerepo upstream must be an absolute HTTP(S) URL")
 	}
 	if config.KeepPrevious < 1 {
 		config.KeepPrevious = 1
@@ -228,7 +237,7 @@ func New(config Config) (*GenerationManager, error) {
 	h := &GenerationManager{
 		config: config, current: make(map[string]*liveSnapshot), pending: make(map[string]pendingAnchor), readers: make(map[string]int),
 		lastSeen: make(map[string]time.Time), lastSeenPersisted: make(map[string]time.Time), retryWindows: make(map[string]retryWindow), retiring: make(map[string]bool),
-		discoveryPending: make(map[string]bool),
+		discoveryPending: make(map[string]bool), pollQueued: make(map[string]bool),
 	}
 	if err := h.restore(); err != nil {
 		return nil, err
@@ -240,22 +249,10 @@ func New(config Config) (*GenerationManager, error) {
 			Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
 				more, err := h.Refresh(ctx, 1)
 				outcome := &scheduler.TaskOutcome{Result: "success"}
-				if err != nil {
-					outcome.ContinueAfter = retryDelay
-				} else if more {
+				if more {
 					outcome.ContinueAfter = continuationDelay
 				} else {
-					now := time.Now()
-					h.mu.RLock()
-					for rootID, retry := range h.retryWindows {
-						pending := h.pending[rootID]
-						current := h.current[rootID]
-						active := pending.CandidateID == retry.candidateID || current != nil && current.snapshot.CandidateID == retry.candidateID
-						if wait := retry.notBefore.Sub(now); active && wait > 0 && (outcome.ContinueAfter == 0 || wait < outcome.ContinueAfter) {
-							outcome.ContinueAfter = wait
-						}
-					}
-					h.mu.RUnlock()
+					outcome.ContinueAfter = h.nextRetryDelay(time.Now())
 				}
 				return outcome, err
 			},
@@ -276,11 +273,11 @@ func New(config Config) (*GenerationManager, error) {
 	return h, nil
 }
 
-func (h *GenerationManager) StageAnchor(ctx context.Context, root, anchorPath, upstream string, header http.Header, body io.ReadSeeker) error {
-	return h.StageAnchorID(ctx, root, root, anchorPath, upstream, header, body)
+func (h *GenerationManager) StageAnchor(ctx context.Context, root, anchorPath string, header http.Header, body io.ReadSeeker) error {
+	return h.StageAnchorID(ctx, root, root, anchorPath, header, body)
 }
 
-func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anchorPath, upstream string, header http.Header, body io.ReadSeeker) error {
+func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anchorPath string, header http.Header, body io.ReadSeeker) error {
 	root, err := cleanRoot(root)
 	if err != nil {
 		return err
@@ -323,7 +320,7 @@ func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anc
 	if _, err := h.config.Store.Put(ctx, h.config.Tenant, key, body, nil); err != nil {
 		return fmt.Errorf("stage metadata anchor: %w", err)
 	}
-	pending := pendingAnchor{RootID: rootID, Root: root, Path: anchorPath, Upstream: upstream, Generation: generation, CandidateID: candidateID, Header: cloneHeader(header), Key: key}
+	pending := pendingAnchor{RootID: rootID, Root: root, Path: anchorPath, Upstream: h.config.Upstream, Generation: generation, CandidateID: candidateID, Header: cloneHeader(header), Key: key}
 	now := time.Now().UTC()
 	preparedLastSeen, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{RootID: rootID, SeenAt: now}, maxRepositoryMarkerSize)
 	if err != nil {
@@ -359,8 +356,33 @@ func (h *GenerationManager) TriggerRefresh() {
 	}
 }
 
-func (h *GenerationManager) Discover(ctx context.Context, rootID, root, anchorPath, upstream string) error {
-	response, err := h.config.Fetch(ctx, upstream, anchorPath, http.Header{"Accept-Encoding": {"identity"}})
+func (h *GenerationManager) requestCurrentPoll(rootID string) {
+	h.mu.Lock()
+	_, pending := h.pending[rootID]
+	if h.current[rootID] != nil && !pending {
+		if h.pollQueued[rootID] {
+			for index, queuedRootID := range h.pollQueue {
+				if queuedRootID == rootID {
+					copy(h.pollQueue[1:index+1], h.pollQueue[:index])
+					h.pollQueue[0] = rootID
+					break
+				}
+			}
+		} else {
+			h.pollQueued[rootID] = true
+			h.pollQueue = append(h.pollQueue, "")
+			copy(h.pollQueue[1:], h.pollQueue[:len(h.pollQueue)-1])
+			h.pollQueue[0] = rootID
+		}
+	}
+	h.mu.Unlock()
+	if !pending {
+		h.TriggerRefresh()
+	}
+}
+
+func (h *GenerationManager) Discover(ctx context.Context, rootID, root, anchorPath string) error {
+	response, err := h.config.Fetch(ctx, anchorPath, http.Header{"Accept-Encoding": {"identity"}})
 	if err != nil {
 		return err
 	}
@@ -376,14 +398,14 @@ func (h *GenerationManager) Discover(ctx context.Context, rootID, root, anchorPa
 		return err
 	}
 	defer func() { _ = spool.Close() }()
-	return h.StageAnchorID(ctx, rootID, root, anchorPath, upstream, response.Header, spool.File)
+	return h.StageAnchorID(ctx, rootID, root, anchorPath, response.Header, spool.File)
 }
 
-func (h *GenerationManager) ScheduleDiscovery(lifecycle *storeio.Lifecycle, rootID, root, anchorPath, upstream string) {
+func (h *GenerationManager) ScheduleDiscovery(lifecycle *storeio.Lifecycle, rootID, root, anchorPath string) {
 	if lifecycle == nil {
 		return
 	}
-	key := rootID + "\x00" + upstream + "\x00" + anchorPath
+	key := rootID + "\x00" + anchorPath
 	h.discoveryMu.Lock()
 	if h.discoveryPending[key] {
 		h.discoveryMu.Unlock()
@@ -404,7 +426,7 @@ func (h *GenerationManager) ScheduleDiscovery(lifecycle *storeio.Lifecycle, root
 			return
 		case <-timer.C:
 		}
-		if err := h.Discover(ctx, rootID, root, anchorPath, upstream); err != nil {
+		if err := h.Discover(ctx, rootID, root, anchorPath); err != nil {
 			slog.Warn("metadata background discovery failed", "mode", h.config.Mode, "path", anchorPath, "err", err)
 		}
 	})
@@ -418,7 +440,61 @@ func (h *GenerationManager) ScheduleDiscovery(lifecycle *storeio.Lifecycle, root
 func (h *GenerationManager) Refresh(ctx context.Context, limit int) (bool, error) {
 	h.refreshMu.Lock()
 	defer h.refreshMu.Unlock()
-	now := time.Now()
+	if err := h.flushLastSeen(ctx); err != nil {
+		return false, err
+	}
+	if limit <= 0 {
+		h.mu.RLock()
+		limit = len(h.pending) + len(h.current) + len(h.pollQueue) + 1
+		h.mu.RUnlock()
+	}
+	processed := 0
+	processedPending := false
+	for processed < limit {
+		if pending, retry, ok := h.nextPending(time.Now()); ok {
+			processed++
+			processedPending = true
+			if retry.candidateID == pending.CandidateID && retry.failures > 0 {
+				updated, replaced, err := h.revalidatePending(ctx, pending)
+				if err != nil {
+					h.recordRefreshFailure(pending.RootID, pending.CandidateID)
+					return h.hasRunnableRefresh(time.Now()), err
+				}
+				if replaced {
+					continue
+				}
+				pending = updated
+			}
+			if err := h.refreshRoot(ctx, pending); err != nil {
+				h.recordRefreshFailure(pending.RootID, pending.CandidateID)
+				return h.hasRunnableRefresh(time.Now()), err
+			}
+			h.mu.Lock()
+			delete(h.retryWindows, pending.RootID)
+			h.mu.Unlock()
+			continue
+		}
+		if processedPending {
+			break
+		}
+		rootID, ok := h.nextCurrentPoll(time.Now())
+		if !ok {
+			break
+		}
+		processed++
+		if err := h.pollCurrent(ctx, rootID); err != nil {
+			return h.hasRunnableRefresh(time.Now()), err
+		}
+	}
+	h.mu.Lock()
+	if len(h.pollQueue) == 0 {
+		h.pollCycleActive = false
+	}
+	h.mu.Unlock()
+	return h.hasRunnableRefresh(time.Now()), nil
+}
+
+func (h *GenerationManager) nextPending(now time.Time) (pendingAnchor, retryWindow, bool) {
 	h.mu.RLock()
 	roots := make([]string, 0, len(h.pending))
 	for rootID, pending := range h.pending {
@@ -427,142 +503,265 @@ func (h *GenerationManager) Refresh(ctx context.Context, limit int) (bool, error
 			roots = append(roots, rootID)
 		}
 	}
-	pendingCount := len(h.pending)
-	h.mu.RUnlock()
-	hadPending := pendingCount != 0
-	if !hadPending || h.pollNext {
-		if err := h.pollCurrent(ctx); err != nil {
-			h.pollNext = false
-			if !hadPending {
-				return false, err
-			}
-			slog.Warn("metadata poll failed while pending refresh remains runnable", "mode", h.config.Mode, "err", err)
-		}
-		h.pollNext = false
-		if !hadPending {
-			h.mu.RLock()
-			for rootID, pending := range h.pending {
-				retry := h.retryWindows[rootID]
-				if retry.candidateID != pending.CandidateID || !now.Before(retry.notBefore) {
-					roots = append(roots, rootID)
-				}
-			}
-			h.mu.RUnlock()
-		}
-	}
 	sort.Strings(roots)
 	if h.refreshCursor != "" && len(roots) > 1 {
-		start := sort.SearchStrings(roots, h.refreshCursor)
-		for start < len(roots) && roots[start] <= h.refreshCursor {
-			start++
-		}
+		start := sort.Search(len(roots), func(i int) bool { return roots[i] > h.refreshCursor })
 		if start == len(roots) {
 			start = 0
 		}
 		roots = append(roots[start:], roots[:start]...)
 	}
-	if limit <= 0 {
-		limit = len(roots)
-	}
-	processed := 0
-	for _, rootID := range roots {
-		if processed >= limit {
-			return true, nil
-		}
-		h.mu.RLock()
-		pending := h.pending[rootID]
-		retry := h.retryWindows[rootID]
-		blocked := retry.candidateID == pending.CandidateID && time.Now().Before(retry.notBefore)
+	if len(roots) == 0 {
 		h.mu.RUnlock()
-		if blocked {
-			continue
-		}
-		h.refreshCursor = rootID
-		h.pollNext = true
-		if err := h.refreshRoot(ctx, rootID); err != nil {
-			h.mu.Lock()
-			if latest, exists := h.pending[rootID]; exists && latest.CandidateID == pending.CandidateID {
-				h.retryWindows[rootID] = retryWindow{candidateID: pending.CandidateID, notBefore: time.Now().Add(retryDelay)}
-			}
-			h.mu.Unlock()
-			return len(roots) > 1, err
-		}
-		h.mu.Lock()
-		delete(h.retryWindows, rootID)
-		h.mu.Unlock()
-		processed++
+		return pendingAnchor{}, retryWindow{}, false
 	}
-	return false, nil
+	rootID := roots[0]
+	pending := h.pending[rootID]
+	retry := h.retryWindows[rootID]
+	h.mu.RUnlock()
+	h.refreshCursor = rootID
+	return pending, retry, true
 }
 
-func (h *GenerationManager) pollCurrent(ctx context.Context) error {
-	h.mu.RLock()
-	snapshots := make([]*Snapshot, 0, len(h.current))
-	for _, current := range h.current {
-		snapshots = append(snapshots, current.snapshot)
-	}
-	h.mu.RUnlock()
-	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].RootID < snapshots[j].RootID })
-	if len(snapshots) > 1 && h.pollCursor != "" {
-		start := sort.Search(len(snapshots), func(i int) bool { return snapshots[i].RootID > h.pollCursor })
-		if start == len(snapshots) {
-			start = 0
+func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.pending) != 0 {
+		for rootID, pending := range h.pending {
+			retry := h.retryWindows[rootID]
+			if retry.candidateID != pending.CandidateID || retry.failures < 2 {
+				return "", false
+			}
 		}
-		snapshots = append(snapshots[start:], snapshots[:start]...)
 	}
-	for _, snapshot := range snapshots {
-		h.pollCursor = snapshot.RootID
-		h.mu.RLock()
-		retry := h.retryWindows[snapshot.RootID]
-		blocked := retry.candidateID == snapshot.CandidateID && time.Now().Before(retry.notBefore)
-		h.mu.RUnlock()
-		if blocked {
+	if len(h.pending) == 0 && len(h.pollQueue) == 0 && !h.pollCycleActive {
+		roots := make([]string, 0, len(h.current))
+		for rootID := range h.current {
+			roots = append(roots, rootID)
+		}
+		sort.Strings(roots)
+		for _, rootID := range roots {
+			h.enqueuePollLocked(rootID)
+		}
+		h.pollCycleActive = len(h.pollQueue) != 0
+	}
+	for index, rootID := range h.pollQueue {
+		current := h.current[rootID]
+		if current == nil {
+			delete(h.pollQueued, rootID)
 			continue
 		}
-		validators := make(http.Header)
-		if anchor, ok := snapshot.byPath[snapshot.Anchor]; ok {
-			if value := anchor.Header.Get("ETag"); value != "" {
-				validators.Set("If-None-Match", value)
+		retry := h.retryWindows[rootID]
+		if retry.candidateID == current.snapshot.CandidateID && now.Before(retry.notBefore) {
+			continue
+		}
+		h.pollQueue = append(h.pollQueue[:index], h.pollQueue[index+1:]...)
+		delete(h.pollQueued, rootID)
+		return rootID, true
+	}
+	compacted := h.pollQueue[:0]
+	for _, rootID := range h.pollQueue {
+		if h.current[rootID] != nil {
+			compacted = append(compacted, rootID)
+		}
+	}
+	h.pollQueue = compacted
+	if len(h.pollQueue) == 0 {
+		h.pollCycleActive = false
+	}
+	return "", false
+}
+
+func (h *GenerationManager) recordRefreshFailure(rootID, candidateID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending, exists := h.pending[rootID]
+	if !exists || pending.CandidateID != candidateID {
+		return
+	}
+	retry := h.retryWindows[rootID]
+	if retry.candidateID != candidateID {
+		retry = retryWindow{candidateID: candidateID}
+	}
+	retry.failures++
+	retry.notBefore = time.Now().Add(refreshRetryDelay(candidateID, retry.failures))
+	h.retryWindows[rootID] = retry
+	if retry.failures > 1 {
+		roots := make([]string, 0, len(h.current))
+		for currentRootID := range h.current {
+			if _, pending := h.pending[currentRootID]; !pending {
+				roots = append(roots, currentRootID)
 			}
-			if value := anchor.Header.Get("Last-Modified"); value != "" {
-				validators.Set("If-Modified-Since", value)
+		}
+		sort.Strings(roots)
+		for _, currentRootID := range roots {
+			h.enqueuePollLocked(currentRootID)
+		}
+	}
+}
+
+func refreshRetryDelay(candidateID string, failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := retryDelay << min(failures-1, 4)
+	if delay > 15*time.Minute {
+		delay = 15 * time.Minute
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", candidateID, failures)))
+	jitterPercent := int(digest[0])%21 - 10
+	delay = delay * time.Duration(100+jitterPercent) / 100
+	return min(delay, 15*time.Minute)
+}
+
+func (h *GenerationManager) hasRunnableRefresh(now time.Time) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for rootID, pending := range h.pending {
+		retry := h.retryWindows[rootID]
+		if retry.candidateID != pending.CandidateID || !now.Before(retry.notBefore) {
+			return true
+		}
+	}
+	if len(h.pending) != 0 {
+		for rootID, pending := range h.pending {
+			retry := h.retryWindows[rootID]
+			if retry.candidateID != pending.CandidateID || retry.failures < 2 {
+				return false
 			}
 		}
-		response, err := h.config.Fetch(ctx, snapshot.Upstream, snapshot.Anchor, validators)
-		if err != nil {
-			h.recordCurrentPollResult(snapshot, err)
-			return err
+	}
+	for _, rootID := range h.pollQueue {
+		if current := h.current[rootID]; current != nil {
+			retry := h.retryWindows[rootID]
+			if retry.candidateID != current.snapshot.CandidateID || !now.Before(retry.notBefore) {
+				return true
+			}
 		}
-		if response.StatusCode == http.StatusNotModified {
-			_ = response.Body.Close()
-			err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
-			h.recordCurrentPollResult(snapshot, err)
-			return err
+	}
+	return false
+}
+
+func (h *GenerationManager) nextRetryDelay(now time.Time) time.Duration {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var next time.Duration
+	for rootID, retry := range h.retryWindows {
+		pending := h.pending[rootID]
+		current := h.current[rootID]
+		active := pending.CandidateID == retry.candidateID || current != nil && current.snapshot.CandidateID == retry.candidateID
+		if wait := retry.notBefore.Sub(now); active && wait > 0 && (next == 0 || wait < next) {
+			next = wait
 		}
-		if response.StatusCode != http.StatusOK {
-			_ = response.Body.Close()
-			err := fmt.Errorf("metadata anchor %s returned %d", snapshot.Anchor, response.StatusCode)
-			h.recordCurrentPollResult(snapshot, err)
-			return err
+	}
+	return next
+}
+
+func (h *GenerationManager) enqueuePollLocked(rootID string) {
+	if rootID == "" || h.pollQueued[rootID] {
+		return
+	}
+	h.pollQueued[rootID] = true
+	h.pollQueue = append(h.pollQueue, rootID)
+}
+
+func (h *GenerationManager) revalidatePending(ctx context.Context, pending pendingAnchor) (pendingAnchor, bool, error) {
+	validators := make(http.Header)
+	if value := pending.Header.Get("ETag"); value != "" {
+		validators.Set("If-None-Match", value)
+	}
+	if value := pending.Header.Get("Last-Modified"); value != "" {
+		validators.Set("If-Modified-Since", value)
+	}
+	validators.Set("Accept-Encoding", "identity")
+	response, err := h.config.Fetch(ctx, pending.Path, validators)
+	if err != nil {
+		return pending, false, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode == http.StatusNotModified {
+		return pending, false, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return pending, false, fmt.Errorf("metadata anchor %s returned %d", pending.Path, response.StatusCode)
+	}
+	if encoding := response.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return pending, false, fmt.Errorf("metadata anchor %s returned content encoding %q", pending.Path, encoding)
+	}
+	spool, err := h.config.Spooler.SpoolWithExpectedSize(ctx, response.Body, h.config.AnchorMaxBytes, response.ContentLength)
+	if err != nil {
+		return pending, false, err
+	}
+	defer func() { _ = spool.Close() }()
+	if spool.SHA256 == pending.Generation {
+		pending.Header = cloneHeader(response.Header)
+		h.mu.Lock()
+		if current, exists := h.pending[pending.RootID]; exists && current.CandidateID == pending.CandidateID {
+			current.Header = pending.Header
+			h.pending[pending.RootID] = current
 		}
-		spool, err := h.config.Spooler.SpoolWithExpectedSize(ctx, response.Body, h.config.AnchorMaxBytes, response.ContentLength)
-		_ = response.Body.Close()
-		if err != nil {
-			h.recordCurrentPollResult(snapshot, err)
-			return err
+		h.mu.Unlock()
+		return pending, false, nil
+	}
+	if err := h.StageAnchorID(ctx, pending.RootID, pending.Root, pending.Path, response.Header, spool.File); err != nil {
+		return pending, false, err
+	}
+	return pending, true, nil
+}
+
+func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string) error {
+	h.mu.RLock()
+	current := h.current[rootID]
+	var snapshot *Snapshot
+	if current != nil {
+		snapshot = current.snapshot
+	}
+	h.mu.RUnlock()
+	if snapshot == nil {
+		return nil
+	}
+	validators := make(http.Header)
+	if anchor, ok := snapshot.byPath[snapshot.Anchor]; ok {
+		if value := anchor.Header.Get("ETag"); value != "" {
+			validators.Set("If-None-Match", value)
 		}
-		if spool.SHA256 == snapshot.Generation {
-			_ = spool.Close()
-			err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
-			h.recordCurrentPollResult(snapshot, err)
-			return err
+		if value := anchor.Header.Get("Last-Modified"); value != "" {
+			validators.Set("If-Modified-Since", value)
 		}
-		err = h.StageAnchorID(ctx, snapshot.RootID, snapshot.Root, snapshot.Anchor, snapshot.Upstream, response.Header, spool.File)
-		_ = spool.Close()
+	}
+	response, err := h.config.Fetch(ctx, snapshot.Anchor, validators)
+	if err != nil {
 		h.recordCurrentPollResult(snapshot, err)
 		return err
 	}
-	return nil
+	if response.StatusCode == http.StatusNotModified {
+		_ = response.Body.Close()
+		err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
+		h.recordCurrentPollResult(snapshot, err)
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		err := fmt.Errorf("metadata anchor %s returned %d", snapshot.Anchor, response.StatusCode)
+		h.recordCurrentPollResult(snapshot, err)
+		return err
+	}
+	spool, err := h.config.Spooler.SpoolWithExpectedSize(ctx, response.Body, h.config.AnchorMaxBytes, response.ContentLength)
+	_ = response.Body.Close()
+	if err != nil {
+		h.recordCurrentPollResult(snapshot, err)
+		return err
+	}
+	if spool.SHA256 == snapshot.Generation {
+		_ = spool.Close()
+		err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
+		h.recordCurrentPollResult(snapshot, err)
+		return err
+	}
+	err = h.StageAnchorID(ctx, snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File)
+	_ = spool.Close()
+	h.recordCurrentPollResult(snapshot, err)
+	return err
 }
 
 func (h *GenerationManager) recordCurrentPollResult(snapshot *Snapshot, pollErr error) {
@@ -573,7 +772,15 @@ func (h *GenerationManager) recordCurrentPollResult(snapshot *Snapshot, pollErr 
 		return
 	}
 	if current := h.current[snapshot.RootID]; current != nil && current.snapshot.CandidateID == snapshot.CandidateID {
-		h.retryWindows[snapshot.RootID] = retryWindow{candidateID: snapshot.CandidateID, notBefore: time.Now().Add(retryDelay)}
+		retry := h.retryWindows[snapshot.RootID]
+		if retry.candidateID != snapshot.CandidateID {
+			retry = retryWindow{candidateID: snapshot.CandidateID}
+		}
+		retry.failures++
+		retry.notBefore = time.Now().Add(refreshRetryDelay(snapshot.CandidateID, retry.failures))
+		h.retryWindows[snapshot.RootID] = retry
+		h.enqueuePollLocked(snapshot.RootID)
+		h.pollCycleActive = true
 	}
 }
 
@@ -609,22 +816,17 @@ func (h *GenerationManager) updateCurrentFreshness(rootID, candidateID string, h
 	return nil
 }
 
-func (h *GenerationManager) refreshRoot(ctx context.Context, rootID string) error {
-	h.mu.RLock()
-	pending, ok := h.pending[rootID]
-	h.mu.RUnlock()
-	if !ok {
-		return nil
-	}
+func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnchor) error {
+	rootID := pending.RootID
 	anchorReader, err := h.config.Store.OpenObject(ctx, h.config.Tenant, pending.Key)
 	if err != nil {
 		return fmt.Errorf("open staged anchor: %w", err)
 	}
 	anchorBlob := &Blob{handler: h, object: Object{Path: pending.Path, State: ObjectPresent, Key: pending.Key, Size: anchorReader.Info().Size, SHA256: pending.Generation, Header: pending.Header}}
 	_ = anchorReader.Close()
-	session := &RefreshSession{handler: h, rootID: rootID, root: pending.Root, upstream: pending.Upstream, generation: pending.Generation, candidateID: pending.CandidateID, objects: make(map[string]Object)}
+	session := &RefreshSession{handler: h, rootID: rootID, root: pending.Root, generation: pending.Generation, candidateID: pending.CandidateID, objects: make(map[string]Object)}
 	session.objects[pending.Path] = anchorBlob.object
-	anchor := Anchor{RootID: rootID, Root: pending.Root, Path: pending.Path, Upstream: pending.Upstream, Generation: pending.Generation, Header: pending.Header, blob: anchorBlob}
+	anchor := Anchor{RootID: rootID, Root: pending.Root, Path: pending.Path, Generation: pending.Generation, Header: pending.Header, blob: anchorBlob}
 	if err := h.config.Build(ctx, session, anchor); err != nil {
 		var retryableError *retryableRefreshError
 		if !errors.As(err, &retryableError) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -637,7 +839,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, rootID string) erro
 		objects = append(objects, object)
 	}
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Path < objects[j].Path })
-	snapshot := &Snapshot{RootID: rootID, Root: pending.Root, Anchor: pending.Path, Generation: pending.Generation, CandidateID: pending.CandidateID, Upstream: pending.Upstream, PublishedAt: time.Now().UTC(), Objects: objects}
+	snapshot := &Snapshot{RootID: rootID, Root: pending.Root, Anchor: pending.Path, Generation: pending.Generation, CandidateID: pending.CandidateID, Upstream: h.config.Upstream, PublishedAt: time.Now().UTC(), Objects: objects}
 	if err := prepareSnapshot(snapshot); err != nil {
 		return err
 	}
@@ -651,7 +853,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, rootID string) erro
 	if err := writeBytes(h.config.StateDir, snapshotName(rootID, pending.Generation, pending.CandidateID), encoded); err != nil {
 		return err
 	}
-	marker := currentMarker{RootID: rootID, Root: pending.Root, Generation: pending.Generation, CandidateID: pending.CandidateID, SnapshotSHA256: digest, Upstream: pending.Upstream}
+	marker := currentMarker{RootID: rootID, Root: pending.Root, Generation: pending.Generation, CandidateID: pending.CandidateID, SnapshotSHA256: digest, Upstream: h.config.Upstream}
 	preparedMarker, err := prepareYAML(h.config.StateDir, currentName(rootID), marker)
 	if err != nil {
 		return err
@@ -722,7 +924,7 @@ func (h *GenerationManager) ServeStagedAnchorFor(w http.ResponseWriter, request 
 	defer func() { _ = reader.Close() }()
 	copyHeaders(w.Header(), pending.Header)
 	w.Header().Set("X-Cache", "COALESCED")
-	http.ServeContent(w, request, path.Base(requestPath), time.Time{}, reader)
+	http.ServeContent(w, request, path.Base(requestPath), headerModTime(pending.Header), reader)
 	return true
 }
 
@@ -736,6 +938,8 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	var object Object
 	var exists bool
 	matchedRoot := false
+	matchedRootID := ""
+	matchedRootLength := -1
 	for candidateRootID, candidate := range h.current {
 		if rootID != "" && candidateRootID != rootID {
 			continue
@@ -747,6 +951,10 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 			continue
 		}
 		matchedRoot = true
+		if len(candidate.snapshot.Root) > matchedRootLength {
+			matchedRootID = candidateRootID
+			matchedRootLength = len(candidate.snapshot.Root)
+		}
 		if candidateObject, ok := candidate.snapshot.byPath[requestPath]; ok && (!exists || len(candidate.snapshot.Root) > len(selected.snapshot.Root)) {
 			selected, object, exists = candidate, candidateObject, true
 		}
@@ -760,7 +968,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		if !classifiedMetadata {
 			return false, 0, ""
 		}
-		h.TriggerRefresh()
+		h.requestCurrentPoll(matchedRootID)
 		w.Header().Set("Retry-After", "5")
 		w.Header().Set("X-Cache", "STALE")
 		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
@@ -774,9 +982,9 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		(strings.Contains(cacheControl, "no-cache") || strings.Contains(cacheControl, "max-age=0"))
 	h.mu.Unlock()
 	if refreshRequested {
-		h.TriggerRefresh()
+		h.requestCurrentPoll(selectedRootID)
 	}
-	_ = h.touchLastSeen(selectedRootID, time.Now().UTC())
+	h.markLastSeen(selectedRootID, time.Now().UTC())
 	defer func() {
 		h.mu.Lock()
 		h.readers[readerKey]--
@@ -790,6 +998,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		if object.State == ObjectForbidden {
 			status = http.StatusForbidden
 		}
+		w.Header().Set("X-Cache", "HIT")
 		http.Error(w, http.StatusText(status), status)
 		return true, status, "HIT"
 	}
@@ -801,7 +1010,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	defer func() { _ = reader.Close() }()
 	copyHeaders(w.Header(), object.Header)
 	w.Header().Set("X-Cache", "HIT")
-	http.ServeContent(w, request, path.Base(requestPath), selected.snapshot.PublishedAt, reader)
+	http.ServeContent(w, request, path.Base(requestPath), headerModTime(object.Header), reader)
 	status := http.StatusOK
 	if request.Header.Get("Range") != "" {
 		status = http.StatusPartialContent
@@ -809,50 +1018,54 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	return true, status, "HIT"
 }
 
-func (h *GenerationManager) touchLastSeen(rootID string, seenAt time.Time) error {
+func (h *GenerationManager) markLastSeen(rootID string, seenAt time.Time) {
 	h.mu.Lock()
 	if seenAt.After(h.lastSeen[rootID]) {
 		h.lastSeen[rootID] = seenAt
 	}
-	if persisted := h.lastSeenPersisted[rootID]; !persisted.IsZero() && seenAt.Sub(persisted) < time.Hour {
-		h.mu.Unlock()
-		return nil
-	}
 	h.mu.Unlock()
+}
 
+func (h *GenerationManager) flushLastSeen(ctx context.Context) error {
 	h.seenPersistMu.Lock()
 	defer h.seenPersistMu.Unlock()
 	h.mu.RLock()
-	latest, exists := h.lastSeen[rootID]
-	persisted := h.lastSeenPersisted[rootID]
+	dirty := make(map[string]time.Time)
+	for rootID, latest := range h.lastSeen {
+		persisted := h.lastSeenPersisted[rootID]
+		if persisted.IsZero() || latest.Sub(persisted) >= time.Hour {
+			dirty[rootID] = latest
+		}
+	}
 	h.mu.RUnlock()
-	if !exists || !persisted.IsZero() && latest.Sub(persisted) < time.Hour {
-		return nil
-	}
-	prepared, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{RootID: rootID, SeenAt: latest}, maxRepositoryMarkerSize)
-	if err != nil {
-		return err
-	}
-	defer prepared.discard()
-	h.commitMu.Lock()
-	h.mu.RLock()
-	_, exists = h.lastSeen[rootID]
-	h.mu.RUnlock()
-	if !exists {
+	for rootID, seenAt := range dirty {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		prepared, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{RootID: rootID, SeenAt: seenAt}, maxRepositoryMarkerSize)
+		if err != nil {
+			return err
+		}
+		h.commitMu.Lock()
+		h.mu.RLock()
+		_, exists := h.lastSeen[rootID]
+		h.mu.RUnlock()
+		if exists {
+			err = prepared.commit()
+		}
+		if err == nil && exists {
+			h.mu.Lock()
+			if current := h.lastSeenPersisted[rootID]; !current.After(seenAt) {
+				h.lastSeenPersisted[rootID] = seenAt
+			}
+			h.mu.Unlock()
+		}
 		h.commitMu.Unlock()
-		return nil
+		prepared.discard()
+		if err != nil {
+			return err
+		}
 	}
-	err = prepared.commit()
-	if err != nil {
-		h.commitMu.Unlock()
-		return err
-	}
-	h.mu.Lock()
-	if current := h.lastSeenPersisted[rootID]; !current.After(latest) {
-		h.lastSeenPersisted[rootID] = latest
-	}
-	h.mu.Unlock()
-	h.commitMu.Unlock()
 	return nil
 }
 
@@ -869,7 +1082,6 @@ type RefreshSession struct {
 	handler     *GenerationManager
 	rootID      string
 	root        string
-	upstream    string
 	generation  string
 	candidateID string
 	objects     map[string]Object
@@ -889,6 +1101,33 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 	if err != nil || !containsPath(s.root, fetchPath) {
 		return nil, fmt.Errorf("invalid metadata fetch path %q", spec.FetchPath)
 	}
+	fallbackFetchPath := spec.FallbackFetchPath
+	if fallbackFetchPath != "" {
+		fallbackFetchPath, err = CleanPath(fallbackFetchPath)
+		if err != nil || !containsPath(s.root, fallbackFetchPath) {
+			return nil, fmt.Errorf("invalid metadata fallback path %q", spec.FallbackFetchPath)
+		}
+	}
+	aliases := make([]string, 0, len(spec.Aliases))
+	registeredPaths := map[string]struct{}{spec.Path: {}}
+	for _, alias := range spec.Aliases {
+		cleanedAlias, aliasErr := CleanPath(alias)
+		if aliasErr != nil || !containsPath(s.root, cleanedAlias) {
+			return nil, fmt.Errorf("invalid metadata alias %q", alias)
+		}
+		if _, exists := registeredPaths[cleanedAlias]; !exists {
+			registeredPaths[cleanedAlias] = struct{}{}
+			aliases = append(aliases, cleanedAlias)
+		}
+	}
+	recordObject := func(object Object) {
+		object.Path = spec.Path
+		s.objects[spec.Path] = object
+		for _, alias := range aliases {
+			object.Path = alias
+			s.objects[alias] = object
+		}
+	}
 	maxBytes := spec.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxObject
@@ -897,6 +1136,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 		return nil, fmt.Errorf("metadata %s declared invalid size %d", spec.Path, *spec.ExpectedSize)
 	}
 	checksums := make([]Checksum, 0, len(spec.Checksums))
+	checksumHashers := make([]hash.Hash, 0, len(spec.Checksums))
 	for _, checksum := range spec.Checksums {
 		algorithm := strings.ToLower(strings.TrimSpace(checksum.Algorithm))
 		digest := strings.ToLower(strings.TrimSpace(checksum.Digest))
@@ -908,41 +1148,50 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 			return nil, fmt.Errorf("metadata %s has invalid %s checksum", spec.Path, checksum.Algorithm)
 		}
 		checksums = append(checksums, Checksum{Algorithm: algorithm, Digest: digest})
+		checksumHashers = append(checksumHashers, hasher)
 	}
-	var key string
+	var objectKey string
 	if len(checksums) > 0 {
-		key = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/" + checksums[0].Algorithm + "/" + checksums[0].Digest
+		objectKey = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/" + checksums[0].Algorithm + "/" + checksums[0].Digest
 	}
-	if key != "" {
-		if reader, openErr := s.handler.config.Store.OpenObject(ctx, s.handler.config.Tenant, key); openErr == nil {
-			hashers := make([]hash.Hash, len(checksums))
+	if objectKey != "" {
+		if reader, openErr := s.handler.config.Store.OpenObject(ctx, s.handler.config.Tenant, objectKey); openErr == nil {
 			writers := make([]io.Writer, 0, len(checksums)+1)
 			internalDigest := sha256.New()
 			writers = append(writers, internalDigest)
-			for index, checksum := range checksums {
-				hashers[index], _ = checksumHash(checksum.Algorithm)
-				writers = append(writers, hashers[index])
+			for _, hasher := range checksumHashers {
+				writers = append(writers, hasher)
 			}
 			size, hashErr := io.Copy(io.MultiWriter(writers...), reader)
 			options := reader.Info().Options
 			closeErr := reader.Close()
 			valid := hashErr == nil && closeErr == nil && (spec.ExpectedSize == nil || size == *spec.ExpectedSize)
 			for index, checksum := range checksums {
-				valid = valid && hex.EncodeToString(hashers[index].Sum(nil)) == checksum.Digest
+				valid = valid && hex.EncodeToString(checksumHashers[index].Sum(nil)) == checksum.Digest
 			}
 			if valid {
 				var header http.Header
 				_ = json.Unmarshal([]byte(options["header"]), &header)
-				object := Object{Path: spec.Path, State: ObjectPresent, Key: key, Size: size, SHA256: hex.EncodeToString(internalDigest.Sum(nil)), Header: header}
-				s.objects[spec.Path] = object
+				object := Object{Path: spec.Path, State: ObjectPresent, Key: objectKey, Size: size, SHA256: hex.EncodeToString(internalDigest.Sum(nil)), Header: header}
+				recordObject(object)
 				return &Blob{handler: s.handler, object: object}, nil
 			}
-			_ = s.handler.config.Store.DeleteObject(context.Background(), s.handler.config.Tenant, key)
+			_ = s.handler.config.Store.DeleteObject(context.Background(), s.handler.config.Tenant, objectKey)
+			for _, hasher := range checksumHashers {
+				hasher.Reset()
+			}
 		}
 	}
-	response, err := s.handler.config.Fetch(ctx, s.upstream, fetchPath, nil)
+	response, err := s.handler.config.Fetch(ctx, fetchPath, nil)
 	if err != nil {
 		return nil, &retryableRefreshError{err: err}
+	}
+	if fallbackFetchPath != "" && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden) {
+		_ = response.Body.Close()
+		response, err = s.handler.config.Fetch(ctx, fallbackFetchPath, nil)
+		if err != nil {
+			return nil, &retryableRefreshError{err: err}
+		}
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden {
@@ -953,17 +1202,15 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 		if response.StatusCode == http.StatusForbidden {
 			state = ObjectForbidden
 		}
-		s.objects[spec.Path] = Object{Path: spec.Path, State: state}
+		recordObject(Object{Path: spec.Path, State: state})
 		return nil, nil
 	}
 	if response.StatusCode != http.StatusOK {
 		return nil, &retryableRefreshError{err: fmt.Errorf("metadata %s returned %d", spec.Path, response.StatusCode)}
 	}
-	hashers := make([]hash.Hash, len(checksums))
 	writers := make([]io.Writer, 0, len(checksums))
-	for index, checksum := range checksums {
-		hashers[index], _ = checksumHash(checksum.Algorithm)
-		writers = append(writers, hashers[index])
+	for _, hasher := range checksumHashers {
+		writers = append(writers, hasher)
 	}
 	source := io.Reader(response.Body)
 	if len(writers) > 0 {
@@ -985,25 +1232,25 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 		return nil, fmt.Errorf("metadata %s size mismatch: got %d, want %d", spec.Path, spool.Size, *spec.ExpectedSize)
 	}
 	for index, checksum := range checksums {
-		if actual := hex.EncodeToString(hashers[index].Sum(nil)); actual != checksum.Digest {
+		if actual := hex.EncodeToString(checksumHashers[index].Sum(nil)); actual != checksum.Digest {
 			return nil, fmt.Errorf("metadata %s %s mismatch", spec.Path, checksum.Algorithm)
 		}
 	}
-	if key == "" {
-		key = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/sha256/" + spool.SHA256
+	if objectKey == "" {
+		objectKey = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/sha256/" + spool.SHA256
 	}
-	if err := s.handler.config.Store.MkdirAll(s.handler.config.Tenant+"/"+path.Dir(key), 0o755); err != nil {
+	if err := s.handler.config.Store.MkdirAll(s.handler.config.Tenant+"/"+path.Dir(objectKey), 0o755); err != nil {
 		return nil, &retryableRefreshError{err: err}
 	}
 	if _, err := spool.File.Seek(0, io.SeekStart); err != nil {
 		return nil, &retryableRefreshError{err: err}
 	}
 	encodedHeader, _ := json.Marshal(cloneHeader(response.Header))
-	if _, err := s.handler.config.Store.Put(ctx, s.handler.config.Tenant, key, spool.File, map[string]string{"header": string(encodedHeader)}); err != nil {
+	if _, err := s.handler.config.Store.Put(ctx, s.handler.config.Tenant, objectKey, spool.File, map[string]string{"header": string(encodedHeader)}); err != nil {
 		return nil, &retryableRefreshError{err: err}
 	}
-	object := Object{Path: spec.Path, State: ObjectPresent, Key: key, Size: spool.Size, SHA256: spool.SHA256, Header: cloneHeader(response.Header)}
-	s.objects[spec.Path] = object
+	object := Object{Path: spec.Path, State: ObjectPresent, Key: objectKey, Size: spool.Size, SHA256: spool.SHA256, Header: cloneHeader(response.Header)}
+	recordObject(object)
 	return &Blob{handler: s.handler, object: object}, nil
 }
 
@@ -1045,6 +1292,14 @@ func (a Anchor) Size() int64 { return a.blob.Size() }
 func copyHeaders(destination, source http.Header) {
 	proxyruntime.CopyEndToEndHeaders(destination, source)
 	destination.Del("Content-Length")
+}
+
+func headerModTime(header http.Header) time.Time {
+	modified, err := http.ParseTime(header.Get("Last-Modified"))
+	if err != nil {
+		return time.Time{}
+	}
+	return modified
 }
 
 func cloneHeader(source http.Header) http.Header {

@@ -102,6 +102,9 @@ func TestRPMRepomdPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.NotNil(t, previous)
 
 	revision.Store(2)
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
 	_, err = h.metadata.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	current := h.metadata.Current("repo")
@@ -213,6 +216,61 @@ func TestRPMRootDirectoriesAndAuxiliaryFilesRemainTransparent(t *testing.T) {
 		}
 	}
 	require.Equal(t, int32(6), requests.Load())
+}
+
+func TestRPMAuxiliaryRepodataRemainsTransparentWithCurrentGeneration(t *testing.T) {
+	metadata := []byte("primary metadata")
+	digest := sha256.Sum256(metadata)
+	repomd := fmt.Sprintf(`<repomd><data type="primary"><checksum type="sha256">%x</checksum><location href="repodata/primary.xml"/><size>%d</size></data></repomd>`, digest, len(metadata))
+	var auxiliaryRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repo/repodata/repomd.xml":
+			_, _ = io.WriteString(w, repomd)
+		case "/repo/repodata/primary.xml":
+			_, _ = w.Write(metadata)
+		case "/repo/repodata/repomd.xml.key":
+			auxiliaryRequests.Add(1)
+			w.Header().Set("X-Upstream-Resource", "repository-key")
+			_, _ = io.WriteString(w, "public key")
+		case "/repo/repodata/vendor-resource.json":
+			auxiliaryRequests.Add(1)
+			w.Header().Set("X-Upstream-Resource", "vendor-extension")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"enabled":true}`)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	h := newRPMTestHandler(t, server.URL)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/repo/repodata/repomd.xml", nil))
+	_, err := h.metadata.Refresh(context.Background(), 10)
+	require.NoError(t, err)
+
+	currentMetadata := httptest.NewRecorder()
+	h.ServeHTTP(currentMetadata, httptest.NewRequest(http.MethodGet, "/repo/repodata/primary.xml", nil))
+	require.Equal(t, http.StatusOK, currentMetadata.Code)
+	require.Equal(t, "HIT", currentMetadata.Header().Get("X-Cache"))
+	require.Equal(t, metadata, currentMetadata.Body.Bytes())
+
+	for target, expected := range map[string]struct {
+		status   int
+		resource string
+		body     string
+	}{
+		"/repo/repodata/repomd.xml.key":       {status: http.StatusOK, resource: "repository-key", body: "public key"},
+		"/repo/repodata/vendor-resource.json": {status: http.StatusAccepted, resource: "vendor-extension", body: `{"enabled":true}`},
+	} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, expected.status, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+		require.Equal(t, expected.resource, response.Header().Get("X-Upstream-Resource"))
+		require.Equal(t, expected.body, response.Body.String())
+	}
+	require.Equal(t, int32(2), auxiliaryRequests.Load())
 }
 
 func newRPMTestHandler(t *testing.T, rawOrigin string) *handler {

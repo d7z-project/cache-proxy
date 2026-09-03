@@ -3,54 +3,193 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>{{t "title"}}</title>
 <style>{{css}}</style>
 </head>
 <body>
-<header>
-  <div class="wrap bar">
-    <h1>{{t "title"}}</h1>
-    <div class="actions">
-      {{if not .Single}}<a class="button" href="/-/status/summary">{{t "server_status"}}</a>{{end}}
-      <button id="theme-btn" class="icon-button" type="button" onclick="toggleTheme()" aria-label="{{t "theme_switch"}}">◐</button>
-      <div class="language" id="lang-select">
-        <button class="button" type="button" onclick="toggleLangMenu()">{{.LocaleLabel}}</button>
-        <div id="lang-menu" class="language-menu" hidden>
-          {{range .Languages}}<button type="button" data-lang="{{.Code}}" onclick="selectLang(this)">{{.Native}}</button>{{end}}
+<svg class="icon-sprite" aria-hidden="true">
+  <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="icon-box" viewBox="0 0 24 24"><path d="m21 8-9 5-9-5"/><path d="m3 8 9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/></symbol>
+  <symbol id="icon-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+  <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+  <symbol id="icon-external" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+  <symbol id="icon-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></symbol>
+  <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/></symbol>
+  <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 9A7 7 0 0 0 6.3 6.3L4 11M20 13l-2.3 4.7A7 7 0 0 1 5.5 15"/></symbol>
+  <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="icon-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+  <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+</svg>
+
+<header class="app-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="/" aria-label="{{t "title"}}">
+      <span class="brand-mark"><svg><use href="#icon-box"/></svg></span>
+      <span class="brand-copy"><strong>{{t "title"}}</strong><small>{{t "dashboard"}}</small></span>
+    </a>
+    <div class="header-actions">
+      {{if not .Single}}
+      <a id="status-button" class="button button-primary" href="/-/status/summary">
+        <svg><use href="#icon-activity"/></svg><span>{{t "server_status"}}</span>
+      </a>
+      {{end}}
+      <button id="theme-button" class="icon-button" type="button" aria-label="{{t "theme_switch"}}" title="{{t "theme_switch"}}">
+        <svg><use id="theme-icon" href="#icon-moon"/></svg>
+      </button>
+      <div class="language" id="language-select">
+        <button id="language-button" class="button language-button" type="button" aria-expanded="false" aria-controls="language-menu">
+          <svg><use href="#icon-globe"/></svg><span>{{.LocaleLabel}}</span><svg class="chevron"><use href="#icon-chevron"/></svg>
+        </button>
+        <div id="language-menu" class="language-menu" hidden>
+          {{range .Languages}}<button type="button" data-language="{{.Code}}" {{if eq $.Locale .Code}}aria-current="true"{{end}}>{{.Native}}</button>{{end}}
         </div>
       </div>
     </div>
   </div>
 </header>
-<main class="wrap">
-  <div class="summary">
-    <strong>{{len .Instances}}</strong> {{t "instances"}}
-    <span class="health {{if .StoreHealthy}}ok{{else}}bad{{end}}">{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
-  </div>
-  <div class="grid">
-    {{range .Instances}}
-    <section class="card" data-mode="{{.Mode}}">
-      <div class="card-head">
-        <span class="badge badge-{{.Mode}}">{{.Mode}}</span>
-        <h2>{{.Name}}</h2>
-        <span class="state state-{{.StatusColor}}">{{.StatusLabel}}</span>
+
+<main class="wrap dashboard">
+  <section class="overview" aria-labelledby="overview-title">
+    <div class="section-heading">
+      <div><p class="eyebrow">{{t "system_overview"}}</p><h1 id="overview-title">{{t "instances_title"}}</h1></div>
+      <div class="health {{if .StoreHealthy}}health-ok{{else}}health-bad{{end}}">
+        <span class="status-dot"></span>
+        <span>{{if .StoreHealthy}}{{t "store_healthy"}}{{else}}{{t "store_degraded" .StoreDegraded}}{{end}}</span>
       </div>
-      {{if .StatusExtra}}<p class="detail">{{.StatusExtra}}</p>{{end}}
-      <div class="endpoint"><a href="{{.URL}}">{{.URL}}</a><button class="icon-button" type="button" data-copy="{{.URL}}" onclick="copyToClipboard(this)" title="{{t "copy"}}">⧉</button></div>
-      <dl>
-        <div><dt>{{t "requests"}}</dt><dd>{{.Requests}}</dd></div>
-        <div><dt>{{t "hit_rate"}}</dt><dd>{{.HitRate}}</dd></div>
-        <div><dt>{{t "disk_usage"}}</dt><dd>{{.DiskUsage}}</dd></div>
-      </dl>
-      <div class="setup">
-        {{if .SetupNote}}<p>{{.SetupNote}}</p>{{end}}
-        <pre>{{.SetupCmd}}</pre>
-        <button class="button" type="button" data-copy="{{.SetupCopy}}" onclick="copyToClipboard(this)">{{t "copy"}}</button>
-      </div>
-    </section>
-    {{else}}<p>{{t "no_instances"}}</p>{{end}}
-  </div>
+    </div>
+    <dl class="overview-metrics">
+      <div><dt>{{t "instances"}}</dt><dd id="overview-instances">{{len .Instances}}</dd></div>
+      <div><dt>{{t "requests"}}</dt><dd id="overview-requests">{{.TotalRequests}}</dd></div>
+      <div><dt>{{t "hit_rate"}}</dt><dd id="overview-hit-rate">{{.TotalHitRate}}</dd></div>
+      <div><dt>{{t "active_downloads"}}</dt><dd id="overview-active">{{.Active}}</dd></div>
+      <div><dt>{{t "disk_usage"}}</dt><dd id="overview-disk">{{.TotalDisk}}</dd></div>
+    </dl>
+  </section>
+
+  <section class="instances-section" aria-labelledby="instances-heading">
+    <div class="section-heading compact-heading">
+      <div><p class="eyebrow">{{t "configured_services"}}</p><h2 id="instances-heading">{{t "proxy_instances"}}</h2></div>
+      <span class="count-label">{{len .Instances}} {{t "enabled"}}</span>
+    </div>
+    <div class="instance-grid">
+      {{range .Instances}}
+      <article class="instance-card" data-mode="{{.Mode}}">
+        <header class="card-header">
+          <div class="instance-identity">
+            <span class="badge badge-{{.Mode}}">{{.Mode}}</span>
+            <h3>{{.Name}}</h3>
+          </div>
+          <span class="instance-state state-{{.StatusColor}}"><span class="status-dot"></span>{{.StatusLabel}}</span>
+        </header>
+        {{if .StatusExtra}}<p class="instance-detail">{{.StatusExtra}}</p>{{end}}
+
+        <div class="endpoint-block">
+          <span class="field-label">{{t "endpoint"}}</span>
+          <div class="endpoint-row">
+            <a href="{{.URL}}" title="{{.URL}}"><span>{{.URL}}</span><svg><use href="#icon-external"/></svg></a>
+            <button class="icon-button copy-button" type="button" data-copy="{{.URL}}" aria-label="{{t "copy_endpoint"}}" title="{{t "copy_endpoint"}}">
+              <svg><use href="#icon-copy"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <dl class="instance-metrics">
+          <div><dt>{{t "requests"}}</dt><dd>{{.Requests}}</dd></div>
+          <div><dt>{{t "hit_rate"}}</dt><dd>{{.HitRate}}</dd></div>
+          <div><dt>{{t "disk_usage"}}</dt><dd>{{.DiskUsage}}</dd></div>
+        </dl>
+
+        <details class="setup-details">
+          <summary><span><svg><use href="#icon-terminal"/></svg>{{t "setup"}}</span><svg class="chevron"><use href="#icon-chevron"/></svg></summary>
+          <div class="setup-body">
+            {{if .SetupNote}}<p>{{.SetupNote}}</p>{{end}}
+            <div class="code-block">
+              <pre>{{.SetupCmd}}</pre>
+              <button class="icon-button copy-button" type="button" data-copy="{{.SetupCopy}}" aria-label="{{t "copy_setup"}}" title="{{t "copy_setup"}}">
+                <svg><use href="#icon-copy"/></svg>
+              </button>
+            </div>
+          </div>
+        </details>
+      </article>
+      {{else}}
+      <div class="empty-state"><svg><use href="#icon-box"/></svg><p>{{t "no_instances"}}</p></div>
+      {{end}}
+    </div>
+  </section>
 </main>
+
+{{if not .Single}}
+<dialog id="status-dialog" class="status-dialog" aria-labelledby="status-title">
+  <div class="status-shell">
+    <header class="dialog-header">
+      <div>
+        <p class="eyebrow">{{t "live_telemetry"}}</p>
+        <h2 id="status-title">{{t "server_status"}}</h2>
+        <p id="status-updated" class="dialog-subtitle">{{t "not_loaded"}}</p>
+      </div>
+      <div class="dialog-actions">
+        <button id="status-refresh" class="icon-button" type="button" aria-label="{{t "refresh"}}" title="{{t "refresh"}}"><svg><use href="#icon-refresh"/></svg></button>
+        <button id="status-close" class="icon-button" type="button" aria-label="{{t "close"}}" title="{{t "close"}}"><svg><use href="#icon-x"/></svg></button>
+      </div>
+    </header>
+
+    <nav class="status-tabs" role="tablist" aria-label="{{t "status_views"}}">
+      <button id="status-tab-overview" type="button" role="tab" aria-selected="true" aria-controls="status-panel-overview" data-status-tab="overview">{{t "overview"}}</button>
+      <button id="status-tab-network" type="button" role="tab" aria-selected="false" aria-controls="status-panel-network" data-status-tab="network" tabindex="-1">{{t "upstreams"}}</button>
+      <button id="status-tab-activity" type="button" role="tab" aria-selected="false" aria-controls="status-panel-activity" data-status-tab="activity" tabindex="-1">{{t "activity"}}</button>
+    </nav>
+
+    <div id="status-loading" class="status-message"><span class="spinner"></span>{{t "loading_status"}}</div>
+    <div id="status-error" class="status-message status-error" hidden></div>
+
+    <div id="status-content" class="status-content" hidden>
+      <section id="status-panel-overview" class="status-panel" role="tabpanel" aria-labelledby="status-tab-overview" data-status-panel="overview">
+        <dl class="status-metrics">
+          <div><dt>{{t "service_health"}}</dt><dd id="status-health">—</dd></div>
+          <div><dt>{{t "cache_hit_rate"}}</dt><dd id="status-hit-rate">—</dd></div>
+          <div><dt>{{t "active_downloads"}}</dt><dd id="status-active-downloads">—</dd></div>
+          <div><dt>{{t "upstream_errors"}}</dt><dd id="status-upstream-errors">—</dd></div>
+          <div><dt>{{t "queued_requests"}}</dt><dd id="status-queued">—</dd></div>
+          <div><dt>{{t "rate_limited"}}</dt><dd id="status-rate-limited">—</dd></div>
+        </dl>
+        <section class="disk-history" aria-labelledby="disk-history-title">
+          <div class="subsection-heading"><div><h3 id="disk-history-title">{{t "disk_history"}}</h3><p>{{t "logical_cache_size"}}</p></div><strong id="status-disk-total">—</strong></div>
+          <div class="chart-wrap"><canvas id="disk-chart" height="190"></canvas><div id="disk-chart-empty" class="chart-empty" hidden>{{t "no_disk_samples"}}</div></div>
+          <div id="disk-range" class="chart-range"></div>
+        </section>
+      </section>
+
+      <section id="status-panel-network" class="status-panel" role="tabpanel" aria-labelledby="status-tab-network" data-status-panel="network" hidden>
+        <div class="subsection-heading"><div><h3>{{t "upstream_hosts"}}</h3><p>{{t "network_description"}}</p></div><span id="status-network-count" class="count-label"></span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>{{t "host"}}</th><th>{{t "requests"}}</th><th>{{t "active_queued"}}</th><th>{{t "latency"}}</th><th>{{t "error_rate"}}</th><th>{{t "cooldown"}}</th></tr></thead>
+            <tbody id="status-upstream-rows"></tbody>
+          </table>
+          <p id="status-upstream-empty" class="table-empty" hidden>{{t "no_upstreams"}}</p>
+        </div>
+      </section>
+
+      <section id="status-panel-activity" class="status-panel" role="tabpanel" aria-labelledby="status-tab-activity" data-status-panel="activity" hidden>
+        <div class="subsection-heading"><div><h3>{{t "maintenance_activity"}}</h3><p>{{t "activity_description"}}</p></div><span id="status-event-count" class="count-label"></span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>{{t "finished"}}</th><th>{{t "storage"}}</th><th>{{t "task"}}</th><th>{{t "target"}}</th><th>{{t "result"}}</th><th>{{t "duration"}}</th></tr></thead>
+            <tbody id="status-event-rows"></tbody>
+          </table>
+          <p id="status-event-empty" class="table-empty" hidden>{{t "no_activity"}}</p>
+        </div>
+      </section>
+    </div>
+  </div>
+</dialog>
+{{end}}
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script>window.I18N={{.I18NJSON}};</script>
 <script>{{js}}</script>
 </body>

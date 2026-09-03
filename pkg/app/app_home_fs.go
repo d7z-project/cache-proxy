@@ -71,6 +71,10 @@ type homeData struct {
 	StoreDegraded int
 	Languages     []localeOption
 	LocaleLabel   string
+	TotalRequests string
+	TotalHitRate  string
+	TotalDisk     string
+	Active        string
 }
 
 func renderHome(w http.ResponseWriter, data homeData) {

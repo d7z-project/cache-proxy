@@ -51,12 +51,14 @@ Date: Tue, 0${major} Jan 2024 00:00:00 UTC
 Architectures: amd64 all
 Components: main
 Description: cache-proxy end-to-end repository $state
+Acquire-By-Hash: yes
 SHA256:
 EOF
   for relative in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
     file="$root/dists/stable/$relative"
     printf ' %s %16s %s\n' "$(sha256sum "$file" | awk '{print $1}')" "$(wc -c <"$file" | tr -d ' ')" "$relative" >>"$release"
   done
+	rm "$root/dists/stable/main/binary-amd64/Packages"
 
   cp "$package" "$root/flat/e2e-deb_${version}_all.deb"
   cat >"$root/flat/Packages" <<EOF
@@ -79,10 +81,12 @@ Codename: flat
 Date: Tue, 0${major} Jan 2024 00:00:00 UTC
 Architectures: amd64 all
 Description: cache-proxy end-to-end flat repository $state
+Acquire-By-Hash: yes
 SHA256:
 EOF
   for relative in Packages Packages.gz; do
     file="$root/flat/$relative"
     printf ' %s %16s %s\n' "$(sha256sum "$file" | awk '{print $1}')" "$(wc -c <"$file" | tr -d ' ')" "$relative" >>"$root/flat/Release"
   done
+	rm "$root/flat/Packages"
 done

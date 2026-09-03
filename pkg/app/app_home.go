@@ -69,11 +69,21 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	instances := make([]homeInstance, 0)
 	modes := make([]string, 0)
 	seenModes := map[string]struct{}{}
+	totalCache := make(map[string]uint64)
+	var totalRequests uint64
+	var totalDiskBytes int64
+	var activeDownloads int64
 	for _, entry := range entries {
 		if !entry.Enabled {
 			continue
 		}
 		s := ss.Instances[entry.Name]
+		totalRequests += s.Requests
+		totalDiskBytes += usage[entry.Name]
+		activeDownloads += s.ActiveDownloads
+		for result, count := range s.Cache {
+			totalCache[result] += count
+		}
 		hi := buildHomeInstance(entry, baseURL, req, s, usage[entry.Name], i18n)
 		if _, ok := seenModes[hi.Mode]; !ok {
 			seenModes[hi.Mode] = struct{}{}
@@ -100,6 +110,10 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		StoreDegraded: degraded,
 		Languages:     supportedLocales,
 		LocaleLabel:   localeLabel(locale),
+		TotalRequests: formatCompact(totalRequests),
+		TotalHitRate:  formatHitRate(totalCache),
+		TotalDisk:     formatBytes(totalDiskBytes),
+		Active:        formatCompact(uint64(max(activeDownloads, 0))),
 	}
 }
 

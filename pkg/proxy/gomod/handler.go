@@ -131,7 +131,12 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		return http.StatusNotFound, "BYPASS"
 	}
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		return h.forwardModule(w, request, parsed.cacheKey)
+		response, err := h.openUpstream(request.Context(), h.origin, request.Method, parsed.cacheKey, request.Header)
+		if err != nil {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
+		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	flight, leader := h.flights.Begin(key)
 	if leader {
@@ -254,15 +259,6 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 		_, _ = io.Copy(w, reader)
 	}
 	return http.StatusOK, result
-}
-
-func (h *handler) forwardModule(w http.ResponseWriter, request *http.Request, target string) (int, string) {
-	response, err := h.openUpstream(request.Context(), h.origin, request.Method, target, request.Header)
-	if err != nil {
-		transport.WriteError(w, http.StatusBadGateway)
-		return http.StatusBadGateway, "ERROR"
-	}
-	return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 }
 
 func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, target string) (int, string) {

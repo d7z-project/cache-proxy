@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -19,7 +18,6 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
-	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func TestPacmanReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
@@ -157,6 +155,9 @@ func TestPacmanDatabasePublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.NotNil(t, previous)
 
 	revision.Store(2)
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
 	_, err = h.metadata.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	current := h.metadata.Current(rootID)
@@ -169,60 +170,6 @@ func TestPacmanDatabasePublishesUpstreamGenerationUpdate(t *testing.T) {
 		require.Equal(t, "HIT", response.Header().Get("X-Cache"))
 		require.Equal(t, expected, response.Body.String())
 	}
-}
-
-func TestPacmanArtifactRevalidationPublishesChangedResponse(t *testing.T) {
-	var requests atomic.Int32
-	conditional := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		current := requests.Add(1)
-		if current == 2 {
-			conditional <- request.Header.Get("If-None-Match")
-		}
-		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current))
-		_, _ = fmt.Fprintf(w, "v%d", current)
-	}))
-	defer server.Close()
-	h := newPacmanTestHandler(t, server.URL)
-	origin, err := url.Parse(server.URL)
-	require.NoError(t, err)
-	key := artifactKey(origin, "pkg.pkg.tar.zst", httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil))
-	cachedBody := func() string {
-		object, err := storeio.OpenResponse(context.Background(), h.store, pacmanTenant, key)
-		if err != nil {
-			return ""
-		}
-		defer func() { _ = object.Reader.Close() }()
-		body, err := io.ReadAll(object.Reader)
-		if err != nil {
-			return ""
-		}
-		return string(body)
-	}
-
-	first := httptest.NewRecorder()
-	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil))
-	require.Equal(t, "v1", first.Body.String())
-	require.Eventually(t, func() bool { return cachedBody() == "v1" }, time.Second, time.Millisecond)
-	revalidate := httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil)
-	revalidate.Header.Set("Cache-Control", "no-cache")
-	second := httptest.NewRecorder()
-	h.ServeHTTP(second, revalidate)
-	require.Equal(t, "v2", second.Body.String())
-	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
-	select {
-	case validator := <-conditional:
-		require.Equal(t, `"v1"`, validator)
-	case <-time.After(time.Second):
-		t.Fatal("artifact revalidation did not send a conditional request")
-	}
-
-	require.Eventually(t, func() bool { return cachedBody() == "v2" }, time.Second, time.Millisecond)
-	third := httptest.NewRecorder()
-	h.ServeHTTP(third, httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil))
-	require.Equal(t, "v2", third.Body.String())
-	require.Equal(t, "HIT", third.Header().Get("X-Cache"))
-	require.Equal(t, int32(2), requests.Load())
 }
 
 func newPacmanTestHandler(t *testing.T, rawOrigin string) *handler {

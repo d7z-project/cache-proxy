@@ -39,10 +39,9 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	handler, err := New(Config{
-		Instance: "test", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(ctx context.Context, origin, requestPath string, _ http.Header) (*http.Response, error) {
-			require.Equal(t, upstream.URL, origin)
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/"+requestPath, nil)
+		Instance: "test", Mode: "test", Tenant: "metadata", Upstream: upstream.URL, StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(ctx context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.URL+"/"+requestPath, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -59,7 +58,7 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 	require.NoError(t, err)
 
 	anchor := bytes.NewReader([]byte("anchor\n"))
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", upstream.URL, http.Header{"Content-Type": {"text/plain"}}, anchor))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"Content-Type": {"text/plain"}}, anchor))
 	more, err := handler.Refresh(context.Background(), 10)
 	require.NoError(t, err)
 	require.False(t, more)
@@ -79,12 +78,82 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, status)
 
 	restarted, err := New(Config{
-		Instance: "test", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "test", Mode: "test", Tenant: "metadata", Upstream: upstream.URL, StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	})
 	require.NoError(t, err)
 	require.NotNil(t, restarted.Current("repo"))
+}
+
+func TestGenerationManagerRequiresAbsoluteHTTPUpstream(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	config := Config{
+		Instance: "upstream-validation", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	}
+	for _, upstream := range []string{"", "relative/path", "ftp://upstream.example/repo", "https:///missing-host"} {
+		t.Run(upstream, func(t *testing.T) {
+			config.Upstream = upstream
+			_, err := New(config)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestGenerationManagerInvalidatesStateFromAnotherUpstream(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stateDir := t.TempDir()
+	config := Config{
+		Instance: "upstream-change", Mode: "test", Tenant: "metadata", Upstream: "https://old.example/repository", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	}
+	handler, err := New(config)
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "published", "published/Release", http.Header{"ETag": {`"old-current"`}}, bytes.NewReader([]byte("old current"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "pending", "pending/Release", http.Header{"ETag": {`"old-pending"`}}, bytes.NewReader([]byte("old pending"))))
+
+	sameUpstream, err := New(config)
+	require.NoError(t, err)
+	require.NotNil(t, sameUpstream.Current("published"))
+	sameUpstream.mu.RLock()
+	_, pendingRestored := sameUpstream.pending["pending"]
+	sameUpstream.mu.RUnlock()
+	require.True(t, pendingRestored)
+
+	var discoveryHeader http.Header
+	config.Upstream = "https://new.example/repository"
+	config.Fetch = func(_ context.Context, requestPath string, header http.Header) (*http.Response, error) {
+		require.Equal(t, "published/Release", requestPath)
+		discoveryHeader = header.Clone()
+		body := []byte("new current")
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"ETag": {`"new-current"`}}, Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body))}, nil
+	}
+	restarted, err := New(config)
+	require.NoError(t, err)
+	require.Nil(t, restarted.Current("published"))
+	restarted.mu.RLock()
+	require.Empty(t, restarted.pending)
+	restarted.mu.RUnlock()
+	for _, marker := range []string{currentName("published"), pendingName("pending")} {
+		_, err := os.Stat(statePath(stateDir, marker))
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+
+	response := httptest.NewRecorder()
+	handled, _, _ := restarted.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/published/Release", nil), "published/Release", true)
+	require.False(t, handled)
+	require.NoError(t, restarted.Discover(context.Background(), "published", "published", "published/Release"))
+	require.Empty(t, discoveryHeader.Get("If-None-Match"))
+	require.Empty(t, discoveryHeader.Get("If-Modified-Since"))
 }
 
 func TestGenerationManagerResumesVerifiedSHA256Objects(t *testing.T) {
@@ -114,9 +183,9 @@ func TestGenerationManagerResumesVerifiedSHA256Objects(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "resume", Mode: "deb", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch: func(ctx context.Context, origin, requestPath string, _ http.Header) (*http.Response, error) {
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/"+requestPath, nil)
+		Instance: "resume", Mode: "deb", Tenant: "metadata", Upstream: upstream.URL, StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(ctx context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.URL+"/"+requestPath, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -131,7 +200,7 @@ func TestGenerationManagerResumesVerifiedSHA256Objects(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", upstream.URL, nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	_, err = handler.Refresh(context.Background(), 10)
 	require.Error(t, err)
 	failSecond.Store(false)
@@ -144,15 +213,72 @@ func TestGenerationManagerResumesVerifiedSHA256Objects(t *testing.T) {
 	require.Equal(t, int32(2), secondRequests.Load())
 }
 
+func TestRefreshSessionFallbackAndAliases(t *testing.T) {
+	body := []byte("verified metadata")
+	digest := sha256.Sum256(body)
+	var requests []string
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler, err := New(Config{
+		Instance: "fallback", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+			requests = append(requests, requestPath)
+			if requestPath == "repo/by-hash/value" {
+				return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: http.NoBody}, nil
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body))}, nil
+		},
+		Build: func(ctx context.Context, session *RefreshSession, _ Anchor) error {
+			size := int64(len(body))
+			_, fetchErr := session.Fetch(ctx, ObjectSpec{
+				Path: "repo/index", FetchPath: "repo/by-hash/value", FallbackFetchPath: "repo/index",
+				Aliases: []string{"repo/by-hash/value", "repo/by-hash/second"}, ExpectedSize: &size,
+				Checksums: []Checksum{{Algorithm: "sha256", Digest: hex.EncodeToString(digest[:])}},
+			})
+			return fetchErr
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, []string{"repo/by-hash/value", "repo/index"}, requests)
+	current := handler.Current("repo")
+	require.NotNil(t, current)
+	for _, objectPath := range []string{"repo/index", "repo/by-hash/value", "repo/by-hash/second"} {
+		object := current.byPath[objectPath]
+		require.Equal(t, ObjectPresent, object.State)
+		require.Equal(t, current.byPath["repo/index"].Key, object.Key)
+	}
+}
+
+func TestRefreshSessionDoesNotFallbackOnServerError(t *testing.T) {
+	var requests []string
+	handler := &GenerationManager{config: Config{Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+		requests = append(requests, requestPath)
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: http.NoBody}, nil
+	}}}
+	session := &RefreshSession{handler: handler, root: "repo", objects: map[string]Object{}}
+	_, err := session.Fetch(context.Background(), ObjectSpec{Path: "repo/index", FetchPath: "repo/by-hash/value", FallbackFetchPath: "repo/index"})
+	require.ErrorContains(t, err, "returned 503")
+	require.Equal(t, []string{"repo/by-hash/value"}, requests)
+}
+
 func TestRefreshSessionRejectsFetchPathOutsideRepositoryRoot(t *testing.T) {
 	var requests atomic.Int32
-	handler := &GenerationManager{config: Config{Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) {
+	handler := &GenerationManager{config: Config{Fetch: func(context.Context, string, http.Header) (*http.Response, error) {
 		requests.Add(1)
 		return nil, errors.New("unexpected fetch")
 	}}}
 	session := &RefreshSession{handler: handler, root: "repository", objects: map[string]Object{}}
 	_, err := session.Fetch(context.Background(), ObjectSpec{Path: "repository/index", FetchPath: "other/index"})
 	require.ErrorContains(t, err, "invalid metadata fetch path")
+	require.Zero(t, requests.Load())
+	_, err = session.Fetch(context.Background(), ObjectSpec{Path: "repository/index", FallbackFetchPath: "other/index"})
+	require.ErrorContains(t, err, "invalid metadata fallback path")
+	_, err = session.Fetch(context.Background(), ObjectSpec{Path: "repository/index", Aliases: []string{"other/index"}})
+	require.ErrorContains(t, err, "invalid metadata alias")
 	require.Zero(t, requests.Load())
 }
 
@@ -164,8 +290,8 @@ func TestGenerationManagerRejectsSupersededCandidate(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	handler, err := New(Config{
-		Instance: "race", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "race", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(_ context.Context, _ *RefreshSession, anchor Anchor) error {
 			if anchor.Generation == digestString([]byte("first")) {
 				once.Do(func() { close(started) })
@@ -175,7 +301,7 @@ func TestGenerationManagerRejectsSupersededCandidate(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("first"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("first"))))
 	handler.mu.RLock()
 	firstCandidate := handler.pending["repo"].CandidateID
 	handler.mu.RUnlock()
@@ -185,7 +311,7 @@ func TestGenerationManagerRejectsSupersededCandidate(t *testing.T) {
 		refreshDone <- refreshErr
 	}()
 	<-started
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("first"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("first"))))
 	close(release)
 	require.Error(t, <-refreshDone)
 	require.Nil(t, handler.Current("repo"))
@@ -202,8 +328,8 @@ func TestGenerationManagerConditionalPollAdvancesFreshness(t *testing.T) {
 	stateDir := t.TempDir()
 	var validators http.Header
 	config := Config{
-		Instance: "poll", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(_ context.Context, _, _ string, header http.Header) (*http.Response, error) {
+		Instance: "poll", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, _ string, header http.Header) (*http.Response, error) {
 			validators = header.Clone()
 			return &http.Response{StatusCode: http.StatusNotModified, Header: http.Header{"Etag": {`"v2"`}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 		},
@@ -211,7 +337,7 @@ func TestGenerationManagerConditionalPollAdvancesFreshness(t *testing.T) {
 	}
 	handler, err := New(config)
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", http.Header{"ETag": {`"v1"`}}, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"ETag": {`"v1"`}}, bytes.NewReader([]byte("anchor"))))
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	committed := handler.Current("repo")
@@ -240,21 +366,113 @@ func TestGenerationManagerConditionalPollAdvancesFreshness(t *testing.T) {
 	require.Equal(t, `"v1"`, restarted.Current("repo").byPath["repo/Release"].Header.Get("ETag"))
 }
 
+func TestGenerationManagerUsesSourceLastModifiedForConditionalResponses(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	modified := time.Date(2026, time.August, 24, 1, 12, 10, 0, time.UTC).Format(http.TimeFormat)
+	handler, err := New(Config{
+		Instance: "conditional", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	})
+	require.NoError(t, err)
+	header := http.Header{"ETag": {`"anchor"`}, "Last-Modified": {modified}}
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", header, bytes.NewReader([]byte("anchor"))))
+
+	for name, requestHeader := range map[string]http.Header{
+		"date": {"If-Modified-Since": {modified}},
+		"etag": {"If-None-Match": {`"anchor"`}},
+	} {
+		t.Run("staged-"+name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/repo/Release", nil)
+			request.Header = requestHeader
+			response := httptest.NewRecorder()
+			require.True(t, handler.ServeStagedAnchorFor(response, request, "repo/Release", "repo"))
+			require.Equal(t, http.StatusNotModified, response.Code)
+			require.Empty(t, response.Body.Bytes())
+		})
+	}
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	for name, requestHeader := range map[string]http.Header{
+		"date": {"If-Modified-Since": {modified}},
+		"etag": {"If-None-Match": {`"anchor"`}},
+	} {
+		t.Run("current-"+name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/repo/Release", nil)
+			request.Header = requestHeader
+			response := httptest.NewRecorder()
+			handled, _, _ := handler.ServeCurrent(response, request, "repo/Release", true)
+			require.True(t, handled)
+			require.Equal(t, http.StatusNotModified, response.Code)
+			require.Empty(t, response.Body.Bytes())
+		})
+	}
+}
+
+func TestGenerationManagerServeCurrentDoesNotPersistLastSeen(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stateDir := t.TempDir()
+	handler, err := New(Config{
+		Instance: "hot-path", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	markerPath := statePath(stateDir, lastSeenName("repo"))
+	before, err := os.ReadFile(markerPath)
+	require.NoError(t, err)
+	handler.mu.Lock()
+	handler.lastSeenPersisted["repo"] = time.Now().Add(-2 * time.Hour)
+	handler.mu.Unlock()
+
+	type result struct {
+		handled bool
+		status  int
+	}
+	response := httptest.NewRecorder()
+	done := make(chan result, 1)
+	handler.commitMu.Lock()
+	go func() {
+		handled, status, _ := handler.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/Release", nil), "repo/Release", true)
+		done <- result{handled: handled, status: status}
+	}()
+	var served result
+	select {
+	case served = <-done:
+		handler.commitMu.Unlock()
+	case <-time.After(time.Second):
+		handler.commitMu.Unlock()
+		t.Fatal("current metadata response blocked on repository persistence")
+	}
+	require.True(t, served.handled)
+	require.Equal(t, http.StatusOK, served.status)
+	after, err := os.ReadFile(markerPath)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 func TestGenerationManagerUnchangedPollAdvancesFreshnessWithoutCandidate(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	var validators http.Header
 	handler, err := New(Config{
-		Instance: "unchanged-poll", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch: func(_ context.Context, _, _ string, header http.Header) (*http.Response, error) {
+		Instance: "unchanged-poll", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, _ string, header http.Header) (*http.Response, error) {
 			validators = header.Clone()
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Etag": {`"v2"`}}, Body: io.NopCloser(strings.NewReader("anchor")), ContentLength: 6}, nil
 		},
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", http.Header{"ETag": {`"v1"`}}, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"ETag": {`"v1"`}}, bytes.NewReader([]byte("anchor"))))
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	committed := handler.Current("repo")
@@ -277,18 +495,21 @@ func TestGenerationManagerPollUsesConfiguredLargeAnchorLimit(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	largeAnchor := bytes.Repeat([]byte("x"), 16<<20+1)
 	handler, err := New(Config{
-		Instance: "large-anchor", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Instance: "large-anchor", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
 		AnchorMaxBytes: 17 << 20,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) {
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(largeAnchor)), ContentLength: int64(len(largeAnchor))}, nil
 		},
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("small"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("small"))))
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	previous := handler.Current("repo")
+	more, err := handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	current := handler.Current("repo")
@@ -312,8 +533,8 @@ func TestGenerationManagerAtomicallyPublishesChangedClosureAndRestoresIt(t *test
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	config := Config{
-		Instance: "atomic-update", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(_ context.Context, _, requestPath string, headers http.Header) (*http.Response, error) {
+		Instance: "atomic-update", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, requestPath string, headers http.Header) (*http.Response, error) {
 			current := int(revision.Load() - 1)
 			switch requestPath {
 			case "repo/Release":
@@ -348,7 +569,7 @@ func TestGenerationManagerAtomicallyPublishesChangedClosureAndRestoresIt(t *test
 	}
 	manager, err := New(config)
 	require.NoError(t, err)
-	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", http.Header{"ETag": {`"release-initial"`}}, bytes.NewReader(anchors[0])))
+	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"ETag": {`"release-initial"`}}, bytes.NewReader(anchors[0])))
 	_, err = manager.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	previous := manager.Current("repo")
@@ -357,7 +578,10 @@ func TestGenerationManagerAtomicallyPublishesChangedClosureAndRestoresIt(t *test
 	revision.Store(2)
 	refreshDone := make(chan error, 1)
 	go func() {
-		_, refreshErr := manager.Refresh(context.Background(), 1)
+		more, refreshErr := manager.Refresh(context.Background(), 1)
+		if refreshErr == nil && more {
+			_, refreshErr = manager.Refresh(context.Background(), 1)
+		}
 		refreshDone <- refreshErr
 	}()
 	select {
@@ -410,8 +634,8 @@ func TestGenerationManagerSchedulerPublishesChangedAnchor(t *testing.T) {
 	sched, err := scheduler.NewPersistent(filepath.Join(t.TempDir(), "scheduler.json"))
 	require.NoError(t, err)
 	manager, err := New(Config{
-		Instance: "scheduled", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store, Scheduler: sched,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) {
+		Instance: "scheduled", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store, Scheduler: sched,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) {
 			body := anchors[int(revision.Load()-1)]
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body))}, nil
 		},
@@ -424,7 +648,7 @@ func TestGenerationManagerSchedulerPublishesChangedAnchor(t *testing.T) {
 		cancel()
 		require.NoError(t, sched.Stop(context.Background()))
 	})
-	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader(anchors[0])))
+	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader(anchors[0])))
 	require.Eventually(t, func() bool {
 		current := manager.Current("repo")
 		return current != nil && current.Generation == digestString(anchors[0])
@@ -445,7 +669,7 @@ func TestGenerationManagerSchedulerPublishesChangedAnchor(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
-func TestLastSeenPersistenceDoesNotRetryUnderContinuousTraffic(t *testing.T) {
+func TestLastSeenPersistenceFlushesConcurrentUpdates(t *testing.T) {
 	rootID := "busy-repository"
 	now := time.Now().UTC()
 	handler := &GenerationManager{
@@ -472,7 +696,7 @@ func TestLastSeenPersistenceDoesNotRetryUnderContinuousTraffic(t *testing.T) {
 	}()
 	<-started
 	done := make(chan error, 1)
-	go func() { done <- handler.touchLastSeen(rootID, time.Now().UTC()) }()
+	go func() { done <- handler.flushLastSeen(context.Background()) }()
 	var persistErr error
 	select {
 	case persistErr = <-done:
@@ -497,14 +721,14 @@ func TestGenerationManagerGCProtectsActiveReader(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "gc", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch:        func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "gc", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch:        func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:        func(context.Context, *RefreshSession, Anchor) error { return nil },
 		KeepPrevious: 1, GracePeriod: time.Nanosecond,
 	})
 	require.NoError(t, err)
 	publish := func(body string) *Snapshot {
-		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte(body))))
+		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte(body))))
 		_, refreshErr := handler.Refresh(context.Background(), 1)
 		require.NoError(t, refreshErr)
 		return handler.Current("repo")
@@ -534,13 +758,13 @@ func TestGenerationManagerGCProtectsPersistedCurrentMarker(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "gc-marker", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch:       func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "gc-marker", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch:       func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:       func(context.Context, *RefreshSession, Anchor) error { return nil },
 		GracePeriod: time.Nanosecond,
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	snapshot := handler.Current("repo")
@@ -562,13 +786,13 @@ func TestGenerationManagerIsolatesInvalidCurrentState(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	config := Config{
-		Instance: "state", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "state", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	}
 	handler, err := New(config)
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	currentPath := filepath.Join(stateDir, filepath.FromSlash(currentName("repo")))
@@ -591,13 +815,13 @@ func TestGenerationManagerRestoresCurrentDespiteInvalidAncillaryState(t *testing
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	config := Config{
-		Instance: "ancillary", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "ancillary", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	}
 	handler, err := New(config)
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	pendingData, err := os.ReadFile(statePath(stateDir, pendingName("repo")))
 	require.NoError(t, err)
 	_, err = handler.Refresh(context.Background(), 1)
@@ -624,13 +848,13 @@ func TestGenerationManagerRetiresInactiveRoot(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	handler, err := New(Config{
-		Instance: "inactive", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch:         func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "inactive", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch:         func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:         func(context.Context, *RefreshSession, Anchor) error { return nil },
 		InactiveAfter: time.Nanosecond, GracePeriod: time.Nanosecond,
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	snapshot := handler.Current("repo")
@@ -654,8 +878,8 @@ func TestGenerationManagerGCRemovesInvalidOrphanCandidate(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	handler, err := New(Config{
-		Instance: "invalid-candidate", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch:       func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "invalid-candidate", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch:       func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:       func(context.Context, *RefreshSession, Anchor) error { return nil },
 		GracePeriod: time.Nanosecond,
 	})
@@ -688,12 +912,12 @@ func TestGenerationManagerRetiresPendingOnlyRoot(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	handler, err := New(Config{
-		Instance: "pending", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "pending", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil }, InactiveAfter: time.Nanosecond,
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	handler.mu.Lock()
 	handler.lastSeen["repo"] = time.Now().Add(-time.Hour)
 	handler.mu.Unlock()
@@ -712,12 +936,12 @@ func TestGenerationManagerRetriesFailedRootRetirement(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	handler, err := New(Config{
-		Instance: "retire-retry", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "retire-retry", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil }, InactiveAfter: time.Nanosecond,
 	})
 	require.NoError(t, err)
-	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 	handler.mu.Lock()
 	handler.lastSeen["repo"] = time.Now().Add(-time.Hour)
 	handler.mu.Unlock()
@@ -754,8 +978,8 @@ func TestGenerationManagerRetiresLastSeenOnlyRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, writeBytes(stateDir, lastSeenName("orphan"), data))
 	handler, err := New(Config{
-		Instance: "last-seen", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch:         func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "last-seen", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch:         func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:         func(context.Context, *RefreshSession, Anchor) error { return nil },
 		InactiveAfter: time.Nanosecond,
 	})
@@ -774,8 +998,8 @@ func TestGenerationManagerRotatesPastFailedRoot(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "rotation", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "rotation", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(_ context.Context, _ *RefreshSession, anchor Anchor) error {
 			if anchor.RootID == "a" {
 				return &retryableRefreshError{err: io.ErrUnexpectedEOF}
@@ -785,7 +1009,7 @@ func TestGenerationManagerRotatesPastFailedRoot(t *testing.T) {
 	})
 	require.NoError(t, err)
 	for _, rootID := range []string{"a", "b"} {
-		require.NoError(t, handler.StageAnchorID(context.Background(), rootID, rootID, rootID+"/Release", "https://upstream.example", nil, bytes.NewReader([]byte(rootID))))
+		require.NoError(t, handler.StageAnchorID(context.Background(), rootID, rootID, rootID+"/Release", nil, bytes.NewReader([]byte(rootID))))
 	}
 	more, err := handler.Refresh(context.Background(), 1)
 	require.Error(t, err)
@@ -801,11 +1025,212 @@ func TestGenerationManagerRotatesPastFailedRoot(t *testing.T) {
 
 	// A newly observed anchor supersedes the failed attempt and must be eligible
 	// immediately instead of inheriting its retry delay.
-	require.NoError(t, handler.StageAnchorID(context.Background(), "a", "a", "a/Release", "https://upstream.example", nil, bytes.NewReader([]byte("replacement"))))
+	require.NoError(t, handler.StageAnchorID(context.Background(), "a", "a", "a/Release", nil, bytes.NewReader([]byte("replacement"))))
 	handler.mu.RLock()
 	_, delayed := handler.retryWindows["a"]
 	handler.mu.RUnlock()
 	require.False(t, delayed)
+}
+
+func TestGenerationManagerReplacesFailedPendingCandidateWhenAnchorChanges(t *testing.T) {
+	anchors := [][]byte{[]byte("anchor-one"), []byte("anchor-two")}
+	metadata := [][]byte{[]byte("metadata-one"), []byte("metadata-two")}
+	digests := [2][sha256.Size]byte{sha256.Sum256(metadata[0]), sha256.Sum256(metadata[1])}
+	var revision atomic.Int32
+	var metadataRequests atomic.Int32
+	revision.Store(1)
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler, err := New(Config{
+		Instance: "pending-update", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, requestPath string, header http.Header) (*http.Response, error) {
+			current := int(revision.Load() - 1)
+			switch requestPath {
+			case "repo/Release":
+				require.Equal(t, `"one"`, header.Get("If-None-Match"))
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"ETag": {`"two"`}}, Body: io.NopCloser(bytes.NewReader(anchors[current])), ContentLength: int64(len(anchors[current]))}, nil
+			case "repo/index":
+				metadataRequests.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(metadata[current])), ContentLength: int64(len(metadata[current]))}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+			}
+		},
+		Build: func(ctx context.Context, session *RefreshSession, anchor Anchor) error {
+			current := 0
+			if anchor.Generation == digestString(anchors[1]) {
+				current = 1
+			}
+			size := int64(len(metadata[current]))
+			if _, fetchErr := session.Fetch(ctx, ObjectSpec{Path: "repo/index", ExpectedSize: &size, Checksums: []Checksum{{Algorithm: "sha256", Digest: hex.EncodeToString(digests[current][:])}}}); fetchErr != nil {
+				return fetchErr
+			}
+			if current == 0 {
+				return Retryable(io.ErrUnexpectedEOF)
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"ETag": {`"one"`}}, bytes.NewReader(anchors[0])))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	handler.mu.Lock()
+	firstCandidate := handler.pending["repo"].CandidateID
+	retry := handler.retryWindows["repo"]
+	retry.notBefore = time.Now().Add(-time.Second)
+	handler.retryWindows["repo"] = retry
+	handler.mu.Unlock()
+
+	revision.Store(2)
+	more, err := handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
+	handler.mu.RLock()
+	secondCandidate := handler.pending["repo"].CandidateID
+	handler.mu.RUnlock()
+	require.NotEqual(t, firstCandidate, secondCandidate)
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := handler.Current("repo")
+	require.NotNil(t, current)
+	require.Equal(t, digestString(anchors[1]), current.Generation)
+	reader, err := store.OpenObject(context.Background(), "metadata", current.byPath["repo/index"].Key)
+	require.NoError(t, err)
+	content, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	require.Equal(t, metadata[1], content)
+	require.Equal(t, int32(2), metadataRequests.Load())
+}
+
+func TestGenerationManagerBlockedPendingDoesNotPollOtherRoots(t *testing.T) {
+	var currentPolls atomic.Int32
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler, err := New(Config{
+		Instance: "isolated-retry", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+			if requestPath == "b/Release" {
+				currentPolls.Add(1)
+			}
+			return &http.Response{StatusCode: http.StatusNotModified, Header: make(http.Header), Body: http.NoBody}, nil
+		},
+		Build: func(_ context.Context, _ *RefreshSession, anchor Anchor) error {
+			if anchor.RootID == "a" {
+				return Retryable(io.ErrUnexpectedEOF)
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchorID(context.Background(), "b", "b", "b/Release", nil, bytes.NewReader([]byte("b"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchorID(context.Background(), "a", "a", "a/Release", nil, bytes.NewReader([]byte("a"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	more, err := handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.False(t, more)
+	require.Zero(t, currentPolls.Load())
+	handler.mu.Lock()
+	retry := handler.retryWindows["a"]
+	retry.notBefore = time.Now().Add(-time.Second)
+	handler.retryWindows["a"] = retry
+	handler.mu.Unlock()
+	more, err = handler.Refresh(context.Background(), 1)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.True(t, more)
+	more, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.False(t, more)
+	require.Equal(t, int32(1), currentPolls.Load())
+}
+
+func TestGenerationManagerBacksOffAndRevalidatesSamePendingCandidate(t *testing.T) {
+	var builds, anchorPolls atomic.Int32
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler, err := New(Config{
+		Instance: "retry", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, requestPath string, header http.Header) (*http.Response, error) {
+			require.Equal(t, "repo/Release", requestPath)
+			require.Equal(t, `"anchor"`, header.Get("If-None-Match"))
+			anchorPolls.Add(1)
+			return &http.Response{StatusCode: http.StatusNotModified, Header: make(http.Header), Body: http.NoBody}, nil
+		},
+		Build: func(context.Context, *RefreshSession, Anchor) error {
+			builds.Add(1)
+			return Retryable(io.ErrUnexpectedEOF)
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"ETag": {`"anchor"`}}, bytes.NewReader([]byte("anchor"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	for range 5 {
+		more, refreshErr := handler.Refresh(context.Background(), 1)
+		require.NoError(t, refreshErr)
+		require.False(t, more)
+	}
+	require.Equal(t, int32(1), builds.Load())
+	require.Zero(t, anchorPolls.Load())
+
+	handler.mu.Lock()
+	retry := handler.retryWindows["repo"]
+	retry.notBefore = time.Now().Add(-time.Second)
+	handler.retryWindows["repo"] = retry
+	handler.mu.Unlock()
+	_, err = handler.Refresh(context.Background(), 1)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.Equal(t, int32(2), builds.Load())
+	require.Equal(t, int32(1), anchorPolls.Load())
+	handler.mu.RLock()
+	retry = handler.retryWindows["repo"]
+	handler.mu.RUnlock()
+	require.Equal(t, 2, retry.failures)
+	require.Greater(t, time.Until(retry.notBefore), 90*time.Second)
+	require.LessOrEqual(t, time.Until(retry.notBefore), 2*time.Minute+15*time.Second)
+}
+
+func TestGenerationManagerPollCycleVisitsEveryCurrentRoot(t *testing.T) {
+	var mu sync.Mutex
+	polled := make(map[string]int)
+	var pollOrder []string
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler, err := New(Config{
+		Instance: "poll-cycle", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+			mu.Lock()
+			polled[requestPath]++
+			pollOrder = append(pollOrder, requestPath)
+			mu.Unlock()
+			return &http.Response{StatusCode: http.StatusNotModified, Header: make(http.Header), Body: http.NoBody}, nil
+		},
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	})
+	require.NoError(t, err)
+	for _, rootID := range []string{"a", "b", "c"} {
+		require.NoError(t, handler.StageAnchorID(context.Background(), rootID, rootID, rootID+"/Release", nil, bytes.NewReader([]byte(rootID))))
+	}
+	_, err = handler.Refresh(context.Background(), 3)
+	require.NoError(t, err)
+	for index := 0; index < 3; index++ {
+		more, refreshErr := handler.Refresh(context.Background(), 1)
+		require.NoError(t, refreshErr)
+		require.Equal(t, index < 2, more)
+		if index == 0 {
+			handler.requestCurrentPoll("c")
+		}
+	}
+	require.Equal(t, map[string]int{"a/Release": 1, "b/Release": 1, "c/Release": 1}, polled)
+	require.Equal(t, []string{"a/Release", "c/Release", "b/Release"}, pollOrder)
 }
 
 func TestGenerationManagerRejectsOversizedAnchorBeforeStaging(t *testing.T) {
@@ -813,13 +1238,13 @@ func TestGenerationManagerRejectsOversizedAnchorBeforeStaging(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "anchor-limit", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Instance: "anchor-limit", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
 		AnchorMaxBytes: 4,
-		Fetch:          func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Fetch:          func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:          func(context.Context, *RefreshSession, Anchor) error { return nil },
 	})
 	require.NoError(t, err)
-	require.ErrorIs(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("large"))), storeio.ErrObjectTooLarge)
+	require.ErrorIs(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("large"))), storeio.ErrObjectTooLarge)
 	handler.mu.RLock()
 	_, pending := handler.pending["repo"]
 	handler.mu.RUnlock()
@@ -832,13 +1257,13 @@ func TestGenerationManagerRejectsOversizedPendingState(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	handler, err := New(Config{
-		Instance: "pending-limit", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "pending-limit", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	})
 	require.NoError(t, err)
 	header := http.Header{"X-Oversized": {strings.Repeat("x", maxRepositoryMarkerSize)}}
-	err = handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", header, bytes.NewReader([]byte("anchor")))
+	err = handler.StageAnchor(context.Background(), "repo", "repo/Release", header, bytes.NewReader([]byte("anchor")))
 	require.ErrorContains(t, err, "state document exceeds")
 	require.Nil(t, handler.Current("repo"))
 	handler.mu.RLock()
@@ -857,8 +1282,8 @@ func TestGenerationManagerPublicationFaultsRemainRetryable(t *testing.T) {
 		t.Cleanup(func() { require.NoError(t, store.Close()) })
 		stateDir := t.TempDir()
 		handler, err := New(Config{
-			Instance: "fault", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
-			Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+			Instance: "fault", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+			Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 			Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 		})
 		require.NoError(t, err)
@@ -869,7 +1294,7 @@ func TestGenerationManagerPublicationFaultsRemainRetryable(t *testing.T) {
 		handler, stateDir := newManager(t)
 		destination := statePath(stateDir, pendingName("repo"))
 		require.NoError(t, os.MkdirAll(destination, 0o755))
-		err := handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor")))
+		err := handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor")))
 		require.Error(t, err)
 		require.Nil(t, handler.Current("repo"))
 		handler.mu.RLock()
@@ -881,7 +1306,7 @@ func TestGenerationManagerPublicationFaultsRemainRetryable(t *testing.T) {
 	for _, fault := range []string{"snapshot", "current marker"} {
 		t.Run(fault, func(t *testing.T) {
 			handler, stateDir := newManager(t)
-			require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte("anchor"))))
+			require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
 			handler.mu.RLock()
 			pending := handler.pending["repo"]
 			handler.mu.RUnlock()
@@ -915,14 +1340,14 @@ func TestGenerationManagerGCBoundsInactiveRootInspection(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "gc-batch", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch:         func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "gc-batch", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch:         func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:         func(context.Context, *RefreshSession, Anchor) error { return nil },
 		InactiveAfter: time.Nanosecond,
 	})
 	require.NoError(t, err)
 	for _, rootID := range []string{"a", "b", "c"} {
-		require.NoError(t, handler.StageAnchorID(context.Background(), rootID, rootID, rootID+"/Release", "https://upstream.example", nil, bytes.NewReader([]byte(rootID))))
+		require.NoError(t, handler.StageAnchorID(context.Background(), rootID, rootID, rootID+"/Release", nil, bytes.NewReader([]byte(rootID))))
 	}
 	handler.mu.Lock()
 	for rootID := range handler.pending {
@@ -945,15 +1370,15 @@ func TestGenerationManagerGCRetriesInterruptedCandidateDeletion(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "gc-cancel", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch:        func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "gc-cancel", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch:        func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build:        func(context.Context, *RefreshSession, Anchor) error { return nil },
 		KeepPrevious: 1, GracePeriod: time.Nanosecond,
 	})
 	require.NoError(t, err)
 	var oldestKey string
 	for _, body := range []string{"first", "second", "third"} {
-		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader([]byte(body))))
+		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte(body))))
 		_, err = handler.Refresh(context.Background(), 1)
 		require.NoError(t, err)
 		if oldestKey == "" {
@@ -987,14 +1412,14 @@ func TestGenerationManagerCoalescesScheduledDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	handler, err := New(Config{
-		Instance: "discovery", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
-		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Instance: "discovery", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
 		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
 	})
 	require.NoError(t, err)
 	lifecycle := storeio.NewLifecycle()
 	for range 20 {
-		handler.ScheduleDiscovery(lifecycle, "repo", "repo", "repo/Release", "https://upstream.example")
+		handler.ScheduleDiscovery(lifecycle, "repo", "repo", "repo/Release")
 	}
 	handler.discoveryMu.Lock()
 	require.Len(t, handler.discoveryPending, 1)

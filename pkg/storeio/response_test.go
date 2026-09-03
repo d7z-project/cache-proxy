@@ -43,7 +43,7 @@ func TestResponseTouchPreservesRetentionAndDeleteVerifiesLogicalKey(t *testing.T
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	ctx := context.Background()
 	key := "refs/retained"
-	require.NoError(t, putResponseRetained(ctx, store, "responses", key, "https://repo.test", http.StatusOK, nil, "", time.Hour, strings.NewReader("body")))
+	require.NoError(t, putResponseWithRetention(ctx, store, "responses", key, "https://repo.test", http.StatusOK, nil, "", time.Hour, strings.NewReader("body")))
 	for range 2 {
 		require.NoError(t, TouchResponse(ctx, store, "responses", key, nil))
 		object, err := OpenResponse(ctx, store, "responses", key)

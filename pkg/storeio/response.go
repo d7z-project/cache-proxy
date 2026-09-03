@@ -31,6 +31,16 @@ type ResponseObject struct {
 	DeleteAt time.Time
 }
 
+type storedResponseMetadata struct {
+	Status     int           `json:"status"`
+	Origin     string        `json:"origin"`
+	Fetched    time.Time     `json:"fetched"`
+	SHA256     string        `json:"sha256,omitempty"`
+	DeleteAt   time.Time     `json:"delete_at"`
+	Retention  time.Duration `json:"retention"`
+	LogicalKey string        `json:"logical_key"`
+}
+
 const defaultReferenceRetention = 30 * 24 * time.Hour
 
 func OpenResponse(ctx context.Context, store *blobfs.Store, tenant, key string) (*ResponseObject, error) {
@@ -45,15 +55,7 @@ func OpenResponse(ctx context.Context, store *blobfs.Store, tenant, key string) 
 		_ = reader.Close()
 		return nil, fmt.Errorf("decode stored response header: %w", err)
 	}
-	var metadata struct {
-		Status     int           `json:"status"`
-		Origin     string        `json:"origin"`
-		Fetched    time.Time     `json:"fetched"`
-		SHA256     string        `json:"sha256"`
-		DeleteAt   time.Time     `json:"delete_at"`
-		Retention  time.Duration `json:"retention"`
-		LogicalKey string        `json:"logical_key"`
-	}
+	var metadata storedResponseMetadata
 	if err := json.Unmarshal([]byte(options["metadata"]), &metadata); err != nil {
 		_ = reader.Close()
 		return nil, fmt.Errorf("decode stored response metadata: %w", err)
@@ -69,11 +71,11 @@ func OpenResponse(ctx context.Context, store *blobfs.Store, tenant, key string) 
 	}, nil
 }
 
-func PutResponse(ctx context.Context, store *blobfs.Store, tenant, key, origin string, status int, header http.Header, sha256 string, body io.Reader) error {
-	return putResponseRetained(ctx, store, tenant, key, origin, status, header, sha256, defaultReferenceRetention, body)
+func PutResponse(ctx context.Context, store *blobfs.Store, tenant, key, origin string, status int, header http.Header, sha256Digest string, body io.Reader) error {
+	return putResponseWithRetention(ctx, store, tenant, key, origin, status, header, sha256Digest, defaultReferenceRetention, body)
 }
 
-func putResponseRetained(ctx context.Context, store *blobfs.Store, tenant, key, origin string, status int, header http.Header, sha256 string, retention time.Duration, body io.Reader) error {
+func putResponseWithRetention(ctx context.Context, store *blobfs.Store, tenant, key, origin string, status int, header http.Header, sha256Digest string, retention time.Duration, body io.Reader) error {
 	if key == "" || origin == "" || status < 100 || status > 599 || retention <= 0 || body == nil {
 		return errors.New("response storage parameters are invalid")
 	}
@@ -97,15 +99,11 @@ func putResponseRetained(ctx context.Context, store *blobfs.Store, tenant, key, 
 	if err != nil {
 		return fmt.Errorf("encode response header: %w", err)
 	}
-	metadata, err := json.Marshal(struct {
-		Status     int           `json:"status"`
-		Origin     string        `json:"origin"`
-		Fetched    time.Time     `json:"fetched"`
-		SHA256     string        `json:"sha256,omitempty"`
-		DeleteAt   time.Time     `json:"delete_at"`
-		Retention  time.Duration `json:"retention"`
-		LogicalKey string        `json:"logical_key"`
-	}{Status: status, Origin: origin, Fetched: time.Now().UTC(), SHA256: sha256, DeleteAt: time.Now().UTC().Add(retention), Retention: retention, LogicalKey: key})
+	now := time.Now().UTC()
+	metadata, err := json.Marshal(storedResponseMetadata{
+		Status: status, Origin: origin, Fetched: now, SHA256: sha256Digest,
+		DeleteAt: now.Add(retention), Retention: retention, LogicalKey: key,
+	})
 	if err != nil {
 		return fmt.Errorf("encode response metadata: %w", err)
 	}
@@ -134,15 +132,7 @@ func TouchResponse(ctx context.Context, store *blobfs.Store, tenant, key string,
 			header[http.CanonicalHeaderKey(name)] = append([]string(nil), values...)
 		}
 	}
-	var metadata struct {
-		Status     int           `json:"status"`
-		Origin     string        `json:"origin"`
-		Fetched    time.Time     `json:"fetched"`
-		SHA256     string        `json:"sha256,omitempty"`
-		DeleteAt   time.Time     `json:"delete_at"`
-		Retention  time.Duration `json:"retention"`
-		LogicalKey string        `json:"logical_key"`
-	}
+	var metadata storedResponseMetadata
 	if err := json.Unmarshal([]byte(info.Options["metadata"]), &metadata); err != nil {
 		return fmt.Errorf("decode stored response metadata: %w", err)
 	}
@@ -176,9 +166,7 @@ func DeleteResponse(ctx context.Context, store *blobfs.Store, tenant, key string
 	if err != nil {
 		return err
 	}
-	var metadata struct {
-		LogicalKey string `json:"logical_key"`
-	}
+	var metadata storedResponseMetadata
 	if err := json.Unmarshal([]byte(info.Options["metadata"]), &metadata); err != nil {
 		return fmt.Errorf("decode stored response metadata: %w", err)
 	}

@@ -302,9 +302,14 @@ func (h *GenerationManager) restoreCurrentGeneration(repositoryName string, seen
 	if _, err := readYAML(h.config.StateDir, directory+"/current.yaml", &marker); err != nil {
 		return err
 	}
+	if marker.Upstream != h.config.Upstream {
+		if err := os.Remove(statePath(h.config.StateDir, directory+"/current.yaml")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove metadata current marker for obsolete upstream: %w", err)
+		}
+		return nil
+	}
 	cleanRootValue, rootErr := cleanRoot(marker.Root)
-	upstream, upstreamErr := url.Parse(marker.Upstream)
-	if marker.RootID == "" || path.Base(repositoryDirectory(marker.RootID)) != repositoryName || rootErr != nil || cleanRootValue != marker.Root || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" {
+	if marker.RootID == "" || path.Base(repositoryDirectory(marker.RootID)) != repositoryName || rootErr != nil || cleanRootValue != marker.Root || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) {
 		return errors.New("invalid current metadata marker")
 	}
 	snapshotPath := snapshotName(marker.RootID, marker.Generation, marker.CandidateID)
@@ -357,10 +362,15 @@ func (h *GenerationManager) restorePendingAnchor(repositoryName string, seen las
 	if _, err := readJSON(h.config.StateDir, directory+"/pending.json", maxRepositoryMarkerSize, &pending); err != nil {
 		return err
 	}
+	if pending.Upstream != h.config.Upstream {
+		if err := os.Remove(statePath(h.config.StateDir, directory+"/pending.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove metadata pending marker for obsolete upstream: %w", err)
+		}
+		return nil
+	}
 	cleanRootValue, rootErr := cleanRoot(pending.Root)
 	cleanAnchor, anchorErr := CleanPath(pending.Path)
-	upstream, upstreamErr := url.Parse(pending.Upstream)
-	if pending.RootID == "" || !validCandidateID(pending.CandidateID) || path.Base(repositoryDirectory(pending.RootID)) != repositoryName || rootErr != nil || cleanRootValue != pending.Root || anchorErr != nil || cleanAnchor != pending.Path || !containsPath(pending.Root, pending.Path) || !validSHA256(pending.Generation) || pending.Key != candidatePrefix(pending.RootID, pending.Generation, pending.CandidateID)+"/anchor" || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" {
+	if pending.RootID == "" || !validCandidateID(pending.CandidateID) || path.Base(repositoryDirectory(pending.RootID)) != repositoryName || rootErr != nil || cleanRootValue != pending.Root || anchorErr != nil || cleanAnchor != pending.Path || !containsPath(pending.Root, pending.Path) || !validSHA256(pending.Generation) || pending.Key != candidatePrefix(pending.RootID, pending.Generation, pending.CandidateID)+"/anchor" {
 		return errors.New("invalid pending metadata state")
 	}
 	if current := h.current[pending.RootID]; current != nil && current.snapshot.CandidateID == pending.CandidateID {
@@ -392,6 +402,9 @@ func validCandidateID(value string) bool {
 func (h *GenerationManager) GC(ctx context.Context, limit int) (bool, error) {
 	h.gcMu.Lock()
 	defer h.gcMu.Unlock()
+	if err := h.flushLastSeen(ctx); err != nil {
+		return false, err
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -487,6 +500,14 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 		delete(h.lastSeenPersisted, rootID)
 		delete(h.retryWindows, rootID)
 		delete(h.retiring, rootID)
+		delete(h.pollQueued, rootID)
+		queued := h.pollQueue[:0]
+		for _, queuedRootID := range h.pollQueue {
+			if queuedRootID != rootID {
+				queued = append(queued, queuedRootID)
+			}
+		}
+		h.pollQueue = queued
 		h.mu.Unlock()
 		h.commitMu.Unlock()
 		if err := removeEmptyStateParents(statePath(h.config.StateDir, currentName(rootID)), statePath(h.config.StateDir, "repositories")); err != nil {

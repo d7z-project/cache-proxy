@@ -140,11 +140,47 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, `class="badge badge-file"`)
 	require.Contains(t, body, "copyToClipboard")
 	require.Contains(t, body, "--bg:")
-	require.Contains(t, body, `id="lang-select"`)
-	require.Contains(t, body, `data-lang="ja"`)
-	require.Contains(t, body, `data-lang="ko"`)
-	require.Contains(t, body, `data-lang="de"`)
-	require.Contains(t, body, `data-lang="fr"`)
+	require.Contains(t, body, `id="language-select"`)
+	require.Contains(t, body, `data-language="ja"`)
+	require.Contains(t, body, `data-language="ko"`)
+	require.Contains(t, body, `data-language="de"`)
+	require.Contains(t, body, `data-language="fr"`)
+	require.Contains(t, body, `id="status-dialog"`)
+	require.Contains(t, body, `id="disk-chart"`)
+	require.Contains(t, body, `data-status-tab="network"`)
+}
+
+func TestHomePageAggregatesInstanceMetrics(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	doc := testDocument(t.TempDir(), []config.Instance{
+		fileInstance(t, "files", "/files", "https://example.com", file.Options{}),
+	})
+	app := openApp(ctx, t, doc)
+	defer closeApp(t, app)
+
+	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "HIT", http.StatusOK, 128)
+	app.stats.RecordRequest("files", config.ModeFile, http.MethodGet, "MISS", http.StatusOK, 128)
+	app.stats.AddActiveDownload("files", config.ModeFile, 2)
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, body, `id="overview-requests">2</dd>`)
+	require.Contains(t, body, `id="overview-hit-rate">50.0%</dd>`)
+	require.Contains(t, body, `id="overview-active">2</dd>`)
+}
+
+func TestHomeTranslationsHaveMatchingKeys(t *testing.T) {
+	reference := i18nMaps["en"]
+	for locale, translations := range i18nMaps {
+		require.Len(t, translations, len(reference), locale)
+		for key := range reference {
+			require.Contains(t, translations, key, "%s is missing %q", locale, key)
+		}
+	}
 }
 
 func TestBackendLockCoversProcessLifetime(t *testing.T) {
@@ -445,6 +481,7 @@ func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "registry")
 	require.NotContains(t, rec.Body.String(), "<section class=\"toolbar\">")
+	require.NotContains(t, rec.Body.String(), `id="status-dialog"`)
 
 	req = httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	rec = httptest.NewRecorder()

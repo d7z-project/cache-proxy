@@ -18,7 +18,7 @@ func TestResponseCleanupCursorProgressesWithoutDeletions(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	for _, key := range []string{"first", "second", "third"} {
-		require.NoError(t, putResponseRetained(context.Background(), store, "responses", key, "https://example.test", 200, nil, "", time.Hour, strings.NewReader(key)))
+		require.NoError(t, putResponseWithRetention(context.Background(), store, "responses", key, "https://example.test", 200, nil, "", time.Hour, strings.NewReader(key)))
 	}
 	cleaner := &responseCleaner{store: store, tenant: "responses", opts: config.CleanupConfig{BatchSize: 1}}
 	seen := make(map[string]struct{})

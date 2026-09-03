@@ -93,7 +93,7 @@ func TestStreamEOFDoesNotWaitForCachePublication(t *testing.T) {
 	reader, err := StartStream(context.Background(), StreamConfig{
 		Body:       io.NopCloser(strings.NewReader("body")),
 		ObjectPath: "object",
-		WorkDir:    t.TempDir(),
+		Spooler:    NewSpooler(t.TempDir(), 1<<20, nil),
 		Lifecycle:  lifecycle,
 		StoreFn: func(context.Context, io.Reader) error {
 			close(publicationStarted)
@@ -128,7 +128,7 @@ func TestStartStreamFastProducerKeepsReaderAlive(t *testing.T) {
 	lifecycle := NewLifecycle()
 	for range 100 {
 		reader, err := StartStream(context.Background(), StreamConfig{
-			Body: io.NopCloser(strings.NewReader("body")), WorkDir: workDir, Lifecycle: lifecycle,
+			Body: io.NopCloser(strings.NewReader("body")), Spooler: NewSpooler(workDir, 1<<20, nil), Lifecycle: lifecycle,
 			StoreFn: func(_ context.Context, body io.Reader) error {
 				_, err := io.Copy(io.Discard, body)
 				return err
@@ -152,7 +152,7 @@ func TestStartStreamRejectsDeclaredLengthMismatch(t *testing.T) {
 	done := make(chan error, 1)
 	stored := atomic.Bool{}
 	reader, err := StartStream(context.Background(), StreamConfig{
-		Body: io.NopCloser(strings.NewReader("body")), WorkDir: t.TempDir(), Lifecycle: lifecycle,
+		Body: io.NopCloser(strings.NewReader("body")), Spooler: NewSpooler(t.TempDir(), 1<<20, nil), Lifecycle: lifecycle,
 		ExpectedSize: &expected,
 		StoreFn: func(context.Context, io.Reader) error {
 			stored.Store(true)
@@ -265,7 +265,7 @@ func TestStartStreamFallsBackToUpstreamAfterSpoolWriteFailure(t *testing.T) {
 	done := make(chan error, 1)
 	stored := atomic.Bool{}
 	reader, err := StartStream(context.Background(), StreamConfig{
-		Body: source, WorkDir: t.TempDir(), Lifecycle: lifecycle,
+		Body: source, Spooler: NewSpooler(t.TempDir(), 1<<20, nil), Lifecycle: lifecycle,
 		StoreFn: func(context.Context, io.Reader) error { stored.Store(true); return nil },
 		Done:    func(err error) { done <- err },
 	})
@@ -290,7 +290,7 @@ func TestStartStreamRejectsIncompleteConfigurationBeforeReading(t *testing.T) {
 	lifecycle := NewLifecycle()
 	source := &countingReader{reader: strings.NewReader("body")}
 	_, err := StartStream(context.Background(), StreamConfig{
-		Body: io.NopCloser(source), WorkDir: t.TempDir(), Lifecycle: lifecycle,
+		Body: io.NopCloser(source), Spooler: NewSpooler(t.TempDir(), 1<<20, nil), Lifecycle: lifecycle,
 	})
 	require.EqualError(t, err, "stream store function is nil")
 	require.Zero(t, source.count)
@@ -298,4 +298,10 @@ func TestStartStreamRejectsIncompleteConfigurationBeforeReading(t *testing.T) {
 
 	_, err = StartStream(context.Background(), StreamConfig{StoreFn: func(context.Context, io.Reader) error { return nil }})
 	require.EqualError(t, err, "stream body is nil")
+
+	_, err = StartStream(context.Background(), StreamConfig{
+		Body: io.NopCloser(source), Lifecycle: lifecycle,
+		StoreFn: func(context.Context, io.Reader) error { return nil },
+	})
+	require.EqualError(t, err, "stream spooler is nil")
 }
