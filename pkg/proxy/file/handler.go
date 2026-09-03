@@ -75,9 +75,12 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		http.Error(w, "invalid file path", http.StatusBadRequest)
 		return http.StatusBadRequest, "ERROR"
 	}
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
+	}
 	policy := h.policy(cleaned)
 	if policy == "passthrough" || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" {
-		return h.passthrough(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 
 	key := cacheKey(h.origin, cleaned, request)
@@ -96,7 +99,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		}
 	}
 	if request.Method == http.MethodHead {
-		return h.passthrough(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	return h.fill(w, request, cleaned)
 }
@@ -246,7 +249,7 @@ func (h *handler) streamAndStoreFlight(w http.ResponseWriter, request *http.Requ
 	return http.StatusOK
 }
 
-func (h *handler) passthrough(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), request.URL.RawQuery)
 	if err != nil {
 		return localError(w, http.StatusBadGateway)
@@ -277,7 +280,7 @@ func (h *handler) copyRequestHeaders(destination, source http.Header) {
 		}
 	}
 	if destination.Get("User-Agent") == "" {
-		destination.Set("User-Agent", "cache-proxy/1")
+		destination.Set("User-Agent", transport.DefaultUserAgent)
 	}
 }
 

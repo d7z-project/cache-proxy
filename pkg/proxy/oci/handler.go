@@ -20,7 +20,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const maxTokenCacheEntries = 2048
@@ -37,7 +36,7 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 	if block.Spooler == nil {
 		block.Spooler = storeio.NewSpooler(block.WorkDir, 2<<30, nil)
 	}
-	client := utils.DefaultHTTPClientWrapper()
+	client := transport.NewUpstreamHTTPClient()
 	transport.ConfigureHTTPClient(client, name, block.Transport)
 	transport.ConfigureAdmission(client.Client, upstreamGate)
 	return &handler{
@@ -54,7 +53,7 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 		upstreamGate:    upstreamGate,
 		lifecycle:       storeio.NewLifecycle(),
 		auth:            authHandler{tokens: map[string]ociToken{}},
-		refLocks:        utils.NewRWLockGroup(),
+		refLocks:        &referenceLocks{},
 		manifestReaders: map[string]int{},
 	}
 }
@@ -235,7 +234,10 @@ func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKi
 	if err != nil {
 		return false, err
 	}
-	fetchedAt, fetchedAtErr := utils.ParseFetchedAt(info.Options["fetched-at"])
+	fetchedAt, fetchedAtErr := time.Parse(time.RFC3339Nano, info.Options["fetched-at"])
+	if fetchedAtErr != nil {
+		fetchedAt, fetchedAtErr = time.Parse(http.TimeFormat, info.Options["fetched-at"])
+	}
 	if fetchedAtErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
 		return false, nil
 	}
@@ -296,7 +298,7 @@ func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Re
 		return http.StatusOK, "LOCAL", 0, nil
 	}
 	if resolved.kind == requestTags || resolved.kind == requestBypass {
-		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	switch resolved.kind {
 	case requestManifest:
@@ -304,7 +306,7 @@ func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Re
 	case requestBlob:
 		return h.serveBlob(ctx, w, req, resolved)
 	default:
-		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 }
 
@@ -432,7 +434,7 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, objectPath, "COALESCED"); cacheErr == nil {
 			return status, "COALESCED", bytes, nil
 		}
-		return h.serveRemote(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	slog.Debug("oci blob miss, fetching", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 	return h.fetchBlob(w, req, resolved, ready)
@@ -465,9 +467,9 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 	return h.writeResponse(w, req.Method, http.StatusOK, headers, reader)
 }
 
-func (h *handler) serveRemote(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {
+func (h *handler) serveUpstream(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRead(ctx, ctx, req.Method, upstreamPath, req.URL.RawQuery, userAgent, headers)
+	response, err := h.readUpstream(ctx, ctx, req.Method, upstreamPath, req.URL.RawQuery, userAgent, headers)
 	if err != nil {
 		return 0, "", 0, err
 	}

@@ -50,10 +50,6 @@ func SpoolBodyUntouched(err error) bool {
 // that differs from it. A negative expected size retains unknown-size
 // behavior and reserves the effective object maximum.
 func (s *Spooler) SpoolWithExpectedSize(ctx context.Context, source io.Reader, maxBytes, expectedSize int64) (*SpoolResult, error) {
-	return s.spool(ctx, source, maxBytes, expectedSize)
-}
-
-func (s *Spooler) spool(ctx context.Context, source io.Reader, maxBytes, expectedSize int64) (*SpoolResult, error) {
 	if source == nil {
 		return nil, errors.New("source reader is nil")
 	}

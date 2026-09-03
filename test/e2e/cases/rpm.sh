@@ -5,8 +5,9 @@ e2e_prepare_rpm() {
 }
 
 e2e_run_rpm() {
-  printf '\n[rpm] dnf metadata/install, closure update, warm RPM and offline restart\n'
-  e2e_reset_fixture
+	printf '\n[rpm] dnf metadata/install, closure update, warm RPM and offline restart\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths rpm /rpm /rpm bypass
   local script='
     mkdir -p /tmp/repos
     cat >/tmp/repos/e2e.repo <<EOF

@@ -6,9 +6,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 )
 
 const userAgentReviewedOption = "user-agent-reviewed"
@@ -35,9 +36,26 @@ func responseBytes(headers map[string]string) uint64 {
 	return value
 }
 
-func cacheSupportsRequestUserAgent(client *utils.HTTPClientWrapper, request *http.Request, options map[string]string) bool {
-	if client.UserAgentConfigured || !utils.IsBrowserRequest(request) {
+func cacheSupportsRequestUserAgent(client *transport.UpstreamHTTPClient, request *http.Request, options map[string]string) bool {
+	if client.UserAgentConfigured || !transport.IsBrowserRequest(request) {
 		return true
 	}
-	return options[userAgentReviewedOption] == "true" && !utils.VariesByUserAgent(options["vary"])
+	return options[userAgentReviewedOption] == "true" && !transport.VariesByUserAgent(options["vary"])
+}
+
+const referenceLockShardCount = 4096
+
+type referenceLocks struct {
+	locks [referenceLockShardCount]sync.RWMutex
+}
+
+func (g *referenceLocks) Get(key string) *sync.RWMutex {
+	const offset32 = 2166136261
+	const prime32 = 16777619
+	hash := uint32(offset32)
+	for i := range len(key) {
+		hash ^= uint32(key[i])
+		hash *= prime32
+	}
+	return &g.locks[hash%referenceLockShardCount]
 }

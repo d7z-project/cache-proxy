@@ -264,39 +264,6 @@ func (i Instance) validateDeclaration() error {
 		return fmt.Errorf("transport: %w", err)
 	}
 
-	if i.Options != nil && i.Options.Node != nil {
-		if i.Options.Node.Kind != yaml.MappingNode {
-			return errors.New("options must be a mapping")
-		}
-		var options map[string]any
-		data, err := yaml.Marshal(i.Options.Node)
-		if err != nil {
-			return err
-		}
-		if err := yaml.Unmarshal(data, &options); err != nil {
-			return fmt.Errorf("options must be a mapping: %w", err)
-		}
-		var fields []string
-		switch i.Mode {
-		case ModeFile:
-			fields = []string{"pass_headers", "rules"}
-		case ModeGit:
-			fields = []string{"auth", "sync_interval", "operation_timeout"}
-		case ModeOCI:
-			fields = []string{"auth"}
-		case ModeGo:
-			fields = []string{"sumdb", "goprivate", "disable_module_fetch_header"}
-		}
-		allowed := make(map[string]struct{}, len(fields))
-		for _, field := range fields {
-			allowed[field] = struct{}{}
-		}
-		for key := range options {
-			if _, ok := allowed[key]; !ok {
-				return fmt.Errorf("options field %q is not supported by %s mode", key, i.Mode)
-			}
-		}
-	}
 	return nil
 }
 
@@ -445,8 +412,7 @@ func (e *Expiration) UnmarshalYAML(value *yaml.Node) error {
 		*e = 0
 		return nil
 	}
-	switch value.Value {
-	case "never", "0", "none", "infinite":
+	if value.Value == "never" {
 		*e = ExpirationNever
 		return nil
 	}
@@ -454,8 +420,8 @@ func (e *Expiration) UnmarshalYAML(value *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("invalid expiration %q: %w", value.Value, err)
 	}
-	if parsed < 0 {
-		return fmt.Errorf("expiration must not be negative: %q", value.Value)
+	if parsed <= 0 {
+		return fmt.Errorf("expiration must be positive or never: %q", value.Value)
 	}
 	*e = Expiration(parsed)
 	return nil

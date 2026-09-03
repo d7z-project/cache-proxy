@@ -11,7 +11,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const statusAPIPath = "/-/status/"
@@ -105,10 +104,7 @@ func (s *appStatus) stop(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
-	if err := utils.WaitGroupContext(ctx, &s.wg); err != nil {
-		return err
-	}
-	return nil
+	return waitForGroup(ctx, &s.wg)
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {

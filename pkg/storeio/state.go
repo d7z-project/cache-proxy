@@ -2,6 +2,8 @@ package storeio
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,37 @@ import (
 	"os"
 	"path/filepath"
 )
+
+const signingSecretBytes = 32
+
+type signingState struct {
+	Secret string `json:"secret"`
+}
+
+// LoadOrCreateSigningSecret returns the stable secret used to authorize
+// rewritten package download URLs.
+func LoadOrCreateSigningSecret(stateDir string) ([]byte, error) {
+	var state signingState
+	err := ReadJSON(stateDir, "signing.json", &state)
+	if err == nil {
+		secret, decodeErr := base64.RawURLEncoding.DecodeString(state.Secret)
+		if decodeErr != nil || len(secret) != signingSecretBytes {
+			return nil, errors.New("invalid signing secret")
+		}
+		return secret, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	secret := make([]byte, signingSecretBytes)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, err
+	}
+	if err := WriteJSON(stateDir, "signing.json", signingState{Secret: base64.RawURLEncoding.EncodeToString(secret)}); err != nil {
+		return nil, err
+	}
+	return secret, nil
+}
 
 func WriteJSON(root, name string, value any) error {
 	cleaned, err := CleanRelative(name)

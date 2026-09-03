@@ -1,4 +1,4 @@
-package utils
+package transport
 
 import (
 	"errors"
@@ -9,28 +9,28 @@ import (
 
 var ErrIdleBodyTimeout = errors.New("idle body timeout")
 
-type IdleTimeoutReadCloser struct {
-	rc           io.ReadCloser
+type idleTimeoutReadCloser struct {
+	inner        io.ReadCloser
 	timeout      time.Duration
 	timer        *time.Timer
 	mu           sync.Mutex
-	close        sync.Once
+	closeOnce    sync.Once
 	closeErr     error
 	readSequence uint64
-	fired        bool
+	timedOut     bool
 	closed       bool
 }
 
-func NewIdleTimeoutReadCloser(rc io.ReadCloser, timeout time.Duration) io.ReadCloser {
+func newIdleTimeoutReadCloser(inner io.ReadCloser, timeout time.Duration) io.ReadCloser {
 	if timeout <= 0 {
-		return rc
+		return inner
 	}
-	return &IdleTimeoutReadCloser{rc: rc, timeout: timeout}
+	return &idleTimeoutReadCloser{inner: inner, timeout: timeout}
 }
 
-func (r *IdleTimeoutReadCloser) Read(p []byte) (int, error) {
+func (r *idleTimeoutReadCloser) Read(p []byte) (int, error) {
 	r.mu.Lock()
-	if r.fired {
+	if r.timedOut {
 		r.mu.Unlock()
 		return 0, ErrIdleBodyTimeout
 	}
@@ -43,10 +43,10 @@ func (r *IdleTimeoutReadCloser) Read(p []byte) (int, error) {
 	}
 	r.readSequence++
 	sequence := r.readSequence
-	r.timer = time.AfterFunc(r.timeout, func() { r.timeoutClose(sequence) })
+	r.timer = time.AfterFunc(r.timeout, func() { r.closeTimedOutRead(sequence) })
 	r.mu.Unlock()
 
-	n, err := r.rc.Read(p)
+	n, err := r.inner.Read(p)
 
 	r.mu.Lock()
 	if r.timer != nil {
@@ -54,15 +54,15 @@ func (r *IdleTimeoutReadCloser) Read(p []byte) (int, error) {
 		r.timer = nil
 	}
 	r.readSequence++
-	fired := r.fired
+	timedOut := r.timedOut
 	r.mu.Unlock()
-	if fired {
+	if timedOut {
 		return n, ErrIdleBodyTimeout
 	}
 	return n, err
 }
 
-func (r *IdleTimeoutReadCloser) Close() error {
+func (r *idleTimeoutReadCloser) Close() error {
 	r.mu.Lock()
 	r.closed = true
 	r.readSequence++
@@ -71,23 +71,23 @@ func (r *IdleTimeoutReadCloser) Close() error {
 		r.timer = nil
 	}
 	r.mu.Unlock()
-	return r.closeUnderlying()
+	return r.closeInner()
 }
 
-func (r *IdleTimeoutReadCloser) timeoutClose(sequence uint64) {
+func (r *idleTimeoutReadCloser) closeTimedOutRead(sequence uint64) {
 	r.mu.Lock()
 	if r.closed || sequence != r.readSequence {
 		r.mu.Unlock()
 		return
 	}
-	r.fired = true
+	r.timedOut = true
 	r.closed = true
 	r.timer = nil
 	r.mu.Unlock()
-	_ = r.closeUnderlying()
+	_ = r.closeInner()
 }
 
-func (r *IdleTimeoutReadCloser) closeUnderlying() error {
-	r.close.Do(func() { r.closeErr = r.rc.Close() })
+func (r *idleTimeoutReadCloser) closeInner() error {
+	r.closeOnce.Do(func() { r.closeErr = r.inner.Close() })
 	return r.closeErr
 }

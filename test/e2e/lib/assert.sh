@@ -191,3 +191,43 @@ e2e_wait_cache_hit() {
     exit 1
   ' "$url"
 }
+
+e2e_assert_transparent_paths() {
+  local mode=$1 proxy_path=$2 upstream_path=$3 cache_unknown=$4 before after expected
+  before=$(e2e_fixture_count GET "$upstream_path/__e2e_path__/asset.css")
+  e2e_client "$mode" transparent-paths "$E2E_TOOLS_IMAGE" '
+    proxy_url=$1
+    proxy_path=$2
+    upstream_path=$3
+    headers=/tmp/root-headers
+    status=$(curl --silent --show-error --dump-header "$headers" --output /dev/null \
+      --write-out "%{http_code}" "$proxy_url$proxy_path?view=root")
+    test "$status" = 308
+    tr -d "\r" <"$headers" | grep -Fqi "Location: $proxy_path/?view=root"
+    test "$(curl --fail --silent --show-error "$proxy_url$proxy_path/?view=root")" = "$upstream_path/?view=root"
+    test "$(curl --fail --silent --show-error "$proxy_url$proxy_path/__e2e_path__/?view=directory")" = \
+      "$upstream_path/__e2e_path__/?view=directory"
+    test "$(curl --fail --silent --show-error "$proxy_url$proxy_path/__e2e_path__/asset.css?theme=dark")" = \
+      "$upstream_path/__e2e_path__/asset.css?theme=dark"
+    test "$(curl --fail --silent --show-error "$proxy_url$proxy_path/__e2e_path__/asset.css?theme=dark")" = \
+      "$upstream_path/__e2e_path__/asset.css?theme=dark"
+  ' "$E2E_PROXY_URL" "$proxy_path" "$upstream_path"
+  after=$(e2e_fixture_count GET "$upstream_path/__e2e_path__/asset.css")
+  expected=2
+  if [[ $cache_unknown == cache ]]; then
+    expected=1
+  fi
+  e2e_assert_eq "$((before + expected))" "$after" "$mode unknown resource transfer count"
+}
+
+e2e_assert_strict_path() {
+  local mode=$1 base_url=$2 proxy_path=$3 upstream_path=$4 before after
+  before=$(e2e_fixture_count GET "$upstream_path/__e2e_path__/asset.css")
+  e2e_client "$mode" strict-path "$E2E_TOOLS_IMAGE" '
+    status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
+      "$1$2/__e2e_path__/asset.css?theme=dark")
+    test "$status" = 404
+  ' "$base_url" "$proxy_path"
+  after=$(e2e_fixture_count GET "$upstream_path/__e2e_path__/asset.css")
+  e2e_assert_eq "$before" "$after" "$mode strict path reached the fixture"
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -58,6 +59,14 @@ func (s *fixtureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	revision := fixtureRevision{directory: "initial", packageMajor: 1}
 	if s.updated.Load() {
 		revision = fixtureRevision{directory: "updated", packageMajor: 2}
+	}
+	if strings.Contains(r.URL.Path, "/__e2e_path__/") ||
+		r.URL.Path == "/file/" || r.URL.Path == "/npm/" || r.URL.Path == "/maven/" ||
+		r.URL.Path == "/cargo/" || r.URL.Path == "/pypi/" || r.URL.Path == "/deb/" ||
+		r.URL.Path == "/apk/" || r.URL.Path == "/rpm/" || r.URL.Path == "/pacman/" ||
+		r.URL.Path == "/git/repo.git/" || r.URL.Path == "/flatpak/repo/" {
+		_, _ = io.WriteString(w, r.URL.RequestURI())
+		return
 	}
 
 	switch {

@@ -2,7 +2,6 @@ package npm
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
@@ -24,6 +23,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/signedtoken"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
@@ -67,7 +67,7 @@ func newHandler(name, upstream, stateDir, workDir string, store *blobfs.Store, c
 	if err != nil {
 		return nil, fmt.Errorf("parse npm upstream: %w", err)
 	}
-	secret, err := loadSigningSecret(stateDir)
+	secret, err := storeio.LoadOrCreateSigningSecret(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("load npm signing state: %w", err)
 	}
@@ -96,7 +96,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	}
 	packageName, packument := packageFromPath(cleaned)
 	if !packument {
-		status := h.forwardRead(w, request, cleaned)
+		status := h.forwardUpstream(w, request, cleaned)
 		return status, "BYPASS"
 	}
 	variant := "full"
@@ -163,7 +163,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		}
 		refreshed, openErr := openObject(request.Context(), h.store, key)
 		if openErr != nil {
-			return h.forwardRead(w, request, cleaned), "BYPASS"
+			return h.forwardUpstream(w, request, cleaned), "BYPASS"
 		}
 		result := "COALESCED"
 		if leader && revalidated {
@@ -212,7 +212,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	}
 	cached, err := openObject(request.Context(), h.store, key)
 	if err != nil {
-		return h.forwardRead(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	return serveCached(w, request, cached, "MISS"), "MISS"
 }
@@ -420,7 +420,7 @@ func (h *handler) rewriteDist(raw json.RawMessage, packageName, version, externa
 		URL: target, Integrity: integrity, Shasum: shasum, Package: packageName, Version: version,
 		Scope: scope, Expires: time.Now().Add(tarballAuthorizationTTL).Unix(),
 	}
-	token, err := h.signAuthorization(authorization)
+	token, err := signedtoken.Sign(h.secret, authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -429,38 +429,12 @@ func (h *handler) rewriteDist(raw json.RawMessage, packageName, version, externa
 	return json.Marshal(dist)
 }
 
-func (h *handler) signAuthorization(authorization tarballAuthorization) (string, error) {
-	payload, err := json.Marshal(authorization)
-	if err != nil {
-		return "", err
-	}
-	mac := hmac.New(sha256.New, h.secret)
-	_, _ = mac.Write(payload)
-	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
-}
-
 func (h *handler) verifyAuthorization(token string) (tarballAuthorization, error) {
-	payloadToken, signatureToken, ok := strings.Cut(token, ".")
-	if !ok {
-		return tarballAuthorization{}, errors.New("invalid npm tarball authorization")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(payloadToken)
-	if err != nil || len(payload) > 16<<10 {
-		return tarballAuthorization{}, errors.New("invalid npm tarball authorization")
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(signatureToken)
-	if err != nil {
-		return tarballAuthorization{}, errors.New("invalid npm tarball authorization")
-	}
-	mac := hmac.New(sha256.New, h.secret)
-	_, _ = mac.Write(payload)
-	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return tarballAuthorization{}, errors.New("invalid npm tarball authorization")
-	}
 	var authorization tarballAuthorization
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&authorization); err != nil || time.Now().Unix() > authorization.Expires ||
+	if err := signedtoken.Verify(h.secret, token, 16<<10, &authorization); err != nil {
+		return tarballAuthorization{}, errors.New("invalid npm tarball authorization")
+	}
+	if time.Now().Unix() > authorization.Expires ||
 		authorization.URL == "" || authorization.Package == "" || authorization.Version == "" || authorization.Scope == "" {
 		return tarballAuthorization{}, errors.New("expired npm tarball authorization")
 	}
@@ -603,7 +577,7 @@ func verifyTarball(reader io.ReadSeeker, authorization tarballAuthorization) err
 	return nil
 }
 
-func (h *handler) forwardRead(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), request.URL.RawQuery)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
@@ -657,7 +631,7 @@ func (h *handler) CloseContext(ctx context.Context) error {
 }
 
 func packageFromPath(cleaned string) (string, bool) {
-	if strings.HasPrefix(cleaned, "-/") || strings.Contains(cleaned, "/-/") {
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") || strings.HasPrefix(cleaned, "-/") || strings.Contains(cleaned, "/-/") {
 		return "", false
 	}
 	parts := strings.Split(cleaned, "/")
@@ -672,8 +646,16 @@ func npmRequestPath(target *url.URL) (string, error) {
 		return "", errors.New("missing npm request URL")
 	}
 	escaped := strings.TrimPrefix(target.EscapedPath(), "/")
-	if escaped == "" || strings.HasPrefix(escaped, "/") {
+	if strings.HasPrefix(escaped, "/") {
 		return "", errors.New("invalid npm request path")
+	}
+	if escaped == "" {
+		return "", nil
+	}
+	trailingSlash := strings.HasSuffix(escaped, "/")
+	escaped = strings.TrimSuffix(escaped, "/")
+	if escaped == "" {
+		return "", nil
 	}
 	parts := strings.Split(escaped, "/")
 	decoded := make([]string, len(parts))
@@ -690,7 +672,11 @@ func npmRequestPath(target *url.URL) (string, error) {
 		}
 		decoded[index] = segment
 	}
-	return strings.Join(decoded, "/"), nil
+	cleaned := strings.Join(decoded, "/")
+	if trailingSlash {
+		cleaned += "/"
+	}
+	return cleaned, nil
 }
 
 func credentialScope(request *http.Request) string {

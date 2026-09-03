@@ -43,14 +43,14 @@ type handler struct {
 	metadata  *filerepo.GenerationManager
 }
 
-func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, stats *metrics.Stats, sched *scheduler.Scheduler) (*handler, error) {
+func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, stats *metrics.Stats, taskScheduler *scheduler.Scheduler) (*handler, error) {
 	origin, err := url.Parse(upstream)
 	if err != nil {
 		return nil, fmt.Errorf("parse debian upstream: %w", err)
 	}
 	h := &handler{name: name, origin: origin, workDir: workDir, store: blobs, client: client, stats: stats, lifecycle: storeio.NewLifecycle()}
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: name, Mode: "deb", Tenant: "deb-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxReleaseSize, Store: blobs, Scheduler: sched,
+		Instance: name, Mode: "deb", Tenant: "deb-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxReleaseSize, Store: blobs, Scheduler: taskScheduler,
 		KeepPrevious: 2,
 		Fetch: func(ctx context.Context, _ string, requestPath string, header http.Header) (*http.Response, error) {
 			return h.openUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
@@ -68,18 +68,26 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		h.stats.RecordRequest(h.name, "deb", request.Method, "REJECTED", http.StatusMethodNotAllowed, 0)
 		return
 	}
-	decoded, err := storeio.DecodeCanonicalURLPath(request.URL)
-	if err == nil {
-		for _, segment := range strings.Split(decoded, "/") {
-			if segment == ".." {
-				err = errors.New("parent path segment is not allowed")
-				break
+	cleaned := ""
+	var err error
+	if request.URL.Path != "" && request.URL.Path != "/" {
+		decoded, decodeErr := storeio.DecodeURLPath(request.URL)
+		err = decodeErr
+		if err == nil {
+			for _, segment := range strings.Split(decoded, "/") {
+				if segment == ".." {
+					err = errors.New("parent path segment is not allowed")
+					break
+				}
 			}
 		}
-	}
-	cleaned := ""
-	if err == nil {
-		cleaned, err = storeio.CleanRelative(strings.TrimPrefix(path.Clean(decoded), "/"))
+		if err == nil {
+			trailingSlash := strings.HasSuffix(decoded, "/")
+			cleaned, err = storeio.CleanRelative(strings.TrimPrefix(path.Clean(decoded), "/"))
+			if err == nil && trailingSlash {
+				cleaned += "/"
+			}
+		}
 	}
 	if err != nil {
 		http.Error(w, "invalid Debian path", http.StatusBadRequest)
@@ -98,7 +106,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		return h.serveArtifact(w, request, cleaned)
 	}
 	if request.Method != http.MethodGet || !isAnchorPath(cleaned) || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" {
-		return h.passthrough(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	root := path.Dir(cleaned)
 	if h.metadata.ServeStagedAnchorFor(w, request, cleaned, root) {
@@ -114,7 +122,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		if h.metadata.ServeStagedAnchorFor(w, request, cleaned, root) {
 			return http.StatusOK, "COALESCED"
 		}
-		return h.passthrough(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	finished := false
 	defer func() {
@@ -260,7 +268,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 		}
 		if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
 			_ = object.Reader.Close()
-			return h.passthrough(w, request, cleaned), "BYPASS"
+			return h.forwardUpstream(w, request, cleaned), "BYPASS"
 		}
 
 		flightKey := "revalidate:" + key
@@ -305,7 +313,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 	}
 
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		return h.passthrough(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	flight, leader := h.flights.Begin(key)
 	if !leader {
@@ -313,7 +321,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 		if cached, err := storeio.OpenResponse(request.Context(), h.store, debArtifactTenant, key); err == nil {
 			return serveArtifactObject(w, request, cached, "COALESCED"), "COALESCED"
 		}
-		return h.passthrough(w, request, cleaned), "BYPASS"
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, debArtifactTenant, key); err == nil {
 		h.flights.Finish(key, flight, nil)
@@ -368,6 +376,9 @@ func serveArtifactObject(w http.ResponseWriter, request *http.Request, object *s
 }
 
 func isArtifactPath(cleaned string) bool {
+	if strings.HasSuffix(cleaned, "/") {
+		return false
+	}
 	name := strings.ToLower(path.Base(cleaned))
 	for _, sidecar := range []string{".asc", ".sig", ".sha256", ".sha512", ".md5", ".md5sum"} {
 		name = strings.TrimSuffix(name, sidecar)
@@ -380,7 +391,7 @@ func isArtifactPath(cleaned string) bool {
 	return false
 }
 
-func (h *handler) passthrough(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	response, err := h.openUpstream(request.Context(), request.Method, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
@@ -413,11 +424,17 @@ func (h *handler) CloseContext(ctx context.Context) error {
 }
 
 func isAnchorPath(cleaned string) bool {
+	if strings.HasSuffix(cleaned, "/") {
+		return false
+	}
 	name := path.Base(cleaned)
 	return name == "InRelease" || name == "Release"
 }
 
 func isMetadataPath(cleaned string) bool {
+	if strings.HasSuffix(cleaned, "/") {
+		return false
+	}
 	name := path.Base(cleaned)
 	if isAnchorPath(cleaned) || strings.Contains(cleaned, "/by-hash/SHA256/") || strings.Contains(cleaned, "/by-hash/SHA512/") {
 		return true

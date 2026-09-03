@@ -12,42 +12,21 @@ import (
 )
 
 func ForwardRead(ctx context.Context, client *Client, origin *url.URL, writer http.ResponseWriter, inbound *http.Request, requestPath string) (int, error) {
-	if !proxyruntime.RequireReadMethod(writer, inbound.Method) {
-		return http.StatusMethodNotAllowed, nil
-	}
-	escaped := make([]string, 0)
-	for _, segment := range strings.Split(strings.TrimPrefix(requestPath, "/"), "/") {
-		escaped = append(escaped, url.PathEscape(segment))
-	}
-	target, err := JoinURL(origin, strings.Join(escaped, "/"), inbound.URL.RawQuery)
+	target, err := JoinURL(origin, EscapePathSegments(strings.TrimPrefix(requestPath, "/")), inbound.URL.RawQuery)
 	if err != nil {
 		return 0, err
 	}
-	request, err := http.NewRequestWithContext(ctx, inbound.Method, target.String(), nil)
-	if err != nil {
-		return 0, err
-	}
-	CopyReadRequestHeaders(request.Header, inbound.Header)
-	response, err := client.DoRead(ctx, request, AdmissionForeground)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = response.Body.Close() }()
-	CopyEndToEndHeaders(writer.Header(), response.Header)
-	writer.Header().Set("X-Cache", "BYPASS")
-	writer.WriteHeader(response.StatusCode)
-	if inbound.Method != http.MethodHead {
-		if _, err := io.Copy(writer, response.Body); err != nil {
-			return response.StatusCode, fmt.Errorf("copy upstream response: %w", err)
-		}
-	}
-	return response.StatusCode, nil
+	return forwardReadTarget(ctx, client, target, writer, inbound, inbound.Header)
 }
 
 // ForwardReadTarget proxies a read request to an already protocol-authorized target.
 // Callers provide the exact safe upstream headers so local authorization
 // tokens are not accidentally disclosed to a signed cross-origin URL.
 func ForwardReadTarget(ctx context.Context, client *Client, target *url.URL, writer http.ResponseWriter, inbound *http.Request, header http.Header) (int, error) {
+	return forwardReadTarget(ctx, client, target, writer, inbound, header)
+}
+
+func forwardReadTarget(ctx context.Context, client *Client, target *url.URL, writer http.ResponseWriter, inbound *http.Request, header http.Header) (int, error) {
 	if !proxyruntime.RequireReadMethod(writer, inbound.Method) {
 		return http.StatusMethodNotAllowed, nil
 	}

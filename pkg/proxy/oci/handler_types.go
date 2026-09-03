@@ -11,7 +11,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.artifact.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v1+json, application/json"
@@ -59,12 +58,12 @@ type handler struct {
 	options         *Options
 	store           *blobfs.Store
 	stats           *metrics.Stats
-	client          *utils.HTTPClientWrapper
+	client          *transport.UpstreamHTTPClient
 	upstreamGate    *transport.UpstreamGate
 	lifecycle       *storeio.Lifecycle
 	auth            authHandler
 	downloads       sync.Map
-	refLocks        *utils.RWLockGroup
+	refLocks        *referenceLocks
 	manifestMu      sync.Mutex
 	manifestReaders map[string]int
 	cleanupMu       sync.Mutex

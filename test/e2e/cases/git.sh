@@ -14,8 +14,9 @@ e2e_git_clone() {
 }
 
 e2e_run_git() {
-  printf '\n[git] smart HTTP clone, local mirror update and offline restart\n'
-  e2e_reset_fixture
+	printf '\n[git] smart HTTP clone, local mirror update and offline restart\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths git /git /git/repo.git bypass
   e2e_git_clone cold cache-proxy-e2e-initial
 
   local before_get before_post after_get after_post ready=0 attempt

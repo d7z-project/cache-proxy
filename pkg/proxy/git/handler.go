@@ -177,7 +177,8 @@ func (h *gitHandler) clearRepository() error {
 }
 
 func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if _, err := storeio.CleanURLPath(req.URL); err != nil {
+	cleaned, err := storeio.CleanURLPath(req.URL)
+	if err != nil {
 		http.Error(w, "invalid Git path", http.StatusBadRequest)
 		return
 	}
@@ -189,8 +190,6 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if !proxyruntime.RequireReadMethod(w, req.Method) {
 			return
 		}
-		http.NotFound(w, req)
-		return
 	}
 	_, done, err := h.lifecycle.Begin()
 	if err != nil {
@@ -199,18 +198,18 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer done()
-	if shouldProxyGitRead(req) {
-		h.proxyGitRead(w, req)
+	if !isGitReadRequest(req) || shouldForwardGitRead(req) {
+		h.forwardUpstream(w, req, cleaned)
 		return
 	}
 
 	if !h.repositoryMu.TryRLock() {
-		h.proxyGitRead(w, req)
+		h.forwardUpstream(w, req, cleaned)
 		return
 	}
 	if h.server == nil {
 		h.repositoryMu.RUnlock()
-		h.proxyGitRead(w, req)
+		h.forwardUpstream(w, req, cleaned)
 		return
 	}
 	serveGitHTTP(w, req, h.server, h.name)

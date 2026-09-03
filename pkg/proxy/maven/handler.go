@@ -47,8 +47,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "invalid Maven path", http.StatusBadRequest)
 		return
 	}
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+		h.forwardUpstream(w, request, cleaned)
+		return
+	}
 	if request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 
@@ -70,7 +74,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 
@@ -80,7 +84,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		if object, err = storeio.OpenResponse(request.Context(), h.store, mavenTenant, key); err == nil {
 			h.serveObject(w, request, object, "COALESCED")
 		} else {
-			h.forward(w, request, cleaned)
+			h.forwardUpstream(w, request, cleaned)
 		}
 		return
 	}
@@ -93,7 +97,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (h *handler) fill(w http.ResponseWriter, request *http.Request, cleaned, key string, flight *storeio.Flight) {
-	response, err := h.fetch(h.lifecycle.Context(), request, cleaned, nil)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), request, cleaned, nil)
 	if err != nil {
 		h.flights.Finish(key, flight, err)
 		transport.WriteError(w, http.StatusBadGateway)
@@ -145,7 +149,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 	if value := object.Header.Get("Last-Modified"); value != "" {
 		conditional.Set("If-Modified-Since", value)
 	}
-	response, err := h.fetch(h.lifecycle.Context(), request, cleaned, conditional)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), request, cleaned, conditional)
 	if err != nil || response.StatusCode >= 500 {
 		if response != nil {
 			_ = response.Body.Close()
@@ -188,7 +192,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 	_, _ = io.Copy(w, reader)
 }
 
-func (h *handler) fetch(ctx context.Context, inbound *http.Request, cleaned string, extra http.Header) (*http.Response, error) {
+func (h *handler) fetchUpstream(ctx context.Context, inbound *http.Request, cleaned string, extra http.Header) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), inbound.URL.RawQuery)
 	if err != nil {
 		return nil, err
@@ -217,7 +221,7 @@ func (h *handler) serveObject(w http.ResponseWriter, request *http.Request, obje
 	http.ServeContent(w, request, path.Base(request.URL.Path), object.Fetched, object.Reader)
 }
 
-func (h *handler) forward(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)

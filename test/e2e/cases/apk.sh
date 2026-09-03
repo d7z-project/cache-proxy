@@ -5,8 +5,9 @@ e2e_prepare_apk() {
 }
 
 e2e_run_apk() {
-  printf '\n[apk] native index/install, generation update, warm package and offline restart\n'
-  e2e_reset_fixture
+	printf '\n[apk] native index/install, generation update, warm package and offline restart\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths apk /apk /apk bypass
   local script='
     printf "%s/apk/v3.20/main\n" "$1" >/tmp/repositories
     apk add --no-cache --allow-untrusted --repositories-file /tmp/repositories e2e-apk >/dev/null

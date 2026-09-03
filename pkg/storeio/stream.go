@@ -100,7 +100,11 @@ func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 
 		fallback, copyErr := spool.copyFrom(cfg.Body)
 		if fallback != nil {
-			spool.finishWithFallback(fallback)
+			spool.mu.Lock()
+			spool.done = true
+			spool.fallback = fallback
+			spool.changed.Broadcast()
+			spool.mu.Unlock()
 		} else {
 			closeErr := cfg.Body.Close()
 			if copyErr == nil {
@@ -305,14 +309,6 @@ func (r *growingFileReader) Close() error {
 		}
 	})
 	return err
-}
-
-func (f *growingFile) finishWithFallback(fallback io.ReadCloser) {
-	f.mu.Lock()
-	f.done = true
-	f.fallback = fallback
-	f.changed.Broadcast()
-	f.mu.Unlock()
 }
 
 func (f *growingFile) finish(readErr error) {

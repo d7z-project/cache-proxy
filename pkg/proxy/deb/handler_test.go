@@ -363,6 +363,45 @@ func TestDebianAnchorlessFlatRepositoryRemainsTransparent(t *testing.T) {
 	require.Equal(t, "flat metadata", response.Body.String())
 }
 
+func TestDebianRootDirectoriesAndAuxiliaryFilesRemainTransparent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	t.Cleanup(server.Close)
+	handler, _ := newDebianTestHandler(t, server.URL)
+
+	for _, test := range []struct {
+		name     string
+		target   string
+		expected string
+		empty    bool
+	}{
+		{name: "empty mount path", target: "/", expected: "/", empty: true},
+		{name: "root", target: "/", expected: "/"},
+		{name: "directory", target: "/images/", expected: "/images/"},
+		{name: "HTML", target: "/index.html", expected: "/index.html"},
+		{name: "CSS with escaped plus", target: "/assets/site%2Btheme.css", expected: "/assets/site+theme.css"},
+		{name: "unknown extension", target: "/files/catalog.data", expected: "/files/catalog.data"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.target, nil)
+			if test.empty {
+				request.URL.Path = ""
+				request.URL.RawPath = ""
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, test.expected, response.Body.String())
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+		})
+	}
+
+	require.False(t, isAnchorPath("dists/trixie/Release/"))
+	require.False(t, isMetadataPath("dists/trixie/main/Packages/"))
+	require.False(t, isArtifactPath("pool/main/demo.deb/"))
+}
+
 func TestDebianFirstAnchorPassesThroughWhenSpoolCannotStart(t *testing.T) {
 	release := "SHA256:\n " + fmt.Sprintf("%x", sha256.Sum256(nil)) + " 0 main/Packages\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -409,6 +448,33 @@ func TestDebianArtifactCacheIsIndependentFromMetadataGeneration(t *testing.T) {
 	handler.ServeHTTP(ranged, rangeRequest)
 	require.Equal(t, http.StatusPartialContent, ranged.Code)
 	require.Equal(t, "package", ranged.Body.String())
+	require.Equal(t, int32(1), requests.Load())
+}
+
+func TestDebianArtifactAcceptsAPTPercentEncodingAndSharesCache(t *testing.T) {
+	const upstreamPath = "/pool/main/f/frr/frr_10.6.1-1+pve3_amd64.deb"
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, upstreamPath, request.URL.Path)
+		requests.Add(1)
+		_, _ = io.WriteString(w, "pve-package")
+	}))
+	t.Cleanup(server.Close)
+	handler, _ := newDebianTestHandler(t, server.URL)
+
+	for index, requestPath := range []string{
+		"/pool/main/f/frr/frr_10.6.1-1%2bpve3_amd64.deb",
+		upstreamPath,
+		"/pool/main/f/frr/frr_10.6.1-1%2Bpve3_amd64.deb",
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "pve-package", response.Body.String())
+		if index > 0 {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+	}
 	require.Equal(t, int32(1), requests.Load())
 }
 

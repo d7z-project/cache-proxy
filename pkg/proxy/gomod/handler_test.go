@@ -247,6 +247,15 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "9", rec.Body.String())
 	require.Equal(t, int64(1), sumdbRequests.Load())
+
+	for _, target := range []string{
+		"/sumdb/sum.corp.example/../latest",
+		"/sumdb/sum.corp.example/%2e%2e/latest",
+	} {
+		response := requestGoProxyMethod(t, handler, http.MethodGet, target, true)
+		require.Equal(t, http.StatusNotFound, response.Code)
+	}
+	require.Equal(t, int64(1), sumdbRequests.Load())
 }
 
 func newTestHandler(t *testing.T, store *blobfs.Store, upstream string, transport *config.TransportConfig, options *Config) *handler {

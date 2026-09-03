@@ -20,16 +20,16 @@ const (
 	responseCleanupContinuation = 2 * time.Second
 )
 
-func RegisterResponseCleanup(sched *scheduler.Scheduler, instance, tenant string, store *blobfs.Store, opts config.CleanupConfig) {
-	if sched == nil {
+func RegisterResponseCleanup(taskScheduler *scheduler.Scheduler, instance, tenant string, store *blobfs.Store, opts config.CleanupConfig) {
+	if taskScheduler == nil {
 		return
 	}
 	cleaner := &responseCleaner{store: store, tenant: tenant, opts: opts}
-	sched.Register(scheduler.TaskDef{
+	taskScheduler.Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(instance, scheduler.TypeExpireCleanup, tenant),
 		Interval: responseCleanupInterval,
 		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			more, err := cleaner.run(ctx)
+			more, err := cleaner.cleanBatch(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -50,7 +50,7 @@ type responseCleaner struct {
 	cursor string
 }
 
-func (c *responseCleaner) run(ctx context.Context) (bool, error) {
+func (c *responseCleaner) cleanBatch(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	filesystem := c.store.TenantFS(c.tenant)

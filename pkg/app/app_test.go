@@ -68,6 +68,29 @@ func TestFileProxyCachesImmutableObjects(t *testing.T) {
 	require.Equal(t, int64(1), upstreamRequests.Load())
 }
 
+func TestPathMountRootRedirectPreservesQuery(t *testing.T) {
+	app := &App{
+		config: &config.Document{
+			Metrics: config.MetricsConfig{Path: "/metrics"},
+		},
+		pathHandlers: map[string]http.Handler{
+			"/files": http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("mount root reached instance handler without trailing slash")
+			}),
+		},
+		pathPrefixes: []string{"/files"},
+	}
+	app.ready.Store(true)
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(method, "/files?view=all", nil))
+
+		require.Equal(t, http.StatusPermanentRedirect, rec.Code)
+		require.Equal(t, "/files/?view=all", rec.Header().Get("Location"))
+	}
+}
+
 func TestMetricsRequireBearerToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -275,25 +298,25 @@ func TestSetupCommandGenerationOCIStripsHTTPScheme(t *testing.T) {
 	require.NotContains(t, cmd, "http://")
 }
 
-func TestValidateRejectsUnknownModeField(t *testing.T) {
+func TestValidateRejectsOptionsForModeWithoutOptions(t *testing.T) {
 	doc, err := config.Decode(strings.NewReader(`
 server:
   bind: 127.0.0.1:8080
   backend: /tmp/cache
 instances:
-  - name: files
+  - name: packages
     enabled: true
-    mode: file
-    path: /files
-    upstream: https://example.com
+    mode: npm
+    path: /npm
+    upstream: https://registry.npmjs.org
     options:
-      default_polciy: immutable
+      unexpected: true
 `))
 	require.NoError(t, err)
 
 	err = Validate(doc)
 	require.Error(t, err)
-	require.ErrorContains(t, err, `options field "default_polciy" is not supported`)
+	require.ErrorContains(t, err, `field unexpected not found`)
 }
 
 func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {

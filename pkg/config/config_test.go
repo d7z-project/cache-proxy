@@ -89,22 +89,6 @@ func TestSelectModeValidatesCommonDeclaration(t *testing.T) {
 	}
 }
 
-func TestOptionsCannotOverrideCommonFields(t *testing.T) {
-	doc, err := Decode(strings.NewReader(`
-instances:
-  - name: packages
-    enabled: true
-    mode: npm
-    path: /npm
-    upstream: https://registry.npmjs.org
-    options:
-      upstream: https://attacker.invalid
-`))
-	require.NoError(t, err)
-	_, err = doc.Instances[0].SelectMode()
-	require.ErrorContains(t, err, `options field "upstream" is not supported`)
-}
-
 func TestDurationAndExpiration(t *testing.T) {
 	var duration Duration
 	require.NoError(t, duration.UnmarshalYAML(&yaml.Node{Kind: yaml.ScalarNode, Value: "3m"}))

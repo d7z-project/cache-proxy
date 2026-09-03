@@ -19,7 +19,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func TestClientReleasesAdmissionWhenBodyCloses(t *testing.T) {
@@ -107,7 +106,7 @@ func TestClientAppliesUserAgentAndIdleBodyTimeout(t *testing.T) {
 	_, err = io.ReadFull(response.Body, buffer)
 	require.NoError(t, err)
 	_, err = response.Body.Read(buffer)
-	require.ErrorIs(t, err, utils.ErrIdleBodyTimeout)
+	require.ErrorIs(t, err, ErrIdleBodyTimeout)
 	require.Equal(t, "cache-proxy-test/1", <-seenUserAgent)
 	require.Eventually(t, func() bool { return gate.Snapshot().Active == 0 }, time.Second, time.Millisecond)
 }
@@ -134,7 +133,7 @@ func TestRedirectDowngradeStripsCredentials(t *testing.T) {
 	next := httptest.NewRequest(http.MethodGet, "http://example.test/target", nil)
 	next.Header.Set("Authorization", "Bearer secret")
 	next.Header.Set("Cookie", "session=secret")
-	require.NoError(t, client.http.CheckRedirect(next, []*http.Request{previous}))
+	require.NoError(t, client.httpClient.CheckRedirect(next, []*http.Request{previous}))
 	require.Empty(t, next.Header.Get("Authorization"))
 	require.Empty(t, next.Header.Get("Cookie"))
 }
@@ -193,12 +192,12 @@ func TestSameOriginIncludesSchemeAndEffectivePort(t *testing.T) {
 func TestClientsDisableCompression(t *testing.T) {
 	client, err := NewClient("test", "file", nil, proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{}), metrics.NewStats(prometheus.NewRegistry()))
 	require.NoError(t, err)
-	httpTransport, ok := client.http.Transport.(*http.Transport)
+	httpTransport, ok := client.httpClient.Transport.(*http.Transport)
 	require.True(t, ok)
 	require.True(t, httpTransport.DisableCompression)
 	require.Equal(t, int64(maxResponseHeaderBytes), httpTransport.MaxResponseHeaderBytes)
 
-	wrapper := utils.DefaultHTTPClientWrapper()
+	wrapper := NewUpstreamHTTPClient()
 	ConfigureHTTPClient(wrapper, "test", nil)
 	wrapperTransport, ok := wrapper.Transport.(*http.Transport)
 	require.True(t, ok)
@@ -237,7 +236,7 @@ func TestClientsStripCredentialsOnCrossOriginRedirect(t *testing.T) {
 	assertStripped(func(request *http.Request) (*http.Response, error) {
 		return client.DoRead(context.Background(), request, AdmissionForeground)
 	})
-	wrapper := utils.DefaultHTTPClientWrapper()
+	wrapper := NewUpstreamHTTPClient()
 	ConfigureHTTPClient(wrapper, "test", nil)
 	assertStripped(wrapper.Do)
 }

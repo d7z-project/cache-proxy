@@ -250,7 +250,7 @@ func (s *Scheduler) loop() {
 		case <-timer.C:
 		}
 		if key != (TaskKey{}) {
-			s.run(key)
+			s.runTask(key)
 		}
 	}
 }
@@ -271,7 +271,7 @@ func (s *Scheduler) nextTask() (TaskKey, time.Duration) {
 	return selected, max(time.Until(next), 0)
 }
 
-func (s *Scheduler) run(key TaskKey) {
+func (s *Scheduler) runTask(key TaskKey) {
 	s.mu.Lock()
 	task := s.tasks[key]
 	if task == nil {

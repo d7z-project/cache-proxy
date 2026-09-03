@@ -42,13 +42,13 @@ type handler struct {
 	metadata  *filerepo.GenerationManager
 }
 
-func newHandler(instance string, origin *url.URL, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, sched *scheduler.Scheduler) (*handler, error) {
+func newHandler(instance string, origin *url.URL, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, taskScheduler *scheduler.Scheduler) (*handler, error) {
 	h := &handler{origin: origin, workDir: workDir, store: blobs, client: client, lifecycle: storeio.NewLifecycle()}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "rpm", Tenant: "rpm-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxRepomdSize, Store: blobs, Scheduler: sched,
+		Instance: instance, Mode: "rpm", Tenant: "rpm-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxRepomdSize, Store: blobs, Scheduler: taskScheduler,
 		Fetch: func(ctx context.Context, _ string, requestPath string, header http.Header) (*http.Response, error) {
-			return h.fetch(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
+			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
 		Build: h.buildSnapshot,
 	})
@@ -67,6 +67,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "invalid RPM path", http.StatusBadRequest)
 		return
 	}
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+		h.forwardUpstream(w, request, cleaned)
+		return
+	}
 	if handled, _, _ := h.metadata.ServeCurrent(w, request, cleaned, isRPMMetadataPath(cleaned)); handled {
 		return
 	}
@@ -75,7 +79,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if request.Method != http.MethodGet || !isRepomdPath(cleaned) || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	root := path.Dir(path.Dir(cleaned))
@@ -92,7 +96,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		if h.metadata.ServeStagedAnchorFor(w, request, cleaned, root) {
 			return
 		}
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	finished := false
@@ -103,7 +107,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -306,6 +310,9 @@ func isRepomdPath(cleaned string) bool {
 }
 
 func isRPMMetadataPath(cleaned string) bool {
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+		return false
+	}
 	return isRepomdPath(cleaned) || strings.Contains(cleaned, "/repodata/")
 }
 
@@ -327,7 +334,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 		}
 		if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
 			_ = object.Reader.Close()
-			h.forward(w, request, cleaned)
+			h.forwardUpstream(w, request, cleaned)
 			return
 		}
 
@@ -347,7 +354,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 		header := http.Header{}
 		header.Set("If-None-Match", object.Header.Get("ETag"))
 		header.Set("If-Modified-Since", object.Header.Get("Last-Modified"))
-		response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
+		response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
 		if err != nil || response.StatusCode >= http.StatusInternalServerError {
 			if response != nil {
 				_ = response.Body.Close()
@@ -379,7 +386,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 	}
 
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	flight, leader := h.flights.Begin(key)
@@ -389,7 +396,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 			serveRPMArtifactObject(w, request, cached, "COALESCED")
 			return
 		}
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, rpmArtifactTenant, key); err == nil {
@@ -397,7 +404,7 @@ func (h *handler) serveArtifact(w http.ResponseWriter, request *http.Request, cl
 		serveRPMArtifactObject(w, request, cached, "HIT")
 		return
 	}
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(key, flight, err)
 		transport.WriteError(w, http.StatusBadGateway)
@@ -446,6 +453,9 @@ func serveRPMArtifactObject(w http.ResponseWriter, request *http.Request, object
 }
 
 func isRPMArtifactPath(cleaned string) bool {
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+		return false
+	}
 	name := strings.ToLower(path.Base(cleaned))
 	for _, sidecar := range []string{".asc", ".sig", ".sha256", ".sha512"} {
 		name = strings.TrimSuffix(name, sidecar)
@@ -453,7 +463,7 @@ func isRPMArtifactPath(cleaned string) bool {
 	return strings.HasSuffix(name, ".rpm") || strings.HasSuffix(name, ".drpm")
 }
 
-func (h *handler) fetch(ctx context.Context, method, cleaned, rawQuery string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
+func (h *handler) fetchUpstream(ctx context.Context, method, cleaned, rawQuery string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), "")
 	if err != nil {
 		return nil, err
@@ -467,7 +477,7 @@ func (h *handler) fetch(ctx context.Context, method, cleaned, rawQuery string, h
 	return h.client.DoRead(ctx, request, class)
 }
 
-func (h *handler) forward(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)

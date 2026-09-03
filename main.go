@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,27 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
+	level := slog.LevelWarn
+	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	debug := os.Getenv("DEBUG") == "true"
+	if debug && os.Getenv("LOG_LEVEL") == "" {
+		level = slog.LevelDebug
+	}
+	logOptions := &slog.HandlerOptions{Level: level}
+	if debug {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, logOptions)))
+		slog.Debug("debug logging enabled; logs may contain sensitive data")
+	} else {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, logOptions)))
+	}
+
 	configPath := flag.String("config", "", "YAML configuration file")
 	validateOnly := flag.Bool("validate", false, "validate configuration and exit")
 	flag.Parse()

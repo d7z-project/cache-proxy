@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const maxTokenResponseSize = 1 << 20 // 1MB
@@ -114,7 +113,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 		}
 		return "", time.Time{}, h.upstreamGate.RateLimited(limitedURL, response.Header.Get("Retry-After"))
 	}
-	response.Body = utils.NewRateLimitReader(response.Body)
+	response.Body = newMinimumRateReadCloser(response.Body)
 	if response.StatusCode != http.StatusOK {
 		return "", time.Time{}, errors.New("oci token request failed")
 	}

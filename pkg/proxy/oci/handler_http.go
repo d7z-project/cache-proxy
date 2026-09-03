@@ -12,10 +12,9 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
-func (h *handler) remoteRead(admissionCtx, transferCtx context.Context, method, upstreamPath, rawQuery, userAgent string, headers map[string]string) (*http.Response, error) {
+func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method, upstreamPath, rawQuery, userAgent string, headers map[string]string) (*http.Response, error) {
 	if method != http.MethodGet && method != http.MethodHead {
 		return nil, errors.New("oci upstream read must use GET or HEAD")
 	}
@@ -53,7 +52,7 @@ func (h *handler) remoteRead(admissionCtx, transferCtx context.Context, method, 
 			return nil, err
 		}
 		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
-		counted := &countingReadCloser{ReadCloser: utils.NewRateLimitReader(h.client.WrapBody(response.Body))}
+		counted := &countingReadCloser{ReadCloser: newMinimumRateReadCloser(h.client.WrapBody(response.Body))}
 		status := response.StatusCode
 		response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
 			releaseStats()

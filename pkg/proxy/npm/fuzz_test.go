@@ -9,7 +9,7 @@ import (
 )
 
 func FuzzNPMRequestPath(f *testing.F) {
-	for _, seed := range []string{"/@scope/pkg", "/@scope%2fpkg", "/pkg", "/a/../b", "/a%2fb"} {
+	for _, seed := range []string{"/", "/browse/", "/@scope/pkg", "/@scope%2fpkg", "/pkg", "/a/../b", "/a%2fb"} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {

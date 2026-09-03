@@ -21,7 +21,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const (
@@ -52,7 +51,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 			requestHeaders["If-Modified-Since"] = previousState.LastModified
 		}
 	}
-	response, err := h.remoteRead(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, requestHeaders)
+	response, err := h.readUpstream(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, requestHeaders)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -75,7 +74,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
-	if !h.client.UserAgentConfigured && utils.VariesByUserAgent(response.Header.Values("Vary")...) {
+	if !h.client.UserAgentConfigured && transport.VariesByUserAgent(response.Header.Values("Vary")...) {
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
@@ -197,7 +196,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	}()
 
 	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.remoteRead(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, nil)
+	response, err := h.readUpstream(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, nil)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -206,7 +205,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
-	if !h.client.UserAgentConfigured && utils.VariesByUserAgent(response.Header.Values("Vary")...) {
+	if !h.client.UserAgentConfigured && transport.VariesByUserAgent(response.Header.Values("Vary")...) {
 		defer func() { _ = response.Body.Close() }()
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr

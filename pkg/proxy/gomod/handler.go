@@ -95,7 +95,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, string) {
-	decodedTarget, pathErr := storeio.DecodeCanonicalURLPath(request.URL)
+	decodedTarget, pathErr := storeio.DecodeURLPath(request.URL)
 	if pathErr != nil {
 		http.Error(w, "invalid Go module path", http.StatusBadRequest)
 		return http.StatusBadRequest, "ERROR"
@@ -165,7 +165,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.open(h.lifecycle.Context(), h.origin, http.MethodGet, parsed.cacheKey, upstreamHeader)
+	response, err := h.openUpstream(h.lifecycle.Context(), h.origin, http.MethodGet, parsed.cacheKey, upstreamHeader)
 	if err != nil {
 		h.flights.Finish(key, flight, err)
 		if cached != nil {
@@ -257,7 +257,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 }
 
 func (h *handler) forwardModule(w http.ResponseWriter, request *http.Request, target string) (int, string) {
-	response, err := h.open(request.Context(), h.origin, request.Method, target, request.Header)
+	response, err := h.openUpstream(request.Context(), h.origin, request.Method, target, request.Header)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway, "ERROR"
@@ -276,6 +276,10 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 		return http.StatusNotFound, "BYPASS"
 	}
 	sumTarget := strings.TrimPrefix(target, prefix)
+	if _, err := storeio.CleanRelative(sumTarget); err != nil {
+		http.NotFound(w, request)
+		return http.StatusNotFound, "BYPASS"
+	}
 	stable := strings.HasPrefix(sumTarget, "lookup/") || strings.HasPrefix(sumTarget, "tile/")
 	key := "sumdb/" + hashKey(h.sumDB.String()+"\x00"+sumTarget)
 	object, _ := storeio.OpenResponse(request.Context(), h.store, goTenant, key)
@@ -287,7 +291,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 		_ = object.Reader.Close()
 	}
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		response, err := h.open(request.Context(), h.sumDB, request.Method, sumTarget, request.Header)
+		response, err := h.openUpstream(request.Context(), h.sumDB, request.Method, sumTarget, request.Header)
 		if err != nil {
 			transport.WriteError(w, http.StatusBadGateway)
 			return http.StatusBadGateway, "ERROR"
@@ -319,7 +323,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.open(h.lifecycle.Context(), h.sumDB, http.MethodGet, sumTarget, upstreamHeader)
+	response, err := h.openUpstream(h.lifecycle.Context(), h.sumDB, http.MethodGet, sumTarget, upstreamHeader)
 	if err != nil {
 		if object != nil {
 			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
@@ -373,7 +377,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 	return http.StatusOK, result
 }
 
-func (h *handler) open(ctx context.Context, origin *url.URL, method, target string, headers http.Header) (*http.Response, error) {
+func (h *handler) openUpstream(ctx context.Context, origin *url.URL, method, target string, headers http.Header) (*http.Response, error) {
 	escaped := strings.Join(strings.Split(target, "/"), "/")
 	targetURL, err := transport.JoinURL(origin, escaped, "")
 	if err != nil {

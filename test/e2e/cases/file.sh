@@ -5,8 +5,9 @@ e2e_prepare_file() {
 }
 
 e2e_run_file() {
-  printf '\n[file] cold, warm, update, Range/HEAD and persisted offline reuse\n'
-  e2e_reset_fixture
+	printf '\n[file] cold, warm, update, Range/HEAD and persisted offline reuse\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths file /file /file cache
   e2e_client file cold "$E2E_TOOLS_IMAGE" '
     test "$(curl -fsS "$1/file/payload.txt")" = cache-proxy-e2e-initial
     test "$(curl -fsS -H "Range: bytes=0-4" "$1/file/payload.txt")" = cache

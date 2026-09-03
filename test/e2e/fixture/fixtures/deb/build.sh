@@ -9,7 +9,7 @@ trap 'rm -rf "$work"' EXIT
 for state in initial updated; do
   major=1
   [[ $state == updated ]] && major=2
-  version="$major.0.0"
+  version="$major.0.0+e2e1"
   root="$out/$state/deb"
   package_work="$work/pkg-$state"
   mkdir -p "$root/pool/main/e/e2e-deb" "$root/dists/stable/main/binary-amd64" "$root/flat"

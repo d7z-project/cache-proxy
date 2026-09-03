@@ -37,18 +37,17 @@ func serveGitHTTP(w http.ResponseWriter, r *http.Request, svr transport.Transpor
 	}
 }
 
-func (h *gitHandler) proxyGitRead(w http.ResponseWriter, request *http.Request) {
-	if !isGitReadRequest(request) {
-		http.NotFound(w, request)
-		return
-	}
-	upstreamURL, err := url.Parse(h.upstream)
-	if err != nil || (upstreamURL.Scheme != "http" && upstreamURL.Scheme != "https") {
+func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
+	origin, err := url.Parse(h.upstream)
+	if err != nil {
 		proxytransport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	upstreamURL.Path = strings.TrimRight(upstreamURL.Path, "/") + request.URL.Path
-	upstreamURL.RawQuery = request.URL.RawQuery
+	upstreamURL, err := proxytransport.JoinURL(origin, proxytransport.EscapePathSegments(cleaned), request.URL.RawQuery)
+	if err != nil {
+		proxytransport.WriteError(w, http.StatusBadGateway)
+		return
+	}
 	var body io.Reader
 	if request.Method == http.MethodPost {
 		body = request.Body
@@ -98,7 +97,7 @@ func isGitReadRequest(request *http.Request) bool {
 		(request.Method == http.MethodGet || request.Method == http.MethodHead) && (!serviceSet || len(services) == 1 && services[0] == "") && isDumbGitPath(request.URL.Path)
 }
 
-func shouldProxyGitRead(request *http.Request) bool {
+func shouldForwardGitRead(request *http.Request) bool {
 	return strings.Contains(request.Header.Get("Git-Protocol"), "version=2") ||
 		(request.Method == http.MethodGet || request.Method == http.MethodHead) && request.URL.Query().Get("service") == "" && isDumbGitPath(request.URL.Path)
 }

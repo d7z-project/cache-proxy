@@ -18,8 +18,7 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModeCargo }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var options struct{}
-	if err := plan.Decode(&options); err != nil {
+	if err := plan.RejectOptions(); err != nil {
 		return err
 	}
 	if !plan.Enabled() {

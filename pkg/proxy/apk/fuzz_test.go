@@ -10,6 +10,7 @@ func FuzzAPKIndexClassification(f *testing.F) {
 		if len(path) > 4096 {
 			t.Skip()
 		}
-		_ = isIndexRequest(path)
+		_ = isAPKIndexPath(path)
+		_ = isAPKArtifactPath(path)
 	})
 }

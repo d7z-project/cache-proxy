@@ -22,8 +22,7 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModePyPI }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	var options struct{}
-	if err := plan.Decode(&options); err != nil {
+	if err := plan.RejectOptions(); err != nil {
 		return err
 	}
 	if !plan.Enabled() {
@@ -37,11 +36,11 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), pypiTenant, plan.Store(), plan.CleanupConfig())
 	handler, err := newHandler(origin, filepath.Join(plan.StoreRoot(), "state"), filepath.Join(plan.StoreRoot(), "work"), plan.Store(), client)
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
+	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), pypiTenant, plan.Store(), plan.CleanupConfig())
 	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{Handler: handler, CloseContext: handler.CloseContext})
 }
 

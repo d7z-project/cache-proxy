@@ -110,6 +110,31 @@ func TestMavenMetadataPublishesUpstreamUpdate(t *testing.T) {
 	require.Equal(t, int32(2), requests.Load())
 }
 
+func TestMavenRootAndDirectoriesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	t.Cleanup(upstream.Close)
+	h := newMavenTestHandler(t, upstream.URL+"/repository")
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                 "/repository/",
+			"/org/example/":     "/repository/org/example/",
+			"/browse/?view=all": "/repository/browse/?view=all",
+		} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
 func newMavenTestHandler(t *testing.T, rawOrigin string) *handler {
 	t.Helper()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())

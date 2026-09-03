@@ -2,6 +2,8 @@ package pacman
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,11 +35,74 @@ func TestPacmanReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 
 func TestPacmanDatabaseNamesAndCompressionAliases(t *testing.T) {
 	for _, name := range []string{"custom.db", "custom.files", "custom.db.sig", "custom.db.tar.zst", "custom.files.tar.xz.sig", "repo-name.db.lz4"} {
-		require.True(t, isIndexRequest(name), name)
+		require.True(t, isPacmanDatabasePath(name), name)
 	}
-	for _, name := range []string{"package.pkg.tar.zst", "package.pkg.tar.zst.sig", "contains.db.backup", ".db"} {
-		require.False(t, isIndexRequest(name), name)
+	for _, name := range []string{"package.pkg.tar.zst", "package.pkg.tar.zst.sig", "contains.db.backup", ".db", "custom.db/"} {
+		require.False(t, isPacmanDatabasePath(name), name)
 	}
+	for _, name := range []string{"package.pkg.tar.zst", "package.pkg.tar.zst.sig", "upgrade.delta", "upgrade.delta.sha256"} {
+		require.True(t, isPacmanArtifactPath(name), name)
+	}
+	for _, name := range []string{"", "packages/", "index.html", "custom.db", "package.pkg.tar.zst/"} {
+		require.False(t, isPacmanArtifactPath(name), name)
+	}
+}
+
+func TestPacmanTransparentResourcesBypassCacheAndPreserveQuery(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	h := newPacmanTestHandler(t, server.URL+"/repository")
+
+	for range 2 {
+		for _, target := range []string{"/", "/browse/", "/assets/site.css?theme=dark"} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
+func TestPacmanArtifactQuerySeparatesCacheEntriesAndDatabaseQueryBypasses(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RawQuery)
+	}))
+	defer server.Close()
+	h := newPacmanTestHandler(t, server.URL)
+
+	for index, target := range []string{"/pkg.pkg.tar.zst?token=one", "/pkg.pkg.tar.zst?token=two", "/pkg.pkg.tar.zst?token=one"} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		if index == 2 {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+	}
+	for range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/custom.db?mirror=one", nil))
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+	}
+	require.Equal(t, int32(4), requests.Load())
+}
+
+func TestPacmanNoQueryCacheKeyRemainsStable(t *testing.T) {
+	origin, err := url.Parse("https://packages.example/repository")
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+
+	digest := sha256.Sum256([]byte(origin.String() + "\x00pkg.pkg.tar.zst\x00gzip"))
+	require.Equal(t, "refs/"+hex.EncodeToString(digest[:]), artifactKey(origin, "pkg.pkg.tar.zst", request))
+	request.URL.RawQuery = "token=one"
+	require.NotEqual(t, "refs/"+hex.EncodeToString(digest[:]), artifactKey(origin, "pkg.pkg.tar.zst", request))
 }
 
 func TestPacmanDatabaseAndSignatureCacheSeparately(t *testing.T) {
@@ -121,7 +186,7 @@ func TestPacmanArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 	h := newPacmanTestHandler(t, server.URL)
 	origin, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	key := pacmanKey(origin, "pkg.pkg.tar.zst", httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil))
+	key := artifactKey(origin, "pkg.pkg.tar.zst", httptest.NewRequest(http.MethodGet, "/pkg.pkg.tar.zst", nil))
 	cachedBody := func() string {
 		object, err := storeio.OpenResponse(context.Background(), h.store, pacmanTenant, key)
 		if err != nil {

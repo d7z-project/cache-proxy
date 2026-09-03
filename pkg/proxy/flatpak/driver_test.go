@@ -34,6 +34,31 @@ func TestFlatpakReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 	require.Zero(t, requests.Load())
 }
 
+func TestFlatpakRootDirectoriesAndUnknownResourcesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = fmt.Fprint(w, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	h := newFlatpakTestHandler(t, server.URL+"/repo")
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                           "/repo/",
+			"/refs/":                      "/repo/refs/",
+			"/assets/site.css?theme=dark": "/repo/assets/site.css?theme=dark",
+		} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
 func TestDescriptorRewriteUsesTrustedExternalBase(t *testing.T) {
 	request := proxyruntime.WithExternalBaseURL(httptest.NewRequest(http.MethodGet, "/repo.flatpakrepo", nil), "https://proxy.example/flatpak")
 	rewritten := rewriteDescriptor(request, []byte("[Flatpak Repo]\nUrl=https://upstream.example/repo\n"))
@@ -294,15 +319,15 @@ func TestFlatpakSummaryPublishesUpstreamGenerationUpdate(t *testing.T) {
 }
 
 func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
-	indexV1, compressedSummary := flatpakIndexedSummaryFixture(t)
-	indexV2 := bytes.Clone(indexV1)
-	indexV2[0xd4] ^= 1
-	parsedV1, err := readSummaryIndex(bytes.NewReader(indexV1), int64(len(indexV1)))
+	initialIndex, compressedSummary := flatpakIndexedSummaryFixture(t)
+	updatedIndex := bytes.Clone(initialIndex)
+	updatedIndex[0xd4] ^= 1
+	parsedInitial, err := readSummaryIndex(bytes.NewReader(initialIndex), int64(len(initialIndex)))
 	require.NoError(t, err)
-	parsedV2, err := readSummaryIndex(bytes.NewReader(indexV2), int64(len(indexV2)))
+	parsedUpdated, err := readSummaryIndex(bytes.NewReader(updatedIndex), int64(len(updatedIndex)))
 	require.NoError(t, err)
-	require.Equal(t, parsedV1.subsummaryDigests, parsedV2.subsummaryDigests)
-	indexes := [][]byte{indexV1, indexV2}
+	require.Equal(t, parsedInitial.subsummaryDigests, parsedUpdated.subsummaryDigests)
+	indexes := [][]byte{initialIndex, updatedIndex}
 	var revision atomic.Int32
 	revision.Store(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -311,7 +336,7 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 		case "/summary.idx":
 			w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
 			_, _ = w.Write(indexes[current])
-		case "/summaries/" + parsedV1.subsummaryDigests[0] + ".gz":
+		case "/summaries/" + parsedInitial.subsummaryDigests[0] + ".gz":
 			_, _ = w.Write(compressedSummary)
 		default:
 			http.NotFound(w, request)
@@ -322,7 +347,7 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 
 	first := httptest.NewRecorder()
 	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
-	require.Equal(t, indexV1, first.Body.Bytes())
+	require.Equal(t, initialIndex, first.Body.Bytes())
 	_, err = h.metadata.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	previous := h.metadata.Current("flatpak:summary.idx")
@@ -338,7 +363,7 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
-	require.Equal(t, indexV2, response.Body.Bytes())
+	require.Equal(t, updatedIndex, response.Body.Bytes())
 }
 
 func TestFlatpakIndexedSummaryRejectsInvalidSubsummary(t *testing.T) {

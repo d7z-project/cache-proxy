@@ -34,6 +34,31 @@ func TestCargoCacheabilityHonorsNoStore(t *testing.T) {
 	require.False(t, cargoCacheable(request, response))
 }
 
+func TestCargoRootDirectoriesAndUnknownResourcesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = fmt.Fprint(w, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	h := newCargoTestHandler(t, server.URL+"/registry")
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                           "/registry/",
+			"/browse/":                    "/registry/browse/",
+			"/assets/site.css?theme=dark": "/registry/assets/site.css?theme=dark",
+		} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
 func TestCargoReadOnlyProtocolSurface(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

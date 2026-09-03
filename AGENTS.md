@@ -16,7 +16,8 @@
 ## Go 代码结构
 
 - helper 必须对应实际复用或清晰的职责边界；短小单次转发逻辑保持内联
-- `transport` 只统一 URL path segment 转义、通用 revalidation/cacheability 判断和响应转发；协议包保留身份、凭据作用域和生命周期决策
+- `transport` 统一 upstream HTTP client、body idle timeout、URL path segment 转义、通用 revalidation/cacheability 判断和响应转发；协议包保留身份、凭据作用域和生命周期决策
+- npm / PyPI 的签名下载地址复用 `signedtoken` 的有界 HMAC envelope；payload 字段、期限、digest 和目标 URL 仍由协议包校验
 - 内部字段和跨函数状态使用完整领域名称，局部循环变量使用 Go 惯用短名称
 - error 文本小写开头，通过 `%w` 保留可判定错误链
 - 协议、缓存键、持久化格式或调度时序变化必须明确记录并补测试
@@ -44,6 +45,7 @@
 - current anchor 收到显式 `no-cache` / `max-age=0` 时触发后台 refresh，本次响应仍读取已提交 generation
 - artifact 和 package sidecar 使用 generation-independent response key，且不依赖 metadata refresh 成功
 - Debian 支持标准、嵌套和 flat root；InRelease 与 Release 同时存在时必须归一化一致
+- Debian instance 根路径和未分类的同源资源透明直通；目录请求必须保留尾斜线
 - Debian 的每个 strong-checksum entry 独立校验；压缩格式保持独立，canonical/by-hash 只指向同一 verified blob
 - RPM 校验 repomd 声明的 wire/open size 与 checksum；APK/Pacman database 作为 opaque anchor
 - Flatpak indexed summary 的当前分片及可选索引签名必须与 `summary.idx` 同 generation；分片按解压后 SHA256 校验
@@ -52,7 +54,7 @@
 
 ## 存储、调度与清理
 
-- `storeio` 是 response path、临时下载、stream、flight 和响应清理的唯一通用实现
+- `storeio` 是 response path、签名密钥、临时下载、stream、flight 和响应清理的唯一通用实现
 - logical response key 映射到 SHA256 分片路径，metadata 中保存并验证原 logical key
 - 调度器单 goroutine 串行执行；达到 batch 上限时短延迟 continuation
 - response、OCI 和 generation GC 按 inspected objects 计 batch，并通过内存游标继续
@@ -63,7 +65,10 @@
 
 ## 网络、安全与资源
 
-- URL path 在任何 clean/join 前拒绝反斜线、NUL、空段、`.`、`..` 和编码分隔符
+- URL path 安全判断基于一次 percent decode 后的逻辑 segment；合法等价编码共享缓存身份，编码分隔符、反斜线、NUL 和父目录段必须在 clean/join 前拒绝
+- `CleanURLPath` 接受根并保留一个目录尾斜线；metadata 内部引用继续使用不接受根与目录的 `CleanRelative`
+- path mount 的 `GET` / `HEAD` 根请求统一 `308` 到尾斜线形式并保留 query；透明 mode 在 metadata manager 和对象缓存前直通根与目录
+- 客户端 `RawPath` 不参与缓存身份或直接回源；回源 URL 必须由已验证的逻辑 segment 重新转义，unknown 资源由 mode 明确分类为协议对象或安全只读直通
 - 主上游只来自当前 instance 的唯一配置；持久化 upstream 不能扩展允许访问的 origin
 - Go SumDB、OCI token realm 和 HTTP redirect 是受协议约束的辅助端点，不构成备用主上游
 - 普通上游请求只允许无 body 的 `GET` / `HEAD`；Git/Cargo 仅允许精确的 `git-upload-pack`，npm 仅允许两个精确 audit endpoint 使用只读 `POST`
@@ -89,6 +94,7 @@
 - 路径、分类器、状态和非可信 metadata parser 使用有界 fuzz target；语料通过 `make test-fuzz` 执行
 - 并发 fuzz target 必须限制输入大小、goroutine 数和等待时间，并覆盖取消、提前关闭、共享资源争用和发布顺序
 - 每个 mode 必须有原生客户端端到端覆盖；Debian standard 和 flat repository 分开验证
+- E2E 同时覆盖透明 mode 的根、目录、unknown/query 资源以及 Go/OCI 的严格端点边界
 - E2E case 和 fixture builder 按 mode 独立，fixture builder 与专用客户端镜像按 mode 分目录；只有断言、生命周期、运行时适配和基础镜像层允许共享
 - E2E 由 `test/e2e/run.sh` 统一编排，Makefile 只暴露 `test-e2e` target，不承载容器生命周期或客户端命令
 - E2E 的 proxy、fixture、探测和包客户端全部使用 Docker/Podman host network 容器；宿主不得直接运行包管理器

@@ -23,6 +23,6 @@ func FuzzGitReadRequest(f *testing.F) {
 				require.Equal(t, "/git-upload-pack", requestPath)
 			}
 		}
-		_ = shouldProxyGitRead(request)
+		_ = shouldForwardGitRead(request)
 	})
 }

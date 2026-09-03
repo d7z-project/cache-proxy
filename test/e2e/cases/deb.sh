@@ -31,8 +31,10 @@ e2e_run_deb_repository() {
 }
 
 e2e_run_deb() {
-  e2e_run_deb_repository standard "deb [trusted=yes] $E2E_PROXY_URL/deb stable main" \
-    /deb/dists/stable/Release /deb/pool/main/e/e2e-deb/e2e-deb_1.0.0_all.deb
+	e2e_reset_fixture
+	e2e_assert_transparent_paths deb /deb /deb bypass
+	e2e_run_deb_repository standard "deb [trusted=yes] $E2E_PROXY_URL/deb stable main" \
+    /deb/dists/stable/Release /deb/pool/main/e/e2e-deb/e2e-deb_1.0.0+e2e1_all.deb
   e2e_run_deb_repository flat "deb [trusted=yes] $E2E_PROXY_URL/deb/flat ./" \
-    /deb/flat/Release /deb/flat/e2e-deb_1.0.0_all.deb
+    /deb/flat/Release /deb/flat/e2e-deb_1.0.0+e2e1_all.deb
 }

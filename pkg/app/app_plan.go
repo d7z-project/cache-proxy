@@ -60,7 +60,7 @@ func planEntries(
 	doc *config.Document,
 	stats *metrics.Stats,
 	upstreamGate *proxyruntime.UpstreamGate,
-	sched *scheduler.Scheduler,
+	taskScheduler *scheduler.Scheduler,
 ) (*proxyruntime.Result, error) {
 	plan := proxyruntime.NewPlanContext(
 		doc.Server.Backend,
@@ -71,7 +71,7 @@ func planEntries(
 		doc.Storage.Cleanup,
 		doc.Server.Bind,
 		doc.Metrics.Path,
-		sched,
+		taskScheduler,
 	)
 	plan.ReservePathPrefix(statusAPIPath, "status API")
 	drivers := driverSet()

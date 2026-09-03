@@ -24,8 +24,8 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 func TestResolveRequestClassifiesManifest(t *testing.T) {
@@ -76,7 +76,7 @@ func TestOCIReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 
 	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
 	require.Zero(t, writes.Load())
-	_, err = handler.remoteRead(context.Background(), context.Background(), http.MethodPatch, "/v2/library/demo", "", "", nil)
+	_, err = handler.readUpstream(context.Background(), context.Background(), http.MethodPatch, "/v2/library/demo", "", "", nil)
 	require.ErrorContains(t, err, "must use GET or HEAD")
 	require.Zero(t, writes.Load())
 }
@@ -309,7 +309,7 @@ func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testi
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, browserUserAgent, <-registryUserAgents)
 	require.Equal(t, browserUserAgent, <-registryUserAgents)
-	require.Equal(t, utils.DefaultUserAgent, <-tokenUserAgent)
+	require.Equal(t, transport.DefaultUserAgent, <-tokenUserAgent)
 }
 
 func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
@@ -679,7 +679,7 @@ func TestOCIStateRejectsUnknownFields(t *testing.T) {
 	handler := newHandler("oci", Block{Upstream: "https://registry.example.test"}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 	statePath := handler.refStatePath("library/alpine", "latest")
-	require.NoError(t, handler.storeObject(context.Background(), statePath, strings.NewReader("version: 1\nunknown: true\n"), nil))
+	require.NoError(t, handler.storeObject(context.Background(), statePath, strings.NewReader("unknown: true\n"), nil))
 
 	_, err = handler.readState(context.Background(), statePath)
 	require.ErrorContains(t, err, "field unknown not found")

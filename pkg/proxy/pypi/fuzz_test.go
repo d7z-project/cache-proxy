@@ -3,6 +3,8 @@ package pypi
 import (
 	"net/url"
 	"testing"
+
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func FuzzPyPIPathAndHash(f *testing.F) {
@@ -15,7 +17,7 @@ func FuzzPyPIPathAndHash(f *testing.F) {
 		_, _ = simpleProject(path)
 		_, _ = hashFromFragment(fragment)
 		if target, err := url.ParseRequestURI(path); err == nil {
-			_, _ = pypiRequestPath(target)
+			_, _ = storeio.CleanURLPath(target)
 		}
 	})
 }

@@ -802,7 +802,11 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	copyHeaders(w.Header(), object.Header)
 	w.Header().Set("X-Cache", "HIT")
 	http.ServeContent(w, request, path.Base(requestPath), selected.snapshot.PublishedAt, reader)
-	return true, responseStatus(request), "HIT"
+	status := http.StatusOK
+	if request.Header.Get("Range") != "" {
+		status = http.StatusPartialContent
+	}
+	return true, status, "HIT"
 }
 
 func (h *GenerationManager) touchLastSeen(rootID string, seenAt time.Time) error {
@@ -850,13 +854,6 @@ func (h *GenerationManager) touchLastSeen(rootID string, seenAt time.Time) error
 	h.mu.Unlock()
 	h.commitMu.Unlock()
 	return nil
-}
-
-func responseStatus(request *http.Request) int {
-	if request.Header.Get("Range") != "" {
-		return http.StatusPartialContent
-	}
-	return http.StatusOK
 }
 
 func (h *GenerationManager) Current(rootID string) *Snapshot {
@@ -1083,13 +1080,9 @@ func containsPath(root, value string) bool {
 	return root == "." || value == root || strings.HasPrefix(value, root+"/")
 }
 
-func generationPrefix(rootID, generation string) string {
-	sum := sha256.Sum256([]byte(rootID))
-	return "generations/" + hex.EncodeToString(sum[:]) + "/" + generation
-}
-
 func candidatePrefix(rootID, generation, candidateID string) string {
-	return generationPrefix(rootID, generation) + "/" + candidateID
+	sum := sha256.Sum256([]byte(rootID))
+	return "generations/" + hex.EncodeToString(sum[:]) + "/" + generation + "/" + candidateID
 }
 
 func checksumHash(kind string) (hash.Hash, error) {

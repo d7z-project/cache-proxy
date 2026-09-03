@@ -25,7 +25,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 const (
@@ -37,12 +37,12 @@ const (
 )
 
 type App struct {
-	config       *config.Document
-	stores       map[string]*blobfs.Store
-	backendLock  *backendLock
-	stats        *metrics.Stats
-	upstreamGate *proxyruntime.UpstreamGate
-	metricsReg   *prometheus.Registry
+	config          *config.Document
+	stores          map[string]*blobfs.Store
+	backendLock     *backendLock
+	stats           *metrics.Stats
+	upstreamGate    *proxyruntime.UpstreamGate
+	metricsRegistry *prometheus.Registry
 
 	scheduler *scheduler.Scheduler
 	status    *appStatus
@@ -137,18 +137,18 @@ func Validate(doc *config.Document) error {
 	stats := metrics.NewStats(registry)
 	upstreamGate := proxyruntime.NewUpstreamGate(upstreamGateConfig(docCopy.Storage.Download))
 
-	sched, err := scheduler.NewPersistent(filepath.Join(docCopy.Server.Backend, "scheduler.json"))
+	taskScheduler, err := scheduler.NewPersistent(filepath.Join(docCopy.Server.Backend, "scheduler.json"))
 	if err != nil {
 		return err
 	}
 	validateCtx, validateCancel := context.WithCancel(context.Background())
-	result, err := planEntries(context.Background(), &docCopy, stats, upstreamGate, sched)
+	result, err := planEntries(context.Background(), &docCopy, stats, upstreamGate, taskScheduler)
 	if result != nil {
 		defer func() { _ = closeStores(result.Stores) }()
 	}
-	sched.Start(validateCtx)
+	taskScheduler.Start(validateCtx)
 	defer validateCancel()
-	defer func() { _ = sched.Stop(validateCtx) }()
+	defer func() { _ = taskScheduler.Stop(validateCtx) }()
 	return err
 }
 
@@ -168,29 +168,29 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	utils.CleanStaleWorkFiles(filepath.Join(doc.Server.Backend, "instances"), 24*time.Hour)
-	metricsReg := prometheus.NewRegistry()
-	stats := metrics.NewStats(metricsReg)
+	storeio.CleanStaleWorkFiles(filepath.Join(doc.Server.Backend, "instances"), 24*time.Hour)
+	metricsRegistry := prometheus.NewRegistry()
+	stats := metrics.NewStats(metricsRegistry)
 	upstreamGate := proxyruntime.NewUpstreamGate(upstreamGateConfig(doc.Storage.Download))
 
-	sched, err := scheduler.NewPersistent(filepath.Join(doc.Server.Backend, "scheduler.json"))
+	taskScheduler, err := scheduler.NewPersistent(filepath.Join(doc.Server.Backend, "scheduler.json"))
 	if err != nil {
 		_ = backendLock.Close()
 		return nil, err
 	}
 	lifecycleCtx, stopRuntime := context.WithCancel(context.Background())
 	status := newAppStatus(doc.Server.Status)
-	sched.SetRunObserver(status.observeTaskRun)
+	taskScheduler.SetRunObserver(status.observeTaskRun)
 
 	cleanupOpenFailure := func() {
 		stopRuntime()
 		stopCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 		defer cancel()
-		_ = sched.Stop(stopCtx)
+		_ = taskScheduler.Stop(stopCtx)
 		_ = backendLock.Close()
 	}
 
-	result, err := planEntries(ctx, doc, stats, upstreamGate, sched)
+	result, err := planEntries(ctx, doc, stats, upstreamGate, taskScheduler)
 	if err != nil {
 		cleanupOpenFailure()
 		return nil, err
@@ -201,37 +201,37 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		entries[entry.Name] = entry
 	}
 	for name, store := range result.Stores {
-		prometheus.WrapRegistererWith(prometheus.Labels{"instance": name}, metricsReg).
+		prometheus.WrapRegistererWith(prometheus.Labels{"instance": name}, metricsRegistry).
 			MustRegister(metrics.NewBlobFSCollector(store))
 	}
 
 	app := &App{
-		config:       doc,
-		stores:       result.Stores,
-		backendLock:  backendLock,
-		stats:        stats,
-		upstreamGate: upstreamGate,
-		metricsReg:   metricsReg,
-		scheduler:    sched,
-		status:       status,
-		entries:      entries,
-		pathHandlers: map[string]http.Handler{},
-		bindHandlers: map[string]http.Handler{},
-		bindServers:  map[string]*http.Server{},
-		lifecycleCtx: lifecycleCtx,
-		stopRuntime:  stopRuntime,
+		config:          doc,
+		stores:          result.Stores,
+		backendLock:     backendLock,
+		stats:           stats,
+		upstreamGate:    upstreamGate,
+		metricsRegistry: metricsRegistry,
+		scheduler:       taskScheduler,
+		status:          status,
+		entries:         entries,
+		pathHandlers:    map[string]http.Handler{},
+		bindHandlers:    map[string]http.Handler{},
+		bindServers:     map[string]*http.Server{},
+		lifecycleCtx:    lifecycleCtx,
+		stopRuntime:     stopRuntime,
 	}
 	if err := app.prepareHandlers(lifecycleCtx); err != nil {
 		_ = closeStores(result.Stores)
 		cleanupOpenFailure()
 		return nil, err
 	}
-	sched.Start(lifecycleCtx)
+	taskScheduler.Start(lifecycleCtx)
 	status.start(lifecycleCtx, app)
 
 	for name, store := range app.stores {
 		instanceName, instanceStore := name, store
-		sched.Register(scheduler.TaskDef{
+		taskScheduler.Register(scheduler.TaskDef{
 			Key:      scheduler.NewTaskKey(instanceName, scheduler.TypeBlobGC, ""),
 			Interval: doc.Storage.GC.Blob.Duration(),
 			Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
@@ -262,7 +262,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if req.URL.Path == a.config.Metrics.Path {
 		metricsAuthMiddleware(a.config.Metrics.Token, promhttp.HandlerFor(
-			prometheus.Gatherers{prometheus.DefaultGatherer, a.metricsReg},
+			prometheus.Gatherers{prometheus.DefaultGatherer, a.metricsRegistry},
 			promhttp.HandlerOpts{},
 		)).ServeHTTP(w, req)
 		return
@@ -273,6 +273,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	a.routesMu.RUnlock()
 	if handler == nil {
 		http.NotFound(w, req)
+		return
+	}
+	if req.URL.Path == prefix && (req.Method == http.MethodGet || req.Method == http.MethodHead) {
+		target := prefix + "/"
+		if req.URL.RawQuery != "" {
+			target += "?" + req.URL.RawQuery
+		}
+		http.Redirect(w, req, target, http.StatusPermanentRedirect)
 		return
 	}
 	next := req.Clone(req.Context())
@@ -394,15 +402,8 @@ func (a *App) Close(ctx context.Context) error {
 	a.tenantUsageMu.Lock()
 	a.tenantUsageClosing = true
 	a.tenantUsageMu.Unlock()
-	usageDone := make(chan struct{})
-	go func() {
-		a.tenantUsageWG.Wait()
-		close(usageDone)
-	}()
-	select {
-	case <-usageDone:
-	case <-ctx.Done():
-		joined = errors.Join(joined, ctx.Err())
+	if err := waitForGroup(ctx, &a.tenantUsageWG); err != nil {
+		joined = errors.Join(joined, err)
 		drained = false
 	}
 	a.routesMu.RLock()
@@ -429,6 +430,20 @@ func (a *App) Close(ctx context.Context) error {
 		}
 	}
 	return joined
+}
+
+func waitForGroup(ctx context.Context, group *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func closeStores(stores map[string]*blobfs.Store) error {

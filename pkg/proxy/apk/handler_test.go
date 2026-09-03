@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -121,24 +123,75 @@ func TestAPKIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.Equal(t, indexes[1], response.Body.Bytes())
 }
 
-func TestAPKDirectIndexUsesExactConfiguredURL(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		require.Equal(t, "/indexes/custom.ndx", request.URL.Path)
-		_, _ = w.Write([]byte("direct index"))
-	}))
-	defer server.Close()
-	h := newAPKTestHandler(t, server.URL+"/indexes/custom.ndx")
-	response := httptest.NewRecorder()
-	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
-	require.Equal(t, http.StatusOK, response.Code)
-	require.Equal(t, "direct index", response.Body.String())
+func TestAPKRecognizesV2V3AndADBIndexes(t *testing.T) {
+	for _, requestPath := range []string{"v2/main/x86_64/APKINDEX.tar.gz", "v3.21/main/x86_64/APKINDEX.tar.gz", "edge/main/x86_64/Packages.adb"} {
+		require.True(t, isAPKIndexPath(requestPath), requestPath)
+	}
+	require.False(t, isAPKIndexPath("v3.21/main/x86_64/package.apk"))
+	for _, requestPath := range []string{"package.apk", "package.apk.sig", "package.apk.sha256"} {
+		require.True(t, isAPKArtifactPath(requestPath), requestPath)
+	}
+	for _, requestPath := range []string{"", "packages/", "index.html", "APKINDEX.tar.gz", "package.apk/"} {
+		require.False(t, isAPKArtifactPath(requestPath), requestPath)
+	}
+	require.False(t, isAPKIndexPath("APKINDEX.tar.gz/"))
 }
 
-func TestAPKRecognizesV2V3AndADBIndexes(t *testing.T) {
-	for _, requestPath := range []string{"v2/main/x86_64/APKINDEX.tar.gz", "v3.21/main/x86_64/APKINDEX.tar.gz", "edge/main/x86_64/Packages.adb", directIndexMarker} {
-		require.True(t, isIndexRequest(requestPath), requestPath)
+func TestAPKTransparentResourcesBypassCacheAndPreserveQuery(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	h := newAPKTestHandler(t, server.URL+"/repository")
+
+	for range 2 {
+		for _, target := range []string{"/", "/browse/", "/assets/site.css?theme=dark"} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+		}
 	}
-	require.False(t, isIndexRequest("v3.21/main/x86_64/package.apk"))
+	require.Equal(t, int32(6), requests.Load())
+}
+
+func TestAPKArtifactQuerySeparatesCacheEntriesAndIndexQueryBypasses(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RawQuery)
+	}))
+	defer server.Close()
+	h := newAPKTestHandler(t, server.URL)
+
+	for index, target := range []string{"/pkg.apk?token=one", "/pkg.apk?token=two", "/pkg.apk?token=one"} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		if index == 2 {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+	}
+	for range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/APKINDEX.tar.gz?mirror=one", nil))
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+	}
+	require.Equal(t, int32(4), requests.Load())
+}
+
+func TestAPKNoQueryCacheKeyRemainsStable(t *testing.T) {
+	origin, err := url.Parse("https://packages.example/repository")
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodGet, "/pkg.apk", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+
+	digest := sha256.Sum256([]byte(origin.String() + "\x00pkg.apk\x00gzip"))
+	require.Equal(t, "refs/"+hex.EncodeToString(digest[:]), artifactKey(origin, "pkg.apk", request))
+	request.URL.RawQuery = "token=one"
+	require.NotEqual(t, "refs/"+hex.EncodeToString(digest[:]), artifactKey(origin, "pkg.apk", request))
 }
 
 func TestAPKArtifactRevalidationPublishesChangedResponse(t *testing.T) {
@@ -156,7 +209,7 @@ func TestAPKArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 	h := newAPKTestHandler(t, server.URL)
 	origin, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	key := apkKey(origin, "pkg.apk", httptest.NewRequest(http.MethodGet, "/pkg.apk", nil))
+	key := artifactKey(origin, "pkg.apk", httptest.NewRequest(http.MethodGet, "/pkg.apk", nil))
 	cachedBody := func() string {
 		object, err := storeio.OpenResponse(context.Background(), h.store, apkTenant, key)
 		if err != nil {

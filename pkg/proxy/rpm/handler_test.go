@@ -190,6 +190,31 @@ func TestRPMArtifactSidecarCachesWithoutMetadataGeneration(t *testing.T) {
 	require.Equal(t, int32(1), requests.Load())
 }
 
+func TestRPMRootDirectoriesAndAuxiliaryFilesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	t.Cleanup(server.Close)
+	h := newRPMTestHandler(t, server.URL+"/repository")
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                               "/repository/",
+			"/repodata/":                      "/repository/repodata/",
+			"/assets/site.css?theme=contrast": "/repository/assets/site.css?theme=contrast",
+		} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
 func newRPMTestHandler(t *testing.T, rawOrigin string) *handler {
 	t.Helper()
 	root := t.TempDir()

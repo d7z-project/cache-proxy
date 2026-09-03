@@ -18,6 +18,9 @@ func NewDriver() proxyruntime.ModeDriver { return Driver{} }
 func (Driver) Mode() string              { return config.ModeMaven }
 
 func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+	if err := plan.RejectOptions(); err != nil {
+		return err
+	}
 	if !plan.Enabled() {
 		return nil
 	}

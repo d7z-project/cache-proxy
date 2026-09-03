@@ -94,6 +94,37 @@ func TestGitReadOnlyProtocolSurface(t *testing.T) {
 	require.Equal(t, int32(1), requests.Load())
 }
 
+func TestGitUnknownReadResourcesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.Method+" "+request.URL.RequestURI())
+	}))
+	defer upstream.Close()
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+
+	for _, test := range []struct {
+		method string
+		target string
+		body   string
+	}{
+		{http.MethodGet, "/", "GET /repo/"},
+		{http.MethodGet, "/browse/", "GET /repo/browse/"},
+		{http.MethodGet, "/assets/site.css?theme=dark", "GET /repo/assets/site.css?theme=dark"},
+		{http.MethodHead, "/assets/site.css?theme=light", ""},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.target, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, test.body, response.Body.String())
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/unknown", strings.NewReader("write")))
+	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
+	require.Equal(t, int32(4), requests.Load())
+}
+
 func TestSyncingMirrorPassesThroughWithSharedAdmission(t *testing.T) {
 	upstreamRequest := make(chan struct{}, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

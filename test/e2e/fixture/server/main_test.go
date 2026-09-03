@@ -48,3 +48,15 @@ func TestFixtureUpdateChangesValidatorsAtomically(t *testing.T) {
 	server.ServeHTTP(current, currentRequest)
 	require.Equal(t, http.StatusNotModified, current.Code)
 }
+
+func TestTransparentPathProbeEchoesExactRequestURI(t *testing.T) {
+	server := &fixtureServer{
+		root: t.TempDir(), counts: make(map[string]int), headers: make(map[string]http.Header),
+	}
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/apk/__e2e_path__/asset.css?theme=dark", nil))
+
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "/apk/__e2e_path__/asset.css?theme=dark", response.Body.String())
+	require.Equal(t, 1, server.counts["GET /apk/__e2e_path__/asset.css"])
+}

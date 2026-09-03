@@ -5,8 +5,9 @@ e2e_prepare_npm() {
 }
 
 e2e_run_npm() {
-  printf '\n[npm] install, audit, warm tarball, update and offline reuse\n'
-  e2e_reset_fixture
+	printf '\n[npm] install, audit, warm tarball, update and offline reuse\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths npm /npm /npm bypass
   local install_script='
     mkdir /tmp/project && cd /tmp/project
     printf "{\"name\":\"consumer\",\"version\":\"1.0.0\",\"dependencies\":{\"e2e-pkg\":\"%s\"}}\n" "$2" >package.json

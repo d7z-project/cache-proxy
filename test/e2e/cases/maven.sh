@@ -5,8 +5,9 @@ e2e_prepare_maven() {
 }
 
 e2e_run_maven() {
-  printf '\n[maven] dependency resolution, warm artifact, metadata update and persisted offline reuse\n'
-  e2e_reset_fixture
+	printf '\n[maven] dependency resolution, warm artifact, metadata update and persisted offline reuse\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths maven /maven /maven cache
   local script='
     mvn -B -ntp \
       -DremoteRepositories=e2e::default::"$1/maven" \

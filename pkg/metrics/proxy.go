@@ -49,18 +49,18 @@ type Stats struct {
 	instances sync.Map // string -> *instanceEntry
 	metrics   *metricsCollector
 
-	totalRequests      atomic.Uint64
-	totalErrors        atomic.Uint64
-	totalResponseBytes atomic.Uint64
-	totalUpstreamReqs  atomic.Uint64
-	totalUpstreamErrs  atomic.Uint64
-	totalUpstreamBytes atomic.Uint64
-	totalActiveDown    atomic.Int64
-	totalActiveUp      atomic.Int64
+	totalRequests         atomic.Uint64
+	totalErrors           atomic.Uint64
+	totalResponseBytes    atomic.Uint64
+	totalUpstreamRequests atomic.Uint64
+	totalUpstreamErrors   atomic.Uint64
+	totalUpstreamBytes    atomic.Uint64
+	totalActiveDownloads  atomic.Int64
+	totalActiveUpstreams  atomic.Int64
 
-	totalMu         sync.Mutex
-	totalCache      map[string]uint64
-	totalUpstreamSt map[string]uint64
+	totalMu             sync.Mutex
+	totalCache          map[string]uint64
+	totalUpstreamStatus map[string]uint64
 }
 
 type StatsSnapshot struct {
@@ -98,9 +98,9 @@ type UpstreamStats struct {
 
 func NewStats(reg prometheus.Registerer) *Stats {
 	return &Stats{
-		metrics:         newMetricsCollector(reg),
-		totalCache:      map[string]uint64{},
-		totalUpstreamSt: map[string]uint64{},
+		metrics:             newMetricsCollector(reg),
+		totalCache:          map[string]uint64{},
+		totalUpstreamStatus: map[string]uint64{},
 	}
 }
 
@@ -129,7 +129,9 @@ func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, 
 
 	s.totalRequests.Add(1)
 	s.totalResponseBytes.Add(bytes)
-	s.incrTotalCache(cache)
+	s.totalMu.Lock()
+	s.totalCache[cache]++
+	s.totalMu.Unlock()
 	if status >= 500 {
 		s.totalErrors.Add(1)
 	}
@@ -187,11 +189,13 @@ func (s *Stats) RecordUpstreamRequest(
 	}
 	entry.mu.Unlock()
 
-	s.totalUpstreamReqs.Add(1)
+	s.totalUpstreamRequests.Add(1)
 	s.totalUpstreamBytes.Add(bytes)
-	s.incrTotalUpstreamStatus(statusText)
+	s.totalMu.Lock()
+	s.totalUpstreamStatus[statusText]++
+	s.totalMu.Unlock()
 	if failed {
-		s.totalUpstreamErrs.Add(1)
+		s.totalUpstreamErrors.Add(1)
 	}
 }
 
@@ -234,9 +238,9 @@ func (s *Stats) addActiveUpstream(instance, mode, upstream string, delta int64) 
 	entry.data.Upstreams[upstream] = upstreamStats
 	entry.mu.Unlock()
 
-	s.totalActiveUp.Add(delta)
-	if s.totalActiveUp.Load() < 0 {
-		s.totalActiveUp.Store(0)
+	s.totalActiveUpstreams.Add(delta)
+	if s.totalActiveUpstreams.Load() < 0 {
+		s.totalActiveUpstreams.Store(0)
 	}
 }
 
@@ -251,7 +255,7 @@ func (s *Stats) AddActiveDownload(instance, mode string, delta int64) {
 	entry.data.ActiveDownloads += delta
 	entry.mu.Unlock()
 
-	s.totalActiveDown.Add(delta)
+	s.totalActiveDownloads.Add(delta)
 }
 
 func (s *Stats) Snapshot() StatsSnapshot {
@@ -262,19 +266,19 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		Requests:         s.totalRequests.Load(),
 		Errors:           s.totalErrors.Load(),
 		ResponseBytes:    s.totalResponseBytes.Load(),
-		UpstreamRequests: s.totalUpstreamReqs.Load(),
-		UpstreamErrors:   s.totalUpstreamErrs.Load(),
+		UpstreamRequests: s.totalUpstreamRequests.Load(),
+		UpstreamErrors:   s.totalUpstreamErrors.Load(),
 		UpstreamBytes:    s.totalUpstreamBytes.Load(),
-		ActiveDownloads:  s.totalActiveDown.Load(),
-		ActiveUpstreams:  s.totalActiveUp.Load(),
+		ActiveDownloads:  s.totalActiveDownloads.Load(),
+		ActiveUpstreams:  s.totalActiveUpstreams.Load(),
 	}
 	s.totalMu.Lock()
 	total.Cache = cloneMap(s.totalCache)
-	total.UpstreamStatus = cloneMap(s.totalUpstreamSt)
+	total.UpstreamStatus = cloneMap(s.totalUpstreamStatus)
 	s.totalMu.Unlock()
 
 	result := StatsSnapshot{Total: total, Instances: map[string]InstanceStats{}}
-	s.instances.Range(func(key, value interface{}) bool {
+	s.instances.Range(func(key, value any) bool {
 		entry := value.(*instanceEntry)
 		entry.mu.Lock()
 		result.Instances[key.(string)] = cloneInstanceStats(entry.data)
@@ -297,18 +301,6 @@ func (s *Stats) getOrCreateEntry(name, mode string) *instanceEntry {
 	entry := &instanceEntry{data: emptyInstanceStats(mode)}
 	actual, _ := s.instances.LoadOrStore(name, entry)
 	return actual.(*instanceEntry)
-}
-
-func (s *Stats) incrTotalCache(cache string) {
-	s.totalMu.Lock()
-	s.totalCache[cache]++
-	s.totalMu.Unlock()
-}
-
-func (s *Stats) incrTotalUpstreamStatus(status string) {
-	s.totalMu.Lock()
-	s.totalUpstreamSt[status]++
-	s.totalMu.Unlock()
 }
 
 func cloneInstanceStats(item InstanceStats) InstanceStats {

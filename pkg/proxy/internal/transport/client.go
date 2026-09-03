@@ -18,7 +18,6 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
-	"gopkg.d7z.net/cache-proxy/pkg/utils"
 )
 
 const maxResponseHeaderBytes = 1 << 20
@@ -26,8 +25,7 @@ const maxResponseHeaderBytes = 1 << 20
 type Client struct {
 	instance            string
 	mode                string
-	http                *http.Client
-	gate                *UpstreamGate
+	httpClient          *http.Client
 	stats               *metrics.Stats
 	userAgent           string
 	userAgentConfigured bool
@@ -61,8 +59,8 @@ func NewClient(instance, mode string, cfg *config.TransportConfig, gate *Upstrea
 	if err := config.ValidateTransport(cfg); err != nil {
 		return nil, fmt.Errorf("configure transport: %w", err)
 	}
-	base := utils.DefaultHTTPClientWrapper()
-	httpTransport, ok := base.Transport.(*http.Transport)
+	baseClient := NewUpstreamHTTPClient()
+	httpTransport, ok := baseClient.Transport.(*http.Transport)
 	if !ok {
 		return nil, errors.New("default HTTP transport has unexpected type")
 	}
@@ -88,7 +86,7 @@ func NewClient(instance, mode string, cfg *config.TransportConfig, gate *Upstrea
 	}
 	client := &http.Client{
 		Transport:     httpTransport,
-		Timeout:       base.Timeout,
+		Timeout:       baseClient.Timeout,
 		CheckRedirect: CheckReadOnlyRedirect,
 	}
 	ConfigureAdmission(client, gate)
@@ -96,8 +94,8 @@ func NewClient(instance, mode string, cfg *config.TransportConfig, gate *Upstrea
 		client.Timeout = cfg.MaxRequestDuration.Duration()
 	}
 	result := &Client{
-		instance: instance, mode: mode, http: client, gate: gate, stats: stats,
-		userAgent: utils.DefaultUserAgent, idleBodyTimeout: base.IdleBodyTimeout,
+		instance: instance, mode: mode, httpClient: client, stats: stats,
+		userAgent: DefaultUserAgent, idleBodyTimeout: baseClient.IdleBodyTimeout,
 	}
 	if cfg != nil {
 		if cfg.UserAgent != "" {
@@ -122,8 +120,8 @@ func NewPlanClient(plan *proxyruntime.InstancePlan, mode string) (*Client, error
 	return client, nil
 }
 
-func ConfigureHTTPClient(client *utils.HTTPClientWrapper, instance string, cfg *config.TransportConfig) {
-	client.UserAgent = utils.DefaultUserAgent
+func ConfigureHTTPClient(client *UpstreamHTTPClient, instance string, cfg *config.TransportConfig) {
+	client.UserAgent = DefaultUserAgent
 	client.UserAgentConfigured = false
 	base, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -166,17 +164,17 @@ func (c *Client) DoRead(ctx context.Context, request *http.Request, class Admiss
 	if request != nil && (request.Method != http.MethodGet && request.Method != http.MethodHead || request.Body != nil && request.Body != http.NoBody) {
 		return nil, errors.New("upstream read request must be bodyless GET or HEAD")
 	}
-	return c.do(ctx, request, class)
+	return c.send(ctx, request, class)
 }
 
 func (c *Client) DoReadOnlyPost(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
 	if request == nil || request.Method != http.MethodPost {
 		return nil, errors.New("upstream read-only query must use POST")
 	}
-	return c.do(ctx, request, class)
+	return c.send(ctx, request, class)
 }
 
-func (c *Client) do(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
+func (c *Client) send(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
 	if request == nil || request.URL == nil || request.URL.Scheme == "" || request.URL.Host == "" {
 		return nil, errors.New("invalid upstream request")
 	}
@@ -186,7 +184,7 @@ func (c *Client) do(ctx context.Context, request *http.Request, class AdmissionC
 	}
 	started := time.Now()
 	request = WithAdmission(ctx, request.WithContext(ctx), class)
-	response, err := c.http.Do(request)
+	response, err := c.httpClient.Do(request)
 	if err != nil {
 		releaseStats()
 		c.stats.RecordUpstreamRequest(c.instance, c.mode, RedactedURL(request.URL), request.Method, 0, time.Since(started), 0)
@@ -197,7 +195,7 @@ func (c *Client) do(ctx context.Context, request *http.Request, class AdmissionC
 		responseURL = response.Request.URL
 	}
 	response.Body = &observedBody{
-		ReadCloser: utils.NewIdleTimeoutReadCloser(response.Body, c.idleBodyTimeout),
+		ReadCloser: newIdleTimeoutReadCloser(response.Body, c.idleBodyTimeout),
 		done: func(bytes uint64) {
 			releaseStats()
 			c.stats.RecordUpstreamRequest(c.instance, c.mode, RedactedURL(responseURL), request.Method, response.StatusCode, time.Since(started), bytes)
@@ -207,7 +205,7 @@ func (c *Client) do(ctx context.Context, request *http.Request, class AdmissionC
 }
 
 func (c *Client) RequestUserAgent(request *http.Request) (string, bool) {
-	if c.userAgentConfigured || !utils.IsBrowserRequest(request) {
+	if c.userAgentConfigured || !IsBrowserRequest(request) {
 		return c.userAgent, false
 	}
 	return request.UserAgent(), true
@@ -255,7 +253,7 @@ func effectivePort(value *url.URL) string {
 }
 
 func (c *Client) CloseIdleConnections() {
-	c.http.CloseIdleConnections()
+	c.httpClient.CloseIdleConnections()
 }
 
 type observedBody struct {

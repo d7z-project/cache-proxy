@@ -40,13 +40,13 @@ type handler struct {
 	metadata  *filerepo.GenerationManager
 }
 
-func newHandler(instance, stateDir string, origin *url.URL, workDir string, store *blobfs.Store, client *transport.Client, sched *scheduler.Scheduler) (*handler, error) {
+func newHandler(instance, stateDir string, origin *url.URL, workDir string, store *blobfs.Store, client *transport.Client, taskScheduler *scheduler.Scheduler) (*handler, error) {
 	h := &handler{origin: origin, workDir: workDir, store: store, client: client, lifecycle: storeio.NewLifecycle()}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "flatpak", Tenant: "flatpak-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), Store: store, Scheduler: sched,
+		Instance: instance, Mode: "flatpak", Tenant: "flatpak-metadata", StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), Store: store, Scheduler: taskScheduler,
 		Fetch: func(ctx context.Context, _ string, requestPath string, header http.Header) (*http.Response, error) {
-			return h.fetchWithClass(ctx, http.MethodGet, requestPath, header, transport.AdmissionRefresh)
+			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, header, transport.AdmissionRefresh)
 		},
 		Build: func(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
 			switch anchor.Path {
@@ -91,14 +91,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	if !proxyruntime.RequireReadMethod(w, request.Method) {
 		return
 	}
-	cleaned := "summary"
-	if request.URL.Path != "" && request.URL.Path != "/" {
-		var err error
-		cleaned, err = storeio.CleanURLPath(request.URL)
-		if err != nil {
-			http.Error(w, "invalid Flatpak path", http.StatusBadRequest)
-			return
-		}
+	cleaned, err := storeio.CleanURLPath(request.URL)
+	if err != nil {
+		http.Error(w, "invalid Flatpak path", http.StatusBadRequest)
+		return
+	}
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+		h.forwardUpstream(w, request, cleaned)
+		return
 	}
 	if anchorPath, metadataPath := metadataAnchorPath(cleaned); metadataPath {
 		rootID := "flatpak:" + anchorPath
@@ -106,14 +106,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 		if request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" || cleaned != anchorPath || request.Method == http.MethodHead {
-			h.forward(w, request, cleaned)
+			h.forwardUpstream(w, request, cleaned)
 			return
 		}
 		h.serveMetadataAnchor(w, request, cleaned, rootID)
 		return
 	}
 	if request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	if digest, extension, ok := objectDigestFromPath(cleaned); ok {
@@ -135,7 +135,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		h.serveMutable(w, request, cleaned, freshness, cacheNotFound)
 		return
 	}
-	h.forward(w, request, cleaned)
+	h.forwardUpstream(w, request, cleaned)
 }
 
 func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Request, cleaned, rootID string) {
@@ -149,7 +149,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		if handled, _, _ := h.metadata.ServeCurrentFor(w, request, cleaned, true, rootID); handled || h.metadata.ServeStagedAnchorFor(w, request, cleaned, rootID) {
 			return
 		}
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	finished := false
@@ -160,7 +160,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, header)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, header)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -205,7 +205,7 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 		return
 	}
 	if request.Method == http.MethodHead {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	rangeRequest := request.Header.Get("Range") != ""
@@ -221,7 +221,7 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 			upstreamHeader.Del("Range")
 			upstreamHeader.Del("If-Range")
 		}
-		response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, upstreamHeader)
+		response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, upstreamHeader)
 		if err != nil {
 			h.flights.Finish(key, flight, err)
 			transport.WriteError(w, http.StatusBadGateway)
@@ -311,7 +311,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		if object != nil {
 			serveFlatpakObject(w, request, object, "STALE")
 		} else {
-			h.forward(w, request, cleaned)
+			h.forwardUpstream(w, request, cleaned)
 		}
 		return
 	}
@@ -319,7 +319,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		if object != nil {
 			_ = object.Reader.Close()
 		}
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	flightKey := "revalidate:" + key
@@ -333,7 +333,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 			serveFlatpakObject(w, request, updated, "COALESCED")
 			return
 		}
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	if current, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); err == nil {
@@ -352,7 +352,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		conditional.Set("If-None-Match", object.Header.Get("ETag"))
 		conditional.Set("If-Modified-Since", object.Header.Get("Last-Modified"))
 	}
-	response, fetchErr := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, conditional)
+	response, fetchErr := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, conditional)
 	if fetchErr != nil || response.StatusCode >= 500 {
 		if response != nil {
 			_ = response.Body.Close()
@@ -411,10 +411,10 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 		return
 	}
 	if request.Method == http.MethodHead {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, request.Header)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.Header)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
 		return
@@ -453,11 +453,11 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 	_, _ = w.Write(body)
 }
 
-func (h *handler) fetch(ctx context.Context, method, cleaned string, header http.Header) (*http.Response, error) {
-	return h.fetchWithClass(ctx, method, cleaned, header, transport.AdmissionForeground)
+func (h *handler) fetchUpstream(ctx context.Context, method, cleaned string, header http.Header) (*http.Response, error) {
+	return h.fetchUpstreamWithClass(ctx, method, cleaned, header, transport.AdmissionForeground)
 }
 
-func (h *handler) fetchWithClass(ctx context.Context, method, cleaned string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
+func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), "")
 	if err != nil {
 		return nil, err
@@ -470,7 +470,7 @@ func (h *handler) fetchWithClass(ctx context.Context, method, cleaned string, he
 	return h.client.DoRead(ctx, request, class)
 }
 
-func (h *handler) forward(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)

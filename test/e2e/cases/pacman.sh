@@ -5,8 +5,9 @@ e2e_prepare_pacman() {
 }
 
 e2e_run_pacman() {
-  printf '\n[pacman] database/install, generation update, warm package and offline restart\n'
-  e2e_reset_fixture
+	printf '\n[pacman] database/install, generation update, warm package and offline restart\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths pacman /pacman /pacman bypass
   local script='
     cat >/tmp/pacman.conf <<EOF
 [options]

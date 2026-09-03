@@ -43,6 +43,31 @@ func TestPyPICacheabilityHonorsNoStore(t *testing.T) {
 	require.False(t, pypiCacheable(request, response))
 }
 
+func TestPyPIRootDirectoriesAndUnknownResourcesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = fmt.Fprint(w, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	h := newPyPITestHandler(t, server.URL+"/index")
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                           "/index/",
+			"/browse/":                    "/index/browse/",
+			"/assets/site.css?theme=dark": "/index/assets/site.css?theme=dark",
+		} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
 func TestSimpleJSONRewritesAndVerifiesExternalFile(t *testing.T) {
 	fileBody := []byte("wheel bytes")
 	digest := sha256.Sum256(fileBody)

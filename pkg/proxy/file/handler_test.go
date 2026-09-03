@@ -124,6 +124,31 @@ func TestFileReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 	require.Zero(t, requests.Load())
 }
 
+func TestFileRootAndDirectoriesAlwaysPassThrough(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	defer upstream.Close()
+	handler, _ := newTestHandler(t, upstream.URL+"/files", []Rule{{Match: "**", Policy: "immutable"}})
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                    "/files/",
+			"/downloads/":          "/files/downloads/",
+			"/nested/path/?view=1": "/files/nested/path/?view=1",
+		} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
+}
+
 func TestFileConcurrentMissUsesSingleTransfer(t *testing.T) {
 	var requests atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

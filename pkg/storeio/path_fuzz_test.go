@@ -30,7 +30,19 @@ func FuzzCleanRelative(f *testing.F) {
 }
 
 func FuzzCleanURLPath(f *testing.F) {
-	for _, seed := range []string{"/dists/trixie/InRelease", "/github.com/!owner/module/@v/list", "/a%20b", "/a%2fb", "/a/../b"} {
+	for _, seed := range []string{
+		"/dists/trixie/InRelease",
+		"/github.com/!owner/module/@v/list",
+		"/pkg_1%2bpve.deb",
+		"/pkg_1%2Bpve.deb",
+		"/a%41",
+		"/a%2eb",
+		"/a%20b",
+		"/a%2fb",
+		"/a/%2e%2e/b",
+		"/",
+		"/repository/",
+	} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
@@ -45,8 +57,13 @@ func FuzzCleanURLPath(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if strings.Contains(cleaned, "\\") || strings.ContainsRune(cleaned, '\x00') || canonicalEscapedPath("/"+cleaned) != target.EscapedPath() {
-			t.Fatalf("accepted path did not round-trip: %q -> %q", raw, cleaned)
+		if strings.Contains(cleaned, "\\") || strings.ContainsRune(cleaned, '\x00') || strings.HasPrefix(cleaned, "/") {
+			t.Fatalf("accepted unsafe path: %q -> %q", raw, cleaned)
+		}
+		roundTrip := &url.URL{Path: "/" + cleaned}
+		second, secondErr := CleanURLPath(roundTrip)
+		if secondErr != nil || second != cleaned {
+			t.Fatalf("accepted path is not semantically stable: %q -> %q -> %q, %v", raw, cleaned, second, secondErr)
 		}
 	})
 }

@@ -212,6 +212,12 @@ func TestNPMAuditIsTheOnlyReadOnlyPOST(t *testing.T) {
 }
 
 func TestNPMRequestPathSupportsScopedFormsWithoutRewritingTraversal(t *testing.T) {
+	for raw, expected := range map[string]string{"/": "", "/browse/": "browse/", "/@scope%2fpkg/": "@scope/pkg/"} {
+		request := httptest.NewRequest(http.MethodGet, raw, nil)
+		cleaned, err := npmRequestPath(request.URL)
+		require.NoError(t, err, raw)
+		require.Equal(t, expected, cleaned)
+	}
 	for _, raw := range []string{"/@scope/pkg", "/@scope%2fpkg", "/%40scope%2Fpkg"} {
 		request := httptest.NewRequest(http.MethodGet, raw, nil)
 		cleaned, err := npmRequestPath(request.URL)
@@ -223,6 +229,31 @@ func TestNPMRequestPathSupportsScopedFormsWithoutRewritingTraversal(t *testing.T
 		_, err := npmRequestPath(request.URL)
 		require.Error(t, err, raw)
 	}
+}
+
+func TestNPMRootDirectoriesAndUnknownResourcesRemainTransparent(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, request.URL.RequestURI())
+	}))
+	defer server.Close()
+	h := newNPMTestHandler(t, server.URL+"/registry")
+
+	for range 2 {
+		for target, expected := range map[string]string{
+			"/":                           "/registry/",
+			"/browse/":                    "/registry/browse/",
+			"/assets/site.css?theme=dark": "/registry/assets/site.css?theme=dark",
+		} {
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+			require.Equal(t, expected, response.Body.String())
+		}
+	}
+	require.Equal(t, int32(6), requests.Load())
 }
 
 func TestNPMPackumentAcceptRepresentationsDoNotShareCache(t *testing.T) {

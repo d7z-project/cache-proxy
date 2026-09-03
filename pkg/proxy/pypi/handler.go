@@ -1,12 +1,9 @@
 package pypi
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +20,7 @@ import (
 	"golang.org/x/net/html"
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/signedtoken"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
@@ -57,7 +55,7 @@ type fileAuthorization struct {
 }
 
 func newHandler(origin *url.URL, stateDir, workDir string, store *blobfs.Store, client *transport.Client) (*handler, error) {
-	secret, err := loadSigningSecret(stateDir)
+	secret, err := storeio.LoadOrCreateSigningSecret(stateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -68,13 +66,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	if !proxyruntime.RequireReadMethod(w, request.Method) {
 		return
 	}
-	cleaned, err := pypiRequestPath(request.URL)
+	cleaned, err := storeio.CleanURLPath(request.URL)
 	if err != nil {
 		http.Error(w, "invalid PyPI path", http.StatusBadRequest)
 		return
-	}
-	if cleaned == "" {
-		cleaned = "simple/"
 	}
 	if strings.HasPrefix(cleaned, "-/file/") {
 		h.serveFile(w, request, strings.TrimPrefix(cleaned, "-/file/"))
@@ -82,31 +77,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	}
 	project, simple := simpleProject(cleaned)
 	if !simple {
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	h.serveSimple(w, request, cleaned, project)
-}
-
-func pypiRequestPath(target *url.URL) (string, error) {
-	decoded, err := storeio.DecodeCanonicalURLPath(target)
-	if err != nil {
-		return "", fmt.Errorf("invalid pypi request path: %w", err)
-	}
-	cleaned := strings.TrimPrefix(decoded, "/")
-	if cleaned == "" {
-		return "", nil
-	}
-	trailingSlash := strings.HasSuffix(cleaned, "/")
-	cleaned = strings.TrimSuffix(cleaned, "/")
-	cleaned, err = storeio.CleanRelative(cleaned)
-	if err != nil {
-		return "", err
-	}
-	if trailingSlash {
-		cleaned += "/"
-	}
-	return cleaned, nil
 }
 
 func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, cleaned, project string) {
@@ -125,7 +99,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 		if stale, err := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); err == nil {
 			servePyPIObject(w, request, stale, "STALE")
 		} else {
-			h.forward(w, request, cleaned)
+			h.forwardUpstream(w, request, cleaned)
 		}
 		return
 	}
@@ -136,7 +110,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 			servePyPIObject(w, request, joined, "COALESCED")
 			return
 		}
-		h.forward(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	defer h.flights.Finish("ref:"+key, flight, nil)
@@ -156,7 +130,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, upstreamHeader)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, upstreamHeader)
 	if err != nil || response.StatusCode >= 500 {
 		if response != nil {
 			_ = response.Body.Close()
@@ -342,38 +316,19 @@ func (h *handler) authorizeFile(rawTarget, project, filename, algorithm, digest,
 	target.Fragment = ""
 	authorization := fileAuthorization{URL: target.String(), Project: project, Filename: filename, Algorithm: algorithm,
 		Digest: strings.ToLower(digest), Scope: scope, Expires: time.Now().Add(fileAuthorizationTTL).Unix()}
-	payload, err := json.Marshal(authorization)
+	token, err := signedtoken.Sign(h.secret, authorization)
 	if err != nil {
 		return "", err
 	}
-	mac := hmac.New(sha256.New, h.secret)
-	_, _ = mac.Write(payload)
-	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return strings.TrimRight(externalBase, "/") + "/-/file/" + token + "/" + url.PathEscape(filename), nil
 }
 
 func (h *handler) verifyAuthorization(token, scope string) (fileAuthorization, error) {
-	payloadPart, signaturePart, ok := strings.Cut(token, ".")
-	if !ok {
-		return fileAuthorization{}, errors.New("invalid PyPI file authorization")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
-	if err != nil || len(payload) > 32<<10 {
-		return fileAuthorization{}, errors.New("invalid PyPI file authorization")
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(signaturePart)
-	if err != nil {
-		return fileAuthorization{}, errors.New("invalid PyPI file authorization")
-	}
-	mac := hmac.New(sha256.New, h.secret)
-	_, _ = mac.Write(payload)
-	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return fileAuthorization{}, errors.New("invalid PyPI file authorization")
-	}
 	var authorization fileAuthorization
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&authorization); err != nil || authorization.Scope != scope || time.Now().Unix() > authorization.Expires {
+	if err := signedtoken.Verify(h.secret, token, 32<<10, &authorization); err != nil {
+		return fileAuthorization{}, errors.New("invalid PyPI file authorization")
+	}
+	if authorization.Scope != scope || time.Now().Unix() > authorization.Expires {
 		return fileAuthorization{}, errors.New("expired PyPI file authorization")
 	}
 	target, err := url.Parse(authorization.URL)
@@ -549,7 +504,7 @@ func (h *handler) rewriteProjectURL(rawTarget, externalBase string) (string, boo
 	return strings.TrimRight(externalBase, "/") + "/simple/" + url.PathEscape(normalizeProjectName(parts[len(parts)-1])) + "/", true
 }
 
-func (h *handler) fetch(ctx context.Context, method, cleaned, rawQuery string, header http.Header) (*http.Response, error) {
+func (h *handler) fetchUpstream(ctx context.Context, method, cleaned, rawQuery string, header http.Header) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), rawQuery)
 	if err != nil {
 		return nil, err
@@ -562,7 +517,7 @@ func (h *handler) fetch(ctx context.Context, method, cleaned, rawQuery string, h
 	return h.client.DoRead(ctx, request, transport.AdmissionForeground)
 }
 
-func (h *handler) forward(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)

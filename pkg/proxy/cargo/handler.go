@@ -56,16 +56,10 @@ func newHandler(origin *url.URL, stateDir, workDir string, store *blobfs.Store, 
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	cleaned := ""
-	if request.URL.Path == "" || request.URL.Path == "/" {
-		cleaned = "config.json"
-	} else {
-		var err error
-		cleaned, err = storeio.CleanURLPath(request.URL)
-		if err != nil {
-			http.Error(w, "invalid Cargo path", http.StatusBadRequest)
-			return
-		}
+	cleaned, err := storeio.CleanURLPath(request.URL)
+	if err != nil {
+		http.Error(w, "invalid Cargo path", http.StatusBadRequest)
+		return
 	}
 	if isCargoGitUploadPack(request.Method, cleaned) {
 		h.forwardGitUploadPack(w, request)
@@ -88,7 +82,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if isCargoGitReadRequest(cleaned, request) || !isSparseIndexPath(cleaned) {
-		h.forwardRead(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	h.serveSparseIndex(w, request, cleaned)
@@ -110,7 +104,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 		if stale, err := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); err == nil {
 			serveCargoObject(w, request, stale, "STALE")
 		} else {
-			h.forwardRead(w, request, "config.json")
+			h.forwardUpstream(w, request, "config.json")
 		}
 		return
 	}
@@ -121,7 +115,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 			serveCargoObject(w, request, joined, "COALESCED")
 			return
 		}
-		h.forwardRead(w, request, "config.json")
+		h.forwardUpstream(w, request, "config.json")
 		return
 	}
 	defer h.flights.Finish("ref:"+key, flight, nil)
@@ -141,7 +135,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, "config.json", upstreamHeader)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, "config.json", upstreamHeader)
 	if err != nil {
 		if stale, openErr := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); openErr == nil {
 			serveCargoObject(w, request, stale, "STALE")
@@ -248,7 +242,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 		if stale, err := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); err == nil {
 			serveCargoObject(w, request, stale, "STALE")
 		} else {
-			h.forwardRead(w, request, cleaned)
+			h.forwardUpstream(w, request, cleaned)
 		}
 		return
 	}
@@ -259,7 +253,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 			serveCargoObject(w, request, joined, "COALESCED")
 			return
 		}
-		h.forwardRead(w, request, cleaned)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	defer h.flights.Finish("ref:"+key, flight, nil)
@@ -279,7 +273,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.fetch(h.lifecycle.Context(), http.MethodGet, cleaned, upstreamHeader)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, upstreamHeader)
 	if err != nil {
 		if stale, openErr := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); openErr == nil {
 			serveCargoObject(w, request, stale, "STALE")
@@ -539,7 +533,7 @@ func cargoDownloadURL(template, name, version, checksum string) (*url.URL, error
 	return target, nil
 }
 
-func (h *handler) fetch(ctx context.Context, method, cleaned string, header http.Header) (*http.Response, error) {
+func (h *handler) fetchUpstream(ctx context.Context, method, cleaned string, header http.Header) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), "")
 	if err != nil {
 		return nil, err
@@ -552,7 +546,7 @@ func (h *handler) fetch(ctx context.Context, method, cleaned string, header http
 	return h.client.DoRead(ctx, request, transport.AdmissionForeground)
 }
 
-func (h *handler) forwardRead(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)

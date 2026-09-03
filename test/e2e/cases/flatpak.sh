@@ -19,8 +19,9 @@ e2e_flatpak_install() {
 }
 
 e2e_run_flatpak() {
-  printf '\n[flatpak] remote/install, generation update, warm objects and offline restart\n'
-  e2e_reset_fixture
+	printf '\n[flatpak] remote/install, generation update, warm objects and offline restart\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths flatpak /flatpak /flatpak/repo bypass
   e2e_flatpak_install cold cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/flatpak/summary.idx"
   local objects_before paths_before delta_indexes_before delta_index_paths_before

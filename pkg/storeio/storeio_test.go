@@ -28,6 +28,17 @@ func TestWriteJSONCommitsStrictState(t *testing.T) {
 	require.Error(t, ReadJSON(root, "refs/state.json", &loaded))
 }
 
+func TestLoadOrCreateSigningSecretPersistsValue(t *testing.T) {
+	root := t.TempDir()
+	first, err := LoadOrCreateSigningSecret(root)
+	require.NoError(t, err)
+	require.Len(t, first, signingSecretBytes)
+
+	second, err := LoadOrCreateSigningSecret(root)
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+}
+
 func TestSpoolBoundsAndHashes(t *testing.T) {
 	result, err := NewSpooler(t.TempDir(), 4, nil).SpoolWithExpectedSize(context.Background(), strings.NewReader("body"), 4, -1)
 	require.NoError(t, err)

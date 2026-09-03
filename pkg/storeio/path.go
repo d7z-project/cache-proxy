@@ -7,17 +7,29 @@ import (
 )
 
 func CleanURLPath(target *url.URL) (string, error) {
-	decoded, err := DecodeCanonicalURLPath(target)
+	decoded, err := DecodeURLPath(target)
 	if err != nil {
 		return "", err
 	}
-	return CleanRelative(strings.TrimPrefix(decoded, "/"))
+	cleaned := strings.TrimPrefix(decoded, "/")
+	if cleaned == "" {
+		return "", nil
+	}
+	trailingSlash := strings.HasSuffix(cleaned, "/")
+	cleaned = strings.TrimSuffix(cleaned, "/")
+	cleaned, err = CleanRelative(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if trailingSlash {
+		cleaned += "/"
+	}
+	return cleaned, nil
 }
 
-// DecodeCanonicalURLPath validates the escaped request path before returning
-// its absolute decoded form. Protocols that allow a trailing slash can apply
-// their own segment rules to the result.
-func DecodeCanonicalURLPath(target *url.URL) (string, error) {
+// DecodeURLPath validates the escaped request path before returning its
+// absolute decoded form. Equivalent percent encodings have the same result.
+func DecodeURLPath(target *url.URL) (string, error) {
 	if target == nil {
 		return "", errors.New("invalid request URL")
 	}
@@ -33,27 +45,10 @@ func DecodeCanonicalURLPath(target *url.URL) (string, error) {
 	if !strings.HasPrefix(decoded, "/") {
 		return "", errors.New("request path is not absolute")
 	}
-	if escaped != canonicalEscapedPath(decoded) {
-		return "", errors.New("request path is not canonical")
+	if strings.Contains(decoded, "\\") || strings.ContainsRune(decoded, '\x00') {
+		return "", errors.New("invalid decoded path")
 	}
 	return decoded, nil
-}
-
-func canonicalEscapedPath(value string) string {
-	const hex = "0123456789ABCDEF"
-	var result strings.Builder
-	result.Grow(len(value))
-	for index := 0; index < len(value); index++ {
-		current := value[index]
-		if current == '/' || current >= 'a' && current <= 'z' || current >= 'A' && current <= 'Z' || current >= '0' && current <= '9' || strings.ContainsRune("-._~!$&'()*+,;=:@", rune(current)) {
-			result.WriteByte(current)
-			continue
-		}
-		result.WriteByte('%')
-		result.WriteByte(hex[current>>4])
-		result.WriteByte(hex[current&0x0f])
-	}
-	return result.String()
 }
 
 func CleanRelative(value string) (string, error) {

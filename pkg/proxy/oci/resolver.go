@@ -31,7 +31,7 @@ func resolveRequest(req *http.Request, _ *Options) (request, error) {
 	if req == nil || req.URL == nil {
 		return request{}, errors.New("invalid oci request URL")
 	}
-	decodedPath, err := storeio.DecodeCanonicalURLPath(req.URL)
+	decodedPath, err := storeio.DecodeURLPath(req.URL)
 	if err != nil {
 		return request{}, errors.New("invalid oci request path")
 	}

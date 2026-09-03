@@ -5,8 +5,9 @@ e2e_prepare_go() {
 }
 
 e2e_run_go() {
-  printf '\n[go] module download, warm zip, list update and persisted offline reuse\n'
-  e2e_reset_fixture
+	printf '\n[go] module download, warm zip, list update and persisted offline reuse\n'
+	e2e_reset_fixture
+	e2e_assert_strict_path go "$E2E_PROXY_URL" /go /go
   local script='
     mkdir /tmp/module && cd /tmp/module
     go mod init client.example/e2e >/dev/null

@@ -5,8 +5,9 @@ e2e_prepare_cargo() {
 }
 
 e2e_run_cargo() {
-  printf '\n[cargo] sparse registry fetch, warm crate, index update and persisted offline reuse\n'
-  e2e_reset_fixture
+	printf '\n[cargo] sparse registry fetch, warm crate, index update and persisted offline reuse\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths cargo /cargo /cargo bypass
   local script='
     mkdir -p /tmp/project/.cargo /tmp/project/src && cd /tmp/project
     cat >Cargo.toml <<EOF

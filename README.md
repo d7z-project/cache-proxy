@@ -36,10 +36,10 @@ a digest is available, and concurrent requests share in-progress downloads.
 | `maven` | Maven metadata, artifacts, and checksums |
 | `cargo` | Sparse indexes, verified crates, and fetch-only Git indexes |
 | `pypi` | PyPI Simple HTML/JSON and verified distributions |
-| `deb` | Debian standard, nested, and flat repositories |
-| `apk` | Alpine indexes and packages |
+| `deb` | Debian standard, nested, and flat repositories with transparent auxiliary files |
+| `apk` | Alpine indexes, packages, and package sidecars |
 | `rpm` | rpm-md metadata and RPM artifacts |
-| `pacman` | Pacman databases, packages, deltas, and signatures |
+| `pacman` | Pacman databases, packages, deltas, and sidecars |
 | `flatpak` | Flatpak/OSTree summaries, objects, and static deltas |
 | `oci` | Pull-only OCI Distribution manifests and blobs |
 | `git` | Fetch-only Git smart HTTP backed by local bare mirrors |
@@ -181,9 +181,11 @@ It must define exactly one listener:
 - `transport` accepts `proxy`, `ua`, `dial_timeout`, `header_timeout`,
   `idle_body_timeout`, `max_request_duration`, and `max_idle_conns`.
 
-An instance represents one upstream. Put DNS or a load balancer in front of
-that URL when upstream high availability is required. Protocol endpoints such
-as Go SumDB and an OCI token realm remain separate auxiliary endpoints.
+An instance represents one upstream repository or registry base URL. Requests
+below a path mount are appended to that base without assigning a special file
+meaning to the instance root. Put DNS or a load balancer in front of the URL
+when upstream high availability is required. Protocol endpoints such as Go
+SumDB and an OCI token realm remain separate auxiliary endpoints.
 
 ### Mode Options
 
@@ -198,8 +200,9 @@ Options are placed below an instance's `options` mapping.
 
 Other modes do not require mode-specific options. Git and OCI credential
 values support shell-style environment expansion such as `$REGISTRY_TOKEN`.
-Cargo and PyPI download targets are authorized from signed proxy routes derived
-from upstream metadata.
+npm and PyPI cross-origin download targets use per-instance signed routes
+derived from upstream metadata. Cargo crate targets are resolved from the
+cached sparse index and verified against its checksum.
 
 ## Client Configuration
 
@@ -245,6 +248,17 @@ verified generation. Packages and sidecars use stable cache keys, so they
 remain available while a metadata refresh is pending or has failed. Repository
 metadata refresh runs every 15 minutes and can be scheduled immediately by
 revalidating the current anchor.
+
+Request paths are classified after one percent-decoding pass. Equivalent legal
+encodings share a cache identity, while encoded separators and parent traversal
+remain invalid. A request for a path-mounted instance without its trailing
+slash receives a permanent redirect that preserves the query. Repository roots,
+directory trailing slashes, and unclassified same-origin read resources pass
+through transparently in file, npm, Maven, Cargo, PyPI, Debian, APK, RPM,
+Pacman, Git, and Flatpak modes. File rules and Maven's open repository object
+space may cache non-directory resources; protocol-specific modes cache only
+objects they recognize. Go module proxy and OCI Distribution paths retain their
+strict protocol endpoint boundaries.
 
 ### Storage
 

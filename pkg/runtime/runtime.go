@@ -106,7 +106,7 @@ func NewPlanContext(
 	cleanup config.CleanupConfig,
 	mainBind string,
 	metricsPath string,
-	sched *scheduler.Scheduler,
+	taskScheduler *scheduler.Scheduler,
 ) *PlanContext {
 	return &PlanContext{
 		backend:              backend,
@@ -122,7 +122,7 @@ func NewPlanContext(
 		pathOwners:           map[string]string{},
 		reservedPathPrefixes: map[string]string{},
 		bindOwners:           map[string]string{mainBind: "main"},
-		scheduler:            sched,
+		scheduler:            taskScheduler,
 	}
 }
 
@@ -230,6 +230,10 @@ func (i *InstancePlan) Decode(target any) error {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
+}
+
+func (i *InstancePlan) RejectOptions() error {
+	return i.Decode(&struct{}{})
 }
 
 func (i *InstancePlan) BindPath(pathValue string, runtime Instance) error {

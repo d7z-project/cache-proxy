@@ -5,8 +5,9 @@ e2e_prepare_pypi() {
 }
 
 e2e_run_pypi() {
-  printf '\n[pypi] pip download, warm wheel, project update and persisted offline reuse\n'
-  e2e_reset_fixture
+	printf '\n[pypi] pip download, warm wheel, project update and persisted offline reuse\n'
+	e2e_reset_fixture
+	e2e_assert_transparent_paths pypi /pypi /pypi bypass
   local script='
     mkdir /tmp/download
     pip download --disable-pip-version-check --no-cache-dir --no-deps \

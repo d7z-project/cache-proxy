@@ -2,12 +2,8 @@ package npm
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"errors"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
@@ -17,38 +13,11 @@ import (
 
 const npmTenant = "npm"
 
-type signingState struct {
-	Secret string `json:"secret"`
-}
-
 type cachedObject struct {
 	reader    *blobfs.ObjectReader
 	headers   http.Header
 	fetchedAt time.Time
 	origin    string
-}
-
-func loadSigningSecret(stateDir string) ([]byte, error) {
-	var state signingState
-	err := storeio.ReadJSON(stateDir, "signing.json", &state)
-	if err == nil {
-		secret, err := base64.RawURLEncoding.DecodeString(state.Secret)
-		if err != nil || len(secret) != 32 {
-			return nil, errors.New("invalid npm signing secret")
-		}
-		return secret, nil
-	}
-	if !os.IsNotExist(err) {
-		return nil, err
-	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return nil, err
-	}
-	if err := storeio.WriteJSON(stateDir, "signing.json", signingState{Secret: base64.RawURLEncoding.EncodeToString(secret)}); err != nil {
-		return nil, err
-	}
-	return secret, nil
 }
 
 func openObject(ctx context.Context, store *blobfs.Store, key string) (*cachedObject, error) {

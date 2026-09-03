@@ -1,4 +1,4 @@
-package utils
+package storeio
 
 import (
 	"os"
@@ -12,10 +12,7 @@ import (
 func CleanStaleWorkFiles(instancesRoot string, maxAge time.Duration) {
 	cutoff := time.Now().Add(-maxAge)
 	_ = filepath.WalkDir(instancesRoot, func(name string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if entry.IsDir() || filepath.Base(filepath.Dir(name)) != "work" {
+		if walkErr != nil || entry.IsDir() || filepath.Base(filepath.Dir(name)) != "work" {
 			return nil
 		}
 		if !strings.HasPrefix(entry.Name(), ".cache-proxy-tmp-") {

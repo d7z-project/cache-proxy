@@ -23,7 +23,7 @@ func TestResponseCleanupCursorProgressesWithoutDeletions(t *testing.T) {
 	cleaner := &responseCleaner{store: store, tenant: "responses", opts: config.CleanupConfig{BatchSize: 1}}
 	seen := make(map[string]struct{})
 	for range 4 {
-		more, err := cleaner.run(context.Background())
+		more, err := cleaner.cleanBatch(context.Background())
 		require.NoError(t, err)
 		if cleaner.cursor != "" {
 			seen[cleaner.cursor] = struct{}{}
@@ -52,7 +52,7 @@ func TestResponseCleanupDeletesCorruptOwnedMetadata(t *testing.T) {
 	_, err = store.Put(ctx, "responses", objectPath, strings.NewReader("body"), map[string]string{"metadata": "not-json"})
 	require.NoError(t, err)
 
-	more, err := (&responseCleaner{store: store, tenant: "responses", opts: config.CleanupConfig{BatchSize: 1}}).run(ctx)
+	more, err := (&responseCleaner{store: store, tenant: "responses", opts: config.CleanupConfig{BatchSize: 1}}).cleanBatch(ctx)
 	require.NoError(t, err)
 	require.True(t, more)
 	_, err = store.StatObject(ctx, "responses", objectPath)
