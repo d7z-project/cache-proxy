@@ -64,7 +64,7 @@ func ReadJSON(root, name string, target any) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	if err != nil {
 		return err

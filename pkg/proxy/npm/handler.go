@@ -130,7 +130,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 				return touchObject(h.lifecycle.Context(), h.store, key)
 			}
 			if response.StatusCode >= http.StatusInternalServerError {
-				defer response.Body.Close()
+				defer func() { _ = response.Body.Close() }()
 				return fmt.Errorf("npm packument upstream returned %d", response.StatusCode)
 			}
 			if response.StatusCode != http.StatusOK {
@@ -142,7 +142,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 				direct = response
 				return nil
 			}
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			fallback, fetchErr = h.transformAndCommit(request, packageName, key, response)
 			return fetchErr
 		})
@@ -154,7 +154,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 			return http.StatusBadGateway, "ERROR"
 		}
 		if leader && direct != nil {
-			defer direct.Body.Close()
+			defer func() { _ = direct.Body.Close() }()
 			return transport.WriteResponse(w, request, direct, "BYPASS"), "BYPASS"
 		}
 		if leader && fallback != nil {

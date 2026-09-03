@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 const testModulePath = "example.com/cacheproxy/gomod"
@@ -165,6 +167,61 @@ func TestGoModuleHandlerServesLatestAndHead(t *testing.T) {
 	require.Empty(t, head.Body.String())
 	require.Equal(t, "text/plain; charset=utf-8", head.Header().Get("Content-Type"))
 	require.Equal(t, int64(2), upstreamRequests.Load())
+}
+
+func TestGoModuleMutableListPublishesUpstreamUpdate(t *testing.T) {
+	var revision atomic.Int32
+	revision.Store(1)
+	var requests atomic.Int32
+	var conditional atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		conditional.Store(request.Header.Get("If-None-Match"))
+		current := revision.Load()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current))
+		_, _ = fmt.Fprintf(w, "v%d.0.0\n", current)
+	}))
+	defer upstream.Close()
+	handler := newTestHandler(t, newTestStore(t), upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	target := "/" + testModulePath + "/@v/list"
+	parsed, err := parseModuleRequest(strings.TrimPrefix(target, "/"))
+	require.NoError(t, err)
+	key := "objects/" + hashKey(handler.origin.String()+"\x00"+parsed.cacheKey+"\x00anonymous")
+	cachedBody := func() string {
+		object, err := storeio.OpenResponse(context.Background(), handler.store, goTenant, key)
+		if err != nil {
+			return ""
+		}
+		defer func() { _ = object.Reader.Close() }()
+		body, err := io.ReadAll(object.Reader)
+		if err != nil {
+			return ""
+		}
+		return string(body)
+	}
+
+	first := requestGoProxy(t, handler, target, false)
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, "v1.0.0\n", first.Body.String())
+	require.Eventually(t, func() bool { return cachedBody() == "v1.0.0\n" }, time.Second, time.Millisecond)
+
+	revision.Store(2)
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.Header.Set("Cache-Control", "no-cache")
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, request)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, "v2.0.0\n", second.Body.String())
+	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
+	require.Equal(t, `"v1"`, conditional.Load())
+	require.Eventually(t, func() bool { return cachedBody() == "v2.0.0\n" }, time.Second, time.Millisecond)
+
+	third := requestGoProxy(t, handler, target, false)
+	require.Equal(t, http.StatusOK, third.Code)
+	require.Equal(t, "v2.0.0\n", third.Body.String())
+	require.Equal(t, "HIT", third.Header().Get("X-Cache"))
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestGoModuleHandlerProxiesSumDB(t *testing.T) {

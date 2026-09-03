@@ -97,11 +97,72 @@ func TestDebianFirstAnchorPassesThroughThenPublishesFullClosure(t *testing.T) {
 	require.Equal(t, int32(2), metadataRequests.Load())
 }
 
+func TestDebianPublishesUpstreamGenerationUpdate(t *testing.T) {
+	for name, paths := range map[string]struct {
+		anchor   string
+		metadata string
+		root     string
+	}{
+		"standard": {anchor: "/dists/trixie/InRelease", metadata: "/dists/trixie/main/Packages", root: "dists/trixie"},
+		"flat":     {anchor: "/flat/Release", metadata: "/flat/Packages", root: "flat"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			packages := [][]byte{[]byte("Package: demo\nVersion: 1\n"), []byte("Package: demo\nVersion: 2\n")}
+			releases := make([]string, len(packages))
+			for i, body := range packages {
+				digest := sha256.Sum256(body)
+				relative := strings.TrimPrefix(paths.metadata, "/"+paths.root+"/")
+				releases[i] = fmt.Sprintf("SHA256:\n %x %d %s\n", digest, len(body), relative)
+			}
+			var revision atomic.Int32
+			revision.Store(1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				current := int(revision.Load() - 1)
+				w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
+				switch request.URL.Path {
+				case paths.anchor:
+					_, _ = io.WriteString(w, releases[current])
+				case paths.metadata:
+					_, _ = w.Write(packages[current])
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			t.Cleanup(server.Close)
+			h, _ := newDebianTestHandler(t, server.URL)
+
+			first := httptest.NewRecorder()
+			h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, paths.anchor, nil))
+			require.Equal(t, releases[0], first.Body.String())
+			_, err := h.metadata.Refresh(context.Background(), 1)
+			require.NoError(t, err)
+			previous := h.metadata.Current(paths.root)
+			require.NotNil(t, previous)
+
+			revision.Store(2)
+			_, err = h.metadata.Refresh(context.Background(), 1)
+			require.NoError(t, err)
+			current := h.metadata.Current(paths.root)
+			require.NotNil(t, current)
+			require.NotEqual(t, previous.CandidateID, current.CandidateID)
+			for target, expected := range map[string][]byte{paths.anchor: []byte(releases[1]), paths.metadata: packages[1]} {
+				response := httptest.NewRecorder()
+				h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+				require.Equal(t, http.StatusOK, response.Code)
+				require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+				require.Equal(t, expected, response.Body.Bytes())
+			}
+		})
+	}
+}
+
 func TestDebianConcurrentFirstAnchorUsesOneStreamingTransfer(t *testing.T) {
 	release := "SHA256:\n " + strings.Repeat("a", 64) + " 0 main/Packages\n"
 	started := make(chan struct{})
 	continueBody := make(chan struct{})
 	var once sync.Once
+	var continueOnce sync.Once
+	t.Cleanup(func() { continueOnce.Do(func() { close(continueBody) }) })
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/dists/trixie/InRelease" {
@@ -127,18 +188,26 @@ func TestDebianConcurrentFirstAnchorUsesOneStreamingTransfer(t *testing.T) {
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 		responses <- response
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first anchor transfer did not start")
+	}
 	go func() {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 		responses <- response
 	}()
 	time.Sleep(20 * time.Millisecond)
-	close(continueBody)
+	continueOnce.Do(func() { close(continueBody) })
 	for range 2 {
-		response := <-responses
-		require.Equal(t, http.StatusOK, response.Code)
-		require.Equal(t, release, response.Body.String())
+		select {
+		case response := <-responses:
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, release, response.Body.String())
+		case <-time.After(time.Second):
+			t.Fatal("anchor request did not finish")
+		}
 	}
 	require.Equal(t, int32(1), requests.Load())
 }

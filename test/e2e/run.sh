@@ -5,16 +5,26 @@ E2E_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$E2E_ROOT/test/e2e/images.env"
 source "$E2E_ROOT/test/e2e/lib/runtime.sh"
 source "$E2E_ROOT/test/e2e/lib/assert.sh"
+source "$E2E_ROOT/test/e2e/lib/client.sh"
 source "$E2E_ROOT/test/e2e/lib/lifecycle.sh"
 
 suite=${E2E_SUITE:-all}
-case "$suite" in
-  all | registries | deb-apk | rpm-pacman | git-oci-flatpak) ;;
-  *)
-    printf 'unknown E2E_SUITE %q; expected all, registries, deb-apk, rpm-pacman, or git-oci-flatpak\n' "$suite" >&2
+all_modes=(file npm go maven cargo pypi deb apk rpm pacman git oci flatpak)
+if [[ $suite == all ]]; then
+  selected_modes=("${all_modes[@]}")
+else
+  selected_modes=()
+  for mode in "${all_modes[@]}"; do
+    if [[ $suite == "$mode" ]]; then
+      selected_modes=("$mode")
+      break
+    fi
+  done
+  if ((${#selected_modes[@]} == 0)); then
+    printf 'unknown E2E_SUITE %q; expected all or one of: %s\n' "$suite" "${all_modes[*]}" >&2
     exit 2
-    ;;
-esac
+  fi
+fi
 
 e2e_select_runtime
 E2E_RUN_ID="cache-proxy-e2e-$(date +%s)-$$-$RANDOM"
@@ -31,61 +41,28 @@ E2E_FLATPAK_CLIENT_IMAGE="localhost/cache-proxy-e2e-flatpak:$E2E_RUN_ID"
 export E2E_ROOT E2E_RUN_ID E2E_OWNER_LABEL E2E_WORK_DIR
 export E2E_PROXY_IMAGE E2E_FIXTURE_IMAGE E2E_TOOLS_IMAGE E2E_MAVEN_CLIENT_IMAGE E2E_FLATPAK_CLIENT_IMAGE
 
+for mode in "${selected_modes[@]}"; do
+  source "$E2E_ROOT/test/e2e/cases/$mode.sh"
+done
+
 trap e2e_cleanup EXIT INT TERM
 
 printf 'Runtime: %s\nSuite: %s\nRun ID: %s\n' "$E2E_RUNTIME" "$suite" "$E2E_RUN_ID"
 
 e2e_build_image "$E2E_PROXY_IMAGE" "$E2E_ROOT/Dockerfile" "$E2E_ROOT"
-e2e_build_image "$E2E_FIXTURE_IMAGE" "$E2E_ROOT/test/e2e/fixture/Containerfile" "$E2E_ROOT/test/e2e/fixture"
-e2e_build_image "$E2E_TOOLS_IMAGE" "$E2E_ROOT/test/e2e/client/Containerfile" "$E2E_ROOT/test/e2e/client" --target tools
+e2e_build_image "$E2E_FIXTURE_IMAGE" "$E2E_ROOT/test/e2e/fixture/Containerfile" "$E2E_ROOT/test/e2e/fixture" --target "fixture-$suite"
+e2e_build_image "$E2E_TOOLS_IMAGE" "$E2E_ROOT/test/e2e/clients/tools/Containerfile" "$E2E_ROOT/test/e2e/clients/tools"
 
-case "$suite" in
-  all | registries)
-    e2e_pull_image "$E2E_NODE_IMAGE"
-    e2e_pull_image "$E2E_GO_IMAGE"
-    e2e_pull_image "$E2E_RUST_IMAGE"
-    e2e_pull_image "$E2E_PYTHON_IMAGE"
-    e2e_build_image "$E2E_MAVEN_CLIENT_IMAGE" "$E2E_ROOT/test/e2e/client/Containerfile" "$E2E_ROOT/test/e2e/client" --target maven
-    ;;
-esac
-case "$suite" in
-  all | deb-apk)
-    e2e_pull_image "$E2E_DEBIAN_IMAGE"
-    e2e_pull_image "$E2E_ALPINE_IMAGE"
-    ;;
-esac
-case "$suite" in
-  all | rpm-pacman)
-    e2e_pull_image "$E2E_FEDORA_IMAGE"
-    e2e_pull_image "$E2E_ARCH_IMAGE"
-    ;;
-esac
-case "$suite" in
-  all | git-oci-flatpak)
-    e2e_pull_image "$E2E_CRANE_IMAGE"
-    e2e_build_image "$E2E_FLATPAK_CLIENT_IMAGE" "$E2E_ROOT/test/e2e/client/Containerfile" "$E2E_ROOT/test/e2e/client" --target flatpak
-    ;;
-esac
+for mode in "${selected_modes[@]}"; do
+  "e2e_prepare_$mode"
+done
 
 e2e_init_lifecycle
 e2e_start_fixture
 e2e_start_proxy
 
-if [[ $suite == all || $suite == registries ]]; then
-  source "$E2E_ROOT/test/e2e/suites/registries.sh"
-  run_registries_suite
-fi
-if [[ $suite == all || $suite == deb-apk ]]; then
-  source "$E2E_ROOT/test/e2e/suites/deb-apk.sh"
-  run_deb_apk_suite
-fi
-if [[ $suite == all || $suite == rpm-pacman ]]; then
-  source "$E2E_ROOT/test/e2e/suites/rpm-pacman.sh"
-  run_rpm_pacman_suite
-fi
-if [[ $suite == all || $suite == git-oci-flatpak ]]; then
-  source "$E2E_ROOT/test/e2e/suites/git-oci-flatpak.sh"
-  run_git_oci_flatpak_suite
-fi
+for mode in "${selected_modes[@]}"; do
+  "e2e_run_$mode"
+done
 
 printf '\nAll %s end-to-end cases passed.\n' "$suite"

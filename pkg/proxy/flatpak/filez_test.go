@@ -23,7 +23,7 @@ func TestVerifyOSTreeFileObject(t *testing.T) {
 
 	compressedHeader := encodeTestFilezHeader(uint64(len(content)), 0, 0, 0o100644)
 	var object bytes.Buffer
-	binary.Write(&object, binary.BigEndian, uint32(len(compressedHeader)))
+	require.NoError(t, binary.Write(&object, binary.BigEndian, uint32(len(compressedHeader))))
 	object.Write(make([]byte, 4))
 	object.Write(compressedHeader)
 	compressor, err := flate.NewWriter(&object, flate.DefaultCompression)

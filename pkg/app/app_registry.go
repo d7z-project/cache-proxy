@@ -21,12 +21,12 @@ func (a *App) checkOrphans(ctx context.Context) {
 			continue
 		}
 		name := entry.Name()
-		configuredSchema := ""
+		configuredMode := ""
 		if configured, ok := a.entries[name]; ok && configured.Enabled {
-			configuredSchema = configured.Mode + "-v4"
+			configuredMode = configured.Mode
 		}
-		if configuredSchema != "" {
-			a.checkOrphanSchemas(ctx, root, name, configuredSchema)
+		if configuredMode != "" {
+			a.checkOrphanModes(ctx, root, name, configuredMode)
 			continue
 		}
 		instancePath := filepath.Join(root, name)
@@ -42,7 +42,7 @@ func (a *App) checkOrphans(ctx context.Context) {
 	}
 }
 
-func (a *App) checkOrphanSchemas(ctx context.Context, root, instance, currentSchema string) {
+func (a *App) checkOrphanModes(ctx context.Context, root, instance, currentMode string) {
 	instancePath := filepath.Join(root, instance)
 	entries, err := os.ReadDir(instancePath)
 	if err != nil {
@@ -52,18 +52,18 @@ func (a *App) checkOrphanSchemas(ctx context.Context, root, instance, currentSch
 		if ctx.Err() != nil {
 			return
 		}
-		if !entry.IsDir() || entry.Name() == currentSchema {
+		if !entry.IsDir() || entry.Name() == currentMode {
 			continue
 		}
 		path := filepath.Join(instancePath, entry.Name())
-		slog.Warn("orphan instance schema found", "instance", instance, "schema", entry.Name(), "path", path)
+		slog.Warn("orphan instance mode storage found", "instance", instance, "mode", entry.Name(), "path", path)
 		if a.config.Storage.OrphanPolicy != "auto" {
 			continue
 		}
 		if err := os.RemoveAll(path); err != nil {
-			slog.Warn("failed to clean orphan instance schema", "instance", instance, "schema", entry.Name(), "err", err)
+			slog.Warn("failed to clean orphan instance mode storage", "instance", instance, "mode", entry.Name(), "err", err)
 		} else {
-			slog.Info("cleaned orphan instance schema", "instance", instance, "schema", entry.Name())
+			slog.Info("cleaned orphan instance mode storage", "instance", instance, "mode", entry.Name())
 		}
 	}
 }

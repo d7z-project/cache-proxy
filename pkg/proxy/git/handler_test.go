@@ -6,12 +6,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	gitlib "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/storage/memory"
@@ -126,6 +130,48 @@ func TestSyncingMirrorPassesThroughWithSharedAdmission(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, "advertisement", recorder.Body.String())
 	require.NoError(t, handler.Stop(context.Background()))
+}
+
+func TestGitSyncPublishesUpstreamCommit(t *testing.T) {
+	upstreamPath := filepath.Join(t.TempDir(), "upstream")
+	upstream, err := gitlib.PlainInit(upstreamPath, false)
+	require.NoError(t, err)
+	worktree, err := upstream.Worktree()
+	require.NoError(t, err)
+	signature := &object.Signature{Name: "cache-proxy test", Email: "test@example.invalid"}
+	commit := func(content string, when time.Time) plumbing.Hash {
+		require.NoError(t, os.WriteFile(filepath.Join(upstreamPath, "README.md"), []byte(content), 0o644))
+		_, err := worktree.Add("README.md")
+		require.NoError(t, err)
+		signature.When = when
+		hash, err := worktree.Commit(content, &gitlib.CommitOptions{Author: signature, Committer: signature})
+		require.NoError(t, err)
+		return hash
+	}
+	firstHash := commit("version 1", time.Unix(1, 0).UTC())
+
+	handler := newGitHandler(gitConfig{
+		name: "test", upstream: upstreamPath,
+		billyFs: newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), ""),
+	})
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+	require.NoError(t, handler.Sync(context.Background()))
+	head, err := handler.repository.Head()
+	require.NoError(t, err)
+	require.Equal(t, firstHash, head.Hash())
+
+	secondHash := commit("version 2", time.Unix(2, 0).UTC())
+	require.NoError(t, handler.Sync(context.Background()))
+	head, err = handler.repository.Head()
+	require.NoError(t, err)
+	require.Equal(t, secondHash, head.Hash())
+	latest, err := handler.repository.CommitObject(secondHash)
+	require.NoError(t, err)
+	file, err := latest.File("README.md")
+	require.NoError(t, err)
+	contents, err := file.Contents()
+	require.NoError(t, err)
+	require.Equal(t, "version 2", contents)
 }
 
 func TestBuildAuthExpandsEnvironmentAndRejectsEmptyCredentials(t *testing.T) {

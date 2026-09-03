@@ -252,6 +252,95 @@ func TestFlatpakIndexedSummaryPublishesVerifiedClosure(t *testing.T) {
 	require.Equal(t, int32(4), requests.Load())
 }
 
+func TestFlatpakSummaryPublishesUpstreamGenerationUpdate(t *testing.T) {
+	var revision atomic.Int32
+	revision.Store(1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := revision.Load()
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current))
+		switch request.URL.Path {
+		case "/summary":
+			_, _ = fmt.Fprintf(w, "summary-v%d", current)
+		case "/summary.sig":
+			_, _ = fmt.Fprintf(w, "signature-v%d", current)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+	h := newFlatpakTestHandler(t, server.URL)
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/summary", nil))
+	require.Equal(t, "summary-v1", first.Body.String())
+	_, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := h.metadata.Current("flatpak:summary")
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := h.metadata.Current("flatpak:summary")
+	require.NotNil(t, current)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	for target, expected := range map[string]string{"/summary": "summary-v2", "/summary.sig": "signature-v2"} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+		require.Equal(t, expected, response.Body.String())
+	}
+}
+
+func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
+	indexV1, compressedSummary := flatpakIndexedSummaryFixture(t)
+	indexV2 := bytes.Clone(indexV1)
+	indexV2[0xd4] ^= 1
+	parsedV1, err := readSummaryIndex(bytes.NewReader(indexV1), int64(len(indexV1)))
+	require.NoError(t, err)
+	parsedV2, err := readSummaryIndex(bytes.NewReader(indexV2), int64(len(indexV2)))
+	require.NoError(t, err)
+	require.Equal(t, parsedV1.subsummaryDigests, parsedV2.subsummaryDigests)
+	indexes := [][]byte{indexV1, indexV2}
+	var revision atomic.Int32
+	revision.Store(1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := int(revision.Load() - 1)
+		switch request.URL.Path {
+		case "/summary.idx":
+			w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
+			_, _ = w.Write(indexes[current])
+		case "/summaries/" + parsedV1.subsummaryDigests[0] + ".gz":
+			_, _ = w.Write(compressedSummary)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+	h := newFlatpakTestHandler(t, server.URL)
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
+	require.Equal(t, indexV1, first.Body.Bytes())
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := h.metadata.Current("flatpak:summary.idx")
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := h.metadata.Current("flatpak:summary.idx")
+	require.NotNil(t, current)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+	require.Equal(t, indexV2, response.Body.Bytes())
+}
+
 func TestFlatpakIndexedSummaryRejectsInvalidSubsummary(t *testing.T) {
 	index, _ := flatpakIndexedSummaryFixture(t)
 	const digest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"

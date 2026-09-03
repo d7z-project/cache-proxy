@@ -16,10 +16,10 @@ func TestCheckOrphansKeepsCurrentAndCleansOrphanedStorage(t *testing.T) {
 	backend := t.TempDir()
 	root := filepath.Join(backend, "instances")
 	for _, path := range []string{
-		filepath.Join(root, "active", "npm-v4"),
-		filepath.Join(root, "active", "npm-v1"),
-		filepath.Join(root, "disabled", "file-v4"),
-		filepath.Join(root, "orphan", "deb-v4"),
+		filepath.Join(root, "active", "npm"),
+		filepath.Join(root, "active", "file"),
+		filepath.Join(root, "disabled", "file"),
+		filepath.Join(root, "orphan", "deb"),
 	} {
 		require.NoError(t, os.MkdirAll(path, 0o755))
 	}
@@ -36,8 +36,8 @@ func TestCheckOrphansKeepsCurrentAndCleansOrphanedStorage(t *testing.T) {
 
 	app.checkOrphans(context.Background())
 
-	require.DirExists(t, filepath.Join(root, "active", "npm-v4"))
-	require.NoDirExists(t, filepath.Join(root, "active", "npm-v1"))
+	require.DirExists(t, filepath.Join(root, "active", "npm"))
+	require.NoDirExists(t, filepath.Join(root, "active", "file"))
 	require.NoDirExists(t, filepath.Join(root, "disabled"))
 	require.NoDirExists(t, filepath.Join(root, "orphan"))
 }

@@ -309,9 +309,25 @@ func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Re
 }
 
 func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
+	if isSHA256Digest(resolved.ref) {
+		objectPath := h.manifestPath(resolved.ref)
+		h.manifestMu.Lock()
+		h.manifestReaders[objectPath]++
+		h.manifestMu.Unlock()
+		status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, objectPath, "HIT")
+		h.manifestMu.Lock()
+		h.manifestReaders[objectPath]--
+		if h.manifestReaders[objectPath] == 0 {
+			delete(h.manifestReaders, objectPath)
+		}
+		h.manifestMu.Unlock()
+		if cacheErr == nil {
+			return status, "HIT", bytes, nil
+		}
+	}
 	statePath := h.refStatePath(resolved.repo, resolved.ref, req.Header.Get("Accept"))
 	state, err := h.readState(ctx, statePath)
-	if err == nil && h.manifestFresh(resolved, state) {
+	if err == nil && h.manifestFresh(resolved, state) && !transport.RequestForcesRevalidation(req) {
 		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
 			slog.Debug("oci manifest cache hit", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 			return status, "HIT", bytes, nil
@@ -331,7 +347,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	defer lock.Unlock()
 
 	state, err = h.readState(ctx, statePath)
-	if err == nil && h.manifestFresh(resolved, state) {
+	if err == nil && h.manifestFresh(resolved, state) && !transport.RequestForcesRevalidation(req) {
 		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
 			return status, "HIT", bytes, nil
 		}

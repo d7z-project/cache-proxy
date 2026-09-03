@@ -114,6 +114,61 @@ func TestSimpleJSONRewritesAndVerifiesExternalFile(t *testing.T) {
 	require.Equal(t, int32(3), fileRequests.Load())
 }
 
+func TestPyPISimplePublishesUpstreamUpdate(t *testing.T) {
+	var revision atomic.Int32
+	revision.Store(1)
+	var requests atomic.Int32
+	var conditional atomic.Value
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "/simple/demo/", request.URL.Path)
+		requests.Add(1)
+		conditional.Store(request.Header.Get("If-None-Match"))
+		current := revision.Load()
+		w.Header().Set("Content-Type", "application/vnd.pypi.simple.v1+json")
+		w.Header().Set("ETag", fmt.Sprintf(`"source-v%d"`, current))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"meta": map[string]any{"api-version": "1.4"},
+			"files": []map[string]any{{
+				"filename": fmt.Sprintf("demo-%d.whl", current),
+				"url":      fmt.Sprintf("%s/files/demo-%d.whl", server.URL, current),
+			}},
+		})
+	}))
+	defer server.Close()
+	h := newPyPITestHandler(t, server.URL)
+	request := func(force bool) *http.Request {
+		req := proxyruntime.WithExternalBaseURL(httptest.NewRequest(http.MethodGet, "/simple/demo/", nil), "https://proxy.example/pypi")
+		req.Header.Set("Accept", "application/vnd.pypi.simple.v1+json")
+		if force {
+			req.Header.Set("Cache-Control", "no-cache")
+		}
+		return req
+	}
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, request(false))
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Contains(t, first.Body.String(), "demo-1.whl")
+	firstETag := first.Header().Get("ETag")
+	require.NotEqual(t, `"source-v1"`, firstETag)
+
+	revision.Store(2)
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, request(true))
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
+	require.Contains(t, second.Body.String(), "demo-2.whl")
+	require.NotEqual(t, firstETag, second.Header().Get("ETag"))
+	require.Equal(t, `"source-v1"`, conditional.Load())
+
+	third := httptest.NewRecorder()
+	h.ServeHTTP(third, request(false))
+	require.Equal(t, "HIT", third.Header().Get("X-Cache"))
+	require.Contains(t, third.Body.String(), "demo-2.whl")
+	require.Equal(t, int32(2), requests.Load())
+}
+
 func newPyPITestHandler(t *testing.T, rawOrigin string) *handler {
 	t.Helper()
 	root := t.TempDir()

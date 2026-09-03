@@ -25,9 +25,8 @@ import (
 )
 
 const (
-	maxManifestSize          = 50 << 20
-	maxRefStateSize          = 64 << 10
-	ociRefStateSchemaVersion = 1
+	maxManifestSize = 50 << 20
+	maxRefStateSize = 64 << 10
 )
 
 var ociStateTempSequence atomic.Uint64
@@ -95,7 +94,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		return 0, "", 0, err
 	}
 	_ = response.Body.Close()
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	tempFile := spool.File
 	size := spool.Size
 
@@ -125,7 +124,6 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 	fetchedAt := time.Now().UTC()
 	state := refState{
-		Version:        ociRefStateSchemaVersion,
 		SourceUpstream: h.upstream,
 		Repo:           resolved.repo,
 		Ref:            resolved.ref,
@@ -166,7 +164,11 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		slog.Warn("oci manifest state commit failed; serving verified upstream response", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", err)
 		return h.writeManifestTemp(w, req, state, tempFile, "BYPASS")
 	}
-	return h.writeManifestTemp(w, req, state, tempFile, "MISS")
+	result := "MISS"
+	if previousStateErr == nil {
+		result = "REFRESH"
+	}
+	return h.writeManifestTemp(w, req, state, tempFile, result)
 }
 
 func (h *handler) writeManifestTemp(w http.ResponseWriter, req *http.Request, state refState, tempFile io.Reader, cache string) (int, string, uint64, error) {
@@ -309,7 +311,6 @@ func (h *handler) readState(ctx context.Context, objectPath string) (refState, e
 }
 
 func (h *handler) writeState(ctx context.Context, state refState) error {
-	state.Version = ociRefStateSchemaVersion
 	state.SourceUpstream = h.upstream
 	if !h.validRefState(state) {
 		return errors.New("invalid oci ref state")
@@ -334,7 +335,7 @@ func (h *handler) writeState(ctx context.Context, state refState) error {
 }
 
 func (h *handler) validRefState(state refState) bool {
-	return state.Version == ociRefStateSchemaVersion && state.SourceUpstream == h.upstream &&
+	return state.SourceUpstream == h.upstream &&
 		state.Repo != "" && state.Ref != "" && !state.FetchedAt.IsZero() &&
 		isSHA256Digest(state.ManifestDigest) && state.ContentLength >= 0
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -18,8 +18,7 @@ import (
 const npmTenant = "npm"
 
 type signingState struct {
-	Version int    `json:"version"`
-	Secret  string `json:"secret"`
+	Secret string `json:"secret"`
 }
 
 type cachedObject struct {
@@ -33,12 +32,9 @@ func loadSigningSecret(stateDir string) ([]byte, error) {
 	var state signingState
 	err := storeio.ReadJSON(stateDir, "signing.json", &state)
 	if err == nil {
-		if state.Version != 1 {
-			return nil, fmt.Errorf("unsupported npm signing state version %d", state.Version)
-		}
 		secret, err := base64.RawURLEncoding.DecodeString(state.Secret)
 		if err != nil || len(secret) != 32 {
-			return nil, fmt.Errorf("invalid npm signing secret")
+			return nil, errors.New("invalid npm signing secret")
 		}
 		return secret, nil
 	}
@@ -49,7 +45,7 @@ func loadSigningSecret(stateDir string) ([]byte, error) {
 	if _, err := rand.Read(secret); err != nil {
 		return nil, err
 	}
-	if err := storeio.WriteJSON(stateDir, "signing.json", signingState{Version: 1, Secret: base64.RawURLEncoding.EncodeToString(secret)}); err != nil {
+	if err := storeio.WriteJSON(stateDir, "signing.json", signingState{Secret: base64.RawURLEncoding.EncodeToString(secret)}); err != nil {
 		return nil, err
 	}
 	return secret, nil

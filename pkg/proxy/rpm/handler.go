@@ -110,7 +110,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		transport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
@@ -131,7 +131,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		slog.Warn("rpm metadata capture failed after response started", "path", cleaned, "err", err)
 		return
 	}
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	_, parseErr := parseRepomdReader(h.lifecycle.Context(), spool.File)
 	stageErr := parseErr
 	if parseErr == nil {
@@ -151,8 +151,11 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		return err
 	}
 	items, err := parseRepomdReader(ctx, reader)
-	reader.Close()
 	if err != nil {
+		_ = reader.Close()
+		return err
+	}
+	if err := reader.Close(); err != nil {
 		return err
 	}
 	for _, item := range items {
@@ -188,7 +191,7 @@ func inspectOpenMetadata(ctx context.Context, blob *filerepo.Blob, item repomdIt
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	return inspectOpenMetadataReader(ctx, reader, blob.Size(), item)
 }
 
@@ -226,7 +229,7 @@ func inspectOpenMetadataReader(ctx context.Context, reader io.Reader, wireSize i
 		}
 		return nil
 	}
-	var source io.Reader = reader
+	source := io.Reader(reader)
 	var closeReader io.Closer
 	switch {
 	case strings.HasSuffix(item.Location, ".gz"):
@@ -252,7 +255,7 @@ func inspectOpenMetadataReader(ctx context.Context, reader io.Reader, wireSize i
 		source, closeReader = closer, closer
 	}
 	if closeReader != nil {
-		defer closeReader.Close()
+		defer func() { _ = closeReader.Close() }()
 	}
 	limited := &io.LimitedReader{R: source, N: expandedLimit + 1}
 	counter := &countingReader{reader: limited}
@@ -423,7 +426,7 @@ func (h *handler) streamArtifact(w http.ResponseWriter, request *http.Request, r
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	transport.CopyEndToEndHeaders(w.Header(), header)
 	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(http.StatusOK)
@@ -436,7 +439,7 @@ func (h *handler) artifactKey(cleaned string, request *http.Request) string {
 }
 
 func serveRPMArtifactObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) {
-	defer object.Reader.Close()
+	defer func() { _ = object.Reader.Close() }()
 	transport.CopyEndToEndHeaders(w.Header(), object.Header)
 	w.Header().Set("X-Cache", result)
 	http.ServeContent(w, request, path.Base(request.URL.Path), object.Fetched, object.Reader)

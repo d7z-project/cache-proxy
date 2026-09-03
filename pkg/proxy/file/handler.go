@@ -87,7 +87,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 			fresh = false
 		}
 		if fresh {
-			status := serveStored(w, request, cached)
+			status := serveStored(w, request, cached, "HIT")
 			return status, "HIT"
 		}
 		status, result, handled := h.revalidate(w, request, cleaned, key, cached)
@@ -127,9 +127,9 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 			return localError(w, http.StatusGatewayTimeout), "ERROR", true
 		}
 		if updated, openErr := openStored(request.Context(), h.store, key); openErr == nil {
-			return serveStored(w, request, updated), "COALESCED", true
+			return serveStored(w, request, updated, "COALESCED"), "COALESCED", true
 		}
-		return serveStored(w, request, cached), "STALE", true
+		return serveStored(w, request, cached, "STALE"), "STALE", true
 	}
 	upstreamRequest, err := http.NewRequestWithContext(h.lifecycle.Context(), http.MethodGet, target.String(), nil)
 	if err != nil {
@@ -147,7 +147,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 	response, err := h.client.DoRead(h.lifecycle.Context(), upstreamRequest, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(key, flight, err)
-		status := serveStored(w, request, cached)
+		status := serveStored(w, request, cached, "STALE")
 		return status, "STALE", true
 	}
 	if response.StatusCode == http.StatusNotModified {
@@ -160,13 +160,13 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 			}
 		}
 		h.flights.Finish(key, flight, nil)
-		status := serveStored(w, request, cached)
+		status := serveStored(w, request, cached, "REVALIDATED")
 		return status, "REVALIDATED", true
 	}
 	if response.StatusCode >= 500 {
 		_ = response.Body.Close()
 		h.flights.Finish(key, flight, fmt.Errorf("upstream returned %d", response.StatusCode))
-		status := serveStored(w, request, cached)
+		status := serveStored(w, request, cached, "STALE")
 		return status, "STALE", true
 	}
 	_ = cached.reader.Close()
@@ -188,14 +188,14 @@ func (h *handler) fill(w http.ResponseWriter, request *http.Request, cleaned str
 		}
 		if waitErr == nil {
 			if cached, err := openStored(request.Context(), h.store, key); err == nil {
-				return serveStored(w, request, cached), "COALESCED"
+				return serveStored(w, request, cached, "COALESCED"), "COALESCED"
 			}
 		}
 		return localError(w, http.StatusBadGateway), "ERROR"
 	}
 	if cached, err := openStored(request.Context(), h.store, key); err == nil {
 		h.flights.Finish(key, flight, nil)
-		return serveStored(w, request, cached), "HIT"
+		return serveStored(w, request, cached, "HIT"), "HIT"
 	}
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), request.URL.RawQuery)
 	if err != nil {
@@ -338,10 +338,10 @@ func cacheable(request *http.Request, response *http.Response) bool {
 		transport.ResponseCacheable(response, false)
 }
 
-func serveStored(w http.ResponseWriter, request *http.Request, cached *storedResponse) int {
+func serveStored(w http.ResponseWriter, request *http.Request, cached *storedResponse, cacheResult string) int {
 	defer func() { _ = cached.reader.Close() }()
 	transport.CopyEndToEndHeaders(w.Header(), cached.headers)
-	w.Header().Set("X-Cache", "HIT")
+	w.Header().Set("X-Cache", cacheResult)
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(request.URL.Path)))
 	}

@@ -144,7 +144,7 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 	if !entry.Enabled {
 		return plan, nil
 	}
-	root := filepath.Join(p.backend, "instances", name, selected.Mode+"-v4")
+	root := filepath.Join(p.backend, "instances", name, selected.Mode)
 	for _, directory := range []string{"blobs", "state", "work"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
 			return nil, fmt.Errorf("instance %s: create %s directory: %w", name, directory, err)

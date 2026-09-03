@@ -144,7 +144,7 @@ func Validate(doc *config.Document) error {
 	validateCtx, validateCancel := context.WithCancel(context.Background())
 	result, err := planEntries(context.Background(), &docCopy, stats, upstreamGate, sched)
 	if result != nil {
-		defer closeStores(result.Stores)
+		defer func() { _ = closeStores(result.Stores) }()
 	}
 	sched.Start(validateCtx)
 	defer validateCancel()
@@ -356,7 +356,7 @@ func (w *idleWriteResponseWriter) Write(data []byte) (int, error) {
 func downstreamWriteIdle(next http.Handler, timeout time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		controller := http.NewResponseController(w)
-		defer controller.SetWriteDeadline(time.Time{})
+		defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
 		next.ServeHTTP(&idleWriteResponseWriter{ResponseWriter: w, timeout: timeout}, request)
 	})
 }

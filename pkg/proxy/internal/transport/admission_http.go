@@ -66,7 +66,7 @@ func (t *admissionRoundTripper) RoundTrip(request *http.Request) (*http.Response
 		return nil, err
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		t.gate.RateLimited(request.URL.String(), response.Header.Get("Retry-After"))
+		_ = t.gate.RateLimited(request.URL.String(), response.Header.Get("Retry-After"))
 	}
 	response.Body = &admissionBody{ReadCloser: response.Body, release: release}
 	return response, nil

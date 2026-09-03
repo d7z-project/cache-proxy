@@ -31,7 +31,6 @@ import (
 )
 
 const (
-	StateVersion      = 4
 	DefaultMaxObject  = int64(2 << 30)
 	refreshInterval   = 15 * time.Minute
 	gcInterval        = 6 * time.Hour
@@ -71,7 +70,6 @@ type Object struct {
 }
 
 type Snapshot struct {
-	Version     int       `json:"version"`
 	RootID      string    `json:"root_id"`
 	Root        string    `json:"root"`
 	Anchor      string    `json:"anchor"`
@@ -115,7 +113,6 @@ type Config struct {
 }
 
 type currentMarker struct {
-	Version        int    `yaml:"version"`
 	RootID         string `yaml:"root_id"`
 	Root           string `yaml:"root"`
 	Generation     string `yaml:"generation"`
@@ -125,7 +122,6 @@ type currentMarker struct {
 }
 
 type pendingAnchor struct {
-	Version     int         `json:"version"`
 	RootID      string      `json:"root_id"`
 	Root        string      `json:"root"`
 	Path        string      `json:"path"`
@@ -137,9 +133,8 @@ type pendingAnchor struct {
 }
 
 type lastSeenMarker struct {
-	Version int       `json:"version"`
-	RootID  string    `json:"root_id"`
-	SeenAt  time.Time `json:"seen_at"`
+	RootID string    `json:"root_id"`
+	SeenAt time.Time `json:"seen_at"`
 }
 
 type liveSnapshot struct {
@@ -328,9 +323,9 @@ func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anc
 	if _, err := h.config.Store.Put(ctx, h.config.Tenant, key, body, nil); err != nil {
 		return fmt.Errorf("stage metadata anchor: %w", err)
 	}
-	pending := pendingAnchor{Version: StateVersion, RootID: rootID, Root: root, Path: anchorPath, Upstream: upstream, Generation: generation, CandidateID: candidateID, Header: cloneHeader(header), Key: key}
+	pending := pendingAnchor{RootID: rootID, Root: root, Path: anchorPath, Upstream: upstream, Generation: generation, CandidateID: candidateID, Header: cloneHeader(header), Key: key}
 	now := time.Now().UTC()
-	preparedLastSeen, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{Version: StateVersion, RootID: rootID, SeenAt: now}, maxRepositoryMarkerSize)
+	preparedLastSeen, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{RootID: rootID, SeenAt: now}, maxRepositoryMarkerSize)
 	if err != nil {
 		return err
 	}
@@ -369,7 +364,7 @@ func (h *GenerationManager) Discover(ctx context.Context, rootID, root, anchorPa
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("metadata discovery anchor %s returned %d", anchorPath, response.StatusCode)
 	}
@@ -380,7 +375,7 @@ func (h *GenerationManager) Discover(ctx context.Context, rootID, root, anchorPa
 	if err != nil {
 		return err
 	}
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	return h.StageAnchorID(ctx, rootID, root, anchorPath, upstream, response.Header, spool.File)
 }
 
@@ -539,31 +534,31 @@ func (h *GenerationManager) pollCurrent(ctx context.Context) error {
 			return err
 		}
 		if response.StatusCode == http.StatusNotModified {
-			response.Body.Close()
+			_ = response.Body.Close()
 			err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
 			h.recordCurrentPollResult(snapshot, err)
 			return err
 		}
 		if response.StatusCode != http.StatusOK {
-			response.Body.Close()
+			_ = response.Body.Close()
 			err := fmt.Errorf("metadata anchor %s returned %d", snapshot.Anchor, response.StatusCode)
 			h.recordCurrentPollResult(snapshot, err)
 			return err
 		}
 		spool, err := h.config.Spooler.SpoolWithExpectedSize(ctx, response.Body, h.config.AnchorMaxBytes, response.ContentLength)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil {
 			h.recordCurrentPollResult(snapshot, err)
 			return err
 		}
 		if spool.SHA256 == snapshot.Generation {
-			spool.Close()
+			_ = spool.Close()
 			err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
 			h.recordCurrentPollResult(snapshot, err)
 			return err
 		}
 		err = h.StageAnchorID(ctx, snapshot.RootID, snapshot.Root, snapshot.Anchor, snapshot.Upstream, response.Header, spool.File)
-		spool.Close()
+		_ = spool.Close()
 		h.recordCurrentPollResult(snapshot, err)
 		return err
 	}
@@ -642,7 +637,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, rootID string) erro
 		objects = append(objects, object)
 	}
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Path < objects[j].Path })
-	snapshot := &Snapshot{Version: StateVersion, RootID: rootID, Root: pending.Root, Anchor: pending.Path, Generation: pending.Generation, CandidateID: pending.CandidateID, Upstream: pending.Upstream, PublishedAt: time.Now().UTC(), Objects: objects}
+	snapshot := &Snapshot{RootID: rootID, Root: pending.Root, Anchor: pending.Path, Generation: pending.Generation, CandidateID: pending.CandidateID, Upstream: pending.Upstream, PublishedAt: time.Now().UTC(), Objects: objects}
 	if err := prepareSnapshot(snapshot); err != nil {
 		return err
 	}
@@ -656,7 +651,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, rootID string) erro
 	if err := writeBytes(h.config.StateDir, snapshotName(rootID, pending.Generation, pending.CandidateID), encoded); err != nil {
 		return err
 	}
-	marker := currentMarker{Version: StateVersion, RootID: rootID, Root: pending.Root, Generation: pending.Generation, CandidateID: pending.CandidateID, SnapshotSHA256: digest, Upstream: pending.Upstream}
+	marker := currentMarker{RootID: rootID, Root: pending.Root, Generation: pending.Generation, CandidateID: pending.CandidateID, SnapshotSHA256: digest, Upstream: pending.Upstream}
 	preparedMarker, err := prepareYAML(h.config.StateDir, currentName(rootID), marker)
 	if err != nil {
 		return err
@@ -724,7 +719,7 @@ func (h *GenerationManager) ServeStagedAnchorFor(w http.ResponseWriter, request 
 	if err != nil {
 		return false
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	copyHeaders(w.Header(), pending.Header)
 	w.Header().Set("X-Cache", "COALESCED")
 	http.ServeContent(w, request, path.Base(requestPath), time.Time{}, reader)
@@ -774,7 +769,13 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	readerKey := selected.snapshot.RootID + "\x00" + selected.snapshot.CandidateID
 	h.readers[readerKey]++
 	selectedRootID := selected.snapshot.RootID
+	cacheControl := strings.ToLower(request.Header.Get("Cache-Control"))
+	refreshRequested := requestPath == selected.snapshot.Anchor &&
+		(strings.Contains(cacheControl, "no-cache") || strings.Contains(cacheControl, "max-age=0"))
 	h.mu.Unlock()
+	if refreshRequested {
+		h.TriggerRefresh()
+	}
 	_ = h.touchLastSeen(selectedRootID, time.Now().UTC())
 	defer func() {
 		h.mu.Lock()
@@ -797,7 +798,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
 		return true, http.StatusServiceUnavailable, "ERROR"
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	copyHeaders(w.Header(), object.Header)
 	w.Header().Set("X-Cache", "HIT")
 	http.ServeContent(w, request, path.Base(requestPath), selected.snapshot.PublishedAt, reader)
@@ -824,7 +825,7 @@ func (h *GenerationManager) touchLastSeen(rootID string, seenAt time.Time) error
 	if !exists || !persisted.IsZero() && latest.Sub(persisted) < time.Hour {
 		return nil
 	}
-	prepared, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{Version: StateVersion, RootID: rootID, SeenAt: latest}, maxRepositoryMarkerSize)
+	prepared, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{RootID: rootID, SeenAt: latest}, maxRepositoryMarkerSize)
 	if err != nil {
 		return err
 	}
@@ -946,7 +947,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 	if err != nil {
 		return nil, &retryableRefreshError{err: err}
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden {
 		if !spec.Optional {
 			return nil, &retryableRefreshError{err: fmt.Errorf("required metadata %s returned %d", spec.Path, response.StatusCode)}
@@ -982,7 +983,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 		}
 		return nil, &retryableRefreshError{err: err}
 	}
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	if spec.ExpectedSize != nil && spool.Size != *spec.ExpectedSize {
 		return nil, fmt.Errorf("metadata %s size mismatch: got %d, want %d", spec.Path, spool.Size, *spec.ExpectedSize)
 	}

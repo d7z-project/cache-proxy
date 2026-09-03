@@ -24,7 +24,6 @@ type authHandler struct {
 }
 
 type refState struct {
-	Version        int               `yaml:"version"`
 	SourceUpstream string            `yaml:"source_upstream"`
 	Repo           string            `yaml:"repo"`
 	Ref            string            `yaml:"ref"`

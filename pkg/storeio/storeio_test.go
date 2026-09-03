@@ -18,13 +18,13 @@ import (
 func TestWriteJSONCommitsStrictState(t *testing.T) {
 	root := t.TempDir()
 	type state struct {
-		Version int `json:"version"`
+		Value int `json:"value"`
 	}
-	require.NoError(t, WriteJSON(root, "refs/state.json", state{Version: 3}))
+	require.NoError(t, WriteJSON(root, "refs/state.json", state{Value: 3}))
 	var loaded state
 	require.NoError(t, ReadJSON(root, "refs/state.json", &loaded))
-	require.Equal(t, 3, loaded.Version)
-	require.NoError(t, os.WriteFile(root+"/refs/state.json", []byte(`{"version":3,"unknown":true}`), 0o600))
+	require.Equal(t, 3, loaded.Value)
+	require.NoError(t, os.WriteFile(root+"/refs/state.json", []byte(`{"value":3,"unknown":true}`), 0o600))
 	require.Error(t, ReadJSON(root, "refs/state.json", &loaded))
 }
 

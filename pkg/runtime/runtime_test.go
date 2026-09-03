@@ -23,12 +23,14 @@ func TestBindPathRegistersRuntime(t *testing.T) {
 	stats := metrics.NewStats(registry)
 	sched, err := scheduler.NewPersistent(filepath.Join(t.TempDir(), "scheduler.json"))
 	require.NoError(t, err)
-	plan := NewPlanContext(t.TempDir(), stats, nil, NewSpoolBudget(8<<30), 2<<30, config.DefaultCleanupConfig(), "127.0.0.1:8080", "/metrics", sched)
+	backend := t.TempDir()
+	plan := NewPlanContext(backend, stats, nil, NewSpoolBudget(8<<30), 2<<30, config.DefaultCleanupConfig(), "127.0.0.1:8080", "/metrics", sched)
 	instance, err := plan.Instance(
 		config.Instance{Name: "cache", Enabled: true},
 		config.SelectedMode{Name: "cache", Mode: config.ModeFile, Enabled: true},
 	)
 	require.NoError(t, err)
+	require.Equal(t, filepath.Join(backend, "instances", "cache", "file"), instance.StoreRoot())
 	t.Cleanup(plan.CloseStores)
 
 	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
@@ -39,5 +41,4 @@ func TestBindPathRegistersRuntime(t *testing.T) {
 	require.Len(t, result.Entries, 1)
 	require.Equal(t, "/cache", result.Entries[0].Path)
 	require.NotNil(t, result.Entries[0].Runtime)
-
 }

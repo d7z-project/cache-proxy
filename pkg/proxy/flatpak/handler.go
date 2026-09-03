@@ -167,7 +167,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		transport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
@@ -188,7 +188,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		slog.Warn("flatpak metadata capture failed after response started", "path", cleaned, "err", err)
 		return
 	}
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	_, _ = spool.File.Seek(0, io.SeekStart)
 	stageErr := h.metadata.StageAnchorID(h.lifecycle.Context(), rootID, ".", cleaned, h.origin.String(), response.Header, spool.File)
 	if stageErr != nil {

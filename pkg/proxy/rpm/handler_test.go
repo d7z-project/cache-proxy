@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -66,6 +67,56 @@ func TestRPMRepomdPublishesCompleteArbitraryDataClosure(t *testing.T) {
 		require.Equal(t, metadata, response.Body.Bytes())
 	}
 	require.Equal(t, int32(1), metadataRequests.Load())
+}
+
+func TestRPMRepomdPublishesUpstreamGenerationUpdate(t *testing.T) {
+	metadata := [][]byte{[]byte("metadata-v1"), []byte("metadata-v2")}
+	repomd := make([]string, len(metadata))
+	for i, body := range metadata {
+		digest := sha256.Sum256(body)
+		repomd[i] = fmt.Sprintf(`<repomd><data type="primary"><checksum type="sha256">%x</checksum><location href="repodata/primary.xml"/><size>%d</size></data></repomd>`, digest, len(body))
+	}
+	var revision atomic.Int32
+	revision.Store(1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := int(revision.Load() - 1)
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
+		switch request.URL.Path {
+		case "/repo/repodata/repomd.xml":
+			_, _ = io.WriteString(w, repomd[current])
+		case "/repo/repodata/primary.xml":
+			_, _ = w.Write(metadata[current])
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	h := newRPMTestHandler(t, server.URL)
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/repo/repodata/repomd.xml", nil))
+	require.Equal(t, repomd[0], first.Body.String())
+	_, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := h.metadata.Current("repo")
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := h.metadata.Current("repo")
+	require.NotNil(t, current)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	for target, expected := range map[string][]byte{
+		"/repo/repodata/repomd.xml":  []byte(repomd[1]),
+		"/repo/repodata/primary.xml": metadata[1],
+	} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+		require.Equal(t, expected, response.Body.Bytes())
+	}
 }
 
 func TestRPMValidatesOpenChecksumAndSize(t *testing.T) {

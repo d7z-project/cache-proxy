@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func TestAPKReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 }
 
 func TestAPKIndexAndPackageHaveIndependentRefs(t *testing.T) {
-	indexBytes := makeAPKIndex(t)
+	indexBytes := makeAPKIndex(t, "1.0-r0")
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		requests.Add(1)
@@ -70,18 +71,54 @@ func TestAPKIndexAndPackageHaveIndependentRefs(t *testing.T) {
 	require.Equal(t, int32(2), requests.Load())
 }
 
-func makeAPKIndex(t *testing.T) []byte {
+func makeAPKIndex(t *testing.T, version string) []byte {
 	t.Helper()
 	var output bytes.Buffer
 	compressed := gzip.NewWriter(&output)
 	archive := tar.NewWriter(compressed)
-	content := []byte("P:pkg\nV:1.0-r0\n\n")
+	content := []byte("P:pkg\nV:" + version + "\n\n")
 	require.NoError(t, archive.WriteHeader(&tar.Header{Name: "APKINDEX", Mode: 0o644, Size: int64(len(content))}))
 	_, err := archive.Write(content)
 	require.NoError(t, err)
 	require.NoError(t, archive.Close())
 	require.NoError(t, compressed.Close())
 	return output.Bytes()
+}
+
+func TestAPKIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
+	indexes := [][]byte{makeAPKIndex(t, "1.0-r0"), makeAPKIndex(t, "2.0-r0")}
+	var revision atomic.Int32
+	revision.Store(1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "/v3.21/main/x86_64/APKINDEX.tar.gz", request.URL.Path)
+		current := int(revision.Load() - 1)
+		w.Header().Set("ETag", fmt.Sprintf(`"index-v%d"`, current+1))
+		_, _ = w.Write(indexes[current])
+	}))
+	defer server.Close()
+	h := newAPKTestHandler(t, server.URL)
+	target := "/v3.21/main/x86_64/APKINDEX.tar.gz"
+	rootID := "apk:" + server.URL + ":" + strings.TrimPrefix(target, "/")
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, target, nil))
+	require.Equal(t, indexes[0], first.Body.Bytes())
+	_, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := h.metadata.Current(rootID)
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := h.metadata.Current(rootID)
+	require.NotNil(t, current)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+	require.Equal(t, indexes[1], response.Body.Bytes())
 }
 
 func TestAPKDirectIndexUsesExactConfiguredURL(t *testing.T) {
@@ -125,7 +162,7 @@ func TestAPKArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 		if err != nil {
 			return ""
 		}
-		defer object.Reader.Close()
+		defer func() { _ = object.Reader.Close() }()
 		body, err := io.ReadAll(object.Reader)
 		if err != nil {
 			return ""
@@ -143,7 +180,12 @@ func TestAPKArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 	h.ServeHTTP(second, revalidate)
 	require.Equal(t, "v2", second.Body.String())
 	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
-	require.Equal(t, `"v1"`, <-conditional)
+	select {
+	case validator := <-conditional:
+		require.Equal(t, `"v1"`, validator)
+	case <-time.After(time.Second):
+		t.Fatal("artifact revalidation did not send a conditional request")
+	}
 
 	require.Eventually(t, func() bool { return cachedBody() == "v2" }, time.Second, time.Millisecond)
 	third := httptest.NewRecorder()

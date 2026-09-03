@@ -21,6 +21,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 	"gopkg.in/yaml.v3"
 
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
@@ -293,6 +294,155 @@ func TestGenerationManagerPollUsesConfiguredLargeAnchorLimit(t *testing.T) {
 	current := handler.Current("repo")
 	require.NotEqual(t, previous.CandidateID, current.CandidateID)
 	require.Equal(t, digestString(largeAnchor), current.Generation)
+}
+
+func TestGenerationManagerAtomicallyPublishesChangedClosureAndRestoresIt(t *testing.T) {
+	anchors := [][]byte{[]byte("release-initial\n"), []byte("release-updated\n")}
+	metadata := [][]byte{[]byte("metadata-initial\n"), []byte("metadata-updated\n")}
+	digests := [2][sha256.Size]byte{sha256.Sum256(metadata[0]), sha256.Sum256(metadata[1])}
+	var revision atomic.Int32
+	revision.Store(1)
+	updatedFetchStarted := make(chan struct{})
+	releaseUpdatedFetch := make(chan struct{})
+	var startOnce sync.Once
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseUpdatedFetch) }) })
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stateDir := t.TempDir()
+	config := Config{
+		Instance: "atomic-update", Mode: "test", Tenant: "metadata", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, _, requestPath string, headers http.Header) (*http.Response, error) {
+			current := int(revision.Load() - 1)
+			switch requestPath {
+			case "repo/Release":
+				require.Equal(t, `"release-initial"`, headers.Get("If-None-Match"))
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"ETag": {`"release-updated"`}},
+					Body:       io.NopCloser(bytes.NewReader(anchors[current])), ContentLength: int64(len(anchors[current])),
+				}, nil
+			case "repo/index":
+				if current == 1 {
+					startOnce.Do(func() { close(updatedFetchStarted) })
+					<-releaseUpdatedFetch
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(metadata[current])), ContentLength: int64(len(metadata[current]))}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+			}
+		},
+		Build: func(ctx context.Context, session *RefreshSession, anchor Anchor) error {
+			current := 0
+			if anchor.Generation == digestString(anchors[1]) {
+				current = 1
+			}
+			size := int64(len(metadata[current]))
+			_, err := session.Fetch(ctx, ObjectSpec{
+				Path: "repo/index", ExpectedSize: &size,
+				Checksums: []Checksum{{Algorithm: "sha256", Digest: hex.EncodeToString(digests[current][:])}},
+			})
+			return err
+		},
+	}
+	manager, err := New(config)
+	require.NoError(t, err)
+	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", http.Header{"ETag": {`"release-initial"`}}, bytes.NewReader(anchors[0])))
+	_, err = manager.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := manager.Current("repo")
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, refreshErr := manager.Refresh(context.Background(), 1)
+		refreshDone <- refreshErr
+	}()
+	select {
+	case <-updatedFetchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("updated metadata fetch did not start")
+	}
+	response := httptest.NewRecorder()
+	handled, status, cache := manager.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/index", nil), "repo/index", true)
+	require.True(t, handled)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "HIT", cache)
+	require.Equal(t, metadata[0], response.Body.Bytes())
+	require.Equal(t, previous.CandidateID, manager.Current("repo").CandidateID)
+
+	releaseOnce.Do(func() { close(releaseUpdatedFetch) })
+	select {
+	case refreshErr := <-refreshDone:
+		require.NoError(t, refreshErr)
+	case <-time.After(time.Second):
+		t.Fatal("updated metadata refresh did not finish")
+	}
+	current := manager.Current("repo")
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	require.Equal(t, digestString(anchors[1]), current.Generation)
+	response = httptest.NewRecorder()
+	handled, status, cache = manager.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/index", nil), "repo/index", true)
+	require.True(t, handled)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "HIT", cache)
+	require.Equal(t, metadata[1], response.Body.Bytes())
+
+	restarted, err := New(config)
+	require.NoError(t, err)
+	require.Equal(t, current.CandidateID, restarted.Current("repo").CandidateID)
+	response = httptest.NewRecorder()
+	handled, status, _ = restarted.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/index", nil), "repo/index", true)
+	require.True(t, handled)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, metadata[1], response.Body.Bytes())
+}
+
+func TestGenerationManagerSchedulerPublishesChangedAnchor(t *testing.T) {
+	anchors := [][]byte{[]byte("anchor-initial"), []byte("anchor-updated")}
+	var revision atomic.Int32
+	revision.Store(1)
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	sched, err := scheduler.NewPersistent(filepath.Join(t.TempDir(), "scheduler.json"))
+	require.NoError(t, err)
+	manager, err := New(Config{
+		Instance: "scheduled", Mode: "test", Tenant: "metadata", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store, Scheduler: sched,
+		Fetch: func(context.Context, string, string, http.Header) (*http.Response, error) {
+			body := anchors[int(revision.Load()-1)]
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body))}, nil
+		},
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	sched.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, sched.Stop(context.Background()))
+	})
+	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", "https://upstream.example", nil, bytes.NewReader(anchors[0])))
+	require.Eventually(t, func() bool {
+		current := manager.Current("repo")
+		return current != nil && current.Generation == digestString(anchors[0])
+	}, time.Second, time.Millisecond)
+
+	revision.Store(2)
+	request := httptest.NewRequest(http.MethodGet, "/repo/Release", nil)
+	request.Header.Set("Cache-Control", "no-cache")
+	response := httptest.NewRecorder()
+	handled, status, cache := manager.ServeCurrent(response, request, "repo/Release", true)
+	require.True(t, handled)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "HIT", cache)
+	require.Equal(t, anchors[0], response.Body.Bytes())
+	require.Eventually(t, func() bool {
+		current := manager.Current("repo")
+		return current != nil && current.Generation == digestString(anchors[1])
+	}, time.Second, time.Millisecond)
 }
 
 func TestLastSeenPersistenceDoesNotRetryUnderContinuousTraffic(t *testing.T) {
@@ -598,9 +748,8 @@ func TestGenerationManagerRetiresLastSeenOnlyRoot(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	stateDir := t.TempDir()
 	data, _, err := encodeJSONDigest(lastSeenMarker{
-		Version: StateVersion,
-		RootID:  "orphan",
-		SeenAt:  time.Now().Add(-time.Hour),
+		RootID: "orphan",
+		SeenAt: time.Now().Add(-time.Hour),
 	})
 	require.NoError(t, err)
 	require.NoError(t, writeBytes(stateDir, lastSeenName("orphan"), data))
@@ -911,8 +1060,8 @@ func FuzzCleanPath(f *testing.F) {
 }
 
 func FuzzStateDecoders(f *testing.F) {
-	f.Add([]byte("version: 4\nroot_id: repo\nroot: repo\ngeneration: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncandidate_id: 0123456789abcdef0123456789abcdef\nsnapshot_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nupstream: https://example.test\n"))
-	f.Add([]byte(`{"version":4,"root_id":"repo","root":"repo"}`))
+	f.Add([]byte("root_id: repo\nroot: repo\ngeneration: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncandidate_id: 0123456789abcdef0123456789abcdef\nsnapshot_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nupstream: https://example.test\n"))
+	f.Add([]byte(`{"root_id":"repo","root":"repo"}`))
 	f.Fuzz(func(_ *testing.T, data []byte) {
 		if len(data) > 1<<20 {
 			return

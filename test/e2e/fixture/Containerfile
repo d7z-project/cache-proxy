@@ -1,67 +1,137 @@
-FROM docker.io/library/alpine:3.20 AS portable
+FROM docker.io/library/alpine:3.20 AS portable-base
 ENV SOURCE_DATE_EPOCH=1704067200
 RUN apk add --no-cache bash coreutils git zip
-COPY build-portable.sh /usr/local/bin/build-portable
-RUN chmod +x /usr/local/bin/build-portable && /usr/local/bin/build-portable /out
+
+FROM portable-base AS file
+COPY fixtures/file/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS npm
+COPY fixtures/npm/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS go
+COPY fixtures/go/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS maven
+COPY fixtures/maven/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS cargo
+COPY fixtures/cargo/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS pypi
+COPY fixtures/pypi/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS oci
+COPY fixtures/oci/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
+
+FROM portable-base AS git
+COPY fixtures/git/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
 FROM docker.io/library/debian:bookworm-slim AS deb
 ENV SOURCE_DATE_EPOCH=1704067200
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gzip xz-utils && rm -rf /var/lib/apt/lists/*
-COPY build-deb.sh /usr/local/bin/build-deb
-RUN chmod +x /usr/local/bin/build-deb && /usr/local/bin/build-deb /out
+COPY fixtures/deb/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
 FROM docker.io/library/alpine:3.20 AS apk
 ENV SOURCE_DATE_EPOCH=1704067200
 RUN apk add --no-cache alpine-sdk bash
-RUN adduser -D builder && addgroup builder abuild && mkdir -p /home/builder/package && chown -R builder:builder /home/builder
-COPY --chown=builder:builder APKBUILD /home/builder/package/APKBUILD
+RUN adduser -D builder && addgroup builder abuild && mkdir -p /out && chown -R builder:builder /home/builder /out
+COPY --chown=builder:builder fixtures/apk/ /home/builder/package/
 USER builder
 WORKDIR /home/builder/package
 RUN abuild-keygen -a -n
 USER root
 RUN cp /home/builder/.abuild/*.rsa.pub /etc/apk/keys/
 USER builder
-RUN abuild -r
-USER root
-RUN mkdir -p /out/v3.20/main/x86_64 && \
-    find /home/builder/packages -name 'e2e-apk-*.apk' -exec cp {} /out/v3.20/main/x86_64/ \; && \
-    find /home/builder/packages -name APKINDEX.tar.gz -exec cp {} /out/v3.20/main/x86_64/APKINDEX.tar.gz \;
+RUN chmod +x build.sh && ./build.sh /out
 
 FROM docker.io/library/fedora:42 AS rpm
 ENV SOURCE_DATE_EPOCH=1704067200
 RUN dnf install -y rpm-build createrepo_c && dnf clean all
-COPY e2e-rpm.spec /root/rpmbuild/SPECS/e2e-rpm.spec
-RUN mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SRPMS} /out && \
-    rpmbuild -bb /root/rpmbuild/SPECS/e2e-rpm.spec && \
-    find /root/rpmbuild/RPMS -name '*.rpm' -exec cp {} /out/ \; && \
-    createrepo_c --no-database /out
+COPY fixtures/rpm/e2e.spec /root/rpmbuild/SPECS/e2e.spec
+COPY fixtures/rpm/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
 FROM docker.io/library/archlinux:base AS pacman
 ENV SOURCE_DATE_EPOCH=1704067200
-RUN mkdir -p /work/pkg/usr/share/e2e-pacman /out && \
-    printf 'pkgname = e2e-pacman\npkgbase = e2e-pacman\npkgver = 1.0.0-1\npkgdesc = cache-proxy end-to-end fixture\nurl = https://example.invalid\nbuilddate = 1704067200\npackager = cache-proxy e2e\nsize = 16\narch = any\nlicense = MIT\n' >/work/pkg/.PKGINFO && \
-    printf 'cache-proxy-e2e\n' >/work/pkg/usr/share/e2e-pacman/payload.txt && \
-    cd /work/pkg && bsdtar --uid 0 --gid 0 -cf - .PKGINFO usr | zstd -q -o /out/e2e-pacman-1.0.0-1-any.pkg.tar.zst && \
-    cd /out && repo-add e2e.db.tar.gz e2e-pacman-1.0.0-1-any.pkg.tar.zst
+COPY fixtures/pacman/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
 FROM docker.io/library/fedora:42 AS flatpak
 ENV SOURCE_DATE_EPOCH=1704067200
 RUN dnf install -y --setopt=install_weak_deps=False flatpak ostree && dnf clean all
-COPY build-flatpak.sh /usr/local/bin/build-flatpak
-RUN chmod +x /usr/local/bin/build-flatpak && /usr/local/bin/build-flatpak /out
+COPY fixtures/flatpak/build.sh /usr/local/bin/build-fixture
+RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
 FROM docker.io/library/golang:1.25-alpine AS fixture-server
 WORKDIR /src
-COPY server.go .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/e2e-fixture server.go
+COPY server/ .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/e2e-fixture *.go
 
-FROM docker.io/library/alpine:3.20
-RUN apk add --no-cache ca-certificates git git-daemon
+FROM docker.io/library/alpine:3.20 AS fixture-runtime
 COPY --from=fixture-server /out/e2e-fixture /usr/local/bin/e2e-fixture
-COPY --from=portable /out/ /srv/fixture/
-COPY --from=deb /out/ /srv/fixture/deb/
-COPY --from=apk /out/ /srv/fixture/apk/
-COPY --from=rpm /out/ /srv/fixture/rpm/
-COPY --from=pacman /out/ /srv/fixture/pacman/
-COPY --from=flatpak /out/ /srv/fixture/flatpak/repo/
 ENTRYPOINT ["/usr/local/bin/e2e-fixture"]
+
+FROM fixture-runtime AS fixture-file
+COPY --from=file /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-npm
+COPY --from=npm /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-go
+COPY --from=go /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-maven
+COPY --from=maven /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-cargo
+COPY --from=cargo /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-pypi
+COPY --from=pypi /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-deb
+COPY --from=deb /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-apk
+COPY --from=apk /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-rpm
+COPY --from=rpm /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-pacman
+COPY --from=pacman /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-oci
+COPY --from=oci /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-flatpak
+COPY --from=flatpak /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-git
+RUN apk add --no-cache git git-daemon
+COPY --from=git /out/ /srv/fixture/
+
+FROM fixture-runtime AS fixture-all
+RUN apk add --no-cache git git-daemon
+COPY --from=file /out/ /srv/fixture/
+COPY --from=npm /out/ /srv/fixture/
+COPY --from=go /out/ /srv/fixture/
+COPY --from=maven /out/ /srv/fixture/
+COPY --from=cargo /out/ /srv/fixture/
+COPY --from=pypi /out/ /srv/fixture/
+COPY --from=oci /out/ /srv/fixture/
+COPY --from=git /out/ /srv/fixture/
+COPY --from=deb /out/ /srv/fixture/
+COPY --from=apk /out/ /srv/fixture/
+COPY --from=rpm /out/ /srv/fixture/
+COPY --from=pacman /out/ /srv/fixture/
+COPY --from=flatpak /out/ /srv/fixture/

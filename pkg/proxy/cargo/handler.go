@@ -201,7 +201,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 	}
 	authRequired := false
 	_ = json.Unmarshal(configDocument["auth-required"], &authRequired)
-	state := registryState{Version: cargoStateVersion, Download: download, AuthRequired: authRequired}
+	state := registryState{Download: download, AuthRequired: authRequired}
 	if err := storeio.WriteJSON(h.stateDir, stateName(scope), state); err != nil {
 		h.writeSpooled(w, response.Header, spool.File, "BYPASS")
 		return
@@ -472,7 +472,7 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 func parseSparseIndex(reader io.Reader, cleaned string) (crateState, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, maxSparseLineSize)
-	state := crateState{Version: cargoStateVersion, Checksums: make(map[string]string)}
+	state := crateState{Checksums: make(map[string]string)}
 	for scanner.Scan() {
 		var record sparseRecord
 		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))

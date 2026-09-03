@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -119,16 +120,69 @@ func TestOCIRevalidatesTagManifestWithConditionalGet(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	handler := newHandler("oci", Block{Upstream: upstream.URL, MetadataTTL: time.Nanosecond}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+	handler := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
 	require.Equal(t, http.StatusOK, first.Code)
 	second := httptest.NewRecorder()
-	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	revalidate := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	revalidate.Header.Set("Cache-Control", "no-cache")
+	handler.ServeHTTP(second, revalidate)
 	require.Equal(t, http.StatusOK, second.Code)
 	require.Equal(t, "REVALIDATED", second.Header().Get("X-Cache"))
 	require.EqualValues(t, 2, requests.Load())
+}
+
+func TestOCITagPublishesUpstreamUpdateAndKeepsDigestManifest(t *testing.T) {
+	manifests := []string{
+		`{"schemaVersion":2,"annotations":{"version":"1"}}`,
+		`{"schemaVersion":2,"annotations":{"version":"2"}}`,
+	}
+	digests := []string{sha256Digest(manifests[0]), sha256Digest(manifests[1])}
+	var revision atomic.Int32
+	revision.Store(1)
+	var requests atomic.Int32
+	var conditional atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "/v2/library/alpine/manifests/latest", request.URL.Path)
+		requests.Add(1)
+		conditional.Store(request.Header.Get("If-None-Match"))
+		current := int(revision.Load() - 1)
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
+		w.Header().Set("Docker-Content-Digest", digests[current])
+		_, _ = io.WriteString(w, manifests[current])
+	}))
+	defer upstream.Close()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
+	require.Equal(t, http.StatusOK, first.Code)
+	require.JSONEq(t, manifests[0], first.Body.String())
+	require.Equal(t, digests[0], first.Header().Get("Docker-Content-Digest"))
+
+	revision.Store(2)
+	second := httptest.NewRecorder()
+	updateRequest := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
+	updateRequest.Header.Set("Cache-Control", "no-cache")
+	handler.ServeHTTP(second, updateRequest)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.JSONEq(t, manifests[1], second.Body.String())
+	require.Equal(t, digests[1], second.Header().Get("Docker-Content-Digest"))
+	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
+	require.Equal(t, `"v1"`, conditional.Load())
+
+	byDigest := httptest.NewRecorder()
+	handler.ServeHTTP(byDigest, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/"+digests[0], nil))
+	require.Equal(t, http.StatusOK, byDigest.Code)
+	require.JSONEq(t, manifests[0], byDigest.Body.String())
+	require.Equal(t, "HIT", byDigest.Header().Get("X-Cache"))
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestOCIRevalidationStateFailureServesCommittedManifest(t *testing.T) {
@@ -742,6 +796,8 @@ func TestOCIConcurrentManifestMissPublishesOneConsistentWriter(t *testing.T) {
 	bodyB := `{"schemaVersion":2,"annotations":{"version":"b"}}`
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseFirst) }) })
 	var requests atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requestNumber := requests.Add(1)
@@ -769,16 +825,29 @@ func TestOCIConcurrentManifestMissPublishesOneConsistentWriter(t *testing.T) {
 		handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
 		firstDone <- rec
 	}()
-	<-firstStarted
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("first manifest request did not reach upstream")
+	}
 	secondDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v2/library/alpine/manifests/latest", nil))
 		secondDone <- rec
 	}()
-	close(releaseFirst)
-	first := <-firstDone
-	second := <-secondDone
+	releaseOnce.Do(func() { close(releaseFirst) })
+	var first, second *httptest.ResponseRecorder
+	select {
+	case first = <-firstDone:
+	case <-ctx.Done():
+		t.Fatal("first manifest request did not finish")
+	}
+	select {
+	case second = <-secondDone:
+	case <-ctx.Done():
+		t.Fatal("second manifest request did not finish")
+	}
 	require.Equal(t, http.StatusOK, first.Code)
 	require.Equal(t, http.StatusOK, second.Code)
 	require.Equal(t, bodyA, second.Body.String())

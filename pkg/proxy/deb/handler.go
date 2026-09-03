@@ -131,7 +131,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway, "ERROR"
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
@@ -150,7 +150,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		slog.Warn("debian metadata capture failed after response started", "path", cleaned, "err", err)
 		return http.StatusOK, "BYPASS"
 	}
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	stageErr := error(nil)
 	if _, err := parseReleaseManifest(h.lifecycle.Context(), spool.File); err == nil {
 		_, _ = spool.File.Seek(0, io.SeekStart)
@@ -170,9 +170,12 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		return err
 	}
 	manifest, err := parseReleaseManifest(ctx, io.LimitReader(reader, maxReleaseSize+1))
-	reader.Close()
 	if err != nil {
+		_ = reader.Close()
 		return fmt.Errorf("parse Debian Release: %w", err)
+	}
+	if err := reader.Close(); err != nil {
+		return err
 	}
 	alternateName := "Release"
 	if path.Base(anchor.Path) == "Release" {
@@ -343,7 +346,7 @@ func (h *handler) streamArtifact(w http.ResponseWriter, request *http.Request, r
 		h.flights.Finish(flightKey, flight, err)
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	transport.CopyEndToEndHeaders(w.Header(), header)
 	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(http.StatusOK)
@@ -357,7 +360,7 @@ func (h *handler) artifactKey(cleaned string, request *http.Request) string {
 }
 
 func serveArtifactObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) int {
-	defer object.Reader.Close()
+	defer func() { _ = object.Reader.Close() }()
 	transport.CopyEndToEndHeaders(w.Header(), object.Header)
 	w.Header().Set("X-Cache", result)
 	http.ServeContent(w, request, path.Base(request.URL.Path), object.Fetched, object.Reader)

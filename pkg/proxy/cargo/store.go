@@ -3,22 +3,18 @@ package cargo
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"errors"
 	"path/filepath"
 
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
-const cargoStateVersion = 1
-
 type registryState struct {
-	Version      int    `json:"version"`
 	Download     string `json:"download"`
 	AuthRequired bool   `json:"auth_required"`
 }
 
 type crateState struct {
-	Version   int               `json:"version"`
 	Name      string            `json:"name"`
 	Checksums map[string]string `json:"checksums"`
 }
@@ -37,8 +33,8 @@ func loadRegistryState(stateDir, scope string) (registryState, error) {
 	if err := storeio.ReadJSON(stateDir, stateName(scope), &state); err != nil {
 		return registryState{}, err
 	}
-	if state.Version != cargoStateVersion || state.Download == "" {
-		return registryState{}, fmt.Errorf("invalid cargo registry state")
+	if state.Download == "" {
+		return registryState{}, errors.New("invalid cargo registry state")
 	}
 	return state, nil
 }
@@ -48,8 +44,8 @@ func loadCrateState(stateDir, scope, name string) (crateState, error) {
 	if err := storeio.ReadJSON(stateDir, crateStateName(scope, name), &state); err != nil {
 		return crateState{}, err
 	}
-	if state.Version != cargoStateVersion || state.Name != name || state.Checksums == nil {
-		return crateState{}, fmt.Errorf("invalid cargo crate state")
+	if state.Name != name || state.Checksums == nil {
+		return crateState{}, errors.New("invalid cargo crate state")
 	}
 	return state, nil
 }

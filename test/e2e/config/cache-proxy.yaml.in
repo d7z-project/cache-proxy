@@ -31,14 +31,14 @@ instances:
     options:
       rules:
         - match: "**"
-          policy: immutable
+          policy: http_cache
   - name: git
     enabled: true
     mode: git
     path: /git
     upstream: @FIXTURE_URL@/git/repo.git
     options:
-      sync_interval: 1h
+      sync_interval: 1s
       operation_timeout: 30s
   - name: oci
     enabled: true

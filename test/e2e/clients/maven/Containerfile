@@ -1,0 +1,2 @@
+FROM docker.io/library/maven:3.9-eclipse-temurin-21-alpine
+RUN mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.8.1:help >/dev/null

@@ -185,7 +185,7 @@ func (h *handler) serveIndex(w http.ResponseWriter, request *http.Request, clean
 		return
 	}
 	_ = response.Body.Close()
-	defer spool.Close()
+	defer func() { _ = spool.Close() }()
 	_, _ = spool.File.Seek(0, io.SeekStart)
 	root := path.Dir(cleaned)
 	if cleaned == directIndexMarker {

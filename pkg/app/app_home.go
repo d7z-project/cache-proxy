@@ -82,7 +82,6 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		instances = append(instances, hi)
 	}
 	i18nJSON, _ := json.Marshal(i18n)
-	healthy := true
 	var degraded int
 	for _, store := range a.stores {
 		storeStats, err := store.Stats(req.Context())
@@ -90,7 +89,6 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 			degraded += storeStats.DegradedObjects
 		}
 	}
-	healthy = degraded == 0
 	return homeData{
 		Instances:     instances,
 		Modes:         modes,
@@ -98,7 +96,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		Locale:        locale,
 		Theme:         detectTheme(req),
 		I18NJSON:      template.JS(i18nJSON),
-		StoreHealthy:  healthy,
+		StoreHealthy:  degraded == 0,
 		StoreDegraded: degraded,
 		Languages:     supportedLocales,
 		LocaleLabel:   localeLabel(locale),

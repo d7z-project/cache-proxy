@@ -8,7 +8,7 @@ import (
 )
 
 func rewriteDescriptor(req *http.Request, data []byte) []byte {
-	base := proxyBaseURL(req)
+	base := proxyruntime.ExternalBaseURL(req)
 	lines := strings.SplitAfter(string(data), "\n")
 	for i, line := range lines {
 		key, _, ok := strings.Cut(strings.TrimRight(line, "\r\n"), "=")
@@ -18,10 +18,6 @@ func rewriteDescriptor(req *http.Request, data []byte) []byte {
 		lines[i] = replaceINIValue(line, key, base)
 	}
 	return []byte(strings.Join(lines, ""))
-}
-
-func proxyBaseURL(req *http.Request) string {
-	return proxyruntime.ExternalBaseURL(req)
 }
 
 func replaceINIValue(line, key, value string) string {

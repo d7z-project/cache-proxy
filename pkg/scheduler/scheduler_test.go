@@ -49,7 +49,7 @@ func TestSchedulerPersistsOnlyMetadataTiming(t *testing.T) {
 	require.Equal(t, metadataKey, info.Key)
 	require.WithinDuration(t, time.Now(), info.NextRun, time.Second)
 
-	require.NoError(t, os.WriteFile(statePath, []byte(`{"version":1,"next_run":{},"unknown":true}`), 0o644))
+	require.NoError(t, os.WriteFile(statePath, []byte(`{"next_run":{},"unknown":true}`), 0o644))
 	_, err = NewPersistent(statePath)
 	require.Error(t, err)
 }

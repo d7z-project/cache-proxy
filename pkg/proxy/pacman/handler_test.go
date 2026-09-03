@@ -64,6 +64,48 @@ func TestPacmanDatabaseAndSignatureCacheSeparately(t *testing.T) {
 	require.Equal(t, int32(2), requests.Load())
 }
 
+func TestPacmanDatabasePublishesUpstreamGenerationUpdate(t *testing.T) {
+	var revision atomic.Int32
+	revision.Store(1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := revision.Load()
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current))
+		switch request.URL.Path {
+		case "/custom.db":
+			_, _ = fmt.Fprintf(w, "database-v%d", current)
+		case "/custom.db.sig":
+			_, _ = fmt.Fprintf(w, "signature-v%d", current)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+	h := newPacmanTestHandler(t, server.URL)
+	rootID := "pacman:" + server.URL + ":custom.db"
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/custom.db", nil))
+	require.Equal(t, "database-v1", first.Body.String())
+	_, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := h.metadata.Current(rootID)
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := h.metadata.Current(rootID)
+	require.NotNil(t, current)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	for target, expected := range map[string]string{"/custom.db": "database-v2", "/custom.db.sig": "signature-v2"} {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+		require.Equal(t, expected, response.Body.String())
+	}
+}
+
 func TestPacmanArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 	var requests atomic.Int32
 	conditional := make(chan string, 1)
@@ -85,7 +127,7 @@ func TestPacmanArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 		if err != nil {
 			return ""
 		}
-		defer object.Reader.Close()
+		defer func() { _ = object.Reader.Close() }()
 		body, err := io.ReadAll(object.Reader)
 		if err != nil {
 			return ""
@@ -103,7 +145,12 @@ func TestPacmanArtifactRevalidationPublishesChangedResponse(t *testing.T) {
 	h.ServeHTTP(second, revalidate)
 	require.Equal(t, "v2", second.Body.String())
 	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
-	require.Equal(t, `"v1"`, <-conditional)
+	select {
+	case validator := <-conditional:
+		require.Equal(t, `"v1"`, validator)
+	case <-time.After(time.Second):
+		t.Fatal("artifact revalidation did not send a conditional request")
+	}
 
 	require.Eventually(t, func() bool { return cachedBody() == "v2" }, time.Second, time.Millisecond)
 	third := httptest.NewRecorder()

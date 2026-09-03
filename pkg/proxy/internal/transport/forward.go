@@ -60,7 +60,7 @@ func ForwardReadTarget(ctx context.Context, client *Client, target *url.URL, wri
 	if err != nil {
 		return 0, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	CopyEndToEndHeaders(writer.Header(), response.Header)
 	writer.Header().Set("X-Cache", "BYPASS")
 	writer.WriteHeader(response.StatusCode)

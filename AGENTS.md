@@ -8,7 +8,7 @@
 2. 在 `pkg/config/config.go` 注册 mode，并在 `pkg/app/drivers.go` 注册 `NewDriver()`
 3. 协议包负责请求分类、缓存身份、freshness、校验、上游选择和协议状态
 4. 通用响应对象使用 `storeio`；Linux 仓库 metadata 使用 `filerepo.GenerationManager`
-5. Flatpak/OSTree legacy 与 indexed summary 分别使用 generation，immutable objects 和 finite-retention deltas 使用稳定响应键
+5. Flatpak/OSTree single-file 与 indexed summary 分别使用 generation，immutable objects 和 finite-retention deltas 使用稳定响应键
 6. 配置或外部行为变化时同步更新 `README.md`
 7. 所有 mode 对上游只读；新增协议能力不得引入发布、上传、删除或其他上游变更操作
 8. 每个 instance 配置一个必填主 `upstream`；上游高可用由该地址前方的 DNS 或负载均衡提供
@@ -19,7 +19,7 @@
 - `transport` 只统一 URL path segment 转义、通用 revalidation/cacheability 判断和响应转发；协议包保留身份、凭据作用域和生命周期决策
 - 内部字段和跨函数状态使用完整领域名称，局部循环变量使用 Go 惯用短名称
 - error 文本小写开头，通过 `%w` 保留可判定错误链
-- 协议、缓存键、持久化版本或调度时序变化必须明确记录并补测试
+- 协议、缓存键、持久化格式或调度时序变化必须明确记录并补测试
 - 大块逻辑按状态转换和资源所有权拆分，避免薄包装与重复生命周期代码
 
 ## YAML 与运行时配置
@@ -28,7 +28,8 @@
 - duration、expiration 和 byte size 分别复用 `config.Duration`、`config.Expiration`、`config.ByteSize`
 - 配置保持严格解码，未知字段必须报错
 - `upstream` 是每个 instance 的必填 HTTP(S) 标量；高可用由该地址前方的 DNS 或负载均衡提供
-- 每个 instance 使用 `<backend>/instances/<name>/<mode>-v4/{blobs,state,work}`
+- 每个 instance 使用独立的 `<backend>/instances/<name>/<mode>/{blobs,state,work}`
+- 自建持久化 state 只描述当前结构，使用严格解码以及身份、路径或摘要校验
 - 所有下载临时文件共享进程级 spool budget；生产 handler 使用 plan 提供的 object size 和 budget
 
 ## Linux 仓库 metadata
@@ -40,6 +41,7 @@
 - 启动只恢复 current 精确引用的 snapshot，并按 root 隔离无效状态
 - 首次合格 anchor 请求立即透传上游，同时由生命周期 context 捕获；并发请求读取完成的 pending/current anchor
 - 已有 current 时 metadata 只读 current；分类为 metadata 但不在 snapshot 中的路径返回 `503` 并触发 refresh
+- current anchor 收到显式 `no-cache` / `max-age=0` 时触发后台 refresh，本次响应仍读取已提交 generation
 - artifact 和 package sidecar 使用 generation-independent response key，且不依赖 metadata refresh 成功
 - Debian 支持标准、嵌套和 flat root；InRelease 与 Release 同时存在时必须归一化一致
 - Debian 的每个 strong-checksum entry 独立校验；压缩格式保持独立，canonical/by-hash 只指向同一 verified blob
@@ -87,9 +89,10 @@
 - 路径、分类器、状态和非可信 metadata parser 使用有界 fuzz target；语料通过 `make test-fuzz` 执行
 - 并发 fuzz target 必须限制输入大小、goroutine 数和等待时间，并覆盖取消、提前关闭、共享资源争用和发布顺序
 - 每个 mode 必须有原生客户端端到端覆盖；Debian standard 和 flat repository 分开验证
+- E2E case 和 fixture builder 按 mode 独立，fixture builder 与专用客户端镜像按 mode 分目录；只有断言、生命周期、运行时适配和基础镜像层允许共享
 - E2E 由 `test/e2e/run.sh` 统一编排，Makefile 只暴露 `test-e2e` target，不承载容器生命周期或客户端命令
 - E2E 的 proxy、fixture、探测和包客户端全部使用 Docker/Podman host network 容器；宿主不得直接运行包管理器
-- E2E 每阶段使用全新客户端，覆盖 cold、warm、持久 backend 离线重启及适用的写操作本地拒绝；清理仅作用于本次 run label 的资源
+- E2E 每阶段使用全新客户端，覆盖 cold、warm、上游更新和持久 backend 离线重启；清理仅作用于本次 run label 的资源
 - 最终验证包含 `gofmt`、`git diff --check`、全量测试、race、fuzz smoke、vet、静态构建和生产配置严格校验
 
 ## 文档

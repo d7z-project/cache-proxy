@@ -11,11 +11,11 @@ import (
 
 func TestCleanStaleWorkFilesOnlyRemovesOwnedFiles(t *testing.T) {
 	root := t.TempDir()
-	work := filepath.Join(root, "demo", "file-v4", "work")
+	work := filepath.Join(root, "demo", "file", "work")
 	require.NoError(t, os.MkdirAll(work, 0o755))
 	old := filepath.Join(work, ".cache-proxy-tmp-stream-old")
 	foreign := filepath.Join(work, "operator.data")
-	state := filepath.Join(root, "demo", "file-v4", "state", ".cache-proxy-tmp-stream-state")
+	state := filepath.Join(root, "demo", "file", "state", ".cache-proxy-tmp-stream-state")
 	require.NoError(t, os.MkdirAll(filepath.Dir(state), 0o755))
 	for _, name := range []string{old, foreign, state} {
 		require.NoError(t, os.WriteFile(name, []byte("x"), 0o600))

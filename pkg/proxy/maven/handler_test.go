@@ -3,12 +3,14 @@ package maven
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -17,6 +19,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func TestMavenReadOnlyCacheContract(t *testing.T) {
@@ -53,6 +56,58 @@ func TestMavenReadOnlyCacheContract(t *testing.T) {
 	h.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/org/example/tool/1.0/tool-1.0.jar", nil))
 	require.Equal(t, "HIT", recorder.Header().Get("X-Cache"))
 	require.Equal(t, int32(1), gets.Load())
+}
+
+func TestMavenMetadataPublishesUpstreamUpdate(t *testing.T) {
+	var revision atomic.Int32
+	revision.Store(1)
+	var requests atomic.Int32
+	var conditional atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		conditional.Store(request.Header.Get("If-None-Match"))
+		current := revision.Load()
+		w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current))
+		_, _ = fmt.Fprintf(w, "<metadata><versioning><latest>%d.0</latest></versioning></metadata>", current)
+	}))
+	t.Cleanup(upstream.Close)
+	h := newMavenTestHandler(t, upstream.URL)
+	target := "/org/example/tool/maven-metadata.xml"
+	key := mavenKey(h.origin, strings.TrimPrefix(target, "/"), httptest.NewRequest(http.MethodGet, target, nil))
+	cachedBody := func() string {
+		object, err := storeio.OpenResponse(context.Background(), h.store, mavenTenant, key)
+		if err != nil {
+			return ""
+		}
+		defer func() { _ = object.Reader.Close() }()
+		body, err := io.ReadAll(object.Reader)
+		if err != nil {
+			return ""
+		}
+		return string(body)
+	}
+
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, target, nil))
+	require.Contains(t, first.Body.String(), "<latest>1.0</latest>")
+	require.Eventually(t, func() bool { return strings.Contains(cachedBody(), "<latest>1.0</latest>") }, time.Second, time.Millisecond)
+
+	revision.Store(2)
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.Header.Set("Cache-Control", "no-cache")
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, request)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Contains(t, second.Body.String(), "<latest>2.0</latest>")
+	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
+	require.Equal(t, `"v1"`, conditional.Load())
+	require.Eventually(t, func() bool { return strings.Contains(cachedBody(), "<latest>2.0</latest>") }, time.Second, time.Millisecond)
+
+	third := httptest.NewRecorder()
+	h.ServeHTTP(third, httptest.NewRequest(http.MethodGet, target, nil))
+	require.Contains(t, third.Body.String(), "<latest>2.0</latest>")
+	require.Equal(t, "HIT", third.Header().Get("X-Cache"))
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func newMavenTestHandler(t *testing.T, rawOrigin string) *handler {

@@ -121,7 +121,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		if parsed.kind == moduleRequestMod || parsed.kind == moduleRequestZip {
 			freshness = 24 * time.Hour
 		}
-		fresh := time.Since(cached.Fetched) < freshness
+		fresh := time.Since(cached.Fetched) < freshness && !transport.RequestForcesRevalidation(request)
 		if request.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader || fresh {
 			return serveStoredGoResponse(w, request, cached, "HIT"), "HIT"
 		}
@@ -244,12 +244,16 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 	}
 	defer func() { _ = reader.Close() }()
 	transport.CopyEndToEndHeaders(w.Header(), response.Header)
-	w.Header().Set("X-Cache", "MISS")
+	result := "MISS"
+	if cached != nil {
+		result = "REFRESH"
+	}
+	w.Header().Set("X-Cache", result)
 	w.WriteHeader(http.StatusOK)
 	if request.Method != http.MethodHead {
 		_, _ = io.Copy(w, reader)
 	}
-	return http.StatusOK, "MISS"
+	return http.StatusOK, result
 }
 
 func (h *handler) forwardModule(w http.ResponseWriter, request *http.Request, target string) (int, string) {
@@ -276,7 +280,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 	key := "sumdb/" + hashKey(h.sumDB.String()+"\x00"+sumTarget)
 	object, _ := storeio.OpenResponse(request.Context(), h.store, goTenant, key)
 	if object != nil {
-		if stable || time.Since(object.Fetched) < time.Minute {
+		if stable || time.Since(object.Fetched) < time.Minute && !transport.RequestForcesRevalidation(request) {
 			status := serveStoredGoResponse(w, request, object, "HIT")
 			return status, "HIT"
 		}

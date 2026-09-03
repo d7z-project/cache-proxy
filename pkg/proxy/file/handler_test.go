@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,15 +42,19 @@ func newTestHandler(t *testing.T, upstream string, rules []Rule) (*handler, *blo
 
 func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 	var requests atomic.Int32
+	var revision atomic.Int32
+	revision.Store(1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		requests.Add(1)
-		w.Header().Set("ETag", `"v1"`)
-		w.Header().Set("Cache-Control", "max-age=0")
-		if request.Header.Get("If-None-Match") == `"v1"` {
+		current := revision.Load()
+		etag := fmt.Sprintf(`"v%d"`, current)
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "max-age=3600")
+		if request.Header.Get("If-None-Match") == etag {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		_, _ = io.WriteString(w, "payload")
+		_, _ = fmt.Fprintf(w, "payload-v%d", current)
 	}))
 	defer upstream.Close()
 	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
@@ -57,30 +62,51 @@ func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Equal(t, http.StatusOK, first.Code)
-	require.Equal(t, "payload", first.Body.String())
+	require.Equal(t, "payload-v1", first.Body.String())
 
+	key := cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Eventually(t, func() bool {
-		reader, err := openStored(context.Background(), handler.store, cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil)))
+		reader, err := openStored(context.Background(), handler.store, key)
 		if err == nil {
 			_ = reader.reader.Close()
 			return true
 		}
 		return false
 	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		flight, leader := handler.flights.Begin(key)
+		if leader {
+			handler.flights.Finish(key, flight, nil)
+		}
+		return leader
+	}, time.Second, time.Millisecond)
 
 	second := httptest.NewRecorder()
 	secondRequest := httptest.NewRequest(http.MethodGet, "/artifact", nil)
-	secondRequest.Header.Set("Cache-Control", "max-age=0")
+	revision.Store(2)
+	secondRequest.Header.Set("Cache-Control", "no-cache")
 	handler.ServeHTTP(second, secondRequest)
 	require.Equal(t, http.StatusOK, second.Code)
-	require.Equal(t, "payload", second.Body.String())
+	require.Equal(t, "payload-v2", second.Body.String())
+	require.Equal(t, `"v2"`, second.Header().Get("ETag"))
+	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
 	require.Equal(t, int32(2), requests.Load())
+	require.Eventually(t, func() bool {
+		reader, err := openStored(context.Background(), handler.store, key)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = reader.reader.Close() }()
+		body, err := io.ReadAll(reader.reader)
+		return err == nil && string(body) == "payload-v2"
+	}, time.Second, time.Millisecond)
 
 	conditional := httptest.NewRequest(http.MethodGet, "/artifact", nil)
-	conditional.Header.Set("If-None-Match", `"v1"`)
+	conditional.Header.Set("If-None-Match", `"v2"`)
 	third := httptest.NewRecorder()
 	handler.ServeHTTP(third, conditional)
 	require.Equal(t, http.StatusNotModified, third.Code)
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestFileReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
@@ -126,6 +152,93 @@ func TestFileConcurrentMissUsesSingleTransfer(t *testing.T) {
 	close(errors)
 	require.Empty(t, errors)
 	require.Equal(t, int32(1), requests.Load())
+}
+
+func TestFileConcurrentRevalidationUsesSingleTransfer(t *testing.T) {
+	var requests atomic.Int32
+	var revision atomic.Int32
+	revision.Store(1)
+	updateStarted := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	var updateOnce sync.Once
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseUpdate) }) })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		current := revision.Load()
+		state := "initial"
+		if current == 2 {
+			state = "updated"
+		}
+		etag := fmt.Sprintf(`"%s"`, state)
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "max-age=3600")
+		if current == 2 {
+			updateOnce.Do(func() { close(updateStarted) })
+			<-releaseUpdate
+		}
+		if request.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = io.WriteString(w, state)
+	}))
+	defer upstream.Close()
+	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
+	require.Equal(t, http.StatusOK, first.Code)
+	key := cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
+	require.Eventually(t, func() bool {
+		object, err := openStored(context.Background(), handler.store, key)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = object.reader.Close() }()
+		body, err := io.ReadAll(object.reader)
+		return err == nil && string(body) == "initial"
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		flight, leader := handler.flights.Begin(key)
+		if leader {
+			handler.flights.Finish(key, flight, nil)
+		}
+		return leader
+	}, time.Second, time.Millisecond)
+
+	revision.Store(2)
+	results := make(chan *httptest.ResponseRecorder, 2)
+	requestUpdate := func() {
+		request := httptest.NewRequest(http.MethodGet, "/artifact", nil)
+		request.Header.Set("Cache-Control", "no-cache")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		results <- response
+	}
+	go requestUpdate()
+	select {
+	case <-updateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("revalidation did not reach upstream")
+	}
+	go requestUpdate()
+	require.Never(t, func() bool { return len(results) != 0 }, 25*time.Millisecond, time.Millisecond)
+	releaseOnce.Do(func() { close(releaseUpdate) })
+
+	cacheResults := map[string]int{}
+	for range 2 {
+		select {
+		case response := <-results:
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "updated", response.Body.String())
+			cacheResults[response.Header().Get("X-Cache")]++
+		case <-time.After(time.Second):
+			t.Fatal("revalidation request did not finish")
+		}
+	}
+	require.Equal(t, map[string]int{"REFRESH": 1, "COALESCED": 1}, cacheResults)
+	require.Equal(t, int32(2), requests.Load())
 }
 
 func TestFileCredentialsBypassAndCachedRangeUsesCompleteObject(t *testing.T) {

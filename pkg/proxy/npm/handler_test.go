@@ -134,6 +134,60 @@ func TestPackumentSeparatesValidatorAndAuthorizesTarball(t *testing.T) {
 	require.Equal(t, int32(3), tarballRequests.Load())
 }
 
+func TestPackumentPublishesUpstreamUpdate(t *testing.T) {
+	var revision atomic.Int32
+	revision.Store(1)
+	var requests atomic.Int32
+	var conditional atomic.Value
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "/pkg", request.URL.Path)
+		requests.Add(1)
+		conditional.Store(request.Header.Get("If-None-Match"))
+		current := revision.Load()
+		w.Header().Set("ETag", fmt.Sprintf(`"source-v%d"`, current))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "pkg",
+			"versions": map[string]any{fmt.Sprintf("%d.0.0", current): map[string]any{
+				"dist": map[string]any{"tarball": fmt.Sprintf("%s/pkg-%d.tgz", server.URL, current)},
+			}},
+		})
+	}))
+	defer server.Close()
+	handler := newNPMTestHandler(t, server.URL)
+	request := func(force bool) *http.Request {
+		req := proxyruntime.WithExternalBaseURL(httptest.NewRequest(http.MethodGet, "/pkg", nil), "https://proxy.example/npm")
+		if force {
+			req.Header.Set("Cache-Control", "no-cache")
+		}
+		return req
+	}
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, request(false))
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Contains(t, first.Body.String(), `"1.0.0"`)
+	firstETag := first.Header().Get("ETag")
+	require.NotEmpty(t, firstETag)
+	require.NotEqual(t, `"source-v1"`, firstETag)
+
+	revision.Store(2)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, request(true))
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
+	require.Contains(t, second.Body.String(), `"2.0.0"`)
+	require.NotEqual(t, firstETag, second.Header().Get("ETag"))
+	require.NotEqual(t, `"source-v2"`, second.Header().Get("ETag"))
+	require.Equal(t, `"source-v1"`, conditional.Load())
+
+	third := httptest.NewRecorder()
+	handler.ServeHTTP(third, request(false))
+	require.Equal(t, "HIT", third.Header().Get("X-Cache"))
+	require.Contains(t, third.Body.String(), `"2.0.0"`)
+	require.Equal(t, int32(2), requests.Load())
+}
+
 func TestNPMAuditIsTheOnlyReadOnlyPOST(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

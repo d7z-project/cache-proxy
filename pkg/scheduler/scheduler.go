@@ -127,7 +127,6 @@ func NewPersistent(statePath string) (*Scheduler, error) {
 		return nil, fmt.Errorf("read scheduler state: %w", err)
 	}
 	var state struct {
-		Version int                  `json:"version"`
 		NextRun map[string]time.Time `json:"next_run"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -138,9 +137,6 @@ func NewPersistent(statePath string) (*Scheduler, error) {
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, errors.New("scheduler state contains trailing data")
-	}
-	if state.Version != 1 {
-		return nil, fmt.Errorf("unsupported scheduler state version %d", state.Version)
 	}
 	s.persisted = state.NextRun
 	return s, nil
@@ -359,9 +355,8 @@ func (s *Scheduler) persist() error {
 	}
 	s.mu.Unlock()
 	data, err := json.Marshal(struct {
-		Version int                  `json:"version"`
 		NextRun map[string]time.Time `json:"next_run"`
-	}{Version: 1, NextRun: nextRun})
+	}{NextRun: nextRun})
 	if err != nil {
 		return err
 	}
@@ -374,13 +369,13 @@ func (s *Scheduler) persist() error {
 		return err
 	}
 	name := temporary.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

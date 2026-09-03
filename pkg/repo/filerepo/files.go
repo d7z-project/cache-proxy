@@ -79,12 +79,12 @@ func prepareBytes(root, name string, data []byte) (*preparedStateFile, error) {
 	}
 	temporaryName := temporary.Name()
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		_ = os.Remove(temporaryName)
 		return nil, err
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		_ = os.Remove(temporaryName)
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func readStateFile(name string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	readLimit := limit
 	if readLimit < math.MaxInt64 {
 		readLimit++
@@ -215,7 +215,7 @@ func prepareSnapshot(snapshot *Snapshot) error {
 	cleanRootValue, rootErr := cleanRoot(snapshot.Root)
 	cleanAnchor, anchorErr := CleanPath(snapshot.Anchor)
 	upstream, upstreamErr := url.Parse(snapshot.Upstream)
-	if snapshot.Version != StateVersion || snapshot.RootID == "" || rootErr != nil || cleanRootValue != snapshot.Root || anchorErr != nil || cleanAnchor != snapshot.Anchor || !containsPath(snapshot.Root, snapshot.Anchor) || !validSHA256(snapshot.Generation) || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" || snapshot.PublishedAt.IsZero() {
+	if snapshot.RootID == "" || rootErr != nil || cleanRootValue != snapshot.Root || anchorErr != nil || cleanAnchor != snapshot.Anchor || !containsPath(snapshot.Root, snapshot.Anchor) || !validSHA256(snapshot.Generation) || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" || snapshot.PublishedAt.IsZero() {
 		return errors.New("invalid metadata snapshot")
 	}
 	generationRoot := candidatePrefix(snapshot.RootID, snapshot.Generation, snapshot.CandidateID)
@@ -274,7 +274,7 @@ func (h *GenerationManager) restore() error {
 		var seen lastSeenMarker
 		seenPresent := false
 		if _, err := readJSON(h.config.StateDir, directory+"/last-seen.json", maxRepositoryMarkerSize, &seen); err == nil {
-			if seen.Version == StateVersion && seen.RootID != "" && path.Base(repositoryDirectory(seen.RootID)) == entry.Name() && !seen.SeenAt.IsZero() {
+			if seen.RootID != "" && path.Base(repositoryDirectory(seen.RootID)) == entry.Name() && !seen.SeenAt.IsZero() {
 				h.lastSeen[seen.RootID] = seen.SeenAt
 				h.lastSeenPersisted[seen.RootID] = seen.SeenAt
 				seenPresent = true
@@ -304,7 +304,7 @@ func (h *GenerationManager) restoreCurrentGeneration(repositoryName string, seen
 	}
 	cleanRootValue, rootErr := cleanRoot(marker.Root)
 	upstream, upstreamErr := url.Parse(marker.Upstream)
-	if marker.Version != StateVersion || marker.RootID == "" || path.Base(repositoryDirectory(marker.RootID)) != repositoryName || rootErr != nil || cleanRootValue != marker.Root || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" {
+	if marker.RootID == "" || path.Base(repositoryDirectory(marker.RootID)) != repositoryName || rootErr != nil || cleanRootValue != marker.Root || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" {
 		return errors.New("invalid current metadata marker")
 	}
 	snapshotPath := snapshotName(marker.RootID, marker.Generation, marker.CandidateID)
@@ -360,7 +360,7 @@ func (h *GenerationManager) restorePendingAnchor(repositoryName string, seen las
 	cleanRootValue, rootErr := cleanRoot(pending.Root)
 	cleanAnchor, anchorErr := CleanPath(pending.Path)
 	upstream, upstreamErr := url.Parse(pending.Upstream)
-	if pending.Version != StateVersion || pending.RootID == "" || !validCandidateID(pending.CandidateID) || path.Base(repositoryDirectory(pending.RootID)) != repositoryName || rootErr != nil || cleanRootValue != pending.Root || anchorErr != nil || cleanAnchor != pending.Path || !containsPath(pending.Root, pending.Path) || !validSHA256(pending.Generation) || pending.Key != candidatePrefix(pending.RootID, pending.Generation, pending.CandidateID)+"/anchor" || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" {
+	if pending.RootID == "" || !validCandidateID(pending.CandidateID) || path.Base(repositoryDirectory(pending.RootID)) != repositoryName || rootErr != nil || cleanRootValue != pending.Root || anchorErr != nil || cleanAnchor != pending.Path || !containsPath(pending.Root, pending.Path) || !validSHA256(pending.Generation) || pending.Key != candidatePrefix(pending.RootID, pending.Generation, pending.CandidateID)+"/anchor" || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" {
 		return errors.New("invalid pending metadata state")
 	}
 	if current := h.current[pending.RootID]; current != nil && current.snapshot.CandidateID == pending.CandidateID {
@@ -518,7 +518,7 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 		inspected++
 		if entry.Name() == "current.yaml" {
 			var marker currentMarker
-			if _, err := readYAML("/", name, &marker); err != nil || marker.Version != StateVersion || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) || path.Base(repositoryDirectory(marker.RootID)) != filepath.Base(filepath.Dir(name)) {
+			if _, err := readYAML("/", name, &marker); err != nil || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) || path.Base(repositoryDirectory(marker.RootID)) != filepath.Base(filepath.Dir(name)) {
 				slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", err)
 				h.gcCursor = name
 				return nil

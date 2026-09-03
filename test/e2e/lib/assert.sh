@@ -42,11 +42,6 @@ e2e_fixture_count() {
   ' "$method" "$path" "$E2E_FIXTURE_URL"
 }
 
-e2e_fixture_mutations() {
-  e2e_run_client_shell "${E2E_RUN_ID}-mutations-$RANDOM" "$E2E_TOOLS_IMAGE" \
-    'curl --fail --silent --show-error "$1/__e2e/mutations"' "$E2E_FIXTURE_URL"
-}
-
 e2e_fixture_prefix_count() {
   local method=$1 prefix=$2
   e2e_run_client_shell "${E2E_RUN_ID}-prefix-$RANDOM" "$E2E_TOOLS_IMAGE" '
@@ -65,9 +60,99 @@ e2e_fixture_counts() {
   ' "$method" "$prefix" "$E2E_FIXTURE_URL"
 }
 
+e2e_fixture_header() {
+  local method=$1 path=$2 header=$3
+  e2e_run_client_shell "${E2E_RUN_ID}-fixture-header-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    curl --fail --silent --show-error --get \
+      --data-urlencode "method=$1" --data-urlencode "path=$2" --data-urlencode "name=$3" \
+      "$4/__e2e/header"
+  ' "$method" "$path" "$header" "$E2E_FIXTURE_URL"
+}
+
 e2e_reset_fixture_counts() {
   e2e_run_client_shell "${E2E_RUN_ID}-reset-$RANDOM" "$E2E_TOOLS_IMAGE" \
     'curl --fail --silent --show-error -X POST "$1/__e2e/reset" >/dev/null' "$E2E_FIXTURE_URL"
+}
+
+e2e_set_fixture_state() {
+  local state=$1
+  e2e_run_client_shell "${E2E_RUN_ID}-state-$state-$RANDOM" "$E2E_TOOLS_IMAGE" \
+    'curl --fail --silent --show-error -X POST "$1/__e2e/state?value=$2" >/dev/null' "$E2E_FIXTURE_URL" "$state"
+}
+
+e2e_reset_fixture() {
+  e2e_set_fixture_state initial
+  e2e_reset_fixture_counts
+}
+
+e2e_wait_body() {
+  local url=$1 expected=$2
+  e2e_run_client_shell "${E2E_RUN_ID}-wait-body-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    url=$1
+    expected=$2
+    i=0
+    while [ "$i" -lt 60 ]; do
+      if actual=$(curl --fail --silent --show-error --max-time 5 -H "Cache-Control: no-cache" "$url") &&
+         [ "$actual" = "$expected" ]; then
+        exit 0
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+    printf "timed out waiting for expected content at %s\n" "$url" >&2
+    exit 1
+  ' "$url" "$expected"
+}
+
+e2e_wait_contains() {
+  local url=$1 expected=$2
+  e2e_run_client_shell "${E2E_RUN_ID}-wait-contains-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    url=$1
+    expected=$2
+    i=0
+    while [ "$i" -lt 60 ]; do
+      if curl --fail --silent --show-error --max-time 5 -H "Cache-Control: no-cache" "$url" | grep -Fq "$expected"; then
+        exit 0
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+    printf "timed out waiting for %s at %s\n" "$expected" "$url" >&2
+    exit 1
+  ' "$url" "$expected"
+}
+
+e2e_response_header() {
+  local url=$1 header=$2 value
+  value=$(e2e_run_client_shell "${E2E_RUN_ID}-header-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    curl --fail --silent --show-error --dump-header - --output /dev/null "$1" |
+      awk -v name="$2" "BEGIN { IGNORECASE=1 } \$1 == name \
+        { sub(/^[^:]*:[[:space:]]*/, \"\"); sub(/\\r$/, \"\"); print; exit }"
+  ' "$url" "$header:")
+  [[ -n $value ]] || e2e_fail "$header was absent at $url"
+  printf '%s\n' "$value"
+}
+
+e2e_wait_header_changed() {
+  local url=$1 header=$2 previous=$3
+  e2e_run_client_shell "${E2E_RUN_ID}-wait-header-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    url=$1
+    header=$2
+    previous=$3
+    i=0
+    while [ "$i" -lt 60 ]; do
+      current=$(curl --fail --silent --show-error --max-time 5 -H "Cache-Control: no-cache" --dump-header - --output /dev/null "$url" |
+        awk -v name="$header:" "BEGIN { IGNORECASE=1 } \$1 == name \
+          { sub(/^[^:]*:[[:space:]]*/, \"\"); sub(/\\r$/, \"\"); print; exit }")
+      if [ -n "$current" ] && [ "$current" != "$previous" ]; then
+        exit 0
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+    printf "timed out waiting for %s to change at %s\n" "$header" "$url" >&2
+    exit 1
+  ' "$url" "$header" "$previous"
 }
 
 e2e_assert_count_unchanged() {

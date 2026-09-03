@@ -45,16 +45,30 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        suite: [registries, deb-apk, rpm-pacman, git-oci-flatpak]
+        mode:
+          - file
+          - npm
+          - go
+          - maven
+          - cargo
+          - pypi
+          - deb
+          - apk
+          - rpm
+          - pacman
+          - git
+          - oci
+          - flatpak
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run containerized end-to-end suite
+      - name: Run ${{ matrix.mode }} end-to-end case
         env:
           E2E_RUNTIME: docker
-          E2E_SUITE: ${{ matrix.suite }}
+          E2E_SUITE: ${{ matrix.mode }}
         run: make test-e2e
 
   e2e-podman:
@@ -72,7 +86,7 @@ jobs:
       - name: Run Podman smoke suite
         env:
           E2E_RUNTIME: podman
-          E2E_SUITE: registries
+          E2E_SUITE: file
         run: make test-e2e
 
   docker:
