@@ -270,7 +270,8 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 
 func newTestHandler(t *testing.T, store *blobfs.Store, upstream string, transport *config.TransportConfig, options *Config) *handler {
 	t.Helper()
-	handler, err := newHandler("gomod", upstream, transport, options, store, metrics.NewStats(prometheus.NewRegistry()), nil, t.TempDir())
+	spooler := storeio.NewSpooler(t.TempDir(), 2<<30, nil)
+	handler, err := newHandler("gomod", upstream, transport, options, store, metrics.NewStats(prometheus.NewRegistry()), nil, spooler)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
 	return handler

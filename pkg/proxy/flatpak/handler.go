@@ -17,6 +17,7 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -32,7 +33,7 @@ const (
 
 type handler struct {
 	origin    *url.URL
-	workDir   string
+	spooler   *storeio.Spooler
 	store     *blobfs.Store
 	client    *transport.Client
 	lifecycle *storeio.Lifecycle
@@ -41,10 +42,19 @@ type handler struct {
 }
 
 func newHandler(instance, stateDir string, origin *url.URL, workDir string, store *blobfs.Store, client *transport.Client, taskScheduler *scheduler.Scheduler) (*handler, error) {
-	h := &handler{origin: origin, workDir: workDir, store: store, client: client, lifecycle: storeio.NewLifecycle()}
+	spooler := client.EnsureSpooler(workDir)
+	h := &handler{origin: origin, spooler: spooler, store: store, client: client, lifecycle: storeio.NewLifecycle()}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "flatpak", Tenant: "flatpak-metadata", Upstream: origin.String(), StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), Store: store, Scheduler: taskScheduler,
+		Instance:  instance,
+		Mode:      config.ModeFlatpak,
+		Tenant:    "flatpak-metadata",
+		Upstream:  origin.String(),
+		StateDir:  stateDir,
+		WorkDir:   workDir,
+		Spooler:   spooler,
+		Store:     store,
+		Scheduler: taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, header, transport.AdmissionRefresh)
 		},
@@ -64,16 +74,27 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 					return err
 				}
 				for _, digest := range index.subsummaryDigests {
-					blob, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: "summaries/" + digest + ".gz", MaxBytes: indexedSummaryMaxBytes})
+					summaryPath := "summaries/" + digest + ".gz"
+					blob, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: summaryPath, MaxBytes: indexedSummaryMaxBytes})
 					if err != nil {
 						return err
 					}
 					if err := verifyIndexedSummary(ctx, blob, digest); err != nil {
 						return err
 					}
+					if err := session.RetainObject(summaryPath); err != nil {
+						return err
+					}
 				}
-				if _, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: "summaries/" + index.digest + ".idx.sig", MaxBytes: summaryIndexMaxBytes, Optional: true}); err != nil {
+				signaturePath := "summaries/" + index.digest + ".idx.sig"
+				signature, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: signaturePath, MaxBytes: summaryIndexMaxBytes, Optional: true})
+				if err != nil {
 					return err
+				}
+				if signature != nil {
+					if err := session.RetainObject(signaturePath); err != nil {
+						return err
+					}
 				}
 				_, err = session.Fetch(ctx, filerepo.ObjectSpec{Path: "summary.idx.sig", MaxBytes: summaryIndexMaxBytes, Optional: true})
 				return err
@@ -174,7 +195,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.client.EnsureSpooler(h.workDir), filerepo.DefaultMaxObject, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, filerepo.DefaultMaxObject, "MISS")
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)
@@ -240,7 +261,7 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 		header := response.Header.Clone()
 		header.Del("Content-Length")
 		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-			Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error {
 				if extension == ".filez" {
 					return verifyOSTreeFileObject(reader, digest)
@@ -385,7 +406,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 	header := response.Header.Clone()
 	header.Del("Content-Length")
 	reader, streamErr := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-		Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+		Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		StoreFn: func(ctx context.Context, body io.Reader) error {
 			return storeio.PutResponse(ctx, h.store, flatpakTenant, key, h.origin.String(), response.StatusCode, response.Header, "", body)
 		},

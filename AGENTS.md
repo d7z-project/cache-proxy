@@ -33,25 +33,26 @@
 - 每个 instance 使用独立的 `<backend>/instances/<name>/<mode>/{blobs,state,work}`
 - 自建持久化 state 只描述当前结构，使用严格解码以及身份、路径或摘要校验
 - 所有下载临时文件共享进程级 spool budget；`StartStream` 和 `CaptureResponse` 必须使用 plan 派生的 `Spooler`
+- handler 在构造阶段固定持有 plan 派生的 `Spooler`；请求热路径不得重复从 work 目录解析或创建 spooler
 
 ## Linux 仓库 metadata
 
 - 一个 generation 内的 anchor、metadata、签名和校验文件来自同一配置 upstream
 - anchor SHA256 是 generation identity；每次 staging 使用独立随机 `candidate_id`
 - candidate 位于 `generations/<root-hash>/<generation>/<candidate-id>/`
-- refresh 完整下载并校验 closure 后发布；`current.yaml` 是唯一提交标记
-- 启动只恢复 current 精确引用、且 upstream 与当前配置完全一致的 snapshot；不一致的 current/pending commit marker 立即失效
+- refresh 完整下载并校验 closure 后发布；`current.yaml` 是唯一提交标记，并精确记录 current 与有界 previous snapshot 的 generation、candidate 和 snapshot digest
+- 启动只恢复 `current.yaml` 精确引用、且 upstream 与当前配置完全一致并通过完整校验的 current/previous snapshot；禁止扫描 generation 目录推测可用版本
 - 首次合格 anchor 请求立即透传上游，同时由生命周期 context 捕获；并发请求读取完成的 pending/current anchor
-- 已有 current 时 metadata 只读 current；分类为 metadata 但不在 snapshot 中的路径返回 `503` 并触发 refresh
+- 已有 current 时 metadata 优先读取 current；仅当 current 不含请求路径时，协议明确标记且路径可绑定版本的对象才能从无歧义的 previous snapshot 读取，其余分类 metadata 返回 `503` 并触发 refresh
 - current anchor 收到显式 `no-cache` / `max-age=0` 时触发后台 refresh，本次响应仍读取已提交 generation
 - artifact 和 package sidecar 使用 generation-independent response key，且不依赖 metadata refresh 成功
 - Debian 支持标准、嵌套和 flat root；InRelease 与 Release 同时存在时必须归一化一致
 - Debian instance 根路径和未分类的同源资源透明直通；目录请求必须保留尾斜线
 - Debian Release 中实际存在的每个压缩或未压缩表示按自身 strong checksum 独立校验，不同压缩格式禁止别名
 - 带已识别压缩 sibling 的未压缩 checksum entry 允许上游缺失；没有压缩 sibling 的 entry 仍是必需对象
-- Acquire-By-Hash 首选 by-hash，仅在其返回 `403` / `404` 时回退同 upstream canonical；canonical 通过原 entry 大小和摘要校验后才能与 by-hash 指向同一 blob
-- RPM generation 只闭合 `repomd.xml` 及其精确引用对象并校验 wire/open size 与 checksum；未引用的同源 `repodata` 资源透明直通
-- Flatpak indexed summary 的当前分片及可选索引签名必须与 `summary.idx` 同 generation；分片按解压后 SHA256 校验
+- Acquire-By-Hash 首选 by-hash，仅在其返回 `403` / `404` 时回退同 upstream canonical；canonical 通过原 entry 大小和摘要校验后才能与 by-hash 指向同一 blob；通过校验的 SHA256/SHA512 by-hash 路径可从精确 previous snapshot 读取，canonical 与固定名称签名保持 current-only
+- RPM generation 只闭合 `repomd.xml` 及其精确引用对象并校验 wire/open size 与 checksum；已验证的精确 location 可从 previous snapshot 读取，`repomd.xml` 与固定名称签名保持 current-only，未引用的同源 `repodata` 资源透明直通
+- Flatpak indexed summary 的当前分片及可选索引签名必须与 `summary.idx` 同 generation；分片按解压后 SHA256 校验；digest summary 和 digest-specific index signature 可从 previous snapshot 读取，固定名称 summary/signature 保持 current-only
 - OSTree delta index 与 indexed-summary delta 必须严格识别编码路径并使用有限缓存，不绑定 summary generation；indexed-summary delta 不缓存缺失响应
 - metadata 解析、解压和状态读取必须有 byte、entry、token 或 expansion 上限
 
@@ -63,8 +64,7 @@
 - metadata refresh 按 repository root 串行处理 pending、显式 poll 和周期 poll；失败 candidate 使用有上限退避并在重试前重新验证 anchor
 - `TriggerNow` 只唤醒内存调度状态；scheduler 在任务完成后持久化，metadata 请求热路径不执行状态文件 fsync
 - response、OCI 和 generation GC 按 inspected objects 计 batch，并通过内存游标继续
-- generation GC 保护 current、pending、active reader、grace-period candidate 和至少一个 previous candidate，
-  并回收无引用损坏 candidate 与空状态目录
+- generation GC 保护 current、pending、active reader、grace-period candidate 和 `current.yaml` 精确提交且校验通过的 previous candidate，并回收无引用或损坏 candidate 与空状态目录
 - inactive current 或 pending root 通过 last-seen 与 generation GC 完整退役
 - Git scheduler 串行执行 mirror sync；repository lock 保护 mirror 状态转换
 

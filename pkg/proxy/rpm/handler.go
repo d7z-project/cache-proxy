@@ -20,6 +20,7 @@ import (
 	"github.com/ulikunitz/xz"
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/artifactcache"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
@@ -35,7 +36,7 @@ const (
 
 type handler struct {
 	origin    *url.URL
-	workDir   string
+	spooler   *storeio.Spooler
 	client    *transport.Client
 	lifecycle *storeio.Lifecycle
 	flights   storeio.FlightGroup
@@ -44,13 +45,14 @@ type handler struct {
 }
 
 func newHandler(instance string, origin *url.URL, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, taskScheduler *scheduler.Scheduler) (*handler, error) {
-	h := &handler{origin: origin, workDir: workDir, client: client, lifecycle: storeio.NewLifecycle()}
+	spooler := client.EnsureSpooler(workDir)
+	h := &handler{origin: origin, spooler: spooler, client: client, lifecycle: storeio.NewLifecycle()}
 	h.artifacts = artifactcache.Cache{
 		Tenant:    rpmArtifactTenant,
 		Upstream:  origin.String(),
 		Freshness: rpmArtifactFreshness,
 		Store:     blobs,
-		Spooler:   client.EnsureSpooler(workDir),
+		Spooler:   spooler,
 		Lifecycle: h.lifecycle,
 		Flights:   &h.flights,
 		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
@@ -60,7 +62,16 @@ func newHandler(instance string, origin *url.URL, stateDir, workDir string, blob
 	}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "rpm", Tenant: "rpm-metadata", Upstream: origin.String(), StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxRepomdSize, Store: blobs, Scheduler: taskScheduler,
+		Instance:       instance,
+		Mode:           config.ModeRPM,
+		Tenant:         "rpm-metadata",
+		Upstream:       origin.String(),
+		StateDir:       stateDir,
+		WorkDir:        workDir,
+		Spooler:        spooler,
+		AnchorMaxBytes: maxRepomdSize,
+		Store:          blobs,
+		Scheduler:      taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
@@ -135,7 +146,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.client.EnsureSpooler(h.workDir), maxRepomdSize, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, maxRepomdSize, "MISS")
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)
@@ -186,7 +197,8 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 			size := item.Size
 			expectedSize = &size
 		}
-		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: joinRoot(anchor.Root, location), ExpectedSize: expectedSize, Checksums: []filerepo.Checksum{{Algorithm: item.SumType, Digest: item.Checksum}}})
+		metadataPath := joinRoot(anchor.Root, location)
+		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: metadataPath, ExpectedSize: expectedSize, Checksums: []filerepo.Checksum{{Algorithm: item.SumType, Digest: item.Checksum}}})
 		if err != nil {
 			return err
 		}
@@ -203,6 +215,9 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 			if closeErr != nil {
 				return closeErr
 			}
+		}
+		if err := session.RetainObject(metadataPath); err != nil {
+			return err
 		}
 	}
 	for _, suffix := range []string{".asc", ".sig"} {

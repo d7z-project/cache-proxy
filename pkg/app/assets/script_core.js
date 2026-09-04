@@ -166,17 +166,40 @@
 
     events.slice().reverse().forEach(function (event) {
       var row = document.createElement("tr");
-      appendCell(row, formatDateTime(event.finished_at));
-      appendCell(row, event.storage || text("none", "None"));
-      appendCell(row, String(event.task_type || "").replaceAll("_", " "));
-      appendCell(row, event.target || "/", event.detail || event.message || "");
-      var resultCell = appendCell(row, "");
       var result = String(event.result || "unknown").toLowerCase();
+      var storage = event.storage || text("none", "None");
+      var task = String(event.task_type || "").replaceAll("_", " ");
+      appendCell(row, formatDateTime(event.finished_at)).className = "event-col-finished";
+      appendCell(row, storage).className = "event-col-storage";
+      appendCell(row, task).className = "event-col-task";
+      var targetCell = appendCell(row, "");
+      targetCell.className = "event-target event-col-target";
+      var compactContext = document.createElement("span");
+      compactContext.className = "event-compact-context";
+      compactContext.textContent = storage + " / " + task + " / " + formatDateTime(event.finished_at);
+      targetCell.appendChild(compactContext);
+      var target = document.createElement("span");
+      target.className = "event-target-main";
+      target.textContent = event.target || "/";
+      targetCell.appendChild(target);
+      var details = [event.reason_code, event.detail, event.message].map(function (value) {
+        return String(value || "").trim();
+      }).filter(function (value, index, values) {
+        return value && values.indexOf(value) === index;
+      });
+      if (details.length) {
+        var detail = document.createElement("span");
+        detail.className = "event-detail" + (result === "success" || result === "skipped" ? "" : " event-detail-error");
+        detail.textContent = details.join("\n");
+        targetCell.appendChild(detail);
+      }
+      var resultCell = appendCell(row, "");
+      resultCell.className = "event-col-result";
       var chip = document.createElement("span");
       chip.className = "status-chip status-chip-" + (result === "success" ? "success" : result === "skipped" ? "skipped" : "failure");
       chip.textContent = result;
       resultCell.appendChild(chip);
-      appendCell(row, formatDuration(event.duration_ms));
+      appendCell(row, formatDuration(event.duration_ms)).className = "event-col-duration";
       body.appendChild(row);
     });
   }
@@ -301,12 +324,46 @@
     document.getElementById("status-updated").textContent = text("updated", "Updated") + " " + formatDateTime(network.generated_at || new Date().toISOString());
   }
 
+  async function fetchStatusJSON(path, signal) {
+    var response;
+    try {
+      response = await fetch(path, { cache: "no-store", signal: signal, headers: { Accept: "application/json" } });
+    } catch (fetchError) {
+      if (fetchError.name === "AbortError") {
+        throw fetchError;
+      }
+      throw new Error(path + ": " + fetchError.message);
+    }
+    if (!response.ok) {
+      var responseBody = "";
+      try {
+        responseBody = (await response.text()).trim();
+      } catch (_) {
+        responseBody = "";
+      }
+      if (responseBody.length > 600) {
+        responseBody = responseBody.slice(0, 600) + "...";
+      }
+      var message = path + ": " + response.status + " " + response.statusText;
+      if (responseBody) {
+        message += "\n" + responseBody;
+      }
+      throw new Error(message);
+    }
+    try {
+      return await response.json();
+    } catch (parseError) {
+      throw new Error(path + ": " + parseError.message);
+    }
+  }
+
   async function loadStatus() {
     var loading = document.getElementById("status-loading");
     var error = document.getElementById("status-error");
+    var errorDetail = document.getElementById("status-error-detail");
     var content = document.getElementById("status-content");
     var refresh = document.getElementById("status-refresh");
-    if (!loading || !error || !content || !refresh) {
+    if (!loading || !error || !errorDetail || !content || !refresh) {
       return;
     }
     if (statusController) {
@@ -316,23 +373,18 @@
     statusController = controller;
     loading.hidden = false;
     error.hidden = true;
+    errorDetail.textContent = "";
     content.hidden = true;
     refresh.classList.add("is-loading");
     refresh.disabled = true;
 
     try {
-      var responses = await Promise.all([
-        fetch("/-/status/summary", { cache: "no-store", signal: controller.signal, headers: { Accept: "application/json" } }),
-        fetch("/-/status/disk", { cache: "no-store", signal: controller.signal, headers: { Accept: "application/json" } }),
-        fetch("/-/status/events?limit=50", { cache: "no-store", signal: controller.signal, headers: { Accept: "application/json" } }),
-        fetch("/-/status/network", { cache: "no-store", signal: controller.signal, headers: { Accept: "application/json" } })
+      var payloads = await Promise.all([
+        fetchStatusJSON("/-/status/summary", controller.signal),
+        fetchStatusJSON("/-/status/disk", controller.signal),
+        fetchStatusJSON("/-/status/events?limit=50", controller.signal),
+        fetchStatusJSON("/-/status/network", controller.signal)
       ]);
-      responses.forEach(function (response) {
-        if (!response.ok) {
-          throw new Error(response.status + " " + response.statusText);
-        }
-      });
-      var payloads = await Promise.all(responses.map(function (response) { return response.json(); }));
       renderStatus(payloads[0], payloads[1], payloads[2], payloads[3]);
       loading.hidden = true;
       content.hidden = false;
@@ -343,7 +395,7 @@
       }
       loading.hidden = true;
       error.hidden = false;
-      error.textContent = text("load_status_failed", "Status data could not be loaded") + ": " + requestError.message;
+      errorDetail.textContent = requestError.message;
     } finally {
       if (statusController === controller) {
         refresh.classList.remove("is-loading");
@@ -362,6 +414,11 @@
     document.querySelectorAll("[data-status-panel]").forEach(function (panel) {
       panel.hidden = panel.dataset.statusPanel !== name;
     });
+    var content = document.getElementById("status-content");
+    if (content) {
+      content.scrollTop = 0;
+      content.scrollLeft = 0;
+    }
     if (name === "overview") {
       requestAnimationFrame(drawDiskChart);
     }

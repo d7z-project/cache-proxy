@@ -37,6 +37,7 @@ const (
 type handler struct {
 	origin    *url.URL
 	workDir   string
+	spooler   *storeio.Spooler
 	store     *blobfs.Store
 	client    *transport.Client
 	secret    []byte
@@ -59,7 +60,15 @@ func newHandler(origin *url.URL, stateDir, workDir string, store *blobfs.Store, 
 	if err != nil {
 		return nil, err
 	}
-	return &handler{origin: origin, workDir: workDir, store: store, client: client, secret: secret, lifecycle: storeio.NewLifecycle()}, nil
+	return &handler{
+		origin:    origin,
+		workDir:   workDir,
+		spooler:   client.EnsureSpooler(workDir),
+		store:     store,
+		client:    client,
+		secret:    secret,
+		lifecycle: storeio.NewLifecycle(),
+	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -163,7 +172,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
-	spool, err := h.client.EnsureSpooler(h.workDir).SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxSimpleBody, response.ContentLength)
+	spool, err := h.spooler.SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxSimpleBody, response.ContentLength)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			transport.WriteResponse(w, request, response, "BYPASS")
@@ -412,7 +421,7 @@ func (h *handler) serveFile(w http.ResponseWriter, request *http.Request, route 
 		header := response.Header.Clone()
 		header.Del("Content-Length")
 		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-			Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error { return verifyPyPIFile(reader, authorization) },
 			StoreFn: func(ctx context.Context, body io.Reader) error {
 				return storeio.PutResponse(ctx, h.store, pypiTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, authorization.Digest, body)

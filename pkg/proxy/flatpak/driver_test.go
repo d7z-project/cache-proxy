@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -397,25 +399,48 @@ func TestFlatpakSummaryPublishesUpstreamGenerationUpdate(t *testing.T) {
 }
 
 func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
-	initialIndex, compressedSummary := flatpakIndexedSummaryFixture(t)
-	updatedIndex := bytes.Clone(initialIndex)
-	updatedIndex[0xd4] ^= 1
+	initialIndex, initialSummary := flatpakIndexedSummaryFixture(t)
 	parsedInitial, err := readSummaryIndex(bytes.NewReader(initialIndex), int64(len(initialIndex)))
 	require.NoError(t, err)
+	newSummaryBody := []byte("updated indexed summary")
+	var newSummary bytes.Buffer
+	writer := gzip.NewWriter(&newSummary)
+	_, err = writer.Write(newSummaryBody)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	newSummaryDigest := sha256.Sum256(newSummaryBody)
+	oldSummaryDigest, err := hex.DecodeString(parsedInitial.subsummaryDigests[0])
+	require.NoError(t, err)
+	updatedIndex := bytes.Clone(initialIndex)
+	digestOffset := bytes.Index(updatedIndex, oldSummaryDigest)
+	require.NotEqual(t, -1, digestOffset)
+	copy(updatedIndex[digestOffset:digestOffset+sha256.Size], newSummaryDigest[:])
 	parsedUpdated, err := readSummaryIndex(bytes.NewReader(updatedIndex), int64(len(updatedIndex)))
 	require.NoError(t, err)
-	require.Equal(t, parsedInitial.subsummaryDigests, parsedUpdated.subsummaryDigests)
+	require.Equal(t, fmt.Sprintf("%x", newSummaryDigest), parsedUpdated.subsummaryDigests[0])
 	indexes := [][]byte{initialIndex, updatedIndex}
+	summaries := [][]byte{initialSummary, newSummary.Bytes()}
+	digests := []string{parsedInitial.subsummaryDigests[0], parsedUpdated.subsummaryDigests[0]}
+	indexDigests := []string{parsedInitial.digest, parsedUpdated.digest}
 	var revision atomic.Int32
 	revision.Store(1)
+	var oldObjectRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		current := int(revision.Load() - 1)
 		switch request.URL.Path {
 		case "/summary.idx":
 			w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
 			_, _ = w.Write(indexes[current])
-		case "/summaries/" + parsedInitial.subsummaryDigests[0] + ".gz":
-			_, _ = w.Write(compressedSummary)
+		case "/summaries/" + digests[current] + ".gz":
+			if current == 0 {
+				oldObjectRequests.Add(1)
+			}
+			_, _ = w.Write(summaries[current])
+		case "/summaries/" + indexDigests[current] + ".idx.sig":
+			if current == 0 {
+				oldObjectRequests.Add(1)
+			}
+			_, _ = io.WriteString(w, fmt.Sprintf("signature-%d", current+1))
 		default:
 			http.NotFound(w, request)
 		}
@@ -445,6 +470,18 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
 	require.Equal(t, updatedIndex, response.Body.Bytes())
+
+	for requestPath, expected := range map[string][]byte{
+		"/summaries/" + digests[0] + ".gz":           initialSummary,
+		"/summaries/" + indexDigests[0] + ".idx.sig": []byte("signature-1"),
+	} {
+		response = httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		require.Equal(t, http.StatusOK, response.Code, requestPath)
+		require.Equal(t, "HIT", response.Header().Get("X-Cache"), requestPath)
+		require.Equal(t, expected, response.Body.Bytes(), requestPath)
+	}
+	require.Equal(t, int32(2), oldObjectRequests.Load())
 }
 
 func TestFlatpakIndexedSummaryRejectsInvalidSubsummary(t *testing.T) {

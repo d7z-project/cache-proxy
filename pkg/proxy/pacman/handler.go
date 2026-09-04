@@ -15,6 +15,7 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/artifactcache"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	"gopkg.d7z.net/cache-proxy/pkg/repo/filerepo"
@@ -30,7 +31,7 @@ const (
 
 type handler struct {
 	origin    *url.URL
-	workDir   string
+	spooler   *storeio.Spooler
 	client    *transport.Client
 	lifecycle *storeio.Lifecycle
 	flights   storeio.FlightGroup
@@ -39,13 +40,14 @@ type handler struct {
 }
 
 func newHandler(instance, stateDir string, origin *url.URL, workDir string, store *blobfs.Store, client *transport.Client, taskScheduler *scheduler.Scheduler) (*handler, error) {
-	h := &handler{origin: origin, workDir: workDir, client: client, lifecycle: storeio.NewLifecycle()}
+	spooler := client.EnsureSpooler(workDir)
+	h := &handler{origin: origin, spooler: spooler, client: client, lifecycle: storeio.NewLifecycle()}
 	h.artifacts = artifactcache.Cache{
 		Tenant:    pacmanTenant,
 		Upstream:  origin.String(),
 		Freshness: artifactFreshness,
 		Store:     store,
-		Spooler:   client.EnsureSpooler(workDir),
+		Spooler:   spooler,
 		Lifecycle: h.lifecycle,
 		Flights:   &h.flights,
 		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
@@ -57,7 +59,15 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 	}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: instance, Mode: "pacman", Tenant: "pacman-metadata", Upstream: origin.String(), StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), Store: store, Scheduler: taskScheduler,
+		Instance:  instance,
+		Mode:      config.ModePacman,
+		Tenant:    "pacman-metadata",
+		Upstream:  origin.String(),
+		StateDir:  stateDir,
+		WorkDir:   workDir,
+		Spooler:   spooler,
+		Store:     store,
+		Scheduler: taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
@@ -150,7 +160,7 @@ func (h *handler) serveDatabaseAnchor(w http.ResponseWriter, request *http.Reque
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.client.EnsureSpooler(h.workDir), filerepo.DefaultMaxObject, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, filerepo.DefaultMaxObject, "MISS")
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)

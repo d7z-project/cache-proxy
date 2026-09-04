@@ -1,6 +1,6 @@
 .PHONY: test test-race test-fuzz test-e2e vet fmt tidy
 
-cache-proxy: $(shell find . -type f -name "*.go" -not -path "./.git/*") go.mod go.sum
+cache-proxy: $(shell find . -type f \( -name "*.go" -o -path "./pkg/app/assets/*" \) -not -path "./.git/*") go.mod go.sum
 	@CGO_ENABLED=0 go build -v -o $@
 
 test:

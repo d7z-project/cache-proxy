@@ -16,6 +16,7 @@ import (
 
 	"gopkg.d7z.net/blobfs"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/artifactcache"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
@@ -35,7 +36,7 @@ const (
 type handler struct {
 	name      string
 	origin    *url.URL
-	workDir   string
+	spooler   *storeio.Spooler
 	client    *transport.Client
 	stats     *metrics.Stats
 	lifecycle *storeio.Lifecycle
@@ -49,25 +50,35 @@ func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, c
 	if err != nil {
 		return nil, fmt.Errorf("parse debian upstream: %w", err)
 	}
-	h := &handler{name: name, origin: origin, workDir: workDir, client: client, stats: stats, lifecycle: storeio.NewLifecycle()}
+	spooler := client.EnsureSpooler(workDir)
+	h := &handler{name: name, origin: origin, spooler: spooler, client: client, stats: stats, lifecycle: storeio.NewLifecycle()}
 	h.artifacts = artifactcache.Cache{
 		Tenant:    debArtifactTenant,
 		Upstream:  origin.String(),
 		Freshness: debArtifactFreshness,
 		Store:     blobs,
-		Spooler:   client.EnsureSpooler(workDir),
+		Spooler:   spooler,
 		Lifecycle: h.lifecycle,
 		Flights:   &h.flights,
 		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
-			return h.openUpstream(ctx, method, requestPath, rawQuery, header, transport.AdmissionForeground)
+			return h.fetchUpstream(ctx, method, requestPath, rawQuery, header, transport.AdmissionForeground)
 		},
 		CacheKey: h.artifactKey,
 	}
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance: name, Mode: "deb", Tenant: "deb-metadata", Upstream: origin.String(), StateDir: stateDir, WorkDir: workDir, Spooler: client.EnsureSpooler(workDir), AnchorMaxBytes: maxReleaseSize, Store: blobs, Scheduler: taskScheduler,
-		KeepPrevious: 2,
+		Instance:       name,
+		Mode:           config.ModeDEB,
+		Tenant:         "deb-metadata",
+		Upstream:       origin.String(),
+		StateDir:       stateDir,
+		WorkDir:        workDir,
+		Spooler:        spooler,
+		AnchorMaxBytes: maxReleaseSize,
+		Store:          blobs,
+		Scheduler:      taskScheduler,
+		KeepPrevious:   2,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
-			return h.openUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
+			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
 		Build: h.buildSnapshot,
 	})
@@ -79,7 +90,7 @@ func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, c
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	if !proxyruntime.RequireReadMethod(w, request.Method) {
-		h.stats.RecordRequest(h.name, "deb", request.Method, "REJECTED", http.StatusMethodNotAllowed, 0)
+		h.stats.RecordRequest(h.name, config.ModeDEB, request.Method, "REJECTED", http.StatusMethodNotAllowed, 0)
 		return
 	}
 	cleaned := ""
@@ -109,7 +120,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	status, result := h.serve(w, request, cleaned)
-	h.stats.RecordRequest(h.name, "deb", request.Method, result, status, 0)
+	h.stats.RecordRequest(h.name, config.ModeDEB, request.Method, result, status, 0)
 }
 
 func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned string) (int, string) {
@@ -146,7 +157,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.openUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -159,7 +170,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		finished = true
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.client.EnsureSpooler(h.workDir), maxReleaseSize, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, maxReleaseSize, "MISS")
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)
@@ -262,12 +273,19 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 			checksums = append(checksums, filerepo.Checksum{Algorithm: "sha512", Digest: entry.SHA512})
 			aliases = append(aliases, releaseByHashPath(canonical, "SHA512", entry.SHA512))
 		}
-		_, err := session.Fetch(ctx, filerepo.ObjectSpec{
+		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{
 			Path: canonical, FetchPath: fetchPath, FallbackFetchPath: fallbackFetchPath, Aliases: aliases,
 			ExpectedSize: &expectedSize, Checksums: checksums, Optional: compressedSiblings[entry.Path],
 		})
 		if err != nil {
 			return err
+		}
+		if manifest.AcquireByHash && blob != nil {
+			for _, alias := range aliases {
+				if err := session.RetainObject(alias); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	companion := joinRoot(anchor.Root, "Release.gpg")
@@ -301,7 +319,7 @@ func isArtifactPath(cleaned string) bool {
 }
 
 func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
-	response, err := h.openUpstream(request.Context(), request.Method, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
+	response, err := h.fetchUpstream(request.Context(), request.Method, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway
@@ -309,7 +327,7 @@ func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, 
 	return transport.WriteResponse(w, request, response, "BYPASS")
 }
 
-func (h *handler) openUpstream(ctx context.Context, method, requestPath, rawQuery string, headers http.Header, class transport.AdmissionClass) (*http.Response, error) {
+func (h *handler) fetchUpstream(ctx context.Context, method, requestPath, rawQuery string, headers http.Header, class transport.AdmissionClass) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(requestPath), "")
 	if err != nil {
 		return nil, err

@@ -296,7 +296,7 @@ func TestMalformedPackumentFallbackReleasesSpoolBudget(t *testing.T) {
 
 	handler := newNPMTestHandler(t, upstream.URL)
 	budget := proxyruntime.NewSpoolBudget(int64(len(body)))
-	handler.client.SetSpooler(storeio.NewSpooler(t.TempDir(), int64(len(body)), budget))
+	handler.spooler = storeio.NewSpooler(t.TempDir(), int64(len(body)), budget)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/pkg", nil))
 

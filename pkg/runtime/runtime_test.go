@@ -14,7 +14,7 @@ import (
 )
 
 func TestInstancePlanNormalizesUpstream(t *testing.T) {
-	plan := &InstancePlan{decl: config.Instance{Upstream: " https://one.test/base "}}
+	plan := &InstancePlan{declaration: config.Instance{Upstream: " https://one.test/base "}}
 	require.Equal(t, "https://one.test/base", plan.Upstream())
 }
 

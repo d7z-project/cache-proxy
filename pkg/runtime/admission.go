@@ -28,11 +28,6 @@ const (
 	AdmissionRefresh
 )
 
-type AdmissionOverloadError struct{}
-
-func (*AdmissionOverloadError) Error() string { return ErrAdmissionOverloaded.Error() }
-func (*AdmissionOverloadError) Unwrap() error { return ErrAdmissionOverloaded }
-
 type UpstreamRateLimitError struct {
 	Host       string
 	RetryAfter time.Time
@@ -41,8 +36,7 @@ type UpstreamRateLimitError struct {
 func (e *UpstreamRateLimitError) Error() string { return "upstream " + e.Host + " is rate limited" }
 
 func AdmissionRetryAfterSeconds(err error) (int, bool) {
-	var overloaded *AdmissionOverloadError
-	if errors.As(err, &overloaded) {
+	if errors.Is(err, ErrAdmissionOverloaded) {
 		return 1, true
 	}
 	var limited *UpstreamRateLimitError
@@ -161,7 +155,7 @@ func (g *UpstreamGate) Acquire(ctx context.Context, upstream string, class Admis
 	}
 	if g.foreground.Len()+g.refresh.Len() >= maxAdmissionWaiters || state.queued >= maxAdmissionWaitersPerHost {
 		g.mu.Unlock()
-		return nil, &AdmissionOverloadError{}
+		return nil, ErrAdmissionOverloaded
 	}
 	if class == AdmissionForeground {
 		waiter.waitQueue = &g.foreground

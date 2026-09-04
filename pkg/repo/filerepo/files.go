@@ -215,13 +215,16 @@ func prepareSnapshot(snapshot *Snapshot) error {
 	cleanRootValue, rootErr := cleanRoot(snapshot.Root)
 	cleanAnchor, anchorErr := CleanPath(snapshot.Anchor)
 	upstream, upstreamErr := url.Parse(snapshot.Upstream)
-	if snapshot.RootID == "" || rootErr != nil || cleanRootValue != snapshot.Root || anchorErr != nil || cleanAnchor != snapshot.Anchor || !containsPath(snapshot.Root, snapshot.Anchor) || !validSHA256(snapshot.Generation) || upstreamErr != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" || snapshot.PublishedAt.IsZero() {
+	validRoot := rootErr == nil && cleanRootValue == snapshot.Root
+	validAnchor := anchorErr == nil && cleanAnchor == snapshot.Anchor && containsPath(snapshot.Root, snapshot.Anchor)
+	validUpstream := upstreamErr == nil && (upstream.Scheme == "http" || upstream.Scheme == "https") && upstream.Host != ""
+	if snapshot.RootID == "" || !validRoot || !validAnchor || !validSHA256(snapshot.Generation) || !validUpstream || snapshot.PublishedAt.IsZero() {
 		return errors.New("invalid metadata snapshot")
 	}
-	generationRoot := candidatePrefix(snapshot.RootID, snapshot.Generation, snapshot.CandidateID)
 	if !validCandidateID(snapshot.CandidateID) {
 		return errors.New("invalid metadata candidate ID")
 	}
+	generationRoot := candidatePrefix(snapshot.RootID, snapshot.Generation, snapshot.CandidateID)
 	snapshot.byPath = make(map[string]Object, len(snapshot.Objects))
 	for _, object := range snapshot.Objects {
 		cleaned, err := CleanPath(object.Path)
@@ -233,12 +236,15 @@ func prepareSnapshot(snapshot *Snapshot) error {
 		}
 		switch object.State {
 		case ObjectPresent:
-			validKey := strings.HasPrefix(object.Key, generationRoot+"/objects/") || object.Path == snapshot.Anchor && object.Key == generationRoot+"/anchor" && strings.EqualFold(object.SHA256, snapshot.Generation)
-			if object.Size < 0 || !validSHA256(object.SHA256) || !validKey {
+			storedObject := strings.HasPrefix(object.Key, generationRoot+"/objects/")
+			storedAnchor := object.Path == snapshot.Anchor && object.Key == generationRoot+"/anchor" &&
+				strings.EqualFold(object.SHA256, snapshot.Generation)
+			validKey := storedObject || storedAnchor
+			if object.Size < 0 || !validSHA256(object.SHA256) || !validKey || object.Retainable && object.Path == snapshot.Anchor {
 				return fmt.Errorf("invalid present snapshot object %q", object.Path)
 			}
 		case ObjectNotFound, ObjectForbidden:
-			if object.Key != "" {
+			if object.Key != "" || object.Retainable {
 				return fmt.Errorf("invalid absent snapshot object %q", object.Path)
 			}
 		default:
@@ -308,28 +314,81 @@ func (h *GenerationManager) restoreCurrentGeneration(repositoryName string, seen
 		}
 		return nil
 	}
-	cleanRootValue, rootErr := cleanRoot(marker.Root)
-	if marker.RootID == "" || path.Base(repositoryDirectory(marker.RootID)) != repositoryName || rootErr != nil || cleanRootValue != marker.Root || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) {
-		return errors.New("invalid current metadata marker")
+	if err := h.validateCurrentMarker(repositoryName, marker); err != nil {
+		return err
 	}
-	snapshotPath := snapshotName(marker.RootID, marker.Generation, marker.CandidateID)
-	data, err := readStateFile(statePath(h.config.StateDir, snapshotPath), maxSnapshotStateSize)
+	currentReference := snapshotReference{
+		Generation:     marker.Generation,
+		CandidateID:    marker.CandidateID,
+		SnapshotSHA256: marker.SnapshotSHA256,
+	}
+	current, err := h.loadSnapshot(context.Background(), marker.RootID, marker.Root, marker.Upstream, currentReference)
 	if err != nil {
 		return fmt.Errorf("load current metadata snapshot: %w", err)
 	}
+	previousSnapshots := make([]*liveSnapshot, 0, min(len(marker.Previous), h.config.KeepPrevious))
+	seenCandidateIDs := map[string]struct{}{marker.CandidateID: {}}
+	for _, reference := range marker.Previous {
+		if len(previousSnapshots) >= h.config.KeepPrevious {
+			break
+		}
+		if _, duplicate := seenCandidateIDs[reference.CandidateID]; duplicate {
+			continue
+		}
+		previousSnapshot, err := h.loadSnapshot(context.Background(), marker.RootID, marker.Root, marker.Upstream, reference)
+		if err != nil {
+			slog.Warn("retained metadata snapshot ignored", "mode", h.config.Mode, "repository", repositoryName, "candidate", reference.CandidateID, "err", err)
+			continue
+		}
+		seenCandidateIDs[reference.CandidateID] = struct{}{}
+		previousSnapshots = append(previousSnapshots, previousSnapshot)
+	}
+	h.current[current.snapshot.RootID] = current
+	if len(previousSnapshots) == 0 {
+		delete(h.retained, current.snapshot.RootID)
+	} else {
+		h.retained[current.snapshot.RootID] = previousSnapshots
+	}
+	if !seenPresent || seen.RootID != current.snapshot.RootID {
+		h.lastSeen[current.snapshot.RootID] = current.snapshot.PublishedAt
+		delete(h.lastSeenPersisted, current.snapshot.RootID)
+	}
+	return nil
+}
+
+func (h *GenerationManager) validateCurrentMarker(repositoryName string, marker currentMarker) error {
+	cleanRootValue, rootErr := cleanRoot(marker.Root)
+	validRepository := marker.RootID != "" && path.Base(repositoryDirectory(marker.RootID)) == repositoryName
+	if !validRepository || marker.Upstream != h.config.Upstream || rootErr != nil || cleanRootValue != marker.Root ||
+		!validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) {
+		return errors.New("invalid current metadata marker")
+	}
+	return nil
+}
+
+func (h *GenerationManager) loadSnapshot(ctx context.Context, rootID, root, upstream string, reference snapshotReference) (*liveSnapshot, error) {
+	if !validSHA256(reference.Generation) || !validCandidateID(reference.CandidateID) || !validSHA256(reference.SnapshotSHA256) {
+		return nil, errors.New("invalid metadata snapshot reference")
+	}
+	snapshotPath := snapshotName(rootID, reference.Generation, reference.CandidateID)
+	data, err := readStateFile(statePath(h.config.StateDir, snapshotPath), maxSnapshotStateSize)
+	if err != nil {
+		return nil, err
+	}
 	digest := sha256.Sum256(data)
-	if !strings.EqualFold(marker.SnapshotSHA256, hex.EncodeToString(digest[:])) {
-		return errors.New("current metadata snapshot digest mismatch")
+	if reference.SnapshotSHA256 != hex.EncodeToString(digest[:]) {
+		return nil, errors.New("metadata snapshot digest mismatch")
 	}
 	var snapshot Snapshot
 	if err := decodeJSON(data, &snapshot); err != nil {
-		return err
+		return nil, err
 	}
-	if snapshot.RootID != marker.RootID || snapshot.Root != marker.Root || snapshot.Generation != marker.Generation || snapshot.CandidateID != marker.CandidateID || snapshot.Upstream != marker.Upstream {
-		return errors.New("current metadata marker does not match snapshot")
+	if snapshot.RootID != rootID || snapshot.Root != root || snapshot.Generation != reference.Generation ||
+		snapshot.CandidateID != reference.CandidateID || snapshot.Upstream != upstream {
+		return nil, errors.New("metadata snapshot reference does not match snapshot")
 	}
 	if err := prepareSnapshot(&snapshot); err != nil {
-		return err
+		return nil, err
 	}
 	validatedKeys := make(map[string]struct{})
 	for _, object := range snapshot.Objects {
@@ -339,21 +398,16 @@ func (h *GenerationManager) restoreCurrentGeneration(repositoryName string, seen
 		if _, validated := validatedKeys[object.Key]; validated {
 			continue
 		}
-		info, err := h.config.Store.StatObject(context.Background(), h.config.Tenant, object.Key)
+		info, err := h.config.Store.StatObject(ctx, h.config.Tenant, object.Key)
 		if err != nil {
-			return fmt.Errorf("open current metadata object %s: %w", object.Path, err)
+			return nil, fmt.Errorf("open metadata object %s: %w", object.Path, err)
 		}
 		if info.Size != object.Size {
-			return fmt.Errorf("current metadata object %s failed validation", object.Path)
+			return nil, fmt.Errorf("metadata object %s failed validation", object.Path)
 		}
 		validatedKeys[object.Key] = struct{}{}
 	}
-	h.current[snapshot.RootID] = &liveSnapshot{snapshot: &snapshot}
-	if !seenPresent || seen.RootID != snapshot.RootID {
-		h.lastSeen[snapshot.RootID] = snapshot.PublishedAt
-		delete(h.lastSeenPersisted, snapshot.RootID)
-	}
-	return nil
+	return &liveSnapshot{snapshot: &snapshot, snapshotSHA256: reference.SnapshotSHA256}, nil
 }
 
 func (h *GenerationManager) restorePendingAnchor(repositoryName string, seen lastSeenMarker, seenPresent bool) error {
@@ -370,7 +424,12 @@ func (h *GenerationManager) restorePendingAnchor(repositoryName string, seen las
 	}
 	cleanRootValue, rootErr := cleanRoot(pending.Root)
 	cleanAnchor, anchorErr := CleanPath(pending.Path)
-	if pending.RootID == "" || !validCandidateID(pending.CandidateID) || path.Base(repositoryDirectory(pending.RootID)) != repositoryName || rootErr != nil || cleanRootValue != pending.Root || anchorErr != nil || cleanAnchor != pending.Path || !containsPath(pending.Root, pending.Path) || !validSHA256(pending.Generation) || pending.Key != candidatePrefix(pending.RootID, pending.Generation, pending.CandidateID)+"/anchor" {
+	validRepository := pending.RootID != "" && path.Base(repositoryDirectory(pending.RootID)) == repositoryName
+	validRoot := rootErr == nil && cleanRootValue == pending.Root
+	validAnchor := anchorErr == nil && cleanAnchor == pending.Path && containsPath(pending.Root, pending.Path)
+	expectedKey := candidatePrefix(pending.RootID, pending.Generation, pending.CandidateID) + "/anchor"
+	if !validRepository || !validCandidateID(pending.CandidateID) || !validRoot || !validAnchor ||
+		!validSHA256(pending.Generation) || pending.Key != expectedKey {
 		return errors.New("invalid pending metadata state")
 	}
 	if current := h.current[pending.RootID]; current != nil && current.snapshot.CandidateID == pending.CandidateID {
@@ -458,8 +517,7 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 		}
 		inspected++
 		h.mu.Lock()
-		current := h.current[rootID]
-		activeReader := current != nil && h.readers[rootID+"\x00"+current.snapshot.CandidateID] != 0
+		activeReader := h.hasActiveReadersLocked(rootID)
 		inactive := !h.retiring[rootID] && !activeReader && now.Sub(h.lastSeen[rootID]) >= h.config.InactiveAfter
 		if inactive {
 			h.retiring[rootID] = true
@@ -472,8 +530,7 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 
 		h.commitMu.Lock()
 		h.mu.RLock()
-		current = h.current[rootID]
-		activeReader = current != nil && h.readers[rootID+"\x00"+current.snapshot.CandidateID] != 0
+		activeReader = h.hasActiveReadersLocked(rootID)
 		stillInactive := !activeReader && now.Sub(h.lastSeen[rootID]) >= h.config.InactiveAfter
 		h.mu.RUnlock()
 		if !stillInactive {
@@ -495,6 +552,7 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 		}
 		h.mu.Lock()
 		delete(h.current, rootID)
+		delete(h.retained, rootID)
 		delete(h.pending, rootID)
 		delete(h.lastSeen, rootID)
 		delete(h.lastSeenPersisted, rootID)
@@ -519,6 +577,16 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 	return true, nil
 }
 
+func (h *GenerationManager) hasActiveReadersLocked(rootID string) bool {
+	prefix := rootID + "\x00"
+	for identity, count := range h.readers {
+		if count > 0 && strings.HasPrefix(identity, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit int, now time.Time) (bool, error) {
 	inspected := 0
 	complete := true
@@ -539,14 +607,46 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 		inspected++
 		if entry.Name() == "current.yaml" {
 			var marker currentMarker
-			if _, err := readYAML("/", name, &marker); err != nil || !validSHA256(marker.Generation) || !validCandidateID(marker.CandidateID) || !validSHA256(marker.SnapshotSHA256) || path.Base(repositoryDirectory(marker.RootID)) != filepath.Base(filepath.Dir(name)) {
+			if _, err := readYAML("/", name, &marker); err != nil {
 				slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", err)
 				h.gcCursor = name
 				return nil
 			}
-			identity := marker.RootID + "\x00" + marker.CandidateID
-			h.gcProtected[identity] = true
+			if err := h.validateCurrentMarker(filepath.Base(filepath.Dir(name)), marker); err != nil {
+				slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", err)
+				h.gcCursor = name
+				return nil
+			}
+			currentReference := snapshotReference{
+				Generation:     marker.Generation,
+				CandidateID:    marker.CandidateID,
+				SnapshotSHA256: marker.SnapshotSHA256,
+			}
+			if _, err := h.loadSnapshot(ctx, marker.RootID, marker.Root, marker.Upstream, currentReference); err != nil {
+				slog.Warn("invalid current metadata snapshot ignored during GC", "path", name, "err", err)
+				h.gcCursor = name
+				return nil
+			}
+			h.gcProtected[marker.RootID+"\x00"+marker.CandidateID] = true
 			h.gcRetained[candidatePrefix(marker.RootID, marker.Generation, marker.CandidateID)] = true
+			seenCandidateIDs := map[string]struct{}{marker.CandidateID: {}}
+			retainedCount := 0
+			for _, reference := range marker.Previous {
+				if retainedCount >= h.config.KeepPrevious {
+					break
+				}
+				if _, duplicate := seenCandidateIDs[reference.CandidateID]; duplicate {
+					continue
+				}
+				if _, err := h.loadSnapshot(ctx, marker.RootID, marker.Root, marker.Upstream, reference); err != nil {
+					slog.Warn("invalid retained metadata snapshot ignored during GC", "path", name, "candidate", reference.CandidateID, "err", err)
+					continue
+				}
+				seenCandidateIDs[reference.CandidateID] = struct{}{}
+				retainedCount++
+				h.gcProtected[marker.RootID+"\x00"+reference.CandidateID] = true
+				h.gcRetained[candidatePrefix(marker.RootID, reference.Generation, reference.CandidateID)] = true
+			}
 			h.gcCursor = name
 			return nil
 		}
@@ -597,27 +697,29 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 	}
 
 	h.mu.RLock()
-	protected := make(map[string]bool, len(h.gcProtected)+len(h.current)+len(h.pending)+len(h.readers))
+	protected := make(map[string]bool, len(h.gcProtected)+len(h.current)+len(h.retained)+len(h.pending)+len(h.readers))
 	for identity := range h.gcProtected {
 		protected[identity] = true
 	}
-	activeRoots := make(map[string]bool, len(h.current)+len(h.pending))
 	for rootID, current := range h.current {
 		protected[rootID+"\x00"+current.snapshot.CandidateID] = true
 		h.gcRetained[candidatePrefix(rootID, current.snapshot.Generation, current.snapshot.CandidateID)] = true
-		activeRoots[rootID] = true
+	}
+	for rootID, previousSnapshots := range h.retained {
+		for _, previousSnapshot := range previousSnapshots {
+			protected[rootID+"\x00"+previousSnapshot.snapshot.CandidateID] = true
+			h.gcRetained[candidatePrefix(rootID, previousSnapshot.snapshot.Generation, previousSnapshot.snapshot.CandidateID)] = true
+		}
 	}
 	for rootID, pending := range h.pending {
 		protected[rootID+"\x00"+pending.CandidateID] = true
 		h.gcRetained[candidatePrefix(rootID, pending.Generation, pending.CandidateID)] = true
-		activeRoots[rootID] = true
 	}
 	for readerKey := range h.readers {
 		protected[readerKey] = true
 	}
 	h.mu.RUnlock()
 	sort.Slice(h.gcCandidates, func(i, j int) bool { return h.gcCandidates[i].modified.After(h.gcCandidates[j].modified) })
-	kept := make(map[string]int)
 	deletable := h.gcCandidates[:0]
 	for _, candidate := range h.gcCandidates {
 		if candidate.snapshot.RootID == "" {
@@ -628,10 +730,7 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 		}
 		identity := candidate.snapshot.RootID + "\x00" + candidate.snapshot.CandidateID
 		prefix := candidate.prefix
-		if protected[identity] || now.Sub(candidate.modified) < h.config.GracePeriod || activeRoots[candidate.snapshot.RootID] && kept[candidate.snapshot.RootID] < h.config.KeepPrevious {
-			if !protected[identity] && activeRoots[candidate.snapshot.RootID] {
-				kept[candidate.snapshot.RootID]++
-			}
+		if protected[identity] || now.Sub(candidate.modified) < h.config.GracePeriod {
 			h.gcRetained[prefix] = true
 			continue
 		}
@@ -647,11 +746,24 @@ func (h *GenerationManager) deleteGenerationCandidates(ctx context.Context, limi
 	for h.gcCandidateIndex < len(h.gcCandidates) {
 		candidate := &h.gcCandidates[h.gcCandidateIndex]
 		h.mu.RLock()
-		current := h.current[candidate.snapshot.RootID]
+		currentSnapshot := h.current[candidate.snapshot.RootID]
 		pending := h.pending[candidate.snapshot.RootID]
-		active := h.gcRetained[candidate.prefix] || candidate.snapshot.RootID != "" && (current != nil && current.snapshot.CandidateID == candidate.snapshot.CandidateID || pending.CandidateID == candidate.snapshot.CandidateID || h.readers[candidate.snapshot.RootID+"\x00"+candidate.snapshot.CandidateID] != 0)
+		candidateInUse := h.gcRetained[candidate.prefix]
+		if !candidateInUse && candidate.snapshot.RootID != "" {
+			candidateInUse = currentSnapshot != nil && currentSnapshot.snapshot.CandidateID == candidate.snapshot.CandidateID ||
+				pending.CandidateID == candidate.snapshot.CandidateID ||
+				h.readers[candidate.snapshot.RootID+"\x00"+candidate.snapshot.CandidateID] != 0
+		}
+		if !candidateInUse {
+			for _, previousSnapshot := range h.retained[candidate.snapshot.RootID] {
+				if previousSnapshot.snapshot.CandidateID == candidate.snapshot.CandidateID {
+					candidateInUse = true
+					break
+				}
+			}
+		}
 		h.mu.RUnlock()
-		if active {
+		if candidateInUse {
 			h.gcRetained[candidate.prefix] = true
 			h.gcCandidateIndex++
 			h.gcObjectIndex = 0
@@ -725,23 +837,36 @@ func (h *GenerationManager) deleteUnretainedGenerationBlobs(ctx context.Context,
 			return nil
 		}
 		h.mu.RLock()
-		active := false
-		for rootID, current := range h.current {
-			if candidatePrefix(rootID, current.snapshot.Generation, current.snapshot.CandidateID) == prefix {
-				active = true
+		candidateInUse := false
+		for rootID, currentSnapshot := range h.current {
+			if candidatePrefix(rootID, currentSnapshot.snapshot.Generation, currentSnapshot.snapshot.CandidateID) == prefix {
+				candidateInUse = true
 				break
 			}
 		}
-		if !active {
+		if !candidateInUse {
+			for rootID, previousSnapshots := range h.retained {
+				for _, previousSnapshot := range previousSnapshots {
+					if candidatePrefix(rootID, previousSnapshot.snapshot.Generation, previousSnapshot.snapshot.CandidateID) == prefix {
+						candidateInUse = true
+						break
+					}
+				}
+				if candidateInUse {
+					break
+				}
+			}
+		}
+		if !candidateInUse {
 			for rootID, pending := range h.pending {
 				if candidatePrefix(rootID, pending.Generation, pending.CandidateID) == prefix {
-					active = true
+					candidateInUse = true
 					break
 				}
 			}
 		}
 		h.mu.RUnlock()
-		if !active {
+		if !candidateInUse {
 			err = h.config.Store.DeleteObject(ctx, h.config.Tenant, objectPath)
 		}
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {

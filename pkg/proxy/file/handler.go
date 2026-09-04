@@ -40,7 +40,7 @@ type handler struct {
 	origin      *url.URL
 	passHeaders []string
 	rules       []Rule
-	workDir     string
+	spooler     *storeio.Spooler
 	store       *blobfs.Store
 	client      *transport.Client
 	stats       *metrics.Stats
@@ -54,9 +54,15 @@ func newHandler(cfg handlerConfig) (*handler, error) {
 		return nil, fmt.Errorf("parse file upstream: %w", err)
 	}
 	return &handler{
-		name: cfg.name, origin: origin, passHeaders: cfg.passHeaders, rules: cfg.rules,
-		workDir: cfg.workDir, store: cfg.store, client: cfg.client, stats: cfg.stats,
-		lifecycle: storeio.NewLifecycle(),
+		name:        cfg.name,
+		origin:      origin,
+		passHeaders: cfg.passHeaders,
+		rules:       cfg.rules,
+		spooler:     cfg.client.EnsureSpooler(cfg.workDir),
+		store:       cfg.store,
+		client:      cfg.client,
+		stats:       cfg.stats,
+		lifecycle:   storeio.NewLifecycle(),
 	}, nil
 }
 
@@ -229,7 +235,7 @@ func (h *handler) streamAndStoreFlight(w http.ResponseWriter, request *http.Requ
 	headers := response.Header.Clone()
 	headers.Del("Content-Length")
 	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-		Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+		Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, "file", 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, "file", -1) },
 		StoreFn: func(ctx context.Context, reader io.Reader) error {

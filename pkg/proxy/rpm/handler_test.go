@@ -122,6 +122,54 @@ func TestRPMRepomdPublishesUpstreamGenerationUpdate(t *testing.T) {
 	}
 }
 
+func TestRPMRetainsPreviousChecksumNamedMetadata(t *testing.T) {
+	metadata := [][]byte{[]byte("primary-v1"), []byte("primary-v2")}
+	locations := []string{"repodata/primary-a.xml", "repodata/primary-b.xml"}
+	repomd := make([]string, len(metadata))
+	for index, body := range metadata {
+		digest := sha256.Sum256(body)
+		repomd[index] = fmt.Sprintf(`<repomd><data type="primary"><checksum type="sha256">%x</checksum><location href="%s"/><size>%d</size></data></repomd>`, digest, locations[index], len(body))
+	}
+	var revision atomic.Int32
+	revision.Store(1)
+	var oldObjectRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := int(revision.Load() - 1)
+		switch request.URL.Path {
+		case "/repo/repodata/repomd.xml":
+			w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
+			_, _ = io.WriteString(w, repomd[current])
+		case "/repo/" + locations[current]:
+			if current == 0 {
+				oldObjectRequests.Add(1)
+			}
+			_, _ = w.Write(metadata[current])
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	h := newRPMTestHandler(t, server.URL)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/repo/repodata/repomd.xml", nil))
+	_, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), oldObjectRequests.Load())
+	revision.Store(2)
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+
+	old := httptest.NewRecorder()
+	h.ServeHTTP(old, httptest.NewRequest(http.MethodGet, "/repo/"+locations[0], nil))
+	require.Equal(t, http.StatusOK, old.Code)
+	require.Equal(t, "HIT", old.Header().Get("X-Cache"))
+	require.Equal(t, metadata[0], old.Body.Bytes())
+	require.Equal(t, int32(1), oldObjectRequests.Load())
+}
+
 func TestRPMValidatesOpenChecksumAndSize(t *testing.T) {
 	primary := []byte(`<metadata><package><location href="Packages/demo.rpm"/></package></metadata>`)
 	var compressed bytes.Buffer

@@ -64,12 +64,13 @@ type ObjectSpec struct {
 }
 
 type Object struct {
-	Path   string      `json:"path"`
-	State  ObjectState `json:"state"`
-	Key    string      `json:"key,omitempty"`
-	Size   int64       `json:"size,omitempty"`
-	SHA256 string      `json:"sha256,omitempty"`
-	Header http.Header `json:"header,omitempty"`
+	Path       string      `json:"path"`
+	State      ObjectState `json:"state"`
+	Key        string      `json:"key,omitempty"`
+	Size       int64       `json:"size,omitempty"`
+	SHA256     string      `json:"sha256,omitempty"`
+	Header     http.Header `json:"header,omitempty"`
+	Retainable bool        `json:"retainable,omitempty"`
 }
 
 type Snapshot struct {
@@ -116,12 +117,19 @@ type Config struct {
 }
 
 type currentMarker struct {
-	RootID         string `yaml:"root_id"`
-	Root           string `yaml:"root"`
+	RootID         string              `yaml:"root_id"`
+	Root           string              `yaml:"root"`
+	Generation     string              `yaml:"generation"`
+	CandidateID    string              `yaml:"candidate_id"`
+	SnapshotSHA256 string              `yaml:"snapshot_sha256"`
+	Upstream       string              `yaml:"upstream"`
+	Previous       []snapshotReference `yaml:"previous,omitempty"`
+}
+
+type snapshotReference struct {
 	Generation     string `yaml:"generation"`
 	CandidateID    string `yaml:"candidate_id"`
 	SnapshotSHA256 string `yaml:"snapshot_sha256"`
-	Upstream       string `yaml:"upstream"`
 }
 
 type pendingAnchor struct {
@@ -141,7 +149,8 @@ type lastSeenMarker struct {
 }
 
 type liveSnapshot struct {
-	snapshot *Snapshot
+	snapshot       *Snapshot
+	snapshotSHA256 string
 }
 
 type gcCandidate struct {
@@ -172,6 +181,7 @@ type GenerationManager struct {
 	config            Config
 	mu                sync.RWMutex
 	current           map[string]*liveSnapshot
+	retained          map[string][]*liveSnapshot
 	pending           map[string]pendingAnchor
 	readers           map[string]int
 	lastSeen          map[string]time.Time
@@ -235,9 +245,17 @@ func New(config Config) (*GenerationManager, error) {
 		config.AnchorMaxBytes = DefaultMaxObject
 	}
 	h := &GenerationManager{
-		config: config, current: make(map[string]*liveSnapshot), pending: make(map[string]pendingAnchor), readers: make(map[string]int),
-		lastSeen: make(map[string]time.Time), lastSeenPersisted: make(map[string]time.Time), retryWindows: make(map[string]retryWindow), retiring: make(map[string]bool),
-		discoveryPending: make(map[string]bool), pollQueued: make(map[string]bool),
+		config:            config,
+		current:           make(map[string]*liveSnapshot),
+		retained:          make(map[string][]*liveSnapshot),
+		pending:           make(map[string]pendingAnchor),
+		readers:           make(map[string]int),
+		lastSeen:          make(map[string]time.Time),
+		lastSeenPersisted: make(map[string]time.Time),
+		retryWindows:      make(map[string]retryWindow),
+		retiring:          make(map[string]bool),
+		discoveryPending:  make(map[string]bool),
+		pollQueued:        make(map[string]bool),
 	}
 	if err := h.restore(); err != nil {
 		return nil, err
@@ -320,7 +338,16 @@ func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anc
 	if _, err := h.config.Store.Put(ctx, h.config.Tenant, key, body, nil); err != nil {
 		return fmt.Errorf("stage metadata anchor: %w", err)
 	}
-	pending := pendingAnchor{RootID: rootID, Root: root, Path: anchorPath, Upstream: h.config.Upstream, Generation: generation, CandidateID: candidateID, Header: cloneHeader(header), Key: key}
+	pending := pendingAnchor{
+		RootID:      rootID,
+		Root:        root,
+		Path:        anchorPath,
+		Upstream:    h.config.Upstream,
+		Generation:  generation,
+		CandidateID: candidateID,
+		Header:      cloneHeader(header),
+		Key:         key,
+	}
 	now := time.Now().UTC()
 	preparedLastSeen, err := prepareJSON(h.config.StateDir, lastSeenName(rootID), lastSeenMarker{RootID: rootID, SeenAt: now}, maxRepositoryMarkerSize)
 	if err != nil {
@@ -812,7 +839,7 @@ func (h *GenerationManager) updateCurrentFreshness(rootID, candidateID string, h
 	// replacing both the snapshot and current marker and creates a crash window
 	// where their digests disagree. Losing freshness on restart only causes an
 	// early same-origin conditional poll.
-	h.current[rootID] = &liveSnapshot{snapshot: &updated}
+	h.current[rootID] = &liveSnapshot{snapshot: &updated, snapshotSHA256: live.snapshotSHA256}
 	return nil
 }
 
@@ -822,9 +849,26 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 	if err != nil {
 		return fmt.Errorf("open staged anchor: %w", err)
 	}
-	anchorBlob := &Blob{handler: h, object: Object{Path: pending.Path, State: ObjectPresent, Key: pending.Key, Size: anchorReader.Info().Size, SHA256: pending.Generation, Header: pending.Header}}
+	anchorBlob := &Blob{
+		handler: h,
+		object: Object{
+			Path:   pending.Path,
+			State:  ObjectPresent,
+			Key:    pending.Key,
+			Size:   anchorReader.Info().Size,
+			SHA256: pending.Generation,
+			Header: pending.Header,
+		},
+	}
 	_ = anchorReader.Close()
-	session := &RefreshSession{handler: h, rootID: rootID, root: pending.Root, generation: pending.Generation, candidateID: pending.CandidateID, objects: make(map[string]Object)}
+	session := &RefreshSession{
+		handler:     h,
+		rootID:      rootID,
+		root:        pending.Root,
+		generation:  pending.Generation,
+		candidateID: pending.CandidateID,
+		objects:     make(map[string]Object),
+	}
 	session.objects[pending.Path] = anchorBlob.object
 	anchor := Anchor{RootID: rootID, Root: pending.Root, Path: pending.Path, Generation: pending.Generation, Header: pending.Header, blob: anchorBlob}
 	if err := h.config.Build(ctx, session, anchor); err != nil {
@@ -839,7 +883,16 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 		objects = append(objects, object)
 	}
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Path < objects[j].Path })
-	snapshot := &Snapshot{RootID: rootID, Root: pending.Root, Anchor: pending.Path, Generation: pending.Generation, CandidateID: pending.CandidateID, Upstream: h.config.Upstream, PublishedAt: time.Now().UTC(), Objects: objects}
+	snapshot := &Snapshot{
+		RootID:      rootID,
+		Root:        pending.Root,
+		Anchor:      pending.Path,
+		Generation:  pending.Generation,
+		CandidateID: pending.CandidateID,
+		Upstream:    h.config.Upstream,
+		PublishedAt: time.Now().UTC(),
+		Objects:     objects,
+	}
 	if err := prepareSnapshot(snapshot); err != nil {
 		return err
 	}
@@ -853,29 +906,65 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 	if err := writeBytes(h.config.StateDir, snapshotName(rootID, pending.Generation, pending.CandidateID), encoded); err != nil {
 		return err
 	}
-	marker := currentMarker{RootID: rootID, Root: pending.Root, Generation: pending.Generation, CandidateID: pending.CandidateID, SnapshotSHA256: digest, Upstream: h.config.Upstream}
-	preparedMarker, err := prepareYAML(h.config.StateDir, currentName(rootID), marker)
-	if err != nil {
-		return err
-	}
-	defer preparedMarker.discard()
-
 	h.commitMu.Lock()
 	h.mu.RLock()
 	latest, stillPending := h.pending[rootID]
 	sameCandidate := stillPending && latest.CandidateID == pending.CandidateID
+	previousSnapshots := make([]*liveSnapshot, 0, h.config.KeepPrevious)
+	seenCandidateIDs := map[string]struct{}{pending.CandidateID: {}}
+	if current := h.current[rootID]; current != nil && current.snapshot.CandidateID != pending.CandidateID {
+		previousSnapshots = append(previousSnapshots, current)
+		seenCandidateIDs[current.snapshot.CandidateID] = struct{}{}
+	}
+	for _, retainedSnapshot := range h.retained[rootID] {
+		if len(previousSnapshots) >= h.config.KeepPrevious {
+			break
+		}
+		candidateID := retainedSnapshot.snapshot.CandidateID
+		if _, duplicate := seenCandidateIDs[candidateID]; !duplicate {
+			previousSnapshots = append(previousSnapshots, retainedSnapshot)
+			seenCandidateIDs[candidateID] = struct{}{}
+		}
+	}
 	h.mu.RUnlock()
 	if !sameCandidate {
 		h.commitMu.Unlock()
 		h.discardCandidate(rootID, pending)
 		return errors.New("metadata anchor changed during refresh")
 	}
+	marker := currentMarker{
+		RootID:         rootID,
+		Root:           pending.Root,
+		Generation:     pending.Generation,
+		CandidateID:    pending.CandidateID,
+		SnapshotSHA256: digest,
+		Upstream:       h.config.Upstream,
+		Previous:       make([]snapshotReference, 0, len(previousSnapshots)),
+	}
+	for _, previousSnapshot := range previousSnapshots {
+		marker.Previous = append(marker.Previous, snapshotReference{
+			Generation:     previousSnapshot.snapshot.Generation,
+			CandidateID:    previousSnapshot.snapshot.CandidateID,
+			SnapshotSHA256: previousSnapshot.snapshotSHA256,
+		})
+	}
+	preparedMarker, err := prepareYAML(h.config.StateDir, currentName(rootID), marker)
+	if err != nil {
+		h.commitMu.Unlock()
+		return err
+	}
+	defer preparedMarker.discard()
 	if err := preparedMarker.commit(); err != nil {
 		h.commitMu.Unlock()
 		return err
 	}
 	h.mu.Lock()
-	h.current[rootID] = &liveSnapshot{snapshot: snapshot}
+	h.current[rootID] = &liveSnapshot{snapshot: snapshot, snapshotSHA256: digest}
+	if len(previousSnapshots) == 0 {
+		delete(h.retained, rootID)
+	} else {
+		h.retained[rootID] = previousSnapshots
+	}
 	delete(h.pending, rootID)
 	h.mu.Unlock()
 	_ = os.Remove(statePath(h.config.StateDir, pendingName(rootID)))
@@ -934,36 +1023,80 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		return false, 0, ""
 	}
 	h.mu.Lock()
-	var selected *liveSnapshot
-	var object Object
-	var exists bool
-	matchedRoot := false
+	var selectedSnapshot *liveSnapshot
+	var selectedObject Object
+	objectFound := false
+	fromCurrent := false
+	repositoryMatched := false
 	matchedRootID := ""
 	matchedRootLength := -1
-	for candidateRootID, candidate := range h.current {
+	for candidateRootID, currentSnapshot := range h.current {
 		if rootID != "" && candidateRootID != rootID {
 			continue
 		}
 		if h.retiring[candidateRootID] {
 			continue
 		}
-		if !containsPath(candidate.snapshot.Root, requestPath) {
+		if !containsPath(currentSnapshot.snapshot.Root, requestPath) {
 			continue
 		}
-		matchedRoot = true
-		if len(candidate.snapshot.Root) > matchedRootLength {
+		repositoryMatched = true
+		if len(currentSnapshot.snapshot.Root) > matchedRootLength {
 			matchedRootID = candidateRootID
-			matchedRootLength = len(candidate.snapshot.Root)
+			matchedRootLength = len(currentSnapshot.snapshot.Root)
 		}
-		if candidateObject, ok := candidate.snapshot.byPath[requestPath]; ok && (!exists || len(candidate.snapshot.Root) > len(selected.snapshot.Root)) {
-			selected, object, exists = candidate, candidateObject, true
+		candidateObject, found := currentSnapshot.snapshot.byPath[requestPath]
+		if found && (!objectFound || len(currentSnapshot.snapshot.Root) > len(selectedSnapshot.snapshot.Root)) {
+			selectedSnapshot = currentSnapshot
+			selectedObject = candidateObject
+			objectFound = true
+			fromCurrent = true
 		}
 	}
-	if !matchedRoot {
+	if !repositoryMatched {
 		h.mu.Unlock()
 		return false, 0, ""
 	}
-	if !exists {
+	if !objectFound {
+		selectedRootLength := -1
+		previousObjectAmbiguous := false
+		for candidateRootID, previousSnapshots := range h.retained {
+			if rootID != "" && candidateRootID != rootID {
+				continue
+			}
+			currentSnapshot := h.current[candidateRootID]
+			if currentSnapshot == nil || h.retiring[candidateRootID] || !containsPath(currentSnapshot.snapshot.Root, requestPath) {
+				continue
+			}
+			for _, previousSnapshot := range previousSnapshots {
+				candidateObject, found := previousSnapshot.snapshot.byPath[requestPath]
+				if !found || candidateObject.State != ObjectPresent || !candidateObject.Retainable {
+					continue
+				}
+				rootLength := len(previousSnapshot.snapshot.Root)
+				if rootLength < selectedRootLength {
+					continue
+				}
+				if rootLength > selectedRootLength {
+					selectedSnapshot = previousSnapshot
+					selectedObject = candidateObject
+					objectFound = true
+					selectedRootLength = rootLength
+					previousObjectAmbiguous = false
+					continue
+				}
+				if selectedObject.SHA256 != candidateObject.SHA256 || selectedObject.Size != candidateObject.Size {
+					previousObjectAmbiguous = true
+				}
+			}
+		}
+		if previousObjectAmbiguous {
+			selectedSnapshot = nil
+			selectedObject = Object{}
+			objectFound = false
+		}
+	}
+	if !objectFound {
 		h.mu.Unlock()
 		if !classifiedMetadata {
 			return false, 0, ""
@@ -974,11 +1107,11 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
 		return true, http.StatusServiceUnavailable, "STALE"
 	}
-	readerKey := selected.snapshot.RootID + "\x00" + selected.snapshot.CandidateID
+	readerKey := selectedSnapshot.snapshot.RootID + "\x00" + selectedSnapshot.snapshot.CandidateID
 	h.readers[readerKey]++
-	selectedRootID := selected.snapshot.RootID
+	selectedRootID := selectedSnapshot.snapshot.RootID
 	cacheControl := strings.ToLower(request.Header.Get("Cache-Control"))
-	refreshRequested := requestPath == selected.snapshot.Anchor &&
+	refreshRequested := fromCurrent && requestPath == selectedSnapshot.snapshot.Anchor &&
 		(strings.Contains(cacheControl, "no-cache") || strings.Contains(cacheControl, "max-age=0"))
 	h.mu.Unlock()
 	if refreshRequested {
@@ -993,24 +1126,24 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		}
 		h.mu.Unlock()
 	}()
-	if object.State == ObjectNotFound || object.State == ObjectForbidden {
+	if selectedObject.State == ObjectNotFound || selectedObject.State == ObjectForbidden {
 		status := http.StatusNotFound
-		if object.State == ObjectForbidden {
+		if selectedObject.State == ObjectForbidden {
 			status = http.StatusForbidden
 		}
 		w.Header().Set("X-Cache", "HIT")
 		http.Error(w, http.StatusText(status), status)
 		return true, status, "HIT"
 	}
-	reader, err := h.config.Store.OpenObject(request.Context(), h.config.Tenant, object.Key)
+	reader, err := h.config.Store.OpenObject(request.Context(), h.config.Tenant, selectedObject.Key)
 	if err != nil {
 		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
 		return true, http.StatusServiceUnavailable, "ERROR"
 	}
 	defer func() { _ = reader.Close() }()
-	copyHeaders(w.Header(), object.Header)
+	copyHeaders(w.Header(), selectedObject.Header)
 	w.Header().Set("X-Cache", "HIT")
-	http.ServeContent(w, request, path.Base(requestPath), headerModTime(object.Header), reader)
+	http.ServeContent(w, request, path.Base(requestPath), headerModTime(selectedObject.Header), reader)
 	status := http.StatusOK
 	if request.Header.Get("Range") != "" {
 		status = http.StatusPartialContent
@@ -1264,6 +1397,21 @@ func (s *RefreshSession) Alias(alias string, blob *Blob) error {
 	}
 	object := blob.object
 	object.Path = cleaned
+	s.objects[cleaned] = object
+	return nil
+}
+
+func (s *RefreshSession) RetainObject(objectPath string) error {
+	cleaned, err := CleanPath(objectPath)
+	if err != nil || !containsPath(s.root, cleaned) || cleaned == s.root || cleaned == "" {
+		return fmt.Errorf("invalid retainable metadata path %q", objectPath)
+	}
+	object, exists := s.objects[cleaned]
+	anchorKey := candidatePrefix(s.rootID, s.generation, s.candidateID) + "/anchor"
+	if !exists || object.State != ObjectPresent || object.Key == anchorKey {
+		return fmt.Errorf("retainable metadata %q is not a present closure object", objectPath)
+	}
+	object.Retainable = true
 	s.objects[cleaned] = object
 	return nil
 }

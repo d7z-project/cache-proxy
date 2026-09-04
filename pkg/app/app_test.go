@@ -146,8 +146,10 @@ func TestHomePageRendersConfiguredInstances(t *testing.T) {
 	require.Contains(t, body, `data-language="de"`)
 	require.Contains(t, body, `data-language="fr"`)
 	require.Contains(t, body, `id="status-dialog"`)
+	require.Contains(t, body, `id="status-error-detail"`)
 	require.Contains(t, body, `id="disk-chart"`)
 	require.Contains(t, body, `data-status-tab="network"`)
+	require.Contains(t, body, `<pre><span class="code-comment"># Base URL for file access</span>`)
 }
 
 func TestHomePageAggregatesInstanceMetrics(t *testing.T) {
@@ -309,6 +311,11 @@ func TestSetupCommandGeneration(t *testing.T) {
 			note, cmd := setupCommand(tt.mode, tt.url)
 			require.Contains(t, note, tt.noteContain)
 			require.Contains(t, cmd, tt.cmdContain)
+			if tt.mode != "maven" {
+				for line := range strings.SplitSeq(note, "\n") {
+					require.Truef(t, strings.HasPrefix(line, "# "), "invalid comment line %q", line)
+				}
+			}
 			if tt.mode == "oci" {
 				require.Contains(t, cmd, "podman pull cache:5000/{image}:{tag}")
 				require.NotContains(t, cmd, "docker pull http://")

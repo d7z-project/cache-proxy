@@ -53,35 +53,35 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := app.Validate(doc); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
 	if *validateOnly {
+		if err := app.Validate(doc); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 
-	runtime, err := app.Open(context.Background(), doc)
+	application, err := app.Open(context.Background(), doc)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := runtime.Start(); err != nil {
+	if err := application.Start(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		_ = runtime.Close(shutdownCtx)
+		_ = application.Close(shutdownCtx)
 		cancel()
 		os.Exit(1)
 	}
 	slog.Info("cache proxy started", "bind", doc.Server.Bind, "backend", doc.Server.Backend, "metrics_path", doc.Metrics.Path)
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	<-sigs
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := runtime.Close(shutdownCtx); err != nil {
+	if err := application.Close(shutdownCtx); err != nil {
 		slog.Error("shutdown failed", "err", err)
 		os.Exit(1)
 	}

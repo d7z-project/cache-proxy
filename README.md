@@ -65,7 +65,7 @@ Linux binaries for `amd64`, `arm64`, and `loong64` are attached to each
 
 ### Build From Source
 
-Building requires Go 1.25 or newer.
+Building requires Go 1.26 or newer.
 
 ```bash
 git clone https://github.com/d7z-project/cache-proxy.git
@@ -252,20 +252,32 @@ metadata refresh runs every 15 minutes and can be scheduled immediately by
 revalidating the current anchor. Each generation is bound to the exact
 configured upstream; changing that URL invalidates its current and pending
 commit markers so the new upstream must publish a complete generation.
+The commit marker also names a bounded set of exact preceding snapshots. The
+current snapshot always wins; a preceding snapshot is consulted only for a
+protocol-verified, version-bound path that is absent from current. Marker and
+snapshot digests are validated on restart and before garbage-collection
+protection, so repository directories are never scanned to guess a fallback.
 
 Debian Release entries are validated per physical representation. A listed
 uncompressed index may be absent when a compressed sibling is available, as
 permitted by the repository format. Acquire-By-Hash repositories prefer the
 by-hash location and fall back to the same upstream canonical path only for a
 missing object; fallback bytes must still match the Release size and digest.
+Verified SHA256/SHA512 by-hash paths remain readable from an exact preceding
+snapshot during an index transition. Mutable canonical index paths,
+`InRelease`, `Release`, and fixed-name signatures remain current-only.
 Failed candidate generations use bounded retry delays and revalidate their
 anchor before resuming, while committed metadata remains available.
 
 RPM generations contain `repomd.xml` and its exact referenced closure;
-unreferenced same-origin `repodata` resources remain transparent. Flatpak
-indexed-summary deltas use a finite mutable cache outside the summary
-generation and remain opaque to the proxy; Flatpak verifies the reconstructed
-summary.
+validated referenced locations remain available from an exact preceding
+snapshot when their path is absent from current. `repomd.xml` and its detached
+signatures remain current-only, while unreferenced same-origin `repodata`
+resources remain transparent. Flatpak retains digest-named indexed summaries
+and digest-specific index signatures across the same bounded transition;
+fixed-name summaries and signatures remain current-only. Indexed-summary
+deltas use a finite mutable cache outside the summary generation and remain
+opaque to the proxy; Flatpak verifies the reconstructed summary.
 
 Request paths are classified after one percent-decoding pass. Equivalent legal
 encodings share a cache identity, while encoded separators and parent traversal

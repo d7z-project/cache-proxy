@@ -43,11 +43,12 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if !plan.Enabled() {
 		return nil
 	}
-	handler, err := newHandler(plan.Name(), plan.Upstream(), plan.Transport(), &options, plan.Store(), plan.Stats(), plan.UpstreamGate(), filepath.Join(plan.StoreRoot(), "work"))
+	workDir := filepath.Join(plan.StoreRoot(), "work")
+	spooler := storeio.NewSpooler(workDir, plan.MaxCacheObjectSize(), plan.SpoolBudget())
+	handler, err := newHandler(plan.Name(), plan.Upstream(), plan.Transport(), &options, plan.Store(), plan.Stats(), plan.UpstreamGate(), spooler)
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	handler.client.SetSpooler(storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget()))
 	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), goTenant, plan.Store(), plan.CleanupConfig())
 	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{
 		Handler:      handler,

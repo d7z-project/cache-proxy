@@ -8,6 +8,7 @@ import (
 	urlpkg "net/url"
 	"strings"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
@@ -51,9 +52,9 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		i18n = i18nMaps["en"]
 	}
 	baseURL := a.publicBaseURL(req)
-	var ss metrics.StatsSnapshot
+	var statsSnapshot metrics.StatsSnapshot
 	if a.stats != nil {
-		ss = a.stats.Snapshot()
+		statsSnapshot = a.stats.Snapshot()
 	}
 	var usage map[string]int64
 	if len(a.stores) > 0 {
@@ -66,8 +67,8 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	if usage == nil {
 		usage = make(map[string]int64)
 	}
-	instances := make([]homeInstance, 0)
-	modes := make([]string, 0)
+	instances := make([]homeInstance, 0, len(entries))
+	modes := make([]string, 0, len(entries))
 	seenModes := map[string]struct{}{}
 	totalCache := make(map[string]uint64)
 	var totalRequests uint64
@@ -77,19 +78,19 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		if !entry.Enabled {
 			continue
 		}
-		s := ss.Instances[entry.Name]
-		totalRequests += s.Requests
+		instanceStats := statsSnapshot.Instances[entry.Name]
+		totalRequests += instanceStats.Requests
 		totalDiskBytes += usage[entry.Name]
-		activeDownloads += s.ActiveDownloads
-		for result, count := range s.Cache {
+		activeDownloads += instanceStats.ActiveDownloads
+		for result, count := range instanceStats.Cache {
 			totalCache[result] += count
 		}
-		hi := buildHomeInstance(entry, baseURL, req, s, usage[entry.Name], i18n)
-		if _, ok := seenModes[hi.Mode]; !ok {
-			seenModes[hi.Mode] = struct{}{}
-			modes = append(modes, hi.Mode)
+		instanceView := buildHomeInstance(entry, baseURL, req, instanceStats, usage[entry.Name], i18n)
+		if _, ok := seenModes[instanceView.Mode]; !ok {
+			seenModes[instanceView.Mode] = struct{}{}
+			modes = append(modes, instanceView.Mode)
 		}
-		instances = append(instances, hi)
+		instances = append(instances, instanceView)
 	}
 	i18nJSON, _ := json.Marshal(i18n)
 	var degraded int
@@ -117,36 +118,49 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 	}
 }
 
-func buildHomeInstance(entry *proxyruntime.Entry, baseURL string, req *http.Request, s metrics.InstanceStats, diskBytes int64, i18n map[string]string) homeInstance {
-	instURL := instURL(entry, baseURL, req)
-	hi := homeInstance{
-		Name: entry.Name,
-		Mode: entry.Mode,
-		URL:  instURL,
-	}
-	hi.SetupNote, hi.SetupCmd = setupCommand(entry.Mode, instURL)
-	if hi.SetupNote != "" {
-		hi.SetupCopy = hi.SetupNote + "\n" + hi.SetupCmd
-	} else {
-		hi.SetupCopy = hi.SetupCmd
-	}
-	hi.Requests = formatCompact(s.Requests)
-	hi.HitRate = formatHitRate(s.Cache)
-	hi.DiskUsage = formatBytes(diskBytes)
-	if src, ok := entry.Runtime.(proxyruntime.StatusSource); ok {
-		hi.StatusColor, hi.StatusLabel, hi.StatusExtra = src.DashboardStatus()
-	} else {
-		if s.UpstreamRequests == 0 {
-			hi.StatusLabel = "\u2014"
-		} else if float64(s.UpstreamErrors)/float64(s.UpstreamRequests)*100 >= 5 {
-			hi.StatusColor = "yellow"
-			hi.StatusLabel = i18nStr(i18n, "n_err", int(s.UpstreamErrors))
-		} else {
-			hi.StatusColor = "green"
-			hi.StatusLabel = i18nStr(i18n, "upstream_ok")
+func buildHomeInstance(
+	entry *proxyruntime.Entry,
+	baseURL string,
+	request *http.Request,
+	stats metrics.InstanceStats,
+	diskBytes int64,
+	i18n map[string]string,
+) homeInstance {
+	instanceURL := baseURL + entry.Path
+	if entry.Bind != "" {
+		instanceURL = entry.DisplayURL
+		if instanceURL == "" {
+			instanceURL = bindDisplayURL(request, entry.Bind)
 		}
 	}
-	return hi
+	instanceView := homeInstance{
+		Name: entry.Name,
+		Mode: entry.Mode,
+		URL:  instanceURL,
+	}
+	instanceView.SetupNote, instanceView.SetupCmd = setupCommand(entry.Mode, instanceURL)
+	if instanceView.SetupNote != "" {
+		instanceView.SetupCopy = instanceView.SetupNote + "\n" + instanceView.SetupCmd
+	} else {
+		instanceView.SetupCopy = instanceView.SetupCmd
+	}
+	instanceView.Requests = formatCompact(stats.Requests)
+	instanceView.HitRate = formatHitRate(stats.Cache)
+	instanceView.DiskUsage = formatBytes(diskBytes)
+	if statusSource, ok := entry.Runtime.(proxyruntime.StatusSource); ok {
+		instanceView.StatusColor, instanceView.StatusLabel, instanceView.StatusExtra = statusSource.DashboardStatus()
+	} else {
+		if stats.UpstreamRequests == 0 {
+			instanceView.StatusLabel = "\u2014"
+		} else if float64(stats.UpstreamErrors)/float64(stats.UpstreamRequests)*100 >= 5 {
+			instanceView.StatusColor = "yellow"
+			instanceView.StatusLabel = i18nStr(i18n, "n_err", int(stats.UpstreamErrors))
+		} else {
+			instanceView.StatusColor = "green"
+			instanceView.StatusLabel = i18nStr(i18n, "upstream_ok")
+		}
+	}
+	return instanceView
 }
 
 func sortedEntries(entries map[string]*proxyruntime.Entry) []*proxyruntime.Entry {
@@ -168,17 +182,7 @@ func (a *App) publicBaseURL(req *http.Request) string {
 	return scheme + "://" + req.Host
 }
 
-func instURL(entry *proxyruntime.Entry, baseURL string, req *http.Request) string {
-	if entry.Bind != "" {
-		if entry.DisplayURL != "" {
-			return entry.DisplayURL
-		}
-		return bindURL(req, entry.Bind)
-	}
-	return baseURL + entry.Path
-}
-
-func bindURL(req *http.Request, bind string) string {
+func bindDisplayURL(req *http.Request, bind string) string {
 	host, port, err := net.SplitHostPort(bind)
 	if err != nil {
 		return "http://" + bind
@@ -197,44 +201,44 @@ func bindURL(req *http.Request, bind string) string {
 	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
-func setupCommand(mode, url string) (note, cmd string) {
-	url = strings.TrimRight(url, "/")
+func setupCommand(mode, instanceURL string) (note, command string) {
+	instanceURL = strings.TrimRight(instanceURL, "/")
 	switch mode {
-	case "git":
-		return "# Clone the repository", "git clone " + url
-	case "npm":
-		return "# Set the npm registry to this proxy", "npm config set registry " + url
-	case "go":
-		return "# Set Go module proxy", "go env -w GOPROXY=" + url
-	case "maven":
-		return "<!-- Replace {mirror_id} if needed -->", "<mirror>\n  <id>{mirror_id}</id>\n  <url>" + url + "</url>\n  <mirrorOf>*</mirrorOf>\n</mirror>"
-	case "cargo":
-		return "# Replace {source_name} and keep the proxy URL as is", "[source.{source_name}]\nregistry = \"sparse+" + url + "/\"\n\n[source.crates-io]\nreplace-with = \"{source_name}\""
-	case "pypi":
-		return "# Replace {package} with the package you want to install", "pip install --index-url " + url + "/simple {package}"
-	case "oci":
-		registry := url
-		if parsed, err := urlpkg.Parse(url); err == nil && parsed.Host != "" {
+	case config.ModeGit:
+		return "# Clone the repository", "git clone " + instanceURL
+	case config.ModeNPM:
+		return "# Set the npm registry to this proxy", "npm config set registry " + instanceURL
+	case config.ModeGo:
+		return "# Set Go module proxy", "go env -w GOPROXY=" + instanceURL
+	case config.ModeMaven:
+		return "<!-- Replace {mirror_id} if needed -->", "<mirror>\n  <id>{mirror_id}</id>\n  <url>" + instanceURL + "</url>\n  <mirrorOf>*</mirrorOf>\n</mirror>"
+	case config.ModeCargo:
+		return "# Replace {source_name} and keep the proxy URL as is", "[source.{source_name}]\nregistry = \"sparse+" + instanceURL + "/\"\n\n[source.crates-io]\nreplace-with = \"{source_name}\""
+	case config.ModePyPI:
+		return "# Replace {package} with the package you want to install", "pip install --index-url " + instanceURL + "/simple {package}"
+	case config.ModeOCI:
+		registry := instanceURL
+		if parsed, err := urlpkg.Parse(instanceURL); err == nil && parsed.Host != "" {
 			registry = parsed.Host
 		}
-		return "# Replace {image} and {tag}\ndocker / podman image reference must not include http:// or https://",
+		return "# Replace {image} and {tag}\n# Docker / Podman image references must not include http:// or https://",
 			"docker pull " + registry + "/{image}:{tag}\n" +
 				"podman pull " + registry + "/{image}:{tag}"
-	case "apk":
-		return "# Repository URL; apk fetches APKINDEX.tar.gz from this directory", url
-	case "deb":
+	case config.ModeAPK:
+		return "# Repository URL; apk fetches APKINDEX.tar.gz from this directory", instanceURL
+	case config.ModeDEB:
 		note := "# Standard repo: replace {distribution} and {component}\n" +
 			"# Flat repo: keep ./ as the suite and use this proxy URL"
-		return note, "deb " + url + " {distribution} {component}\n" +
-			"deb [trusted=yes] " + url + " ./"
-	case "rpm":
-		return "# Repository base URL; DNF/YUM will fetch repodata/repomd.xml below it", "baseurl=" + url
-	case "pacman":
-		return "# Repository base URL; common layouts may still include $repo/os/$arch", "Server = " + url
-	case "flatpak":
+		return note, "deb " + instanceURL + " {distribution} {component}\n" +
+			"deb [trusted=yes] " + instanceURL + " ./"
+	case config.ModeRPM:
+		return "# Repository base URL; DNF/YUM will fetch repodata/repomd.xml below it", "baseurl=" + instanceURL
+	case config.ModePacman:
+		return "# Repository base URL; common layouts may still include $repo/os/$arch", "Server = " + instanceURL
+	case config.ModeFlatpak:
 		return "# Replace {remote} with the Flatpak remote name",
-			"flatpak remote-add --if-not-exists {remote} " + url + "/{remote}.flatpakrepo"
+			"flatpak remote-add --if-not-exists {remote} " + instanceURL + "/{remote}.flatpakrepo"
 	default:
-		return "# Base URL for file access", url
+		return "# Base URL for file access", instanceURL
 	}
 }

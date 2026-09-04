@@ -86,6 +86,178 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 	require.NotNil(t, restarted.Current("repo"))
 }
 
+func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) {
+	type versionObject struct {
+		path     string
+		body     []byte
+		optional bool
+		retain   bool
+	}
+	type version struct {
+		anchor  []byte
+		objects []versionObject
+	}
+	versions := []version{
+		{anchor: []byte("release-a"), objects: []versionObject{
+			{path: "repo/shared", body: []byte("shared-a"), retain: true},
+			{path: "repo/historical", body: []byte("historical-a"), retain: true},
+			{path: "repo/removed", body: []byte("removed-a"), retain: true},
+			{path: "repo/unmarked", body: []byte("unmarked-a")},
+		}},
+		{anchor: []byte("release-b"), objects: []versionObject{
+			{path: "repo/shared", body: []byte("shared-b"), retain: true},
+			{path: "repo/removed", optional: true},
+		}},
+	}
+	active := 0
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stateDir := t.TempDir()
+	config := Config{
+		Instance: "retained", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		GracePeriod: time.Nanosecond,
+		Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+			for _, object := range versions[active].objects {
+				if object.path != requestPath {
+					continue
+				}
+				if object.body == nil {
+					return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(object.body)), ContentLength: int64(len(object.body))}, nil
+			}
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody}, nil
+		},
+	}
+	config.Build = func(ctx context.Context, session *RefreshSession, anchor Anchor) error {
+		selected := -1
+		for index := range versions {
+			if digestString(versions[index].anchor) == anchor.Generation {
+				selected = index
+				break
+			}
+		}
+		if selected < 0 {
+			return errors.New("unknown test generation")
+		}
+		for _, object := range versions[selected].objects {
+			blob, err := session.Fetch(ctx, ObjectSpec{Path: object.path, Optional: object.optional})
+			if err != nil {
+				return err
+			}
+			if object.retain && blob != nil {
+				if err := session.RetainObject(object.path); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	handler, err := New(config)
+	require.NoError(t, err)
+	publish := func(index int) *Snapshot {
+		active = index
+		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader(versions[index].anchor)))
+		_, refreshErr := handler.Refresh(context.Background(), 1)
+		require.NoError(t, refreshErr)
+		return handler.Current("repo")
+	}
+	first := publish(0)
+	firstAnchorKey := first.byPath[first.Anchor].Key
+	second := publish(1)
+
+	for requestPath, expected := range map[string]struct {
+		status int
+		body   string
+	}{
+		"repo/shared":     {status: http.StatusOK, body: "shared-b"},
+		"repo/historical": {status: http.StatusOK, body: "historical-a"},
+		"repo/removed":    {status: http.StatusNotFound},
+		"repo/unmarked":   {status: http.StatusServiceUnavailable},
+	} {
+		response := httptest.NewRecorder()
+		handled, status, _ := handler.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/"+requestPath, nil), requestPath, true)
+		require.True(t, handled, requestPath)
+		require.Equal(t, expected.status, status, requestPath)
+		if expected.body != "" {
+			require.Equal(t, expected.body, response.Body.String(), requestPath)
+		}
+	}
+
+	var marker currentMarker
+	_, err = readYAML(stateDir, currentName("repo"), &marker)
+	require.NoError(t, err)
+	require.Equal(t, second.CandidateID, marker.CandidateID)
+	require.Len(t, marker.Previous, 1)
+	require.Equal(t, first.Generation, marker.Previous[0].Generation)
+	require.Equal(t, first.CandidateID, marker.Previous[0].CandidateID)
+	require.True(t, validSHA256(marker.Previous[0].SnapshotSHA256))
+
+	restarted, err := New(config)
+	require.NoError(t, err)
+	response := httptest.NewRecorder()
+	handled, status, _ := restarted.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/historical", nil), "repo/historical", true)
+	require.True(t, handled)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "historical-a", response.Body.String())
+	drainGenerationGC(t, restarted)
+	response = httptest.NewRecorder()
+	_, status, _ = restarted.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/historical", nil), "repo/historical", true)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "historical-a", response.Body.String())
+
+	marker.Previous[0].SnapshotSHA256 = strings.Repeat("0", sha256.Size*2)
+	prepared, err := prepareYAML(stateDir, currentName("repo"), marker)
+	require.NoError(t, err)
+	require.NoError(t, prepared.commit())
+	prepared.discard()
+	withoutPrevious, err := New(config)
+	require.NoError(t, err)
+	require.Equal(t, second.CandidateID, withoutPrevious.Current("repo").CandidateID)
+	response = httptest.NewRecorder()
+	_, status, _ = withoutPrevious.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/historical", nil), "repo/historical", true)
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	drainGenerationGC(t, withoutPrevious)
+	_, err = store.StatObject(context.Background(), "metadata", firstAnchorKey)
+	require.Error(t, err)
+}
+
+func TestGenerationManagerRejectsConflictingRetainedObjects(t *testing.T) {
+	bodies := [][]byte{[]byte("first"), []byte("second"), nil}
+	active := 0
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler, err := New(Config{
+		Instance: "retained-conflict", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		KeepPrevious: 2,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(bodies[active])), ContentLength: int64(len(bodies[active]))}, nil
+		},
+		Build: func(ctx context.Context, session *RefreshSession, _ Anchor) error {
+			if bodies[active] == nil {
+				return nil
+			}
+			if _, err := session.Fetch(ctx, ObjectSpec{Path: "repo/versioned"}); err != nil {
+				return err
+			}
+			return session.RetainObject("repo/versioned")
+		},
+	})
+	require.NoError(t, err)
+	for index := range bodies {
+		active = index
+		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte{byte(index)})))
+		_, err = handler.Refresh(context.Background(), 1)
+		require.NoError(t, err)
+	}
+	response := httptest.NewRecorder()
+	handled, status, _ := handler.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/versioned", nil), "repo/versioned", true)
+	require.True(t, handled)
+	require.Equal(t, http.StatusServiceUnavailable, status)
+}
+
 func TestGenerationManagerRequiresAbsoluteHTTPUpstream(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
@@ -1335,6 +1507,41 @@ func TestGenerationManagerPublicationFaultsRemainRetryable(t *testing.T) {
 	}
 }
 
+func TestGenerationManagerPublicationFailureKeepsCommittedSnapshots(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	stateDir := t.TempDir()
+	handler, err := New(Config{
+		Instance: "publication-state", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Build: func(context.Context, *RefreshSession, Anchor) error { return nil },
+	})
+	require.NoError(t, err)
+	for _, body := range []string{"first", "second"} {
+		require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte(body))))
+		_, err = handler.Refresh(context.Background(), 1)
+		require.NoError(t, err)
+	}
+	committed := handler.Current("repo")
+	handler.mu.RLock()
+	require.Len(t, handler.retained["repo"], 1)
+	retainedCandidate := handler.retained["repo"][0].snapshot.CandidateID
+	handler.mu.RUnlock()
+
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("third"))))
+	markerPath := statePath(stateDir, currentName("repo"))
+	require.NoError(t, os.Remove(markerPath))
+	require.NoError(t, os.Mkdir(markerPath, 0o755))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.Error(t, err)
+	require.Equal(t, committed.CandidateID, handler.Current("repo").CandidateID)
+	handler.mu.RLock()
+	require.Len(t, handler.retained["repo"], 1)
+	require.Equal(t, retainedCandidate, handler.retained["repo"][0].snapshot.CandidateID)
+	handler.mu.RUnlock()
+}
+
 func TestGenerationManagerGCBoundsInactiveRootInspection(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
@@ -1486,6 +1693,7 @@ func FuzzCleanPath(f *testing.F) {
 
 func FuzzStateDecoders(f *testing.F) {
 	f.Add([]byte("root_id: repo\nroot: repo\ngeneration: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncandidate_id: 0123456789abcdef0123456789abcdef\nsnapshot_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nupstream: https://example.test\n"))
+	f.Add([]byte("root_id: repo\nroot: repo\ngeneration: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncandidate_id: 0123456789abcdef0123456789abcdef\nsnapshot_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nupstream: https://example.test\nprevious:\n  - generation: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n    candidate_id: abcdef0123456789abcdef0123456789\n    snapshot_sha256: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n"))
 	f.Add([]byte(`{"root_id":"repo","root":"repo"}`))
 	f.Fuzz(func(_ *testing.T, data []byte) {
 		if len(data) > 1<<20 {

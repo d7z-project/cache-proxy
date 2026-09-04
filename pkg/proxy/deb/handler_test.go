@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func newDebianTestHandler(t *testing.T, upstream string) (*handler, *blobfs.Store) {
@@ -157,6 +159,62 @@ func TestDebianPublishesUpstreamGenerationUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDebianRetainsPreviousAcquireByHashObject(t *testing.T) {
+	packages := [][]byte{[]byte("Package: demo\nVersion: 1\n"), []byte("Package: demo\nVersion: 2\n")}
+	releases := make([]string, len(packages))
+	byHashPaths := make([]string, len(packages))
+	for index, body := range packages {
+		digest := sha256.Sum256(body)
+		releases[index] = fmt.Sprintf("Acquire-By-Hash: yes\nSHA256:\n %x %d main/binary-amd64/Packages\n", digest, len(body))
+		byHashPaths[index] = fmt.Sprintf("/dists/trixie/main/binary-amd64/by-hash/SHA256/%x", digest)
+	}
+	var revision atomic.Int32
+	revision.Store(1)
+	var oldObjectRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		current := int(revision.Load() - 1)
+		switch request.URL.Path {
+		case "/dists/trixie/InRelease":
+			w.Header().Set("ETag", fmt.Sprintf(`"v%d"`, current+1))
+			_, _ = io.WriteString(w, releases[current])
+		case byHashPaths[current]:
+			if current == 0 {
+				oldObjectRequests.Add(1)
+			}
+			_, _ = w.Write(packages[current])
+		case "/dists/trixie/main/binary-amd64/Packages":
+			_, _ = w.Write(packages[current])
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	h, _ := newDebianTestHandler(t, server.URL)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
+	_, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), oldObjectRequests.Load())
+	revision.Store(2)
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+
+	old := httptest.NewRecorder()
+	h.ServeHTTP(old, httptest.NewRequest(http.MethodGet, byHashPaths[0], nil))
+	require.Equal(t, http.StatusOK, old.Code)
+	require.Equal(t, "HIT", old.Header().Get("X-Cache"))
+	require.Equal(t, packages[0], old.Body.Bytes())
+	require.Equal(t, int32(1), oldObjectRequests.Load())
+
+	canonical := httptest.NewRecorder()
+	h.ServeHTTP(canonical, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/binary-amd64/Packages", nil))
+	require.Equal(t, http.StatusOK, canonical.Code)
+	require.Equal(t, packages[1], canonical.Body.Bytes())
 }
 
 func TestDebianConcurrentFirstAnchorUsesOneStreamingTransfer(t *testing.T) {
@@ -528,8 +586,9 @@ func TestDebianFirstAnchorPassesThroughWhenSpoolCannotStart(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	handler, _ := newDebianTestHandler(t, server.URL)
-	require.NoError(t, os.RemoveAll(handler.workDir))
-	require.NoError(t, os.WriteFile(handler.workDir, []byte("not a directory"), 0o600))
+	invalidWorkDir := filepath.Join(t.TempDir(), "work")
+	require.NoError(t, os.WriteFile(invalidWorkDir, []byte("not a directory"), 0o600))
+	handler.spooler = storeio.NewSpooler(invalidWorkDir, int64(len(release)), nil)
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))

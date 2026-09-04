@@ -34,18 +34,6 @@ type Client struct {
 	spooler             *storeio.Spooler
 }
 
-func (c *Client) SetSpooler(spooler *storeio.Spooler) {
-	c.spoolMu.Lock()
-	c.spooler = spooler
-	c.spoolMu.Unlock()
-}
-
-func (c *Client) Spooler() *storeio.Spooler {
-	c.spoolMu.Lock()
-	defer c.spoolMu.Unlock()
-	return c.spooler
-}
-
 func (c *Client) EnsureSpooler(workDir string) *storeio.Spooler {
 	c.spoolMu.Lock()
 	defer c.spoolMu.Unlock()
@@ -66,9 +54,13 @@ func NewClient(instance, mode string, cfg *config.TransportConfig, gate *Upstrea
 	ConfigureHTTPClient(baseClient, instance, cfg)
 	ConfigureAdmission(baseClient.Client, gate)
 	result := &Client{
-		instance: instance, mode: mode, httpClient: baseClient.Client, stats: stats,
-		userAgent: baseClient.UserAgent, userAgentConfigured: baseClient.UserAgentConfigured,
-		idleBodyTimeout: baseClient.IdleBodyTimeout,
+		instance:            instance,
+		mode:                mode,
+		httpClient:          baseClient.Client,
+		stats:               stats,
+		userAgent:           baseClient.UserAgent,
+		userAgentConfigured: baseClient.UserAgentConfigured,
+		idleBodyTimeout:     baseClient.IdleBodyTimeout,
 	}
 	return result, nil
 }
@@ -80,7 +72,7 @@ func NewPlanClient(plan *proxyruntime.InstancePlan, mode string) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-	client.SetSpooler(storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget()))
+	client.spooler = storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget())
 	return client, nil
 }
 

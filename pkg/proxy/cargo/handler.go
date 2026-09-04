@@ -35,7 +35,7 @@ const (
 type handler struct {
 	origin    *url.URL
 	stateDir  string
-	workDir   string
+	spooler   *storeio.Spooler
 	store     *blobfs.Store
 	client    *transport.Client
 	lifecycle *storeio.Lifecycle
@@ -52,7 +52,14 @@ func newHandler(origin *url.URL, stateDir, workDir string, store *blobfs.Store, 
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return nil, err
 	}
-	return &handler{origin: origin, stateDir: stateDir, workDir: workDir, store: store, client: client, lifecycle: storeio.NewLifecycle()}, nil
+	return &handler{
+		origin:    origin,
+		stateDir:  stateDir,
+		spooler:   client.EnsureSpooler(workDir),
+		store:     store,
+		client:    client,
+		lifecycle: storeio.NewLifecycle(),
+	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -168,7 +175,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := h.client.EnsureSpooler(h.workDir).SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxCargoConfigSize, response.ContentLength)
+	spool, err := h.spooler.SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxCargoConfigSize, response.ContentLength)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			transport.WriteResponse(w, request, response, "BYPASS")
@@ -306,7 +313,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := h.client.EnsureSpooler(h.workDir).SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxSparseIndexSize, response.ContentLength)
+	spool, err := h.spooler.SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxSparseIndexSize, response.ContentLength)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			transport.WriteResponse(w, request, response, "BYPASS")
@@ -425,7 +432,7 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 		header := response.Header.Clone()
 		header.Del("Content-Length")
 		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-			Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error {
 				digest := sha256.New()
 				if _, err := io.Copy(digest, reader); err != nil {

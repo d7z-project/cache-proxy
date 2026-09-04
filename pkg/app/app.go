@@ -141,14 +141,10 @@ func Validate(doc *config.Document) error {
 	if err != nil {
 		return err
 	}
-	validateCtx, validateCancel := context.WithCancel(context.Background())
 	result, err := planEntries(context.Background(), &docCopy, stats, upstreamGate, taskScheduler)
 	if result != nil {
 		defer func() { _ = closeStores(result.Stores) }()
 	}
-	taskScheduler.Start(validateCtx)
-	defer validateCancel()
-	defer func() { _ = taskScheduler.Stop(validateCtx) }()
 	return err
 }
 

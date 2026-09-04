@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -236,7 +236,7 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if a.status == nil {
-		writeStatusError(w, http.StatusNotFound, errors.New("status endpoint disabled"))
+		http.Error(w, "status endpoint disabled", http.StatusNotFound)
 		return
 	}
 	switch req.URL.Path {
@@ -245,7 +245,8 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 	case "/-/status/disk":
 		writeStatusJSON(w, req, map[string]any{"samples": a.status.diskSamples()})
 	case "/-/status/events":
-		writeStatusJSON(w, req, map[string]any{"events": a.status.taskEvents(parseStatusLimit(req, a.status.eventLimit))})
+		limit, _ := strconv.Atoi(req.URL.Query().Get("limit"))
+		writeStatusJSON(w, req, map[string]any{"events": a.status.taskEvents(limit)})
 	case "/-/status/network":
 		writeStatusJSON(w, req, a.status.network(a))
 	default:
@@ -253,31 +254,10 @@ func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func parseStatusLimit(req *http.Request, fallback int) int {
-	value := req.URL.Query().Get("limit")
-	if value == "" {
-		return fallback
-	}
-	var limit int
-	for _, ch := range value {
-		if ch < '0' || ch > '9' {
-			return fallback
-		}
-		limit = limit*10 + int(ch-'0')
-		if limit > fallback {
-			return fallback
-		}
-	}
-	if limit <= 0 {
-		return fallback
-	}
-	return limit
-}
-
 func writeStatusJSON(w http.ResponseWriter, req *http.Request, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		writeStatusError(w, http.StatusInternalServerError, err)
+		proxyruntime.WriteError(w, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -287,12 +267,4 @@ func writeStatusJSON(w http.ResponseWriter, req *http.Request, payload any) {
 		return
 	}
 	_, _ = w.Write(data)
-}
-
-func writeStatusError(w http.ResponseWriter, status int, err error) {
-	if status >= 500 {
-		proxyruntime.WriteError(w, status)
-		return
-	}
-	http.Error(w, err.Error(), status)
 }

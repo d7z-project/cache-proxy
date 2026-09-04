@@ -71,7 +71,7 @@ RUN dnf install -y --setopt=install_weak_deps=False flatpak ostree && dnf clean 
 COPY fixtures/flatpak/build.sh /usr/local/bin/build-fixture
 RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
-FROM docker.io/library/golang:1.25-alpine AS fixture-server
+FROM docker.io/library/golang:1.26-alpine AS fixture-server
 WORKDIR /src
 COPY server/ .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/e2e-fixture *.go

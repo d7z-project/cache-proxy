@@ -10,6 +10,7 @@
 <body>
 <svg class="icon-sprite" aria-hidden="true">
   <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M10.3 3.7 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
   <symbol id="icon-box" viewBox="0 0 24 24"><path d="m21 8-9 5-9-5"/><path d="m3 8 9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/></symbol>
   <symbol id="icon-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
   <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
@@ -105,9 +106,9 @@
         <details class="setup-details">
           <summary><span><svg><use href="#icon-terminal"/></svg>{{t "setup"}}</span><svg class="chevron"><use href="#icon-chevron"/></svg></summary>
           <div class="setup-body">
-            {{if .SetupNote}}<p>{{.SetupNote}}</p>{{end}}
             <div class="code-block">
-              <pre>{{.SetupCmd}}</pre>
+              <pre>{{if .SetupNote}}<span class="code-comment">{{.SetupNote}}</span>
+{{end}}{{.SetupCmd}}</pre>
               <button class="icon-button copy-button" type="button" data-copy="{{.SetupCopy}}" aria-label="{{t "copy_setup"}}" title="{{t "copy_setup"}}">
                 <svg><use href="#icon-copy"/></svg>
               </button>
@@ -144,7 +145,13 @@
     </nav>
 
     <div id="status-loading" class="status-message"><span class="spinner"></span>{{t "loading_status"}}</div>
-    <div id="status-error" class="status-message status-error" hidden></div>
+    <div id="status-error" class="status-message status-error" role="alert" hidden>
+      <svg class="status-error-icon"><use href="#icon-alert"/></svg>
+      <div class="status-error-copy">
+        <strong>{{t "load_status_failed"}}</strong>
+        <pre id="status-error-detail"></pre>
+      </div>
+    </div>
 
     <div id="status-content" class="status-content" hidden>
       <section id="status-panel-overview" class="status-panel" role="tabpanel" aria-labelledby="status-tab-overview" data-status-panel="overview">
@@ -177,8 +184,8 @@
       <section id="status-panel-activity" class="status-panel" role="tabpanel" aria-labelledby="status-tab-activity" data-status-panel="activity" hidden>
         <div class="subsection-heading"><div><h3>{{t "maintenance_activity"}}</h3><p>{{t "activity_description"}}</p></div><span id="status-event-count" class="count-label"></span></div>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>{{t "finished"}}</th><th>{{t "storage"}}</th><th>{{t "task"}}</th><th>{{t "target"}}</th><th>{{t "result"}}</th><th>{{t "duration"}}</th></tr></thead>
+          <table class="activity-table">
+            <thead><tr><th class="event-col-finished">{{t "finished"}}</th><th class="event-col-storage">{{t "storage"}}</th><th class="event-col-task">{{t "task"}}</th><th class="event-col-target">{{t "target"}}</th><th class="event-col-result">{{t "result"}}</th><th class="event-col-duration">{{t "duration"}}</th></tr></thead>
             <tbody id="status-event-rows"></tbody>
           </table>
           <p id="status-event-empty" class="table-empty" hidden>{{t "no_activity"}}</p>

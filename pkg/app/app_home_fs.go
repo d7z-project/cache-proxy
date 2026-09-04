@@ -19,7 +19,7 @@ var homeAssets embed.FS
 
 var homeTemplate *template.Template
 
-var i18nMaps = map[string]map[string]string{}
+var i18nMaps = make(map[string]map[string]string)
 
 type localeOption struct {
 	Code   string
@@ -40,24 +40,23 @@ func init() {
 		i18nMaps[locale.Code] = loadI18N(locale.Code)
 	}
 
-	htmlData, err := homeAssets.ReadFile("assets/home.html")
-	if err != nil {
-		panic(err)
-	}
-	cssData, err := homeAssets.ReadFile("assets/style.css")
-	if err != nil {
-		panic(err)
-	}
-	jsCoreData, err := homeAssets.ReadFile("assets/script_core.js")
-	if err != nil {
-		panic(err)
-	}
+	htmlData := mustReadHomeAsset("assets/home.html")
+	cssData := mustReadHomeAsset("assets/style.css")
+	jsCoreData := mustReadHomeAsset("assets/script_core.js")
 
 	homeTemplate = template.Must(template.New("home").Funcs(template.FuncMap{
 		"css": func() template.CSS { return template.CSS(cssData) },
 		"js":  func() template.JS { return template.JS(jsCoreData) },
 		"t":   func(string, ...any) string { return "" },
 	}).Parse(string(htmlData)))
+}
+
+func mustReadHomeAsset(name string) []byte {
+	data, err := homeAssets.ReadFile(name)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 type homeData struct {
@@ -120,15 +119,12 @@ func detectLocale(req *http.Request) string {
 }
 
 func loadI18N(locale string) map[string]string {
-	data, err := homeAssets.ReadFile("assets/" + locale + ".json")
-	if err != nil {
+	data := mustReadHomeAsset("assets/" + locale + ".json")
+	translations := make(map[string]string)
+	if err := json.Unmarshal(data, &translations); err != nil {
 		panic(err)
 	}
-	m := map[string]string{}
-	if err := json.Unmarshal(data, &m); err != nil {
-		panic(err)
-	}
-	return m
+	return translations
 }
 
 func matchLocale(tag string) string {

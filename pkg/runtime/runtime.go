@@ -88,13 +88,13 @@ type PlanContext struct {
 }
 
 type InstancePlan struct {
-	ctx      *PlanContext
-	decl     config.Instance
-	selected config.SelectedMode
-	entry    *Entry
-	store    *blobfs.Store
-	root     string
-	bound    bool
+	planContext  *PlanContext
+	declaration  config.Instance
+	selectedMode config.SelectedMode
+	entry        *Entry
+	store        *blobfs.Store
+	storeRoot    string
+	bound        bool
 }
 
 func NewPlanContext(
@@ -140,7 +140,7 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 		Enabled: selected.Enabled,
 	}
 	p.entries[name] = entry
-	plan := &InstancePlan{ctx: p, decl: decl, selected: selected, entry: entry}
+	plan := &InstancePlan{planContext: p, declaration: decl, selectedMode: selected, entry: entry}
 	if !entry.Enabled {
 		return plan, nil
 	}
@@ -150,12 +150,21 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 			return nil, fmt.Errorf("instance %s: create %s directory: %w", name, directory, err)
 		}
 	}
-	store, err := blobfs.Open(filepath.Join(root, "blobs"), instanceBlobFSConfig())
+	storeConfig := blobfs.DefaultConfig()
+	storeConfig.MaxOpenWriteSessions = 128
+	storeConfig.Chunking.MaxSize = 4 << 20
+	if storeConfig.Chunking.AvgSize > storeConfig.Chunking.MaxSize {
+		storeConfig.Chunking.AvgSize = storeConfig.Chunking.MaxSize
+	}
+	if storeConfig.Chunking.MinSize > storeConfig.Chunking.AvgSize {
+		storeConfig.Chunking.MinSize = storeConfig.Chunking.AvgSize
+	}
+	store, err := blobfs.Open(filepath.Join(root, "blobs"), storeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("instance %s: open blob store: %w", name, err)
 	}
 	plan.store = store
-	plan.root = root
+	plan.storeRoot = root
 	p.stores[name] = store
 	return plan, nil
 }
@@ -195,38 +204,25 @@ func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
 func (i *InstancePlan) Name() string                        { return i.entry.Name }
 func (i *InstancePlan) Enabled() bool                       { return i.entry.Enabled }
 func (i *InstancePlan) Store() *blobfs.Store                { return i.store }
-func (i *InstancePlan) StoreRoot() string                   { return i.root }
-func (i *InstancePlan) Stats() *metrics.Stats               { return i.ctx.stats }
-func (i *InstancePlan) UpstreamGate() *UpstreamGate         { return i.ctx.upstreamGate }
-func (i *InstancePlan) SpoolBudget() *SpoolBudget           { return i.ctx.spoolBudget }
-func (i *InstancePlan) MaxCacheObjectSize() int64           { return i.ctx.maxCacheObjectSize }
-func (i *InstancePlan) CleanupConfig() config.CleanupConfig { return i.ctx.cleanup }
-func (i *InstancePlan) Scheduler() *scheduler.Scheduler     { return i.ctx.scheduler }
-func (i *InstancePlan) Path() string                        { return strings.TrimSpace(i.decl.Path) }
-func (i *InstancePlan) Bind() string                        { return strings.TrimSpace(i.decl.Bind) }
-func (i *InstancePlan) DisplayURL() string                  { return strings.TrimSpace(i.decl.DisplayURL) }
-func (i *InstancePlan) Transport() *config.TransportConfig  { return i.decl.Transport }
+func (i *InstancePlan) StoreRoot() string                   { return i.storeRoot }
+func (i *InstancePlan) Stats() *metrics.Stats               { return i.planContext.stats }
+func (i *InstancePlan) UpstreamGate() *UpstreamGate         { return i.planContext.upstreamGate }
+func (i *InstancePlan) SpoolBudget() *SpoolBudget           { return i.planContext.spoolBudget }
+func (i *InstancePlan) MaxCacheObjectSize() int64           { return i.planContext.maxCacheObjectSize }
+func (i *InstancePlan) CleanupConfig() config.CleanupConfig { return i.planContext.cleanup }
+func (i *InstancePlan) Scheduler() *scheduler.Scheduler     { return i.planContext.scheduler }
+func (i *InstancePlan) Path() string                        { return strings.TrimSpace(i.declaration.Path) }
+func (i *InstancePlan) Bind() string                        { return strings.TrimSpace(i.declaration.Bind) }
+func (i *InstancePlan) DisplayURL() string                  { return strings.TrimSpace(i.declaration.DisplayURL) }
+func (i *InstancePlan) Transport() *config.TransportConfig  { return i.declaration.Transport }
 
-func instanceBlobFSConfig() blobfs.Config {
-	cfg := blobfs.DefaultConfig()
-	cfg.MaxOpenWriteSessions = 128
-	cfg.Chunking.MaxSize = 4 << 20
-	if cfg.Chunking.AvgSize > cfg.Chunking.MaxSize {
-		cfg.Chunking.AvgSize = cfg.Chunking.MaxSize
-	}
-	if cfg.Chunking.MinSize > cfg.Chunking.AvgSize {
-		cfg.Chunking.MinSize = cfg.Chunking.AvgSize
-	}
-	return cfg
-}
-
-func (i *InstancePlan) Upstream() string { return strings.TrimSpace(i.decl.Upstream) }
+func (i *InstancePlan) Upstream() string { return strings.TrimSpace(i.declaration.Upstream) }
 
 func (i *InstancePlan) Decode(target any) error {
-	if i.selected.Options == nil {
+	if i.selectedMode.Options == nil {
 		return nil
 	}
-	if err := i.selected.Options.DecodeStrict(target); err != nil {
+	if err := i.selectedMode.Options.DecodeStrict(target); err != nil {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
@@ -269,28 +265,28 @@ func (i *InstancePlan) bind(pathValue, addr string, runtime Instance) error {
 		if normalized == "" || normalized == "/" || strings.Contains(normalized, "//") {
 			return fmt.Errorf("invalid listen path %q", pathValue)
 		}
-		if owner := i.ctx.pathOwners[normalized]; owner != "" {
+		if owner := i.planContext.pathOwners[normalized]; owner != "" {
 			return fmt.Errorf("listen path %s conflicts between %s and %s", normalized, owner, i.entry.Name)
 		}
-		for reserved, owner := range i.ctx.reservedPathPrefixes {
+		for reserved, owner := range i.planContext.reservedPathPrefixes {
 			if normalized == reserved || strings.HasPrefix(normalized, reserved+"/") || strings.HasPrefix(reserved, normalized+"/") {
 				return fmt.Errorf("listen path %s conflicts with %s at %s", normalized, owner, reserved)
 			}
 		}
-		if normalized == i.ctx.metricsPath {
+		if normalized == i.planContext.metricsPath {
 			return fmt.Errorf("listen path %s conflicts with metrics path", normalized)
 		}
-		i.ctx.pathOwners[normalized] = i.entry.Name
+		i.planContext.pathOwners[normalized] = i.entry.Name
 		i.entry.Path = normalized
 	} else {
 		trimmed := strings.TrimSpace(addr)
 		if err := ValidateBindAddress(trimmed); err != nil {
 			return err
 		}
-		if owner := i.ctx.bindOwners[trimmed]; owner != "" {
+		if owner := i.planContext.bindOwners[trimmed]; owner != "" {
 			return fmt.Errorf("listen bind %s conflicts between %s and %s", trimmed, owner, i.entry.Name)
 		}
-		i.ctx.bindOwners[trimmed] = i.entry.Name
+		i.planContext.bindOwners[trimmed] = i.entry.Name
 		i.entry.Bind = trimmed
 	}
 	i.entry.Runtime = runtime

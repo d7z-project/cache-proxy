@@ -60,13 +60,20 @@ func OpenResponse(ctx context.Context, store *blobfs.Store, tenant, key string) 
 		_ = reader.Close()
 		return nil, fmt.Errorf("decode stored response metadata: %w", err)
 	}
-	if metadata.Status < 100 || metadata.Status > 599 || metadata.Origin == "" || metadata.Fetched.IsZero() || metadata.DeleteAt.IsZero() || metadata.Retention <= 0 || metadata.LogicalKey != key {
+	validStatus := metadata.Status >= 100 && metadata.Status <= 599
+	if !validStatus || metadata.Origin == "" || metadata.Fetched.IsZero() || metadata.DeleteAt.IsZero() ||
+		metadata.Retention <= 0 || metadata.LogicalKey != key {
 		_ = reader.Close()
-		return nil, fmt.Errorf("stored response metadata is invalid")
+		return nil, errors.New("stored response metadata is invalid")
 	}
 	return &ResponseObject{
-		Reader: reader, Header: header, Status: metadata.Status, Origin: metadata.Origin,
-		Fetched: metadata.Fetched, SHA256: metadata.SHA256, WireSize: reader.Info().Size,
+		Reader:   reader,
+		Header:   header,
+		Status:   metadata.Status,
+		Origin:   metadata.Origin,
+		Fetched:  metadata.Fetched,
+		SHA256:   metadata.SHA256,
+		WireSize: reader.Info().Size,
 		DeleteAt: metadata.DeleteAt,
 	}, nil
 }
@@ -101,8 +108,13 @@ func putResponseWithRetention(ctx context.Context, store *blobfs.Store, tenant, 
 	}
 	now := time.Now().UTC()
 	metadata, err := json.Marshal(storedResponseMetadata{
-		Status: status, Origin: origin, Fetched: now, SHA256: sha256Digest,
-		DeleteAt: now.Add(retention), Retention: retention, LogicalKey: key,
+		Status:     status,
+		Origin:     origin,
+		Fetched:    now,
+		SHA256:     sha256Digest,
+		DeleteAt:   now.Add(retention),
+		Retention:  retention,
+		LogicalKey: key,
 	})
 	if err != nil {
 		return fmt.Errorf("encode response metadata: %w", err)
@@ -112,7 +124,8 @@ func putResponseWithRetention(ctx context.Context, store *blobfs.Store, tenant, 
 		return fmt.Errorf("prepare response directory: %w", err)
 	}
 	_, err = store.Put(ctx, tenant, objectPath, body, map[string]string{
-		"header": string(encodedHeader), "metadata": string(metadata),
+		"header":   string(encodedHeader),
+		"metadata": string(metadata),
 	})
 	return err
 }

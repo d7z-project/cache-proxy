@@ -38,6 +38,7 @@ type handler struct {
 	name      string
 	origin    *url.URL
 	workDir   string
+	spooler   *storeio.Spooler
 	store     *blobfs.Store
 	client    *transport.Client
 	stats     *metrics.Stats
@@ -71,7 +72,17 @@ func newHandler(name, upstream, stateDir, workDir string, store *blobfs.Store, c
 	if err != nil {
 		return nil, fmt.Errorf("load npm signing state: %w", err)
 	}
-	return &handler{name: name, origin: origin, workDir: workDir, store: store, client: client, stats: stats, secret: secret, lifecycle: storeio.NewLifecycle()}, nil
+	return &handler{
+		name:      name,
+		origin:    origin,
+		workDir:   workDir,
+		spooler:   client.EnsureSpooler(workDir),
+		store:     store,
+		client:    client,
+		stats:     stats,
+		secret:    secret,
+		lifecycle: storeio.NewLifecycle(),
+	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -252,7 +263,7 @@ func (h *handler) fetchPackument(request *http.Request, packageName string, cach
 }
 
 func (h *handler) transformAndCommit(request *http.Request, packageName, key string, response *http.Response) (*transformedPackument, error) {
-	source, err := h.client.EnsureSpooler(h.workDir).SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxPackumentSize, response.ContentLength)
+	source, err := h.spooler.SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, maxPackumentSize, response.ContentLength)
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +529,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 		header := response.Header.Clone()
 		header.Del("Content-Length")
 		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-			Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error { return verifyTarball(reader, authorization) },
 			StoreFn: func(ctx context.Context, body io.Reader) error {
 				return putObject(ctx, h.store, key, target.Scheme+"://"+target.Host, response.Header, body)

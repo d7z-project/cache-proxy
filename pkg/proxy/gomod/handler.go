@@ -57,12 +57,12 @@ type handler struct {
 	store     *blobfs.Store
 	client    *transport.Client
 	stats     *metrics.Stats
-	workDir   string
+	spooler   *storeio.Spooler
 	lifecycle *storeio.Lifecycle
 	flights   storeio.FlightGroup
 }
 
-func newHandler(name, upstream string, transportConfig *config.TransportConfig, options *Config, store *blobfs.Store, stats *metrics.Stats, gate *transport.UpstreamGate, workDir string) (*handler, error) {
+func newHandler(name, upstream string, transportConfig *config.TransportConfig, options *Config, store *blobfs.Store, stats *metrics.Stats, gate *transport.UpstreamGate, spooler *storeio.Spooler) (*handler, error) {
 	if options == nil {
 		options = &Config{}
 	}
@@ -80,8 +80,15 @@ func newHandler(name, upstream string, transportConfig *config.TransportConfig, 
 		return nil, err
 	}
 	return &handler{
-		name: name, options: options, origin: origin, sumDB: sumDB, store: store, stats: stats, workDir: workDir,
-		client: client, lifecycle: storeio.NewLifecycle(),
+		name:      name,
+		options:   options,
+		origin:    origin,
+		sumDB:     sumDB,
+		store:     store,
+		client:    client,
+		stats:     stats,
+		spooler:   spooler,
+		lifecycle: storeio.NewLifecycle(),
 	}, nil
 }
 
@@ -131,7 +138,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		return http.StatusNotFound, "BYPASS"
 	}
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		response, err := h.openUpstream(request.Context(), h.origin, request.Method, parsed.cacheKey, request.Header)
+		response, err := h.fetchUpstream(request.Context(), h.origin, request.Method, parsed.cacheKey, request.Header)
 		if err != nil {
 			transport.WriteError(w, http.StatusBadGateway)
 			return http.StatusBadGateway, "ERROR"
@@ -174,7 +181,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.openUpstream(h.lifecycle.Context(), h.origin, http.MethodGet, parsed.cacheKey, upstreamHeader)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), h.origin, http.MethodGet, parsed.cacheKey, upstreamHeader)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		if cached != nil {
@@ -224,7 +231,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-		Body: response.Body, ObjectPath: objectKey, Spooler: h.client.EnsureSpooler(h.workDir), MaxBytes: maxSize, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+		Body: response.Body, ObjectPath: objectKey, Spooler: h.spooler, MaxBytes: maxSize, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		VerifyFn: func(reader io.ReadSeeker) error {
 			size, err := reader.Seek(0, io.SeekEnd)
 			if err != nil {
@@ -291,7 +298,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 		_ = object.Reader.Close()
 	}
 	if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
-		response, err := h.openUpstream(request.Context(), h.sumDB, request.Method, sumTarget, request.Header)
+		response, err := h.fetchUpstream(request.Context(), h.sumDB, request.Method, sumTarget, request.Header)
 		if err != nil {
 			transport.WriteError(w, http.StatusBadGateway)
 			return http.StatusBadGateway, "ERROR"
@@ -323,7 +330,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.openUpstream(h.lifecycle.Context(), h.sumDB, http.MethodGet, sumTarget, upstreamHeader)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), h.sumDB, http.MethodGet, sumTarget, upstreamHeader)
 	if err != nil {
 		if object != nil {
 			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
@@ -352,7 +359,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	defer func() { _ = response.Body.Close() }()
-	spool, err := h.client.EnsureSpooler(h.workDir).SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, 64<<20, response.ContentLength)
+	spool, err := h.spooler.SpoolWithExpectedSize(h.lifecycle.Context(), response.Body, 64<<20, response.ContentLength)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
@@ -377,9 +384,8 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 	return http.StatusOK, result
 }
 
-func (h *handler) openUpstream(ctx context.Context, origin *url.URL, method, target string, headers http.Header) (*http.Response, error) {
-	escaped := strings.Join(strings.Split(target, "/"), "/")
-	targetURL, err := transport.JoinURL(origin, escaped, "")
+func (h *handler) fetchUpstream(ctx context.Context, origin *url.URL, method, requestPath string, headers http.Header) (*http.Response, error) {
+	targetURL, err := transport.JoinURL(origin, requestPath, "")
 	if err != nil {
 		return nil, err
 	}
