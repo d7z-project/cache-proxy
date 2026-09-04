@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/spf13/afero"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -32,13 +32,7 @@ type Block struct {
 
 const defaultOperationTimeout = 2 * time.Minute
 
-type Driver struct{}
-
-func NewDriver() proxyruntime.ModeDriver { return Driver{} }
-
-func (Driver) Mode() string { return config.ModeGit }
-
-func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	var block Block
 	if err := plan.Decode(&block); err != nil {
 		return err
@@ -71,8 +65,7 @@ func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := os.MkdirAll(repositoryRoot, 0o755); err != nil {
 		return fmt.Errorf("instance %s: create git repository directory: %w", plan.Name(), err)
 	}
-	baseFs := afero.NewBasePathFs(afero.NewOsFs(), repositoryRoot)
-	billyFs := newBillyAdapter(baseFs, "")
+	billyFs := osfs.New(repositoryRoot, osfs.WithBoundOS())
 
 	handler := newGitHandler(gitConfig{
 		name:             plan.Name(),

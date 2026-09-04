@@ -95,7 +95,7 @@ func verifyOSTreeFileObject(source io.Reader, expectedDigest string) error {
 		if written != int64(declaredSize) {
 			return fmt.Errorf("ostree file size mismatch: got %d, want %d", written, declaredSize)
 		}
-		if _, err := buffered.ReadByte(); err != io.EOF {
+		if _, err := buffered.ReadByte(); !errors.Is(err, io.EOF) {
 			if err == nil {
 				err = errors.New("trailing data")
 			}
@@ -103,7 +103,7 @@ func verifyOSTreeFileObject(source io.Reader, expectedDigest string) error {
 		}
 	} else {
 		var trailing [1]byte
-		if n, err := source.Read(trailing[:]); n != 0 || err != io.EOF {
+		if n, err := source.Read(trailing[:]); n != 0 || !errors.Is(err, io.EOF) {
 			if err == nil {
 				err = errors.New("trailing data")
 			}

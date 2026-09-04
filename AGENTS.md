@@ -4,8 +4,8 @@
 
 ## Proxy mode
 
-1. 在 `pkg/proxy/<mode>/` 实现满足 `proxyruntime.ModeDriver` 的 `Driver`
-2. 在 `pkg/config/config.go` 注册 mode，并在 `pkg/app/drivers.go` 注册 `NewDriver()`
+1. 在 `pkg/proxy/<mode>/` 实现 `Plan(context.Context, *proxyruntime.InstancePlan) error`
+2. 在 `pkg/config/config.go` 注册 mode，并在 `pkg/app/drivers.go` 注册对应的 `Plan`
 3. 协议包负责请求分类、缓存身份、freshness、校验、上游选择和协议状态
 4. 通用响应对象使用 `storeio`；Linux 仓库 metadata 使用 `filerepo.GenerationManager`
 5. Flatpak/OSTree single-file 与 indexed summary 分别使用 generation，immutable objects 和 finite-retention deltas 使用稳定响应键
@@ -40,20 +40,21 @@
 - 一个 generation 内的 anchor、metadata、签名和校验文件来自同一配置 upstream
 - anchor SHA256 是 generation identity；每次 staging 使用独立随机 `candidate_id`
 - candidate 位于 `generations/<root-hash>/<generation>/<candidate-id>/`
-- refresh 完整下载并校验 closure 后发布；`current.yaml` 是唯一提交标记，并精确记录 current 与有界 previous snapshot 的 generation、candidate 和 snapshot digest
+- refresh 下载并校验协议要求的 closure 后发布；协议明确允许不可用的对象只有在上游返回 `403` / `404` 时才能从 candidate 省略，其他失败必须中止发布
 - 启动只恢复 `current.yaml` 精确引用、且 upstream 与当前配置完全一致并通过完整校验的 current/previous snapshot；禁止扫描 generation 目录推测可用版本
 - 首次合格 anchor 请求立即透传上游，同时由生命周期 context 捕获；并发请求读取完成的 pending/current anchor
-- 已有 current 时 metadata 优先读取 current；仅当 current 不含请求路径时，协议明确标记且路径可绑定版本的对象才能从无歧义的 previous snapshot 读取，其余分类 metadata 返回 `503` 并触发 refresh
+- 已有 current 时 metadata 优先读取 current；仅当 current 不含请求路径时，协议明确标记且路径可绑定版本的对象才能从无歧义的 previous snapshot 读取；其余 miss 或本地 blob 丢失触发 refresh 并交回协议 handler，以原请求对同一 upstream 透明 `BYPASS`，禁止生成 `503` 或负缓存状态
+- current miss 或本地 blob 丢失触发的 refresh 必须在 anchor 返回 `304` 或内容 digest 未变化时重新构建 candidate，使恢复可用的对象无需等待 anchor 变化即可进入 snapshot；普通周期 poll 不重建未变化的 candidate
 - current anchor 收到显式 `no-cache` / `max-age=0` 时触发后台 refresh，本次响应仍读取已提交 generation
 - artifact 和 package sidecar 使用 generation-independent response key，且不依赖 metadata refresh 成功
 - Debian 支持标准、嵌套和 flat root；InRelease 与 Release 同时存在时必须归一化一致
 - Debian instance 根路径和未分类的同源资源透明直通；目录请求必须保留尾斜线
-- Debian Release 中实际存在的每个压缩或未压缩表示按自身 strong checksum 独立校验，不同压缩格式禁止别名
-- 带已识别压缩 sibling 的未压缩 checksum entry 允许上游缺失；没有压缩 sibling 的 entry 仍是必需对象
-- Acquire-By-Hash 首选 by-hash，仅在其返回 `403` / `404` 时回退同 upstream canonical；canonical 通过原 entry 大小和摘要校验后才能与 by-hash 指向同一 blob；通过校验的 SHA256/SHA512 by-hash 路径可从精确 previous snapshot 读取，canonical 与固定名称签名保持 current-only
-- RPM generation 只闭合 `repomd.xml` 及其精确引用对象并校验 wire/open size 与 checksum；已验证的精确 location 可从 previous snapshot 读取，`repomd.xml` 与固定名称签名保持 current-only，未引用的同源 `repodata` 资源透明直通
-- Flatpak indexed summary 的当前分片及可选索引签名必须与 `summary.idx` 同 generation；分片按解压后 SHA256 校验；digest summary 和 digest-specific index signature 可从 previous snapshot 读取，固定名称 summary/signature 保持 current-only
-- OSTree delta index 与 indexed-summary delta 必须严格识别编码路径并使用有限缓存，不绑定 summary generation；indexed-summary delta 不缓存缺失响应
+- Debian Release 的每个 strong-checksum entry 是独立可用性单元；上游 `200` 必须通过声明大小和所有 strong checksum 才能进入 snapshot，上游 `403` / `404` 则省略该 entry，`429`、其他非 `200`、传输或持久化错误必须中止 candidate
+- Debian candidate 的续传对象键同时绑定精确 Release path 和 digest；相同内容的其他 entry 禁止被当作该路径已经验证可用。压缩、未压缩以及不同目录中的 entry 均保持独立
+- Acquire-By-Hash 首选 by-hash，仅在其返回 `403` / `404` 时回退同 upstream canonical；canonical 通过原 entry 大小和摘要校验后才能与该 entry 的 by-hash alias 指向同一 blob；通过校验的 SHA256/SHA512 by-hash 路径可从精确 previous snapshot 读取，canonical 与固定名称签名保持 current-only
+- RPM generation 发布 `repomd.xml` 与上游实际可用且通过 wire/open size 和 checksum 校验的引用对象；引用对象只有 `403` / `404` 可以省略，其他失败中止 candidate。RPM metadata 全部保持 current-only，禁止按 location 文件名推测不可变性并从 previous snapshot 回退
+- Flatpak `summary.idx` generation 只绑定已验证索引及其签名；优先 digest-specific signature，仅在 `403` / `404` 时回退 `summary.idx.sig`。`summaries/<sha256>.gz` 按请求下载，解压后 SHA256 校验通过才进入不含 generation 的内容缓存，禁止预取其他架构或 subset
+- OSTree delta index、detached commit metadata 与 indexed-summary delta 必须严格识别编码路径并使用有限的成功响应缓存，不绑定 summary generation且不缓存缺失响应
 - metadata 解析、解压和状态读取必须有 byte、entry、token 或 expansion 上限
 
 ## 存储、调度与清理
@@ -110,4 +111,5 @@
 
 - `README.md` 面向使用者，按简介、能力、安装、快速开始、配置、客户端、运维和开发组织
 - 架构约束记录在 `AGENTS.md`，公开功能、配置和运行行为记录在 `README.md`
+- `README.md` 只描述当前公开行为；内部状态机细节仅在直接影响配置、数据或运维时记录
 - 配置示例必须通过当前严格配置校验，命令、端点、镜像标签和测试入口必须与仓库保持一致

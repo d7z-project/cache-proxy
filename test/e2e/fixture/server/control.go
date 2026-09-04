@@ -59,7 +59,41 @@ func (s *fixtureServer) serveControl(w http.ResponseWriter, r *http.Request) {
 		s.countsMu.Lock()
 		clear(s.counts)
 		clear(s.headers)
+		clear(s.faults)
 		s.countsMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	case "/__e2e/fault":
+		requestPath := r.URL.Query().Get("path")
+		if requestPath == "" || !strings.HasPrefix(requestPath, "/") || strings.HasPrefix(requestPath, "/__e2e/") {
+			http.Error(w, "fault path must be an absolute fixture path", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodPost:
+			status := 0
+			switch r.URL.Query().Get("status") {
+			case "403":
+				status = http.StatusForbidden
+			case "404":
+				status = http.StatusNotFound
+			default:
+				http.Error(w, "fault status must be 403 or 404", http.StatusBadRequest)
+				return
+			}
+			s.countsMu.Lock()
+			if s.faults == nil {
+				s.faults = make(map[string]int)
+			}
+			s.faults[requestPath] = status
+			s.countsMu.Unlock()
+		case http.MethodDelete:
+			s.countsMu.Lock()
+			delete(s.faults, requestPath)
+			s.countsMu.Unlock()
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case "/__e2e/state":
 		if r.Method != http.MethodPost {

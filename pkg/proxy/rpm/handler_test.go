@@ -69,6 +69,110 @@ func TestRPMRepomdPublishesCompleteArbitraryDataClosure(t *testing.T) {
 	require.Equal(t, int32(1), metadataRequests.Load())
 }
 
+func TestRPMRepomdPublishesAvailableMetadata(t *testing.T) {
+	for _, unavailableStatus := range []int{http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(unavailableStatus), func(t *testing.T) {
+			primary := []byte("primary metadata")
+			primaryDigest := sha256.Sum256(primary)
+			missing := []byte("future metadata")
+			missingDigest := sha256.Sum256(missing)
+			repomd := fmt.Sprintf(`<repomd>
+<data type="primary"><checksum type="sha256">%x</checksum><location href="repodata/primary.xml"/><size>%d</size></data>
+<data type="future-extension"><checksum type="sha256">%x</checksum><location href="repodata/future.bin"/><size>%d</size></data>
+</repomd>`, primaryDigest, len(primary), missingDigest, len(missing))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/repo/repodata/repomd.xml":
+					_, _ = io.WriteString(w, repomd)
+				case "/repo/repodata/primary.xml":
+					_, _ = w.Write(primary)
+				case "/repo/repodata/future.bin":
+					w.WriteHeader(unavailableStatus)
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			t.Cleanup(server.Close)
+			h := newRPMTestHandler(t, server.URL)
+
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/repo/repodata/repomd.xml", nil))
+			_, err := h.metadata.Refresh(context.Background(), 10)
+			require.NoError(t, err)
+			require.NotNil(t, h.metadata.Current("repo"))
+
+			available := httptest.NewRecorder()
+			h.ServeHTTP(available, httptest.NewRequest(http.MethodGet, "/repo/repodata/primary.xml", nil))
+			require.Equal(t, http.StatusOK, available.Code)
+			require.Equal(t, "HIT", available.Header().Get("X-Cache"))
+			require.Equal(t, primary, available.Body.Bytes())
+
+			absent := httptest.NewRecorder()
+			h.ServeHTTP(absent, httptest.NewRequest(http.MethodGet, "/repo/repodata/future.bin", nil))
+			require.Equal(t, unavailableStatus, absent.Code)
+			require.Equal(t, "BYPASS", absent.Header().Get("X-Cache"))
+			require.Empty(t, absent.Header().Get("Retry-After"))
+		})
+	}
+}
+
+func TestRPMMetadataRecoveryRebuildsUnchangedGeneration(t *testing.T) {
+	metadata := []byte("metadata")
+	digest := sha256.Sum256(metadata)
+	repomd := fmt.Sprintf(`<repomd><data type="future-extension"><checksum type="sha256">%x</checksum><location href="repodata/future.bin"/><size>%d</size></data></repomd>`, digest, len(metadata))
+	var available atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repo/repodata/repomd.xml":
+			w.Header().Set("ETag", `"stable"`)
+			_, _ = io.WriteString(w, repomd)
+		case "/repo/repodata/future.bin":
+			if !available.Load() {
+				http.NotFound(w, request)
+				return
+			}
+			_, _ = w.Write(metadata)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	h := newRPMTestHandler(t, server.URL)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/repo/repodata/repomd.xml", nil))
+	_, err := h.metadata.Refresh(context.Background(), 10)
+	require.NoError(t, err)
+	initial := h.metadata.Current("repo")
+	require.NotNil(t, initial)
+
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/repo/repodata/future.bin", nil))
+	require.Equal(t, http.StatusNotFound, missing.Code)
+	require.Equal(t, "BYPASS", missing.Header().Get("X-Cache"))
+
+	available.Store(true)
+	recovered := httptest.NewRecorder()
+	h.ServeHTTP(recovered, httptest.NewRequest(http.MethodGet, "/repo/repodata/future.bin", nil))
+	require.Equal(t, http.StatusOK, recovered.Code)
+	require.Equal(t, "BYPASS", recovered.Header().Get("X-Cache"))
+	require.Equal(t, metadata, recovered.Body.Bytes())
+
+	more, err := h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
+	_, err = h.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := h.metadata.Current("repo")
+	require.NotNil(t, current)
+	require.Equal(t, initial.Generation, current.Generation)
+	require.NotEqual(t, initial.CandidateID, current.CandidateID)
+
+	cached := httptest.NewRecorder()
+	h.ServeHTTP(cached, httptest.NewRequest(http.MethodGet, "/repo/repodata/future.bin", nil))
+	require.Equal(t, http.StatusOK, cached.Code)
+	require.Equal(t, "HIT", cached.Header().Get("X-Cache"))
+	require.Equal(t, metadata, cached.Body.Bytes())
+}
+
 func TestRPMRepomdPublishesUpstreamGenerationUpdate(t *testing.T) {
 	metadata := [][]byte{[]byte("metadata-v1"), []byte("metadata-v2")}
 	repomd := make([]string, len(metadata))
@@ -122,7 +226,7 @@ func TestRPMRepomdPublishesUpstreamGenerationUpdate(t *testing.T) {
 	}
 }
 
-func TestRPMRetainsPreviousChecksumNamedMetadata(t *testing.T) {
+func TestRPMGenerationDoesNotMixEarlierMetadata(t *testing.T) {
 	metadata := [][]byte{[]byte("primary-v1"), []byte("primary-v2")}
 	locations := []string{"repodata/primary-a.xml", "repodata/primary-b.xml"}
 	repomd := make([]string, len(metadata))
@@ -164,9 +268,8 @@ func TestRPMRetainsPreviousChecksumNamedMetadata(t *testing.T) {
 
 	old := httptest.NewRecorder()
 	h.ServeHTTP(old, httptest.NewRequest(http.MethodGet, "/repo/"+locations[0], nil))
-	require.Equal(t, http.StatusOK, old.Code)
-	require.Equal(t, "HIT", old.Header().Get("X-Cache"))
-	require.Equal(t, metadata[0], old.Body.Bytes())
+	require.Equal(t, http.StatusNotFound, old.Code)
+	require.Equal(t, "BYPASS", old.Header().Get("X-Cache"))
 	require.Equal(t, int32(1), oldObjectRequests.Load())
 }
 

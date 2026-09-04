@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	goruntime "runtime"
 	"sync"
@@ -26,7 +27,7 @@ func FuzzUpstreamGateParallelAcquire(f *testing.F) {
 		hostActive := make([]atomic.Int32, hostCount)
 		var violated atomic.Bool
 		starts := make(chan struct{})
-		errors := make(chan error, workerCount)
+		errCh := make(chan error, workerCount)
 		var wait sync.WaitGroup
 		for i := range workerCount {
 			wait.Add(1)
@@ -46,13 +47,13 @@ func FuzzUpstreamGateParallelAcquire(f *testing.F) {
 				}
 				release, err := gate.Acquire(ctx, fmt.Sprintf("https://host-%d.example/object", hostIndex), class)
 				if cancelMask&(uint64(1)<<index) != 0 {
-					if err != context.Canceled {
-						errors <- fmt.Errorf("pre-canceled acquire returned %v", err)
+					if !errors.Is(err, context.Canceled) {
+						errCh <- fmt.Errorf("pre-canceled acquire: %w", err)
 					}
 					return
 				}
 				if err != nil {
-					errors <- err
+					errCh <- err
 					return
 				}
 				current := active.Add(1)
@@ -68,8 +69,8 @@ func FuzzUpstreamGateParallelAcquire(f *testing.F) {
 		}
 		close(starts)
 		wait.Wait()
-		close(errors)
-		for err := range errors {
+		close(errCh)
+		for err := range errCh {
 			require.NoError(t, err)
 		}
 		require.False(t, violated.Load())

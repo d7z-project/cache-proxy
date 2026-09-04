@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -48,11 +50,13 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 			return http.DefaultClient.Do(request)
 		},
 		Build: func(ctx context.Context, session *RefreshSession, _ Anchor) error {
-			blob, err := session.Fetch(ctx, ObjectSpec{Path: "repo/index", ExpectedSize: int64Pointer(len(metadata)), Checksums: []Checksum{{Algorithm: "sha256", Digest: hex.EncodeToString(digest[:])}}})
-			if err != nil {
-				return err
-			}
-			return session.Alias("repo/by-hash/"+hex.EncodeToString(digest[:]), blob)
+			_, err := session.Fetch(ctx, ObjectSpec{
+				Path:         "repo/index",
+				Aliases:      []string{"repo/by-hash/" + hex.EncodeToString(digest[:])},
+				ExpectedSize: int64Pointer(len(metadata)),
+				Checksums:    []Checksum{{Algorithm: "sha256", Digest: hex.EncodeToString(digest[:])}},
+			})
+			return err
 		},
 	})
 	require.NoError(t, err)
@@ -74,8 +78,9 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 
 	missingResponse := httptest.NewRecorder()
 	handled, status, _ = handler.ServeCurrent(missingResponse, httptest.NewRequest(http.MethodGet, "/repo/missing", nil), "repo/missing", true)
-	require.True(t, handled)
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.False(t, handled)
+	require.Zero(t, status)
+	require.Empty(t, missingResponse.Body.String())
 
 	restarted, err := New(Config{
 		Instance: "test", Mode: "test", Tenant: "metadata", Upstream: upstream.URL, StateDir: stateDir, WorkDir: t.TempDir(), Store: store,
@@ -86,12 +91,49 @@ func TestGenerationManagerPublishesCompleteGeneration(t *testing.T) {
 	require.NotNil(t, restarted.Current("repo"))
 }
 
+func TestGenerationManagerMissingCurrentBlobFallsThroughAndQueuesPoll(t *testing.T) {
+	metadata := []byte("metadata\n")
+	digest := sha256.Sum256(metadata)
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	manager, err := New(Config{
+		Instance: "missing-blob", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(context.Context, string, http.Header) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(metadata)), ContentLength: int64(len(metadata))}, nil
+		},
+		Build: func(ctx context.Context, session *RefreshSession, _ Anchor) error {
+			_, err := session.Fetch(ctx, ObjectSpec{Path: "repo/index", ExpectedSize: int64Pointer(len(metadata)), Checksums: []Checksum{{Algorithm: "sha256", Digest: hex.EncodeToString(digest[:])}}})
+			return err
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.StageAnchor(context.Background(), "repo", "repo/Release", nil, bytes.NewReader([]byte("anchor"))))
+	_, err = manager.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := manager.Current("repo")
+	require.NotNil(t, current)
+	object := current.byPath["repo/index"]
+	require.NoError(t, store.DeleteObject(context.Background(), "metadata", object.Key))
+
+	response := httptest.NewRecorder()
+	handled, status, cache := manager.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/index", nil), "repo/index", true)
+	require.False(t, handled)
+	require.Zero(t, status)
+	require.Empty(t, cache)
+	require.Empty(t, response.Body.String())
+	manager.mu.RLock()
+	require.True(t, manager.pollQueued["repo"])
+	require.Empty(t, manager.readers)
+	manager.mu.RUnlock()
+}
+
 func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) {
 	type versionObject struct {
-		path     string
-		body     []byte
-		optional bool
-		retain   bool
+		path             string
+		body             []byte
+		allowUnavailable bool
+		retain           bool
 	}
 	type version struct {
 		anchor  []byte
@@ -106,7 +148,7 @@ func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) 
 		}},
 		{anchor: []byte("release-b"), objects: []versionObject{
 			{path: "repo/shared", body: []byte("shared-b"), retain: true},
-			{path: "repo/removed", optional: true},
+			{path: "repo/removed", allowUnavailable: true},
 		}},
 	}
 	active := 0
@@ -142,7 +184,7 @@ func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) 
 			return errors.New("unknown test generation")
 		}
 		for _, object := range versions[selected].objects {
-			blob, err := session.Fetch(ctx, ObjectSpec{Path: object.path, Optional: object.optional})
+			blob, err := session.Fetch(ctx, ObjectSpec{Path: object.path, AllowUnavailable: object.allowUnavailable})
 			if err != nil {
 				return err
 			}
@@ -168,17 +210,18 @@ func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) 
 	second := publish(1)
 
 	for requestPath, expected := range map[string]struct {
-		status int
-		body   string
+		handled bool
+		status  int
+		body    string
 	}{
-		"repo/shared":     {status: http.StatusOK, body: "shared-b"},
-		"repo/historical": {status: http.StatusOK, body: "historical-a"},
-		"repo/removed":    {status: http.StatusNotFound},
-		"repo/unmarked":   {status: http.StatusServiceUnavailable},
+		"repo/shared":     {handled: true, status: http.StatusOK, body: "shared-b"},
+		"repo/historical": {handled: true, status: http.StatusOK, body: "historical-a"},
+		"repo/removed":    {handled: true, status: http.StatusOK, body: "removed-a"},
+		"repo/unmarked":   {},
 	} {
 		response := httptest.NewRecorder()
 		handled, status, _ := handler.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/"+requestPath, nil), requestPath, true)
-		require.True(t, handled, requestPath)
+		require.Equal(t, expected.handled, handled, requestPath)
 		require.Equal(t, expected.status, status, requestPath)
 		if expected.body != "" {
 			require.Equal(t, expected.body, response.Body.String(), requestPath)
@@ -186,7 +229,7 @@ func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) 
 	}
 
 	var marker currentMarker
-	_, err = readYAML(stateDir, currentName("repo"), &marker)
+	err = readYAML(stateDir, currentName("repo"), &marker)
 	require.NoError(t, err)
 	require.Equal(t, second.CandidateID, marker.CandidateID)
 	require.Len(t, marker.Previous, 1)
@@ -216,8 +259,9 @@ func TestGenerationManagerServesExactRetainedClosureAndRestoresIt(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, second.CandidateID, withoutPrevious.Current("repo").CandidateID)
 	response = httptest.NewRecorder()
-	_, status, _ = withoutPrevious.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/historical", nil), "repo/historical", true)
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	handled, status, _ = withoutPrevious.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/historical", nil), "repo/historical", true)
+	require.False(t, handled)
+	require.Zero(t, status)
 	drainGenerationGC(t, withoutPrevious)
 	_, err = store.StatObject(context.Background(), "metadata", firstAnchorKey)
 	require.Error(t, err)
@@ -254,8 +298,8 @@ func TestGenerationManagerRejectsConflictingRetainedObjects(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	handled, status, _ := handler.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/versioned", nil), "repo/versioned", true)
-	require.True(t, handled)
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.False(t, handled)
+	require.Zero(t, status)
 }
 
 func TestGenerationManagerRequiresAbsoluteHTTPUpstream(t *testing.T) {
@@ -328,7 +372,7 @@ func TestGenerationManagerInvalidatesStateFromAnotherUpstream(t *testing.T) {
 	require.Empty(t, discoveryHeader.Get("If-Modified-Since"))
 }
 
-func TestGenerationManagerResumesVerifiedSHA256Objects(t *testing.T) {
+func TestGenerationManagerResumesVerifiedSHA256ObjectsAfterChecksumMismatch(t *testing.T) {
 	firstBody := []byte("first")
 	secondBody := []byte("second")
 	firstDigest := sha256.Sum256(firstBody)
@@ -344,7 +388,7 @@ func TestGenerationManagerResumesVerifiedSHA256Objects(t *testing.T) {
 		case "/repo/second":
 			secondRequests.Add(1)
 			if failSecond.Load() {
-				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write(bytes.Repeat([]byte("x"), len(secondBody)))
 				return
 			}
 			_, _ = w.Write(secondBody)
@@ -420,21 +464,25 @@ func TestRefreshSessionFallbackAndAliases(t *testing.T) {
 	require.NotNil(t, current)
 	for _, objectPath := range []string{"repo/index", "repo/by-hash/value", "repo/by-hash/second"} {
 		object := current.byPath[objectPath]
-		require.Equal(t, ObjectPresent, object.State)
+		require.NotEmpty(t, object.Key)
 		require.Equal(t, current.byPath["repo/index"].Key, object.Key)
 	}
 }
 
 func TestRefreshSessionDoesNotFallbackOnServerError(t *testing.T) {
-	var requests []string
-	handler := &GenerationManager{config: Config{Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
-		requests = append(requests, requestPath)
-		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: http.NoBody}, nil
-	}}}
-	session := &RefreshSession{handler: handler, root: "repo", objects: map[string]Object{}}
-	_, err := session.Fetch(context.Background(), ObjectSpec{Path: "repo/index", FetchPath: "repo/by-hash/value", FallbackFetchPath: "repo/index"})
-	require.ErrorContains(t, err, "returned 503")
-	require.Equal(t, []string{"repo/by-hash/value"}, requests)
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var requests []string
+			handler := &GenerationManager{config: Config{Fetch: func(_ context.Context, requestPath string, _ http.Header) (*http.Response, error) {
+				requests = append(requests, requestPath)
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody}, nil
+			}}}
+			session := &RefreshSession{handler: handler, root: "repo", objects: map[string]Object{}}
+			_, err := session.Fetch(context.Background(), ObjectSpec{Path: "repo/index", FetchPath: "repo/by-hash/value", FallbackFetchPath: "repo/index"})
+			require.ErrorContains(t, err, fmt.Sprintf("returned %d", status))
+			require.Equal(t, []string{"repo/by-hash/value"}, requests)
+		})
+	}
 }
 
 func TestRefreshSessionRejectsFetchPathOutsideRepositoryRoot(t *testing.T) {
@@ -536,6 +584,48 @@ func TestGenerationManagerConditionalPollAdvancesFreshness(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, committed.CandidateID, restarted.Current("repo").CandidateID)
 	require.Equal(t, `"v1"`, restarted.Current("repo").byPath["repo/Release"].Header.Get("ETag"))
+}
+
+func TestGenerationManagerMissingObjectRebuildsAfterNotModifiedPoll(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	var builds atomic.Int32
+	var validators http.Header
+	handler, err := New(Config{
+		Instance: "missing-rebuild", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch: func(_ context.Context, _ string, header http.Header) (*http.Response, error) {
+			validators = header.Clone()
+			return &http.Response{StatusCode: http.StatusNotModified, Body: io.NopCloser(strings.NewReader(""))}, nil
+		},
+		Build: func(context.Context, *RefreshSession, Anchor) error {
+			builds.Add(1)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, handler.StageAnchor(context.Background(), "repo", "repo/Release", http.Header{"ETag": {`"v1"`}}, bytes.NewReader([]byte("anchor"))))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := handler.Current("repo")
+	require.NotNil(t, previous)
+	require.Equal(t, int32(1), builds.Load())
+
+	response := httptest.NewRecorder()
+	handled, _, _ := handler.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/missing", nil), "repo/missing", true)
+	require.False(t, handled)
+	more, err := handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, more)
+	require.Equal(t, `"v1"`, validators.Get("If-None-Match"))
+	_, err = handler.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+
+	current := handler.Current("repo")
+	require.NotNil(t, current)
+	require.Equal(t, previous.Generation, current.Generation)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+	require.Equal(t, int32(2), builds.Load())
 }
 
 func TestGenerationManagerUsesSourceLastModifiedForConditionalResponses(t *testing.T) {
@@ -882,7 +972,7 @@ func TestLastSeenPersistenceFlushesConcurrentUpdates(t *testing.T) {
 	require.NoError(t, persistErr)
 
 	var marker lastSeenMarker
-	_, err := readJSON(handler.config.StateDir, lastSeenName(rootID), maxRepositoryMarkerSize, &marker)
+	err := readJSON(handler.config.StateDir, lastSeenName(rootID), maxRepositoryMarkerSize, &marker)
 	require.NoError(t, err)
 	require.Equal(t, rootID, marker.RootID)
 	require.False(t, marker.SeenAt.IsZero())
@@ -1398,7 +1488,7 @@ func TestGenerationManagerPollCycleVisitsEveryCurrentRoot(t *testing.T) {
 		require.NoError(t, refreshErr)
 		require.Equal(t, index < 2, more)
 		if index == 0 {
-			handler.requestCurrentPoll("c")
+			handler.requestCurrentPoll("c", false)
 		}
 	}
 	require.Equal(t, map[string]int{"a/Release": 1, "b/Release": 1, "c/Release": 1}, polled)
@@ -1695,6 +1785,17 @@ func FuzzStateDecoders(f *testing.F) {
 	f.Add([]byte("root_id: repo\nroot: repo\ngeneration: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncandidate_id: 0123456789abcdef0123456789abcdef\nsnapshot_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nupstream: https://example.test\n"))
 	f.Add([]byte("root_id: repo\nroot: repo\ngeneration: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\ncandidate_id: 0123456789abcdef0123456789abcdef\nsnapshot_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nupstream: https://example.test\nprevious:\n  - generation: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n    candidate_id: abcdef0123456789abcdef0123456789\n    snapshot_sha256: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n"))
 	f.Add([]byte(`{"root_id":"repo","root":"repo"}`))
+	generation := strings.Repeat("a", 64)
+	candidateID := strings.Repeat("b", 32)
+	seed, err := json.Marshal(Snapshot{
+		RootID: "repo", Root: "repo", Anchor: "repo/Release", Generation: generation, CandidateID: candidateID,
+		Upstream: "https://example.test", PublishedAt: time.Unix(1, 0).UTC(),
+		Objects: []Object{{Path: "repo/Release", Key: candidatePrefix("repo", generation, candidateID) + "/anchor", Size: 0, SHA256: generation}},
+	})
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(seed)
 	f.Fuzz(func(_ *testing.T, data []byte) {
 		if len(data) > 1<<20 {
 			return

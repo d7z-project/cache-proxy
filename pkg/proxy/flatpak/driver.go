@@ -14,12 +14,7 @@ import (
 
 const maxDescriptorSize = 1 << 20
 
-type Driver struct{}
-
-func NewDriver() proxyruntime.ModeDriver { return Driver{} }
-func (Driver) Mode() string              { return config.ModeFlatpak }
-
-func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := plan.RejectOptions(); err != nil {
 		return err
 	}

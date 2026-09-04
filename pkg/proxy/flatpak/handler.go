@@ -61,42 +61,26 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 		Build: func(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
 			switch anchor.Path {
 			case "summary":
-				_, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: "summary.sig", Optional: true})
+				_, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: "summary.sig", AllowUnavailable: true})
 				return err
 			case "summary.idx":
 				reader, err := anchor.Open(ctx)
 				if err != nil {
 					return err
 				}
-				index, parseErr := readSummaryIndex(reader, anchor.Size())
+				indexDigest, parseErr := parseSummaryIndexDigest(reader, anchor.Size())
 				closeErr := reader.Close()
 				if err := errors.Join(parseErr, closeErr); err != nil {
 					return err
 				}
-				for _, digest := range index.subsummaryDigests {
-					summaryPath := "summaries/" + digest + ".gz"
-					blob, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: summaryPath, MaxBytes: indexedSummaryMaxBytes})
-					if err != nil {
-						return err
-					}
-					if err := verifyIndexedSummary(ctx, blob, digest); err != nil {
-						return err
-					}
-					if err := session.RetainObject(summaryPath); err != nil {
-						return err
-					}
-				}
-				signaturePath := "summaries/" + index.digest + ".idx.sig"
-				signature, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: signaturePath, MaxBytes: summaryIndexMaxBytes, Optional: true})
-				if err != nil {
-					return err
-				}
-				if signature != nil {
-					if err := session.RetainObject(signaturePath); err != nil {
-						return err
-					}
-				}
-				_, err = session.Fetch(ctx, filerepo.ObjectSpec{Path: "summary.idx.sig", MaxBytes: summaryIndexMaxBytes, Optional: true})
+				signaturePath := "summaries/" + indexDigest + ".idx.sig"
+				_, err = session.Fetch(ctx, filerepo.ObjectSpec{
+					Path:              signaturePath,
+					FallbackFetchPath: "summary.idx.sig",
+					Aliases:           []string{"summary.idx.sig"},
+					MaxBytes:          summaryIndexMaxBytes,
+					AllowUnavailable:  true,
+				})
 				return err
 			}
 			return nil
@@ -137,8 +121,26 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
+	if digest, ok := indexedSummaryDigestFromPath(cleaned); ok {
+		h.serveVerifiedObject(w, request, cleaned, "summaries/sha256/"+digest, digest, indexedSummaryMaxBytes, func(reader io.ReadSeeker) error {
+			return verifyIndexedSummary(reader, digest, indexedSummaryMaxBytes)
+		})
+		return
+	}
 	if digest, extension, ok := objectDigestFromPath(cleaned); ok {
-		h.serveDigestObject(w, request, cleaned, digest, extension)
+		h.serveVerifiedObject(w, request, cleaned, "objects/sha256/"+digest, digest, 0, func(reader io.ReadSeeker) error {
+			if extension == ".filez" {
+				return verifyOSTreeFileObject(reader, digest)
+			}
+			hash := sha256.New()
+			if _, err := io.Copy(hash, reader); err != nil {
+				return err
+			}
+			if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), digest) {
+				return errors.New("ostree object digest mismatch")
+			}
+			return nil
+		})
 		return
 	}
 	if isDescriptorPath(cleaned) {
@@ -152,8 +154,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		if deltaPath || objectPath {
 			freshness = deltaFreshness
 		}
-		cacheNotFound := isDeltaIndexPath(cleaned) || objectPath && strings.HasSuffix(cleaned, ".commitmeta")
-		h.serveMutable(w, request, cleaned, freshness, cacheNotFound)
+		h.serveMutable(w, request, cleaned, freshness)
 		return
 	}
 	h.forwardUpstream(w, request, cleaned)
@@ -181,7 +182,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, header)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, header)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -219,8 +220,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 	finished = true
 }
 
-func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request, cleaned, digest, extension string) {
-	key := "objects/sha256/" + digest
+func (h *handler) serveVerifiedObject(w http.ResponseWriter, request *http.Request, cleaned, key, digest string, maxBytes int64, verify func(io.ReadSeeker) error) {
 	if object, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); err == nil {
 		serveFlatpakObject(w, request, object, "HIT")
 		return
@@ -242,7 +242,7 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 			upstreamHeader.Del("Range")
 			upstreamHeader.Del("If-Range")
 		}
-		response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, upstreamHeader)
+		response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, upstreamHeader)
 		if err != nil {
 			h.flights.Finish(key, flight, err)
 			transport.WriteError(w, http.StatusBadGateway)
@@ -261,20 +261,8 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 		header := response.Header.Clone()
 		header.Del("Content-Length")
 		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
-			VerifyFn: func(reader io.ReadSeeker) error {
-				if extension == ".filez" {
-					return verifyOSTreeFileObject(reader, digest)
-				}
-				hash := sha256.New()
-				if _, err := io.Copy(hash, reader); err != nil {
-					return err
-				}
-				if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), digest) {
-					return errors.New("ostree object digest mismatch")
-				}
-				return nil
-			},
+			Body: response.Body, ObjectPath: key, Spooler: h.spooler, MaxBytes: maxBytes, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+			VerifyFn: verify,
 			StoreFn: func(ctx context.Context, body io.Reader) error {
 				return storeio.PutResponse(ctx, h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, digest, body)
 			}, Done: func(err error) { h.flights.Finish(key, flight, err) },
@@ -292,12 +280,12 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 				return
 			}
 			if err := h.flights.Wait(request.Context(), flight); err != nil {
-				transport.WriteError(w, http.StatusBadGateway)
+				h.forwardUpstream(w, request, cleaned)
 				return
 			}
 			object, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key)
 			if err != nil {
-				transport.WriteError(w, http.StatusBadGateway)
+				h.forwardUpstream(w, request, cleaned)
 				return
 			}
 			serveFlatpakObject(w, request, object, "MISS")
@@ -311,20 +299,24 @@ func (h *handler) serveDigestObject(w http.ResponseWriter, request *http.Request
 		return
 	}
 	if err := h.flights.Wait(request.Context(), flight); err != nil {
-		transport.WriteError(w, http.StatusBadGateway)
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	if object, openErr := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); openErr == nil {
 		serveFlatpakObject(w, request, object, "COALESCED")
 		return
 	}
-	transport.WriteError(w, http.StatusBadGateway)
+	h.forwardUpstream(w, request, cleaned)
 }
 
-func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cleaned string, freshness time.Duration, cacheNotFound bool) {
+func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cleaned string, freshness time.Duration) {
 	key := flatpakRefKey(h.origin.String(), cleaned, request.Header.Get("Accept-Encoding"))
-	object, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key)
-	if err == nil && time.Since(object.Fetched) < freshness && !transport.RequestForcesRevalidation(request) {
+	object, _ := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key)
+	if object != nil && object.Status != http.StatusOK {
+		_ = object.Reader.Close()
+		object = nil
+	}
+	if object != nil && time.Since(object.Fetched) < freshness && !transport.RequestForcesRevalidation(request) {
 		serveFlatpakObject(w, request, object, "HIT")
 		return
 	}
@@ -373,7 +365,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		conditional.Set("If-None-Match", object.Header.Get("ETag"))
 		conditional.Set("If-Modified-Since", object.Header.Get("Last-Modified"))
 	}
-	response, fetchErr := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, conditional)
+	response, fetchErr := h.fetchUpstream(h.lifecycle.Context(), cleaned, conditional)
 	if fetchErr != nil || response.StatusCode >= 500 {
 		if response != nil {
 			_ = response.Body.Close()
@@ -397,8 +389,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 	if object != nil {
 		_ = object.Reader.Close()
 	}
-	cacheableStatus := response.StatusCode == http.StatusOK || cacheNotFound && response.StatusCode == http.StatusNotFound
-	if !cacheableStatus || !transport.ResponseCacheable(response, false) {
+	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) {
 		h.flights.Finish(flightKey, flight, nil)
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
@@ -408,7 +399,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 	reader, streamErr := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
 		Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(ctx, h.store, flatpakTenant, key, h.origin.String(), response.StatusCode, response.Header, "", body)
+			return storeio.PutResponse(ctx, h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
 		},
 		Done: func(err error) { h.flights.Finish(flightKey, flight, err) },
 	})
@@ -435,7 +426,7 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.Header)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, request.Header)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
 		return
@@ -474,8 +465,8 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 	_, _ = w.Write(body)
 }
 
-func (h *handler) fetchUpstream(ctx context.Context, method, cleaned string, header http.Header) (*http.Response, error) {
-	return h.fetchUpstreamWithClass(ctx, method, cleaned, header, transport.AdmissionForeground)
+func (h *handler) fetchUpstream(ctx context.Context, cleaned string, header http.Header) (*http.Response, error) {
+	return h.fetchUpstreamWithClass(ctx, http.MethodGet, cleaned, header, transport.AdmissionForeground)
 }
 
 func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
@@ -491,13 +482,11 @@ func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned st
 	return h.client.DoRead(ctx, request, class)
 }
 
-func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)
-		return http.StatusBadGateway
 	}
-	return status
 }
 
 func (h *handler) CloseContext(ctx context.Context) error {

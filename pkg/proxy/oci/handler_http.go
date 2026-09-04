@@ -118,16 +118,16 @@ func (h *handler) copyRemote(w http.ResponseWriter, req *http.Request, response 
 	return response.StatusCode, uint64(written), err
 }
 
-func (h *handler) writeResponse(w http.ResponseWriter, method string, status int, headers map[string]string, body io.Reader) (int, uint64, error) {
+func (h *handler) writeResponse(w http.ResponseWriter, method string, headers map[string]string, body io.Reader) (int, uint64, error) {
 	for key, value := range headers {
 		if value != "" {
 			w.Header().Set(key, value)
 		}
 	}
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	if method == http.MethodHead || body == nil {
-		return status, responseBytes(headers), nil
+		return http.StatusOK, responseBytes(headers), nil
 	}
 	written, err := io.Copy(w, body)
-	return status, uint64(written), err
+	return http.StatusOK, uint64(written), err
 }

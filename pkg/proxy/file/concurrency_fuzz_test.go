@@ -36,7 +36,7 @@ func FuzzFileParallelMiss(f *testing.F) {
 			_, _ = w.Write(body)
 		}))
 		defer upstream.Close()
-		handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+		handler := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 
 		starts := make(chan struct{})
 		type result struct {

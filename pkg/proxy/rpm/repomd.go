@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -51,7 +52,7 @@ func parseRepomdReader(ctx context.Context, reader io.Reader) ([]repomdItem, err
 	rootSeen := false
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			switch {
 			case decoder.InputOffset() > maxRepomdSize:
 				return nil, fmt.Errorf("repomd exceeds %d bytes", maxRepomdSize)

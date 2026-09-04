@@ -215,7 +215,7 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		alternateName = "InRelease"
 	}
 	alternatePath := joinRoot(anchor.Root, alternateName)
-	alternate, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: alternatePath, MaxBytes: maxReleaseSize, Optional: true})
+	alternate, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: alternatePath, MaxBytes: maxReleaseSize, AllowUnavailable: true})
 	if err != nil {
 		return err
 	}
@@ -237,15 +237,6 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 			return filerepo.Retryable(errors.New("debian InRelease and Release metadata differ"))
 		}
 		hasRelease = hasRelease || alternateName == "Release"
-	}
-	compressedSiblings := make(map[string]bool)
-	for _, entry := range manifest.Entries {
-		for _, suffix := range []string{".gz", ".xz", ".bz2", ".lzma", ".zst", ".lz4"} {
-			if strings.HasSuffix(entry.Path, suffix) {
-				compressedSiblings[strings.TrimSuffix(entry.Path, suffix)] = true
-				break
-			}
-		}
 	}
 	for _, entry := range manifest.Entries {
 		if entry.SHA256 == "" && entry.SHA512 == "" {
@@ -275,7 +266,7 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		}
 		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{
 			Path: canonical, FetchPath: fetchPath, FallbackFetchPath: fallbackFetchPath, Aliases: aliases,
-			ExpectedSize: &expectedSize, Checksums: checksums, Optional: compressedSiblings[entry.Path],
+			ExpectedSize: &expectedSize, Checksums: checksums, AllowUnavailable: true,
 		})
 		if err != nil {
 			return err
@@ -290,7 +281,7 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 	}
 	companion := joinRoot(anchor.Root, "Release.gpg")
 	if hasRelease && companion != anchor.Path {
-		if _, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: companion, Optional: true}); err != nil {
+		if _, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: companion, AllowUnavailable: true}); err != nil {
 			return err
 		}
 	}

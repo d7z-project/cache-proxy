@@ -2,7 +2,10 @@ package flatpak
 
 import (
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -16,6 +19,7 @@ func FuzzOSTreePathClassification(f *testing.F) {
 			t.Skip()
 		}
 		_, metadata := metadataAnchorPath(path)
+		_, _ = indexedSummaryDigestFromPath(path)
 		_ = isDescriptorPath(path)
 		delta := isDeltaPath(path)
 		_ = isDeltaIndexPath(path)
@@ -24,6 +28,27 @@ func FuzzOSTreePathClassification(f *testing.F) {
 		if isIndexedSummaryDeltaPath(path) && (metadata || !delta) {
 			t.Fatal("indexed summary delta classifications overlap or are incomplete")
 		}
+	})
+}
+
+func FuzzVerifyIndexedSummary(f *testing.F) {
+	body := []byte("flatpak indexed summary")
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(body); err != nil {
+		f.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		f.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+	f.Add(compressed.Bytes(), digest)
+	f.Add([]byte{}, strings.Repeat("0", 64))
+	f.Fuzz(func(t *testing.T, data []byte, digest string) {
+		if len(data) > 1<<20 || len(digest) > 128 {
+			t.Skip()
+		}
+		_ = verifyIndexedSummary(bytes.NewReader(data), digest, 1<<20)
 	})
 }
 
@@ -38,7 +63,7 @@ func FuzzSummaryIndex(f *testing.F) {
 		if len(data) > 1<<20 {
 			t.Skip()
 		}
-		_, _ = readSummaryIndex(bytes.NewReader(data), int64(len(data)))
+		_, _ = parseSummaryIndexDigest(bytes.NewReader(data), int64(len(data)))
 	})
 }
 

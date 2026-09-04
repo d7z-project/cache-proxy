@@ -20,7 +20,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 )
 
-func newTestHandler(t *testing.T, upstream string, rules []Rule) (*handler, *blobfs.Store) {
+func newTestHandler(t *testing.T, upstream string, rules []Rule) *handler {
 	t.Helper()
 	root := t.TempDir()
 	store, err := blobfs.Open(root+"/blobs", blobfs.DefaultConfig())
@@ -37,7 +37,7 @@ func newTestHandler(t *testing.T, upstream string, rules []Rule) (*handler, *blo
 		require.NoError(t, handler.CloseContext(context.Background()))
 		_ = store.Close()
 	})
-	return handler, store
+	return handler
 }
 
 func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
@@ -57,7 +57,7 @@ func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 		_, _ = fmt.Fprintf(w, "payload-v%d", current)
 	}))
 	defer upstream.Close()
-	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	handler := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
@@ -115,7 +115,7 @@ func TestFileReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 		requests.Add(1)
 	}))
 	defer upstream.Close()
-	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	handler := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/artifact", strings.NewReader("content")))
@@ -131,7 +131,7 @@ func TestFileRootAndDirectoriesAlwaysPassThrough(t *testing.T) {
 		_, _ = io.WriteString(w, request.URL.RequestURI())
 	}))
 	defer upstream.Close()
-	handler, _ := newTestHandler(t, upstream.URL+"/files", []Rule{{Match: "**", Policy: "immutable"}})
+	handler := newTestHandler(t, upstream.URL+"/files", []Rule{{Match: "**", Policy: "immutable"}})
 
 	for range 2 {
 		for target, expected := range map[string]string{
@@ -158,7 +158,7 @@ func TestFileConcurrentMissUsesSingleTransfer(t *testing.T) {
 		_, _ = io.WriteString(w, strings.Repeat("x", 4096))
 	}))
 	defer upstream.Close()
-	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	handler := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 
 	var wait sync.WaitGroup
 	errors := make(chan error, 32)
@@ -209,7 +209,7 @@ func TestFileConcurrentRevalidationUsesSingleTransfer(t *testing.T) {
 		_, _ = io.WriteString(w, state)
 	}))
 	defer upstream.Close()
-	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	handler := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
@@ -274,7 +274,7 @@ func TestFileCredentialsBypassAndCachedRangeUsesCompleteObject(t *testing.T) {
 		_, _ = io.WriteString(w, "0123456789")
 	}))
 	defer upstream.Close()
-	handler, _ := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	handler := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))

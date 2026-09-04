@@ -25,12 +25,7 @@ type Rule struct {
 	Policy string `yaml:"policy"`
 }
 
-type Driver struct{}
-
-func NewDriver() proxyruntime.ModeDriver { return Driver{} }
-func (Driver) Mode() string              { return config.ModeFile }
-
-func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	var options Options
 	if err := plan.Decode(&options); err != nil {
 		return err

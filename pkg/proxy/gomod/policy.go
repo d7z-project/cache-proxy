@@ -15,23 +15,18 @@ import (
 )
 
 type SumDBConfig struct {
-	Enabled bool   `json:"enabled" yaml:"enabled"`
-	Name    string `json:"name,omitempty" yaml:"name,omitempty"`
-	URL     string `json:"url,omitempty" yaml:"url,omitempty"`
+	Enabled bool   `yaml:"enabled"`
+	Name    string `yaml:"name,omitempty"`
+	URL     string `yaml:"url,omitempty"`
 }
 
 type Config struct {
-	SumDB                    *SumDBConfig `json:"sumdb,omitempty" yaml:"sumdb,omitempty"`
-	GOPrivate                []string     `json:"goprivate,omitempty" yaml:"goprivate,omitempty"`
-	DisableModuleFetchHeader bool         `json:"disableModuleFetchHeader,omitempty" yaml:"disable_module_fetch_header,omitempty"`
+	SumDB                    *SumDBConfig `yaml:"sumdb,omitempty"`
+	GOPrivate                []string     `yaml:"goprivate,omitempty"`
+	DisableModuleFetchHeader bool         `yaml:"disable_module_fetch_header,omitempty"`
 }
 
-type Driver struct{}
-
-func NewDriver() proxyruntime.ModeDriver { return Driver{} }
-func (Driver) Mode() string              { return config.ModeGo }
-
-func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	var options Config
 	if err := plan.Decode(&options); err != nil {
 		return err

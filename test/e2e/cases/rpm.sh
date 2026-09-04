@@ -5,9 +5,11 @@ e2e_prepare_rpm() {
 }
 
 e2e_run_rpm() {
-	printf '\n[rpm] dnf metadata/install, closure update, warm RPM and offline restart\n'
-	e2e_reset_fixture
-	e2e_assert_transparent_paths rpm /rpm /rpm bypass
+  printf '\n[rpm] dnf metadata/install, closure update, warm RPM and offline restart\n'
+  e2e_reset_fixture
+  e2e_assert_transparent_paths rpm /rpm /rpm bypass
+  local future_path=/rpm/repodata/future.bin
+  e2e_set_fixture_fault "$future_path" 404
   local script='
     mkdir -p /tmp/repos
     cat >/tmp/repos/e2e.repo <<EOF
@@ -24,6 +26,15 @@ EOF
   '
   e2e_client rpm cold "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
+  e2e_assert_bypass_status rpm-unavailable-metadata "$E2E_PROXY_URL$future_path" 404
+  e2e_clear_fixture_fault "$future_path"
+  e2e_client rpm recovered-metadata "$E2E_TOOLS_IMAGE" '
+    headers=/tmp/headers
+    body=$(curl --fail --silent --show-error --dump-header "$headers" "$1")
+    grep -Eiq "^X-Cache:[[:space:]]*BYPASS" "$headers"
+    test "$body" = "future metadata for initial"
+  ' "$E2E_PROXY_URL$future_path"
+  e2e_wait_cache_hit "$E2E_PROXY_URL$future_path"
   local package_path=/rpm/e2e-rpm-1.0.0-1.noarch.rpm before
   before=$(e2e_fixture_count GET "$package_path")
   ((before >= 1)) || e2e_fail 'RPM package did not reach the fixture'

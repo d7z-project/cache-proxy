@@ -48,11 +48,6 @@ func (h HandlerInstance) Stop(ctx context.Context) error {
 	return nil
 }
 
-type ModeDriver interface {
-	Mode() string
-	Plan(context.Context, *InstancePlan) error
-}
-
 type Entry struct {
 	Name       string
 	Mode       string

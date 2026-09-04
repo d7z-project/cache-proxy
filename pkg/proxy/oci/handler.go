@@ -165,8 +165,7 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool,
 				if active {
 					return true, nil
 				}
-				_, err := h.cleanupExpiredObject(ctx, current, "manifest", opts)
-				return false, err
+				return false, h.cleanupExpiredObject(ctx, current, "manifest", opts)
 			})
 			if err != nil || !complete {
 				return !complete, err
@@ -177,8 +176,7 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool,
 				if _, active := h.downloads.Load(current); active {
 					return true, nil
 				}
-				_, err := h.cleanupExpiredObject(ctx, current, "blob", opts)
-				return false, err
+				return false, h.cleanupExpiredObject(ctx, current, "blob", opts)
 			})
 			if err != nil || !complete {
 				return !complete, err
@@ -224,26 +222,26 @@ func (h *handler) cleanupWalk(ctx context.Context, root string, batch int, visit
 	return complete, err
 }
 
-func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKind string, opts config.CleanupConfig) (bool, error) {
+func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKind string, opts config.CleanupConfig) error {
 	info, err := h.store.StatObject(ctx, h.name, objectPath)
 	if err != nil {
-		return false, err
+		return err
 	}
 	fetchedAt, fetchedAtErr := time.Parse(time.RFC3339Nano, info.Options["fetched-at"])
 	if fetchedAtErr != nil {
 		fetchedAt, fetchedAtErr = time.Parse(http.TimeFormat, info.Options["fetched-at"])
 	}
 	if fetchedAtErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
-		return false, nil
+		return nil
 	}
 	if opts.DryRun {
 		slog.Info("oci cleanup dry-run delete", "instance", h.name, "kind", objectKind, "path", objectPath)
-		return true, nil
+		return nil
 	}
 	if err := h.store.DeleteObject(ctx, h.name, objectPath); err != nil {
-		return false, fmt.Errorf("delete expired oci %s %s: %w", objectKind, objectPath, err)
+		return fmt.Errorf("delete expired oci %s %s: %w", objectKind, objectPath, err)
 	}
-	return true, nil
+	return nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -399,7 +397,7 @@ func (h *handler) serveManifestState(ctx context.Context, w http.ResponseWriter,
 		"X-Cache":               cache,
 		"Docker-Content-Digest": state.ManifestDigest,
 	}
-	return h.writeResponse(w, req.Method, http.StatusOK, headers, reader)
+	return h.writeResponse(w, req.Method, headers, reader)
 }
 
 func (h *handler) manifestFresh(resolved request, state refState) bool {
@@ -459,7 +457,7 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 	if headers["Content-Length"] == "" {
 		headers["Content-Length"] = strconv.FormatInt(info.Size, 10)
 	}
-	return h.writeResponse(w, req.Method, http.StatusOK, headers, reader)
+	return h.writeResponse(w, req.Method, headers, reader)
 }
 
 func (h *handler) serveUpstream(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {

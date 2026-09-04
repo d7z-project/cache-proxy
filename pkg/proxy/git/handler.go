@@ -12,13 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-git/go-billy/v5"
+	billyutil "github.com/go-git/go-billy/v5/util"
 	gitlib "github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/storage/filesystem"
-	"github.com/spf13/afero"
 
 	proxytransport "gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
@@ -27,7 +28,7 @@ import (
 
 type gitConfig struct {
 	name             string
-	billyFs          *billyAdapter
+	billyFs          billy.Filesystem
 	upstream         string
 	auth             transport.AuthMethod
 	proxyURL         string
@@ -41,7 +42,7 @@ type gitHandler struct {
 	auth             transport.AuthMethod
 	proxyURL         string
 	operationTimeout time.Duration
-	billyFs          *billyAdapter
+	billyFs          billy.Filesystem
 	bootstrapClient  *http.Client
 	upstreamGate     *proxytransport.UpstreamGate
 
@@ -164,12 +165,12 @@ func (h *gitHandler) syncRepository(ctx context.Context) error {
 }
 
 func (h *gitHandler) clearRepository() error {
-	entries, err := afero.ReadDir(h.billyFs.fs, ".")
+	entries, err := h.billyFs.ReadDir(".")
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read git mirror directory: %w", err)
 	}
 	for _, entry := range entries {
-		if err := (afero.Afero{Fs: h.billyFs.fs}).RemoveAll(entry.Name()); err != nil {
+		if err := billyutil.RemoveAll(h.billyFs, entry.Name()); err != nil {
 			return fmt.Errorf("clear git mirror %s: %w", entry.Name(), err)
 		}
 	}

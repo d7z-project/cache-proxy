@@ -36,7 +36,7 @@ RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 
 FROM docker.io/library/debian:bookworm-slim AS deb
 ENV SOURCE_DATE_EPOCH=1704067200
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gzip xz-utils && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gnupg gzip xz-utils && rm -rf /var/lib/apt/lists/*
 COPY fixtures/deb/build.sh /usr/local/bin/build-fixture
 RUN chmod +x /usr/local/bin/build-fixture && build-fixture /out
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -27,7 +28,8 @@ func (s *fixtureServer) serveGit(w http.ResponseWriter, r *http.Request, revisio
 	command.Stdin = r.Body
 	output, err := command.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			log.Printf("git http-backend failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		http.Error(w, "git backend failed", http.StatusInternalServerError)

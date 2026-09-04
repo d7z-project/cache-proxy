@@ -74,6 +74,41 @@ e2e_reset_fixture_counts() {
     'curl --fail --silent --show-error -X POST "$1/__e2e/reset" >/dev/null' "$E2E_FIXTURE_URL"
 }
 
+e2e_set_fixture_fault() {
+  local path=$1 status=$2
+  e2e_run_client_shell "${E2E_RUN_ID}-fault-$status-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    curl --fail --silent --show-error -X POST --get \
+      --data-urlencode "path=$1" --data-urlencode "status=$2" \
+      "$3/__e2e/fault" >/dev/null
+  ' "$path" "$status" "$E2E_FIXTURE_URL"
+}
+
+e2e_clear_fixture_fault() {
+  local path=$1
+  e2e_run_client_shell "${E2E_RUN_ID}-fault-clear-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    curl --fail --silent --show-error -X DELETE --get \
+      --data-urlencode "path=$1" "$2/__e2e/fault" >/dev/null
+  ' "$path" "$E2E_FIXTURE_URL"
+}
+
+e2e_assert_bypass_status() {
+  local name=$1 url=$2 expected_status=$3
+  e2e_run_client_shell "${E2E_RUN_ID}-${name}-bypass-$RANDOM" "$E2E_TOOLS_IMAGE" '
+    headers=/tmp/headers
+    status=$(curl --silent --show-error --dump-header "$headers" --output /dev/null --write-out "%{http_code}" "$1")
+    if [ "$status" != "$2" ] || ! grep -Eiq "^X-Cache:[[:space:]]*BYPASS" "$headers"; then
+      printf "unexpected bypass response: status=%s, expected=%s\n" "$status" "$2" >&2
+      cat "$headers" >&2
+      exit 1
+    fi
+    if grep -Eiq "^Retry-After:" "$headers"; then
+      printf "bypass response included Retry-After\n" >&2
+      cat "$headers" >&2
+      exit 1
+    fi
+  ' "$url" "$expected_status"
+}
+
 e2e_set_fixture_state() {
   local state=$1
   e2e_run_client_shell "${E2E_RUN_ID}-state-$state-$RANDOM" "$E2E_TOOLS_IMAGE" \
@@ -139,12 +174,20 @@ e2e_wait_header_changed() {
     url=$1
     header=$2
     previous=$3
+    headers=/tmp/response-headers
     i=0
     while [ "$i" -lt 60 ]; do
-      current=$(curl --fail --silent --show-error --max-time 5 -H "Cache-Control: no-cache" --dump-header - --output /dev/null "$url" |
-        awk -v name="$header:" "BEGIN { IGNORECASE=1 } \$1 == name \
-          { sub(/^[^:]*:[[:space:]]*/, \"\"); sub(/\\r$/, \"\"); print; exit }")
-      if [ -n "$current" ] && [ "$current" != "$previous" ]; then
+      if curl --fail --silent --show-error --max-time 5 -H "Cache-Control: no-cache" \
+          --dump-header "$headers" --output /dev/null "$url"; then
+        current=$(awk -v name="$header:" "BEGIN { IGNORECASE=1 } \$1 == name \
+          { sub(/^[^:]*:[[:space:]]*/, \"\"); sub(/\\r$/, \"\"); print; exit }" "$headers")
+        cache=$(awk "BEGIN { IGNORECASE=1 } \$1 == \"X-Cache:\" \
+          { sub(/^[^:]*:[[:space:]]*/, \"\"); sub(/\\r$/, \"\"); print; exit }" "$headers")
+      else
+        current=
+        cache=
+      fi
+      if [ -n "$current" ] && [ "$current" != "$previous" ] && [ "$cache" = HIT ]; then
         exit 0
       fi
       i=$((i + 1))

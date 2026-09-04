@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -117,52 +118,78 @@ func TestOSTreeDigestObjectRangeMissFillsVerifiedObject(t *testing.T) {
 	require.Equal(t, int32(1), requests.Load())
 }
 
-func TestOSTreeDetachedMetadataCachesNotFound(t *testing.T) {
+func TestOSTreeDetachedMetadataReflectsUpstreamAvailability(t *testing.T) {
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte("commit")))
 	objectPath := "/objects/" + digest[:2] + "/" + digest[2:] + ".commitmeta"
 	var requests atomic.Int32
+	var available atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		requests.Add(1)
-		http.NotFound(w, request)
+		if !available.Load() {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = io.WriteString(w, "detached metadata")
 	}))
 	defer server.Close()
 	h := newFlatpakTestHandler(t, server.URL)
 
-	for _, method := range []string{http.MethodGet, http.MethodGet, http.MethodHead} {
+	for range 2 {
 		response := httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(method, objectPath, nil))
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, objectPath, nil))
 		require.Equal(t, http.StatusNotFound, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
 	}
-	require.Equal(t, int32(1), requests.Load())
+	available.Store(true)
+	for index := range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, objectPath, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "detached metadata", response.Body.String())
+		if index == 0 {
+			require.Equal(t, "MISS", response.Header().Get("X-Cache"))
+		} else {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+	}
+	require.Equal(t, int32(3), requests.Load())
 }
 
 func TestOSTreeDeltaIndexUsesFiniteResponseCache(t *testing.T) {
 	const deltaIndexPath = "/delta-indexes/_1/CNHDS81donGnhBJHDT9ww12oUNEP9E2v1eWqzmuqg.index"
-	for name, status := range map[string]int{"present": http.StatusOK, "absent": http.StatusNotFound} {
-		t.Run(name, func(t *testing.T) {
-			var requests atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				requests.Add(1)
-				require.Equal(t, deltaIndexPath, request.URL.Path)
-				w.WriteHeader(status)
-				_, _ = w.Write([]byte("delta index"))
-			}))
-			defer server.Close()
-			h := newFlatpakTestHandler(t, server.URL)
+	var requests atomic.Int32
+	var available atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		require.Equal(t, deltaIndexPath, request.URL.Path)
+		if !available.Load() {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = io.WriteString(w, "delta index")
+	}))
+	defer server.Close()
+	h := newFlatpakTestHandler(t, server.URL)
 
-			for index := range 2 {
-				response := httptest.NewRecorder()
-				h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, deltaIndexPath, nil))
-				require.Equal(t, status, response.Code)
-				if index == 0 {
-					require.Equal(t, "MISS", response.Header().Get("X-Cache"))
-				} else {
-					require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
-				}
-			}
-			require.Equal(t, int32(1), requests.Load())
-		})
+	for range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, deltaIndexPath, nil))
+		require.Equal(t, http.StatusNotFound, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
 	}
+	available.Store(true)
+	for index := range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, deltaIndexPath, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "delta index", response.Body.String())
+		if index == 0 {
+			require.Equal(t, "MISS", response.Header().Get("X-Cache"))
+		} else {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+	}
+	require.Equal(t, int32(3), requests.Load())
 }
 
 func TestOSTreeDeltaIndexPathValidation(t *testing.T) {
@@ -201,6 +228,26 @@ func TestFlatpakIndexedSummaryDeltaPathValidation(t *testing.T) {
 		"summaries/nested/" + oldDigest + "-" + newDigest + ".delta",
 	} {
 		require.False(t, isIndexedSummaryDeltaPath(invalid), invalid)
+	}
+}
+
+func TestFlatpakIndexedSummaryPathIsContentAddressed(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	requestPath := "summaries/" + digest + ".gz"
+	parsed, ok := indexedSummaryDigestFromPath(requestPath)
+	require.True(t, ok)
+	require.Equal(t, digest, parsed)
+	_, metadata := metadataAnchorPath(requestPath)
+	require.False(t, metadata)
+
+	for _, invalid := range []string{
+		"summaries/" + strings.Repeat("a", 63) + ".gz",
+		"summaries/" + strings.Repeat("A", 64) + ".gz",
+		"summaries/nested/" + digest + ".gz",
+		"summaries/" + digest + ".gz/extra",
+	} {
+		_, ok := indexedSummaryDigestFromPath(invalid)
+		require.False(t, ok, invalid)
 	}
 }
 
@@ -256,16 +303,16 @@ func TestFlatpakMetadataUsesIndependentGenerations(t *testing.T) {
 	}
 }
 
-func TestFlatpakIndexedSummaryPublishesVerifiedClosure(t *testing.T) {
+func TestFlatpakIndexedSummaryLoadsSelectedSummaryOnDemand(t *testing.T) {
 	index, compressedSummary := flatpakIndexedSummaryFixture(t)
 	const digest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"
-	var requests atomic.Int32
+	var summaryRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		requests.Add(1)
 		switch request.URL.Path {
 		case "/summary.idx":
 			_, _ = w.Write(index)
 		case "/summaries/" + digest + ".gz":
+			summaryRequests.Add(1)
 			_, _ = w.Write(compressedSummary)
 		default:
 			http.NotFound(w, request)
@@ -280,23 +327,174 @@ func TestFlatpakIndexedSummaryPublishesVerifiedClosure(t *testing.T) {
 	require.Equal(t, index, response.Body.Bytes())
 	_, err := h.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
+	require.Zero(t, summaryRequests.Load())
 
-	for requestPath, expected := range map[string][]byte{
-		"/summary.idx":                 index,
-		"/summaries/" + digest + ".gz": compressedSummary,
-	} {
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+	require.Equal(t, index, response.Body.Bytes())
+
+	for requestIndex := range 2 {
 		response = httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summaries/"+digest+".gz", nil))
 		require.Equal(t, http.StatusOK, response.Code)
-		require.Equal(t, "HIT", response.Header().Get("X-Cache"))
-		require.Equal(t, expected, response.Body.Bytes())
+		if requestIndex == 0 {
+			require.Equal(t, "MISS", response.Header().Get("X-Cache"))
+		} else {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+		require.Equal(t, compressedSummary, response.Body.Bytes())
 	}
+	require.Equal(t, int32(1), summaryRequests.Load())
 	for _, requestPath := range []string{"/summary.idx.sig", "/summaries/" + fmt.Sprintf("%x", sha256.Sum256(index)) + ".idx.sig"} {
 		response = httptest.NewRecorder()
 		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
 		require.Equal(t, http.StatusNotFound, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
 	}
-	require.Equal(t, int32(4), requests.Load())
+}
+
+func TestFlatpakIndexedSummaryFailedFillFallsBackForWaiter(t *testing.T) {
+	const digest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"
+	const requestPath = "/summaries/" + digest + ".gz"
+	invalid := []byte("not a gzip stream")
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.Equal(t, requestPath, request.URL.Path)
+		if requests.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		_, _ = w.Write(invalid)
+	}))
+	t.Cleanup(server.Close)
+	h := newFlatpakTestHandler(t, server.URL)
+
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	request := func() {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		responses <- response
+	}
+	go request()
+	<-firstStarted
+	go request()
+	select {
+	case <-responses:
+		t.Fatal("coalesced request completed before the active transfer")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for range 2 {
+		select {
+		case response := <-responses:
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, invalid, response.Body.Bytes())
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for indexed summary response")
+		}
+	}
+	require.Equal(t, int32(2), requests.Load())
+}
+
+func TestFlatpakIndexedSummaryReflectsUpstreamAvailability(t *testing.T) {
+	_, compressedSummary := flatpakIndexedSummaryFixture(t)
+	const digest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"
+	requestPath := "/summaries/" + digest + ".gz"
+	var available atomic.Bool
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		if !available.Load() {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = w.Write(compressedSummary)
+	}))
+	t.Cleanup(server.Close)
+	h := newFlatpakTestHandler(t, server.URL)
+
+	for range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		require.Equal(t, http.StatusNotFound, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+	}
+	available.Store(true)
+	for index := range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, compressedSummary, response.Body.Bytes())
+		if index == 0 {
+			require.Equal(t, "MISS", response.Header().Get("X-Cache"))
+		} else {
+			require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
+		}
+	}
+	require.Equal(t, int32(3), requests.Load())
+}
+
+func TestFlatpakSummaryIndexSignatureFallback(t *testing.T) {
+	index, _ := flatpakIndexedSummaryFixture(t)
+	indexDigest := fmt.Sprintf("%x", sha256.Sum256(index))
+	tests := []struct {
+		name              string
+		digestStatus      int
+		wantBody          string
+		wantRefreshError  bool
+		wantFallbackCalls int32
+	}{
+		{name: "digest signature", digestStatus: http.StatusOK, wantBody: "digest signature"},
+		{name: "forbidden digest signature", digestStatus: http.StatusForbidden, wantBody: "canonical signature", wantFallbackCalls: 1},
+		{name: "missing digest signature", digestStatus: http.StatusNotFound, wantBody: "canonical signature", wantFallbackCalls: 1},
+		{name: "limited digest signature", digestStatus: http.StatusTooManyRequests, wantRefreshError: true},
+		{name: "failed digest signature", digestStatus: http.StatusServiceUnavailable, wantRefreshError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var fallbackCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/summary.idx":
+					_, _ = w.Write(index)
+				case "/summaries/" + indexDigest + ".idx.sig":
+					w.WriteHeader(test.digestStatus)
+					if test.digestStatus == http.StatusOK {
+						_, _ = io.WriteString(w, "digest signature")
+					}
+				case "/summary.idx.sig":
+					fallbackCalls.Add(1)
+					_, _ = io.WriteString(w, "canonical signature")
+				default:
+					http.NotFound(w, request)
+				}
+			}))
+			t.Cleanup(server.Close)
+			h := newFlatpakTestHandler(t, server.URL)
+
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
+			_, err := h.metadata.Refresh(context.Background(), 10)
+			if test.wantRefreshError {
+				require.Error(t, err)
+				require.Nil(t, h.metadata.Current("flatpak:summary.idx"))
+				require.Zero(t, fallbackCalls.Load())
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.wantFallbackCalls, fallbackCalls.Load())
+			for _, requestPath := range []string{"/summary.idx.sig", "/summaries/" + indexDigest + ".idx.sig"} {
+				response := httptest.NewRecorder()
+				h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
+				require.Equal(t, http.StatusOK, response.Code)
+				require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+				require.Equal(t, test.wantBody, response.Body.String())
+			}
+		})
+	}
 }
 
 func TestFlatpakIndexedSummaryDeltaRemainsMutableAfterGenerationPublish(t *testing.T) {
@@ -400,8 +598,9 @@ func TestFlatpakSummaryPublishesUpstreamGenerationUpdate(t *testing.T) {
 
 func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	initialIndex, initialSummary := flatpakIndexedSummaryFixture(t)
-	parsedInitial, err := readSummaryIndex(bytes.NewReader(initialIndex), int64(len(initialIndex)))
+	initialDigest, err := parseSummaryIndexDigest(bytes.NewReader(initialIndex), int64(len(initialIndex)))
 	require.NoError(t, err)
+	const initialSummaryDigest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"
 	newSummaryBody := []byte("updated indexed summary")
 	var newSummary bytes.Buffer
 	writer := gzip.NewWriter(&newSummary)
@@ -409,19 +608,18 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 	newSummaryDigest := sha256.Sum256(newSummaryBody)
-	oldSummaryDigest, err := hex.DecodeString(parsedInitial.subsummaryDigests[0])
+	oldSummaryDigest, err := hex.DecodeString(initialSummaryDigest)
 	require.NoError(t, err)
 	updatedIndex := bytes.Clone(initialIndex)
 	digestOffset := bytes.Index(updatedIndex, oldSummaryDigest)
 	require.NotEqual(t, -1, digestOffset)
 	copy(updatedIndex[digestOffset:digestOffset+sha256.Size], newSummaryDigest[:])
-	parsedUpdated, err := readSummaryIndex(bytes.NewReader(updatedIndex), int64(len(updatedIndex)))
+	updatedDigest, err := parseSummaryIndexDigest(bytes.NewReader(updatedIndex), int64(len(updatedIndex)))
 	require.NoError(t, err)
-	require.Equal(t, fmt.Sprintf("%x", newSummaryDigest), parsedUpdated.subsummaryDigests[0])
 	indexes := [][]byte{initialIndex, updatedIndex}
 	summaries := [][]byte{initialSummary, newSummary.Bytes()}
-	digests := []string{parsedInitial.subsummaryDigests[0], parsedUpdated.subsummaryDigests[0]}
-	indexDigests := []string{parsedInitial.digest, parsedUpdated.digest}
+	digests := []string{initialSummaryDigest, fmt.Sprintf("%x", newSummaryDigest)}
+	indexDigests := []string{initialDigest, updatedDigest}
 	var revision atomic.Int32
 	revision.Store(1)
 	var oldObjectRequests atomic.Int32
@@ -455,6 +653,11 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.NoError(t, err)
 	previous := h.metadata.Current("flatpak:summary.idx")
 	require.NotNil(t, previous)
+	oldSummary := httptest.NewRecorder()
+	h.ServeHTTP(oldSummary, httptest.NewRequest(http.MethodGet, "/summaries/"+digests[0]+".gz", nil))
+	require.Equal(t, http.StatusOK, oldSummary.Code)
+	require.Equal(t, "MISS", oldSummary.Header().Get("X-Cache"))
+	require.Equal(t, initialSummary, oldSummary.Body.Bytes())
 
 	revision.Store(2)
 	more, err := h.metadata.Refresh(context.Background(), 1)
@@ -471,20 +674,15 @@ func TestFlatpakSummaryIndexPublishesUpstreamGenerationUpdate(t *testing.T) {
 	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
 	require.Equal(t, updatedIndex, response.Body.Bytes())
 
-	for requestPath, expected := range map[string][]byte{
-		"/summaries/" + digests[0] + ".gz":           initialSummary,
-		"/summaries/" + indexDigests[0] + ".idx.sig": []byte("signature-1"),
-	} {
-		response = httptest.NewRecorder()
-		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, requestPath, nil))
-		require.Equal(t, http.StatusOK, response.Code, requestPath)
-		require.Equal(t, "HIT", response.Header().Get("X-Cache"), requestPath)
-		require.Equal(t, expected, response.Body.Bytes(), requestPath)
-	}
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summaries/"+digests[0]+".gz", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+	require.Equal(t, initialSummary, response.Body.Bytes())
 	require.Equal(t, int32(2), oldObjectRequests.Load())
 }
 
-func TestFlatpakIndexedSummaryRejectsInvalidSubsummary(t *testing.T) {
+func TestFlatpakIndexedSummaryDoesNotCacheInvalidContent(t *testing.T) {
 	index, _ := flatpakIndexedSummaryFixture(t)
 	const digest = "156cfd16c25f06ec053ded6a1c1f54e939f363673da3f4deefca92e1d773065e"
 	var compressed bytes.Buffer
@@ -498,11 +696,13 @@ func TestFlatpakIndexedSummaryRejectsInvalidSubsummary(t *testing.T) {
 		"digest mismatch": compressed.Bytes(),
 	} {
 		t.Run(name, func(t *testing.T) {
+			var summaryRequests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				switch request.URL.Path {
 				case "/summary.idx":
 					_, _ = w.Write(index)
 				case "/summaries/" + digest + ".gz":
+					summaryRequests.Add(1)
 					_, _ = w.Write(body)
 				default:
 					http.NotFound(w, request)
@@ -515,8 +715,16 @@ func TestFlatpakIndexedSummaryRejectsInvalidSubsummary(t *testing.T) {
 			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summary.idx", nil))
 			require.Equal(t, http.StatusOK, response.Code)
 			_, err := h.metadata.Refresh(context.Background(), 10)
-			require.Error(t, err)
-			require.Nil(t, h.metadata.Current("flatpak:summary.idx"))
+			require.NoError(t, err)
+			require.NotNil(t, h.metadata.Current("flatpak:summary.idx"))
+
+			for range 2 {
+				response = httptest.NewRecorder()
+				h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summaries/"+digest+".gz", nil))
+				require.Equal(t, http.StatusOK, response.Code)
+				require.Equal(t, body, response.Body.Bytes())
+			}
+			require.Equal(t, int32(2), summaryRequests.Load())
 		})
 	}
 }
@@ -576,6 +784,14 @@ func TestFlatpakIndexedSummaryRestoresOffline(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code)
 	_, err := h.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summaries/"+digest+".gz", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, compressedSummary, response.Body.Bytes())
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/summaries/"+digest+".gz", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Contains(t, []string{"HIT", "COALESCED"}, response.Header().Get("X-Cache"))
 	require.NoError(t, h.CloseContext(context.Background()))
 	require.NoError(t, store.Close())
 	server.Close()

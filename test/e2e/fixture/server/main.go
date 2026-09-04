@@ -19,6 +19,7 @@ type fixtureServer struct {
 	countsMu  sync.RWMutex
 	counts    map[string]int
 	headers   map[string]http.Header
+	faults    map[string]int
 	updated   atomic.Bool
 }
 
@@ -38,6 +39,7 @@ func main() {
 		publicURL: strings.TrimRight(*publicURL, "/"),
 		counts:    make(map[string]int),
 		headers:   make(map[string]http.Header),
+		faults:    make(map[string]int),
 	}
 	log.Printf("fixture listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, server))
@@ -56,6 +58,13 @@ func (s *fixtureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.countsMu.Unlock()
 	log.Printf("%s %s", r.Method, r.URL.RequestURI())
+	s.countsMu.RLock()
+	faultStatus := s.faults[r.URL.Path]
+	s.countsMu.RUnlock()
+	if faultStatus != 0 {
+		http.Error(w, http.StatusText(faultStatus), faultStatus)
+		return
+	}
 	revision := fixtureRevision{directory: "initial", packageMajor: 1}
 	if s.updated.Load() {
 		revision = fixtureRevision{directory: "updated", packageMajor: 2}

@@ -113,12 +113,12 @@ func (f *preparedStateFile) discard() {
 	}
 }
 
-func readJSON(root, name string, limit int64, target any) ([]byte, error) {
+func readJSON(root, name string, limit int64, target any) error {
 	data, err := readStateFile(statePath(root, name), limit)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return data, decodeJSON(data, target)
+	return decodeJSON(data, target)
 }
 
 func decodeJSON(data []byte, target any) error {
@@ -128,7 +128,7 @@ func decodeJSON(data []byte, target any) error {
 		return err
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("state contains multiple JSON values")
 		}
@@ -148,12 +148,12 @@ func prepareYAML(root, name string, value any) (*preparedStateFile, error) {
 	return prepareBytes(root, name, data)
 }
 
-func readYAML(root, name string, target any) ([]byte, error) {
+func readYAML(root, name string, target any) error {
 	data, err := readStateFile(statePath(root, name), maxCurrentMarkerSize)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return data, decodeYAML(data, target)
+	return decodeYAML(data, target)
 }
 
 func readStateFile(name string, limit int64) ([]byte, error) {
@@ -186,7 +186,7 @@ func decodeYAML(data []byte, target any) error {
 		return err
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("state contains multiple YAML documents")
 		}
@@ -234,21 +234,12 @@ func prepareSnapshot(snapshot *Snapshot) error {
 		if _, duplicate := snapshot.byPath[object.Path]; duplicate {
 			return fmt.Errorf("duplicate snapshot object %q", object.Path)
 		}
-		switch object.State {
-		case ObjectPresent:
-			storedObject := strings.HasPrefix(object.Key, generationRoot+"/objects/")
-			storedAnchor := object.Path == snapshot.Anchor && object.Key == generationRoot+"/anchor" &&
-				strings.EqualFold(object.SHA256, snapshot.Generation)
-			validKey := storedObject || storedAnchor
-			if object.Size < 0 || !validSHA256(object.SHA256) || !validKey || object.Retainable && object.Path == snapshot.Anchor {
-				return fmt.Errorf("invalid present snapshot object %q", object.Path)
-			}
-		case ObjectNotFound, ObjectForbidden:
-			if object.Key != "" || object.Retainable {
-				return fmt.Errorf("invalid absent snapshot object %q", object.Path)
-			}
-		default:
-			return fmt.Errorf("invalid snapshot object state %q", object.State)
+		storedObject := strings.HasPrefix(object.Key, generationRoot+"/objects/")
+		storedAnchor := object.Path == snapshot.Anchor && object.Key == generationRoot+"/anchor" &&
+			strings.EqualFold(object.SHA256, snapshot.Generation)
+		validKey := storedObject || storedAnchor
+		if object.Size < 0 || !validSHA256(object.SHA256) || !validKey || object.Retainable && object.Path == snapshot.Anchor {
+			return fmt.Errorf("invalid snapshot object %q", object.Path)
 		}
 		snapshot.byPath[object.Path] = object
 	}
@@ -279,7 +270,7 @@ func (h *GenerationManager) restore() error {
 		directory := "repositories/" + entry.Name()
 		var seen lastSeenMarker
 		seenPresent := false
-		if _, err := readJSON(h.config.StateDir, directory+"/last-seen.json", maxRepositoryMarkerSize, &seen); err == nil {
+		if err := readJSON(h.config.StateDir, directory+"/last-seen.json", maxRepositoryMarkerSize, &seen); err == nil {
 			if seen.RootID != "" && path.Base(repositoryDirectory(seen.RootID)) == entry.Name() && !seen.SeenAt.IsZero() {
 				h.lastSeen[seen.RootID] = seen.SeenAt
 				h.lastSeenPersisted[seen.RootID] = seen.SeenAt
@@ -305,7 +296,7 @@ func (h *GenerationManager) restore() error {
 func (h *GenerationManager) restoreCurrentGeneration(repositoryName string, seen lastSeenMarker, seenPresent bool) error {
 	directory := "repositories/" + repositoryName
 	var marker currentMarker
-	if _, err := readYAML(h.config.StateDir, directory+"/current.yaml", &marker); err != nil {
+	if err := readYAML(h.config.StateDir, directory+"/current.yaml", &marker); err != nil {
 		return err
 	}
 	if marker.Upstream != h.config.Upstream {
@@ -392,9 +383,6 @@ func (h *GenerationManager) loadSnapshot(ctx context.Context, rootID, root, upst
 	}
 	validatedKeys := make(map[string]struct{})
 	for _, object := range snapshot.Objects {
-		if object.State != ObjectPresent {
-			continue
-		}
 		if _, validated := validatedKeys[object.Key]; validated {
 			continue
 		}
@@ -413,7 +401,7 @@ func (h *GenerationManager) loadSnapshot(ctx context.Context, rootID, root, upst
 func (h *GenerationManager) restorePendingAnchor(repositoryName string, seen lastSeenMarker, seenPresent bool) error {
 	directory := "repositories/" + repositoryName
 	var pending pendingAnchor
-	if _, err := readJSON(h.config.StateDir, directory+"/pending.json", maxRepositoryMarkerSize, &pending); err != nil {
+	if err := readJSON(h.config.StateDir, directory+"/pending.json", maxRepositoryMarkerSize, &pending); err != nil {
 		return err
 	}
 	if pending.Upstream != h.config.Upstream {
@@ -607,7 +595,7 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 		inspected++
 		if entry.Name() == "current.yaml" {
 			var marker currentMarker
-			if _, err := readYAML("/", name, &marker); err != nil {
+			if err := readYAML("/", name, &marker); err != nil {
 				slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", err)
 				h.gcCursor = name
 				return nil
@@ -656,7 +644,7 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 		}
 		prefix, pathErr := candidateStatePrefix(h.config.StateDir, name)
 		var snapshot Snapshot
-		_, snapshotErr := readJSON("/", name, maxSnapshotStateSize, &snapshot)
+		snapshotErr := readJSON("/", name, maxSnapshotStateSize, &snapshot)
 		if snapshotErr == nil {
 			snapshotErr = prepareSnapshot(&snapshot)
 		}

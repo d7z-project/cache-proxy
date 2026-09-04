@@ -202,13 +202,11 @@ func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned, r
 	return h.client.DoRead(ctx, request, class)
 }
 
-func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)
-		return http.StatusBadGateway
 	}
-	return status
 }
 
 func (h *handler) CloseContext(ctx context.Context) error {

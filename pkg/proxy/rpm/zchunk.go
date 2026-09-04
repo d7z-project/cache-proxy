@@ -98,7 +98,7 @@ func decompressZchunk(ctx context.Context, source io.Reader, destination io.Writ
 		written += part.uncompressedSize
 	}
 	var trailing [1]byte
-	if n, err := source.Read(trailing[:]); n != 0 || err != io.EOF {
+	if n, err := source.Read(trailing[:]); n != 0 || !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = errors.New("trailing data")
 		}
@@ -261,7 +261,7 @@ func decompressZstdPart(ctx context.Context, source io.Reader, destination io.Wr
 	}
 	var extra [1]byte
 	n, err := decoder.Read(extra[:])
-	if n != 0 || err != io.EOF {
+	if n != 0 || !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = errors.New("decoded data exceeds declared size")
 		}

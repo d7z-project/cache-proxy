@@ -39,14 +39,6 @@ const (
 	retryDelay        = time.Minute
 )
 
-type ObjectState string
-
-const (
-	ObjectPresent   ObjectState = "present"
-	ObjectNotFound  ObjectState = "not_found"
-	ObjectForbidden ObjectState = "forbidden"
-)
-
 type Checksum struct {
 	Algorithm string
 	Digest    string
@@ -60,15 +52,14 @@ type ObjectSpec struct {
 	ExpectedSize      *int64
 	MaxBytes          int64
 	Checksums         []Checksum
-	Optional          bool
+	AllowUnavailable  bool
 }
 
 type Object struct {
 	Path       string      `json:"path"`
-	State      ObjectState `json:"state"`
-	Key        string      `json:"key,omitempty"`
-	Size       int64       `json:"size,omitempty"`
-	SHA256     string      `json:"sha256,omitempty"`
+	Key        string      `json:"key"`
+	Size       int64       `json:"size"`
+	SHA256     string      `json:"sha256"`
 	Header     http.Header `json:"header,omitempty"`
 	Retainable bool        `json:"retainable,omitempty"`
 }
@@ -178,33 +169,34 @@ type retryWindow struct {
 }
 
 type GenerationManager struct {
-	config            Config
-	mu                sync.RWMutex
-	current           map[string]*liveSnapshot
-	retained          map[string][]*liveSnapshot
-	pending           map[string]pendingAnchor
-	readers           map[string]int
-	lastSeen          map[string]time.Time
-	lastSeenPersisted map[string]time.Time
-	retryWindows      map[string]retryWindow
-	retiring          map[string]bool
-	commitMu          sync.Mutex
-	seenPersistMu     sync.Mutex
-	discoveryMu       sync.Mutex
-	discoveryPending  map[string]bool
-	refreshMu         sync.Mutex
-	refreshCursor     string
-	pollQueue         []string
-	pollQueued        map[string]bool
-	pollCycleActive   bool
-	gcMu              sync.Mutex
-	gcPhase           generationGCPhase
-	gcCursor          string
-	gcCandidates      []gcCandidate
-	gcCandidateIndex  int
-	gcObjectIndex     int
-	gcRetained        map[string]bool
-	gcProtected       map[string]bool
+	config             Config
+	mu                 sync.RWMutex
+	current            map[string]*liveSnapshot
+	retained           map[string][]*liveSnapshot
+	pending            map[string]pendingAnchor
+	readers            map[string]int
+	lastSeen           map[string]time.Time
+	lastSeenPersisted  map[string]time.Time
+	retryWindows       map[string]retryWindow
+	retiring           map[string]bool
+	commitMu           sync.Mutex
+	seenPersistMu      sync.Mutex
+	discoveryMu        sync.Mutex
+	discoveryPending   map[string]bool
+	refreshMu          sync.Mutex
+	refreshCursor      string
+	pollQueue          []string
+	pollQueued         map[string]bool
+	forceRebuildQueued map[string]bool
+	pollCycleActive    bool
+	gcMu               sync.Mutex
+	gcPhase            generationGCPhase
+	gcCursor           string
+	gcCandidates       []gcCandidate
+	gcCandidateIndex   int
+	gcObjectIndex      int
+	gcRetained         map[string]bool
+	gcProtected        map[string]bool
 }
 
 type retryableRefreshError struct {
@@ -245,17 +237,18 @@ func New(config Config) (*GenerationManager, error) {
 		config.AnchorMaxBytes = DefaultMaxObject
 	}
 	h := &GenerationManager{
-		config:            config,
-		current:           make(map[string]*liveSnapshot),
-		retained:          make(map[string][]*liveSnapshot),
-		pending:           make(map[string]pendingAnchor),
-		readers:           make(map[string]int),
-		lastSeen:          make(map[string]time.Time),
-		lastSeenPersisted: make(map[string]time.Time),
-		retryWindows:      make(map[string]retryWindow),
-		retiring:          make(map[string]bool),
-		discoveryPending:  make(map[string]bool),
-		pollQueued:        make(map[string]bool),
+		config:             config,
+		current:            make(map[string]*liveSnapshot),
+		retained:           make(map[string][]*liveSnapshot),
+		pending:            make(map[string]pendingAnchor),
+		readers:            make(map[string]int),
+		lastSeen:           make(map[string]time.Time),
+		lastSeenPersisted:  make(map[string]time.Time),
+		retryWindows:       make(map[string]retryWindow),
+		retiring:           make(map[string]bool),
+		discoveryPending:   make(map[string]bool),
+		pollQueued:         make(map[string]bool),
+		forceRebuildQueued: make(map[string]bool),
 	}
 	if err := h.restore(); err != nil {
 		return nil, err
@@ -383,10 +376,13 @@ func (h *GenerationManager) TriggerRefresh() {
 	}
 }
 
-func (h *GenerationManager) requestCurrentPoll(rootID string) {
+func (h *GenerationManager) requestCurrentPoll(rootID string, forceRebuild bool) {
 	h.mu.Lock()
 	_, pending := h.pending[rootID]
 	if h.current[rootID] != nil && !pending {
+		if forceRebuild {
+			h.forceRebuildQueued[rootID] = true
+		}
 		if h.pollQueued[rootID] {
 			for index, queuedRootID := range h.pollQueue {
 				if queuedRootID == rootID {
@@ -504,12 +500,12 @@ func (h *GenerationManager) Refresh(ctx context.Context, limit int) (bool, error
 		if processedPending {
 			break
 		}
-		rootID, ok := h.nextCurrentPoll(time.Now())
+		rootID, forceRebuild, ok := h.nextCurrentPoll(time.Now())
 		if !ok {
 			break
 		}
 		processed++
-		if err := h.pollCurrent(ctx, rootID); err != nil {
+		if err := h.pollCurrent(ctx, rootID, forceRebuild); err != nil {
 			return h.hasRunnableRefresh(time.Now()), err
 		}
 	}
@@ -550,14 +546,14 @@ func (h *GenerationManager) nextPending(now time.Time) (pendingAnchor, retryWind
 	return pending, retry, true
 }
 
-func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, bool) {
+func (h *GenerationManager) nextCurrentPoll(now time.Time) (rootID string, forceRebuild, ok bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.pending) != 0 {
 		for rootID, pending := range h.pending {
 			retry := h.retryWindows[rootID]
 			if retry.candidateID != pending.CandidateID || retry.failures < 2 {
-				return "", false
+				return "", false, false
 			}
 		}
 	}
@@ -568,7 +564,7 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, bool) {
 		}
 		sort.Strings(roots)
 		for _, rootID := range roots {
-			h.enqueuePollLocked(rootID)
+			h.enqueuePollLocked(rootID, false)
 		}
 		h.pollCycleActive = len(h.pollQueue) != 0
 	}
@@ -576,6 +572,7 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, bool) {
 		current := h.current[rootID]
 		if current == nil {
 			delete(h.pollQueued, rootID)
+			delete(h.forceRebuildQueued, rootID)
 			continue
 		}
 		retry := h.retryWindows[rootID]
@@ -584,7 +581,9 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, bool) {
 		}
 		h.pollQueue = append(h.pollQueue[:index], h.pollQueue[index+1:]...)
 		delete(h.pollQueued, rootID)
-		return rootID, true
+		forceRebuild := h.forceRebuildQueued[rootID]
+		delete(h.forceRebuildQueued, rootID)
+		return rootID, forceRebuild, true
 	}
 	compacted := h.pollQueue[:0]
 	for _, rootID := range h.pollQueue {
@@ -596,7 +595,7 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, bool) {
 	if len(h.pollQueue) == 0 {
 		h.pollCycleActive = false
 	}
-	return "", false
+	return "", false, false
 }
 
 func (h *GenerationManager) recordRefreshFailure(rootID, candidateID string) {
@@ -622,7 +621,7 @@ func (h *GenerationManager) recordRefreshFailure(rootID, candidateID string) {
 		}
 		sort.Strings(roots)
 		for _, currentRootID := range roots {
-			h.enqueuePollLocked(currentRootID)
+			h.enqueuePollLocked(currentRootID, false)
 		}
 	}
 }
@@ -684,8 +683,14 @@ func (h *GenerationManager) nextRetryDelay(now time.Time) time.Duration {
 	return next
 }
 
-func (h *GenerationManager) enqueuePollLocked(rootID string) {
-	if rootID == "" || h.pollQueued[rootID] {
+func (h *GenerationManager) enqueuePollLocked(rootID string, forceRebuild bool) {
+	if rootID == "" {
+		return
+	}
+	if forceRebuild {
+		h.forceRebuildQueued[rootID] = true
+	}
+	if h.pollQueued[rootID] {
 		return
 	}
 	h.pollQueued[rootID] = true
@@ -736,17 +741,18 @@ func (h *GenerationManager) revalidatePending(ctx context.Context, pending pendi
 	return pending, true, nil
 }
 
-func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string) error {
+func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forceRebuild bool) (pollErr error) {
 	h.mu.RLock()
-	current := h.current[rootID]
 	var snapshot *Snapshot
-	if current != nil {
+	if current := h.current[rootID]; current != nil {
 		snapshot = current.snapshot
 	}
 	h.mu.RUnlock()
 	if snapshot == nil {
 		return nil
 	}
+	defer func() { h.finishCurrentPoll(snapshot, pollErr, forceRebuild) }()
+
 	validators := make(http.Header)
 	if anchor, ok := snapshot.byPath[snapshot.Anchor]; ok {
 		if value := anchor.Header.Get("ETag"); value != "" {
@@ -758,40 +764,45 @@ func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string) erro
 	}
 	response, err := h.config.Fetch(ctx, snapshot.Anchor, validators)
 	if err != nil {
-		h.recordCurrentPollResult(snapshot, err)
 		return err
 	}
 	if response.StatusCode == http.StatusNotModified {
 		_ = response.Body.Close()
-		err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
-		h.recordCurrentPollResult(snapshot, err)
-		return err
+		if forceRebuild {
+			anchor := snapshot.byPath[snapshot.Anchor]
+			reader, err := h.config.Store.OpenObject(ctx, h.config.Tenant, anchor.Key)
+			if err == nil {
+				err = h.StageAnchorID(ctx, snapshot.RootID, snapshot.Root, snapshot.Anchor, anchor.Header, reader)
+				_ = reader.Close()
+			}
+			return err
+		}
+		return h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
 	}
 	if response.StatusCode != http.StatusOK {
 		_ = response.Body.Close()
-		err := fmt.Errorf("metadata anchor %s returned %d", snapshot.Anchor, response.StatusCode)
-		h.recordCurrentPollResult(snapshot, err)
-		return err
+		return fmt.Errorf("metadata anchor %s returned %d", snapshot.Anchor, response.StatusCode)
 	}
 	spool, err := h.config.Spooler.SpoolWithExpectedSize(ctx, response.Body, h.config.AnchorMaxBytes, response.ContentLength)
 	_ = response.Body.Close()
 	if err != nil {
-		h.recordCurrentPollResult(snapshot, err)
 		return err
 	}
 	if spool.SHA256 == snapshot.Generation {
+		if forceRebuild {
+			err = h.StageAnchorID(ctx, snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File)
+			_ = spool.Close()
+			return err
+		}
 		_ = spool.Close()
-		err := h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
-		h.recordCurrentPollResult(snapshot, err)
-		return err
+		return h.updateCurrentFreshness(snapshot.RootID, snapshot.CandidateID, response.Header)
 	}
 	err = h.StageAnchorID(ctx, snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File)
 	_ = spool.Close()
-	h.recordCurrentPollResult(snapshot, err)
 	return err
 }
 
-func (h *GenerationManager) recordCurrentPollResult(snapshot *Snapshot, pollErr error) {
+func (h *GenerationManager) finishCurrentPoll(snapshot *Snapshot, pollErr error, forceRebuild bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if pollErr == nil {
@@ -806,7 +817,7 @@ func (h *GenerationManager) recordCurrentPollResult(snapshot *Snapshot, pollErr 
 		retry.failures++
 		retry.notBefore = time.Now().Add(refreshRetryDelay(snapshot.CandidateID, retry.failures))
 		h.retryWindows[snapshot.RootID] = retry
-		h.enqueuePollLocked(snapshot.RootID)
+		h.enqueuePollLocked(snapshot.RootID, forceRebuild)
 		h.pollCycleActive = true
 	}
 }
@@ -853,7 +864,6 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 		handler: h,
 		object: Object{
 			Path:   pending.Path,
-			State:  ObjectPresent,
 			Key:    pending.Key,
 			Size:   anchorReader.Info().Size,
 			SHA256: pending.Generation,
@@ -1070,7 +1080,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 			}
 			for _, previousSnapshot := range previousSnapshots {
 				candidateObject, found := previousSnapshot.snapshot.byPath[requestPath]
-				if !found || candidateObject.State != ObjectPresent || !candidateObject.Retainable {
+				if !found || !candidateObject.Retainable {
 					continue
 				}
 				rootLength := len(previousSnapshot.snapshot.Root)
@@ -1101,11 +1111,8 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		if !classifiedMetadata {
 			return false, 0, ""
 		}
-		h.requestCurrentPoll(matchedRootID)
-		w.Header().Set("Retry-After", "5")
-		w.Header().Set("X-Cache", "STALE")
-		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
-		return true, http.StatusServiceUnavailable, "STALE"
+		h.requestCurrentPoll(matchedRootID, true)
+		return false, 0, ""
 	}
 	readerKey := selectedSnapshot.snapshot.RootID + "\x00" + selectedSnapshot.snapshot.CandidateID
 	h.readers[readerKey]++
@@ -1115,7 +1122,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		(strings.Contains(cacheControl, "no-cache") || strings.Contains(cacheControl, "max-age=0"))
 	h.mu.Unlock()
 	if refreshRequested {
-		h.requestCurrentPoll(selectedRootID)
+		h.requestCurrentPoll(selectedRootID, false)
 	}
 	h.markLastSeen(selectedRootID, time.Now().UTC())
 	defer func() {
@@ -1126,19 +1133,10 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		}
 		h.mu.Unlock()
 	}()
-	if selectedObject.State == ObjectNotFound || selectedObject.State == ObjectForbidden {
-		status := http.StatusNotFound
-		if selectedObject.State == ObjectForbidden {
-			status = http.StatusForbidden
-		}
-		w.Header().Set("X-Cache", "HIT")
-		http.Error(w, http.StatusText(status), status)
-		return true, status, "HIT"
-	}
 	reader, err := h.config.Store.OpenObject(request.Context(), h.config.Tenant, selectedObject.Key)
 	if err != nil {
-		proxyruntime.WriteError(w, http.StatusServiceUnavailable)
-		return true, http.StatusServiceUnavailable, "ERROR"
+		h.requestCurrentPoll(selectedRootID, true)
+		return false, 0, ""
 	}
 	defer func() { _ = reader.Close() }()
 	copyHeaders(w.Header(), selectedObject.Header)
@@ -1285,7 +1283,8 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 	}
 	var objectKey string
 	if len(checksums) > 0 {
-		objectKey = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/" + checksums[0].Algorithm + "/" + checksums[0].Digest
+		pathDigest := sha256.Sum256([]byte(spec.Path))
+		objectKey = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/" + hex.EncodeToString(pathDigest[:]) + "/" + checksums[0].Algorithm + "/" + checksums[0].Digest
 	}
 	if objectKey != "" {
 		if reader, openErr := s.handler.config.Store.OpenObject(ctx, s.handler.config.Tenant, objectKey); openErr == nil {
@@ -1305,7 +1304,7 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 			if valid {
 				var header http.Header
 				_ = json.Unmarshal([]byte(options["header"]), &header)
-				object := Object{Path: spec.Path, State: ObjectPresent, Key: objectKey, Size: size, SHA256: hex.EncodeToString(internalDigest.Sum(nil)), Header: header}
+				object := Object{Path: spec.Path, Key: objectKey, Size: size, SHA256: hex.EncodeToString(internalDigest.Sum(nil)), Header: header}
 				recordObject(object)
 				return &Blob{handler: s.handler, object: object}, nil
 			}
@@ -1328,14 +1327,9 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusForbidden {
-		if !spec.Optional {
+		if !spec.AllowUnavailable {
 			return nil, &retryableRefreshError{err: fmt.Errorf("required metadata %s returned %d", spec.Path, response.StatusCode)}
 		}
-		state := ObjectNotFound
-		if response.StatusCode == http.StatusForbidden {
-			state = ObjectForbidden
-		}
-		recordObject(Object{Path: spec.Path, State: state})
 		return nil, nil
 	}
 	if response.StatusCode != http.StatusOK {
@@ -1362,11 +1356,11 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 	}
 	defer func() { _ = spool.Close() }()
 	if spec.ExpectedSize != nil && spool.Size != *spec.ExpectedSize {
-		return nil, fmt.Errorf("metadata %s size mismatch: got %d, want %d", spec.Path, spool.Size, *spec.ExpectedSize)
+		return nil, &retryableRefreshError{err: fmt.Errorf("metadata %s size mismatch: got %d, want %d", spec.Path, spool.Size, *spec.ExpectedSize)}
 	}
 	for index, checksum := range checksums {
 		if actual := hex.EncodeToString(checksumHashers[index].Sum(nil)); actual != checksum.Digest {
-			return nil, fmt.Errorf("metadata %s %s mismatch", spec.Path, checksum.Algorithm)
+			return nil, &retryableRefreshError{err: fmt.Errorf("metadata %s %s mismatch", spec.Path, checksum.Algorithm)}
 		}
 	}
 	if objectKey == "" {
@@ -1382,23 +1376,9 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 	if _, err := s.handler.config.Store.Put(ctx, s.handler.config.Tenant, objectKey, spool.File, map[string]string{"header": string(encodedHeader)}); err != nil {
 		return nil, &retryableRefreshError{err: err}
 	}
-	object := Object{Path: spec.Path, State: ObjectPresent, Key: objectKey, Size: spool.Size, SHA256: spool.SHA256, Header: cloneHeader(response.Header)}
+	object := Object{Path: spec.Path, Key: objectKey, Size: spool.Size, SHA256: spool.SHA256, Header: cloneHeader(response.Header)}
 	recordObject(object)
 	return &Blob{handler: s.handler, object: object}, nil
-}
-
-func (s *RefreshSession) Alias(alias string, blob *Blob) error {
-	if blob == nil {
-		return errors.New("cannot alias absent metadata")
-	}
-	cleaned, err := CleanPath(alias)
-	if err != nil || !containsPath(s.root, cleaned) {
-		return fmt.Errorf("invalid metadata alias %q", alias)
-	}
-	object := blob.object
-	object.Path = cleaned
-	s.objects[cleaned] = object
-	return nil
 }
 
 func (s *RefreshSession) RetainObject(objectPath string) error {
@@ -1408,7 +1388,7 @@ func (s *RefreshSession) RetainObject(objectPath string) error {
 	}
 	object, exists := s.objects[cleaned]
 	anchorKey := candidatePrefix(s.rootID, s.generation, s.candidateID) + "/anchor"
-	if !exists || object.State != ObjectPresent || object.Key == anchorKey {
+	if !exists || object.Key == "" || object.Key == anchorKey {
 		return fmt.Errorf("retainable metadata %q is not a present closure object", objectPath)
 	}
 	object.Retainable = true

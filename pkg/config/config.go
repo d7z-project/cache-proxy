@@ -287,7 +287,7 @@ func Decode(r io.Reader) (*Document, error) {
 		return nil, err
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return nil, errors.New("configuration must contain exactly one YAML document")
 		}

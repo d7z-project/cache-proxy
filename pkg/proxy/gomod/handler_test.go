@@ -22,7 +22,6 @@ import (
 	modzip "golang.org/x/mod/zip"
 	"gopkg.d7z.net/blobfs"
 
-	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
@@ -34,7 +33,7 @@ func TestGoProxyReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 	var requests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
 	defer upstream.Close()
-	handler := newTestHandler(t, newTestStore(t), upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, newTestStore(t), upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}})
 	response := requestGoProxyMethod(t, handler, http.MethodPut, "/example.com/mod/@v/v1.0.0.mod", false)
 	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
 	require.Zero(t, requests.Load())
@@ -59,7 +58,7 @@ func TestGoModuleHandlerCachesModuleFilesInBlobFS(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}})
 	target := "/" + testModulePath + "/@v/" + testModuleVersion + ".mod"
 
 	first := requestGoProxy(t, handler, target, false)
@@ -78,7 +77,7 @@ func TestGoModuleCacheCommitFailurePreservesUpstreamResponse(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}})
 	target := testModulePath + "/@v/" + testModuleVersion + ".mod"
 	parsed, err := parseModuleRequest(target)
 	require.NoError(t, err)
@@ -100,14 +99,14 @@ func TestGoModuleHandlerDisableModuleFetchHeader(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true})
+	handler := newTestHandler(t, store, upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: true})
 
 	target := "/" + testModulePath + "/@v/list"
 	blocked := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusNotFound, blocked.Code)
 	require.Zero(t, upstreamRequests.Load())
 
-	handler = newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: false})
+	handler = newTestHandler(t, store, upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}, DisableModuleFetchHeader: false})
 	allowed := requestGoProxy(t, handler, target, true)
 	require.Equal(t, http.StatusOK, allowed.Code)
 	require.Equal(t, "v1.0.0\n", allowed.Body.String())
@@ -119,7 +118,7 @@ func TestGoModuleHandlerServesCachedModuleWhenFetchDisabled(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}})
 
 	target := "/" + testModulePath + "/@v/list"
 	require.Equal(t, http.StatusOK, requestGoProxy(t, handler, target, false).Code)
@@ -136,7 +135,7 @@ func TestGoModuleHandlerSkipsPrivateModules(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, upstream.URL, nil, &Config{
+	handler := newTestHandler(t, store, upstream.URL, &Config{
 		SumDB:     &SumDBConfig{Enabled: false},
 		GOPrivate: []string{"example.com/cacheproxy/*"},
 	})
@@ -156,7 +155,7 @@ func TestGoModuleHandlerServesLatestAndHead(t *testing.T) {
 	upstream := newGoProxyUpstream(t, &upstreamRequests)
 	defer upstream.Close()
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, store, upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}})
 
 	latest := requestGoProxyMethod(t, handler, http.MethodGet, "/"+testModulePath+"/@latest", false)
 	require.Equal(t, http.StatusOK, latest.Code)
@@ -183,7 +182,7 @@ func TestGoModuleMutableListPublishesUpstreamUpdate(t *testing.T) {
 		_, _ = fmt.Fprintf(w, "v%d.0.0\n", current)
 	}))
 	defer upstream.Close()
-	handler := newTestHandler(t, newTestStore(t), upstream.URL, nil, &Config{SumDB: &SumDBConfig{Enabled: false}})
+	handler := newTestHandler(t, newTestStore(t), upstream.URL, &Config{SumDB: &SumDBConfig{Enabled: false}})
 	target := "/" + testModulePath + "/@v/list"
 	parsed, err := parseModuleRequest(strings.TrimPrefix(target, "/"))
 	require.NoError(t, err)
@@ -245,7 +244,7 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 	defer sumdb.Close()
 
 	store := newTestStore(t)
-	handler := newTestHandler(t, store, "https://proxy.golang.org", nil, &Config{
+	handler := newTestHandler(t, store, "https://proxy.golang.org", &Config{
 		SumDB: &SumDBConfig{
 			Enabled: true,
 			Name:    "sum.corp.example",
@@ -268,10 +267,10 @@ func TestGoModuleHandlerProxiesSumDB(t *testing.T) {
 	require.Equal(t, int64(1), sumdbRequests.Load())
 }
 
-func newTestHandler(t *testing.T, store *blobfs.Store, upstream string, transport *config.TransportConfig, options *Config) *handler {
+func newTestHandler(t *testing.T, store *blobfs.Store, upstream string, options *Config) *handler {
 	t.Helper()
 	spooler := storeio.NewSpooler(t.TempDir(), 2<<30, nil)
-	handler, err := newHandler("gomod", upstream, transport, options, store, metrics.NewStats(prometheus.NewRegistry()), nil, spooler)
+	handler, err := newHandler("gomod", upstream, nil, options, store, metrics.NewStats(prometheus.NewRegistry()), nil, spooler)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handler.CloseContext(context.Background())) })
 	return handler

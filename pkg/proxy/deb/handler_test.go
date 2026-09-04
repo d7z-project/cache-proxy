@@ -1,8 +1,10 @@
 package deb
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +26,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
-func newDebianTestHandler(t *testing.T, upstream string) (*handler, *blobfs.Store) {
+func newDebianTestHandler(t *testing.T, upstream string) *handler {
 	t.Helper()
 	root := t.TempDir()
 	store, err := blobfs.Open(root+"/blobs", blobfs.DefaultConfig())
@@ -38,14 +40,14 @@ func newDebianTestHandler(t *testing.T, upstream string) (*handler, *blobfs.Stor
 		require.NoError(t, handler.CloseContext(context.Background()))
 		require.NoError(t, store.Close())
 	})
-	return handler, store
+	return handler
 }
 
 func TestDebianReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
 	defer server.Close()
-	h, _ := newDebianTestHandler(t, server.URL)
+	h := newDebianTestHandler(t, server.URL)
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/pool/main/demo.deb", nil))
 	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
@@ -74,7 +76,7 @@ func TestDebianFirstAnchorPassesThroughThenPublishesFullClosure(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
@@ -131,7 +133,7 @@ func TestDebianPublishesUpstreamGenerationUpdate(t *testing.T) {
 				}
 			}))
 			t.Cleanup(server.Close)
-			h, _ := newDebianTestHandler(t, server.URL)
+			h := newDebianTestHandler(t, server.URL)
 
 			first := httptest.NewRecorder()
 			h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, paths.anchor, nil))
@@ -191,7 +193,7 @@ func TestDebianRetainsPreviousAcquireByHashObject(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	h, _ := newDebianTestHandler(t, server.URL)
+	h := newDebianTestHandler(t, server.URL)
 
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := h.metadata.Refresh(context.Background(), 1)
@@ -241,7 +243,7 @@ func TestDebianConcurrentFirstAnchorUsesOneStreamingTransfer(t *testing.T) {
 		_, _ = io.WriteString(w, release[midpoint:])
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 
 	responses := make(chan *httptest.ResponseRecorder, 2)
 	go func() {
@@ -273,81 +275,228 @@ func TestDebianConcurrentFirstAnchorUsesOneStreamingTransfer(t *testing.T) {
 	require.Equal(t, int32(1), requests.Load())
 }
 
-func TestDebianDoesNotPublishPartialGeneration(t *testing.T) {
+func TestDebianRetriesMismatchedCandidateBeforePublishing(t *testing.T) {
 	expected := []byte("expected")
 	digest := sha256.Sum256(expected)
 	release := fmt.Sprintf("SHA256:\n %x %d main/Packages\n", digest, len(expected))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/dists/trixie/InRelease" {
-			_, _ = io.WriteString(w, release)
-			return
-		}
-		_, _ = io.WriteString(w, "incorrect")
-	}))
-	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
-	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
-	_, err := handler.metadata.Refresh(context.Background(), 10)
-	require.Error(t, err)
-	require.Nil(t, handler.metadata.Current("dists/trixie"))
-}
-
-func TestDebianAllowsMissingUncompressedIndexWithCompressedSibling(t *testing.T) {
-	compressed := []byte("compressed package index")
-	bare := []byte("uncompressed package index")
-	compressedDigest := sha256.Sum256(compressed)
-	bareDigest := sha256.Sum256(bare)
-	release := fmt.Sprintf("Acquire-By-Hash: yes\nSHA256:\n %x %d main/Contents-all\n %x %d main/Contents-all.gz\n", bareDigest, len(bare), compressedDigest, len(compressed))
+	var corrected atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/dists/trixie/InRelease":
 			_, _ = io.WriteString(w, release)
-		case "/dists/trixie/main/Contents-all.gz":
-			_, _ = w.Write(compressed)
+		case "/dists/trixie/main/Packages":
+			if corrected.Load() {
+				_, _ = w.Write(expected)
+				return
+			}
+			_, _ = io.WriteString(w, "mismatch")
 		default:
 			http.NotFound(w, request)
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
+	require.Error(t, err)
+	require.Nil(t, handler.metadata.Current("dists/trixie"))
+
+	corrected.Store(true)
+	require.NoError(t, handler.metadata.StageAnchor(context.Background(), "dists/trixie", "dists/trixie/InRelease", nil, bytes.NewReader([]byte(release))))
+	_, err = handler.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
 	require.NotNil(t, handler.metadata.Current("dists/trixie"))
-
-	bareResponse := httptest.NewRecorder()
-	handler.ServeHTTP(bareResponse, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
-	require.Equal(t, http.StatusNotFound, bareResponse.Code)
-	require.Equal(t, "HIT", bareResponse.Header().Get("X-Cache"))
-	bareByHash := "/dists/trixie/main/by-hash/SHA256/" + fmt.Sprintf("%x", bareDigest)
-	byHashResponse := httptest.NewRecorder()
-	handler.ServeHTTP(byHashResponse, httptest.NewRequest(http.MethodGet, bareByHash, nil))
-	require.Equal(t, http.StatusNotFound, byHashResponse.Code)
-	require.Equal(t, "HIT", byHashResponse.Header().Get("X-Cache"))
-
-	compressedResponse := httptest.NewRecorder()
-	handler.ServeHTTP(compressedResponse, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all.gz", nil))
-	require.Equal(t, http.StatusOK, compressedResponse.Code)
-	require.Equal(t, compressed, compressedResponse.Body.Bytes())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Packages", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+	require.Equal(t, expected, response.Body.Bytes())
 }
 
-func TestDebianRequiresUncompressedIndexWithoutCompressedSibling(t *testing.T) {
-	bare := []byte("uncompressed package index")
-	digest := sha256.Sum256(bare)
-	release := fmt.Sprintf("SHA256:\n %x %d main/Contents-all\n", digest, len(bare))
+func TestDebianUnavailableArchitectureDoesNotBlockGeneration(t *testing.T) {
+	amd64Packages := []byte("Package: demo\nArchitecture: all\n")
+	arm64Packages := amd64Packages
+	amd64Digest := sha256.Sum256(amd64Packages)
+	arm64Digest := sha256.Sum256(arm64Packages)
+	release := fmt.Sprintf("Architectures: amd64 arm64\nAcquire-By-Hash: yes\nSHA256:\n %x %d main/binary-amd64/Packages.gz\n %x %d main/binary-arm64/Packages.gz\n", amd64Digest, len(amd64Packages), arm64Digest, len(arm64Packages))
+
+	for _, unavailableStatus := range []int{http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(unavailableStatus), func(t *testing.T) {
+			var armStatus atomic.Int32
+			armStatus.Store(int32(unavailableStatus))
+			var armRequests atomic.Int32
+			var armByHashRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/dists/trixie/InRelease":
+					_, _ = io.WriteString(w, release)
+				case "/dists/trixie/main/binary-amd64/Packages.gz":
+					_, _ = w.Write(amd64Packages)
+				case "/dists/trixie/main/binary-arm64/Packages.gz":
+					armRequests.Add(1)
+					if status := int(armStatus.Load()); status != http.StatusOK {
+						w.WriteHeader(status)
+						return
+					}
+					_, _ = w.Write(arm64Packages)
+				default:
+					if strings.Contains(request.URL.Path, "/main/binary-arm64/by-hash/SHA256/") {
+						armByHashRequests.Add(1)
+					}
+					http.NotFound(w, request)
+				}
+			}))
+			t.Cleanup(server.Close)
+			handler := newDebianTestHandler(t, server.URL)
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
+			_, err := handler.metadata.Refresh(context.Background(), 10)
+			require.NoError(t, err)
+			current := handler.metadata.Current("dists/trixie")
+			require.NotNil(t, current)
+
+			amd64Response := httptest.NewRecorder()
+			handler.ServeHTTP(amd64Response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/binary-amd64/Packages.gz", nil))
+			require.Equal(t, http.StatusOK, amd64Response.Code)
+			require.Equal(t, "HIT", amd64Response.Header().Get("X-Cache"))
+			require.Equal(t, amd64Packages, amd64Response.Body.Bytes())
+
+			arm64Path := "/dists/trixie/main/binary-arm64/Packages.gz"
+			unavailable := httptest.NewRecorder()
+			handler.ServeHTTP(unavailable, httptest.NewRequest(http.MethodGet, arm64Path, nil))
+			require.Equal(t, unavailableStatus, unavailable.Code)
+			require.Equal(t, "BYPASS", unavailable.Header().Get("X-Cache"))
+			require.Empty(t, unavailable.Header().Get("Retry-After"))
+
+			armStatus.Store(http.StatusOK)
+			for range 2 {
+				available := httptest.NewRecorder()
+				handler.ServeHTTP(available, httptest.NewRequest(http.MethodGet, arm64Path, nil))
+				require.Equal(t, http.StatusOK, available.Code)
+				require.Equal(t, "BYPASS", available.Header().Get("X-Cache"))
+				require.Equal(t, arm64Packages, available.Body.Bytes())
+			}
+			require.Equal(t, int32(4), armRequests.Load())
+			require.Equal(t, int32(1), armByHashRequests.Load())
+		})
+	}
+}
+
+func TestDebianUnavailableCanonicalDoesNotUsePreviousGeneration(t *testing.T) {
+	firstPackages := []byte("Package: first\n")
+	secondPackages := []byte("Package: second\n")
+	firstDigest := sha256.Sum256(firstPackages)
+	secondDigest := sha256.Sum256(secondPackages)
+	firstRelease := fmt.Sprintf("SHA256:\n %x %d main/Packages\n", firstDigest, len(firstPackages))
+	secondRelease := fmt.Sprintf("SHA256:\n %x %d main/Packages\n", secondDigest, len(secondPackages))
+	var revision atomic.Int32
+	revision.Store(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/dists/trixie/InRelease" {
-			_, _ = io.WriteString(w, release)
-			return
+		switch request.URL.Path {
+		case "/dists/trixie/InRelease":
+			if revision.Load() == 1 {
+				_, _ = io.WriteString(w, firstRelease)
+			} else {
+				_, _ = io.WriteString(w, secondRelease)
+			}
+		case "/dists/trixie/main/Packages":
+			if revision.Load() == 1 {
+				_, _ = w.Write(firstPackages)
+			} else {
+				http.NotFound(w, request)
+			}
+		default:
+			http.NotFound(w, request)
 		}
-		http.NotFound(w, request)
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
-	_, err := handler.metadata.Refresh(context.Background(), 10)
-	require.ErrorContains(t, err, "required metadata")
-	require.Nil(t, handler.metadata.Current("dists/trixie"))
+	_, err := handler.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	previous := handler.metadata.Current("dists/trixie")
+	require.NotNil(t, previous)
+
+	revision.Store(2)
+	require.NoError(t, handler.metadata.StageAnchor(context.Background(), "dists/trixie", "dists/trixie/InRelease", nil, bytes.NewReader([]byte(secondRelease))))
+	_, err = handler.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+	current := handler.metadata.Current("dists/trixie")
+	require.NotNil(t, current)
+	require.NotEqual(t, previous.CandidateID, current.CandidateID)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Packages", nil))
+	require.Equal(t, http.StatusNotFound, response.Code)
+	require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+	require.NotContains(t, response.Body.String(), "first")
+}
+
+func TestDebianConcurrentUnavailableMetadataPassesThroughDuringPoll(t *testing.T) {
+	packages := []byte("Package: arm64\n")
+	digest := sha256.Sum256(packages)
+	release := fmt.Sprintf("SHA256:\n %x %d main/binary-arm64/Packages.gz\n", digest, len(packages))
+	var available atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/binary-arm64/Packages.gz":
+			if !available.Load() {
+				http.NotFound(w, request)
+				return
+			}
+			_, _ = w.Write(packages)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	handler := newDebianTestHandler(t, server.URL)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
+	_, err := handler.metadata.Refresh(context.Background(), 1)
+	require.NoError(t, err)
+
+	missingPath := "/dists/trixie/main/binary-arm64/Packages.gz"
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, missingPath, nil))
+	available.Store(true)
+	const workers = 16
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, workers)
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, missingPath, nil))
+			responses <- response
+		}()
+	}
+	refreshResult := make(chan error, 1)
+	go func() {
+		<-start
+		_, refreshErr := handler.metadata.Refresh(context.Background(), 1)
+		refreshResult <- refreshErr
+	}()
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent metadata requests did not finish")
+	}
+	require.NoError(t, <-refreshResult)
+	close(responses)
+	for response := range responses {
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+		require.Equal(t, packages, response.Body.Bytes())
+	}
 }
 
 func TestDebianDualAnchorMismatchPreservesCurrent(t *testing.T) {
@@ -383,7 +532,7 @@ func TestDebianDualAnchorMismatchPreservesCurrent(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
@@ -420,7 +569,7 @@ func TestDebianPublishesMatchingDualAnchorsAndSignature(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
@@ -458,7 +607,7 @@ func TestDebianByHashFallsBackToVerifiedCanonicalIndex(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
@@ -488,14 +637,36 @@ func TestDebianByHashCanonicalFallbackMustMatchRelease(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.Error(t, err)
 	require.Nil(t, handler.metadata.Current("dists/trixie"))
 }
 
-func TestDebianCurrentMissingMetadataReturns503WithoutUpstreamFill(t *testing.T) {
+func TestDebianSHA512MismatchDoesNotPublish(t *testing.T) {
+	expected := []byte("expected")
+	digest := sha512.Sum512(expected)
+	release := fmt.Sprintf("SHA512:\n %x %d main/Packages\n", digest, len(expected))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/dists/trixie/InRelease":
+			_, _ = io.WriteString(w, release)
+		case "/dists/trixie/main/Packages":
+			_, _ = io.WriteString(w, "mismatch")
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+	handler := newDebianTestHandler(t, server.URL)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
+	_, err := handler.metadata.Refresh(context.Background(), 1)
+	require.ErrorContains(t, err, "sha512 mismatch")
+	require.Nil(t, handler.metadata.Current("dists/trixie"))
+}
+
+func TestDebianCurrentMissPassesThroughUpstream(t *testing.T) {
 	packages := []byte("Package: demo\n")
 	digest := sha256.Sum256(packages)
 	release := fmt.Sprintf("SHA256:\n %x %d main/Packages\n", digest, len(packages))
@@ -510,21 +681,25 @@ func TestDebianCurrentMissingMetadataReturns503WithoutUpstreamFill(t *testing.T)
 			_, _ = w.Write(packages)
 		default:
 			missingRequests.Add(1)
-			_, _ = io.WriteString(w, "should not be used")
+			_, _ = io.WriteString(w, "transparent metadata")
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
 	missingRequests.Store(0)
 
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
-	require.Equal(t, http.StatusServiceUnavailable, response.Code)
-	require.Equal(t, "5", response.Header().Get("Retry-After"))
-	require.Zero(t, missingRequests.Load())
+	for range 2 {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Contents-all", nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+		require.Empty(t, response.Header().Get("Retry-After"))
+		require.Equal(t, "transparent metadata", response.Body.String())
+	}
+	require.Equal(t, int32(2), missingRequests.Load())
 }
 
 func TestDebianAnchorlessFlatRepositoryRemainsTransparent(t *testing.T) {
@@ -533,7 +708,7 @@ func TestDebianAnchorlessFlatRepositoryRemainsTransparent(t *testing.T) {
 		_, _ = io.WriteString(w, "flat metadata")
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/flat/./Packages", nil))
 	require.Equal(t, http.StatusOK, response.Code)
@@ -545,7 +720,7 @@ func TestDebianRootDirectoriesAndAuxiliaryFilesRemainTransparent(t *testing.T) {
 		_, _ = io.WriteString(w, request.URL.RequestURI())
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 
 	for _, test := range []struct {
 		name     string
@@ -585,7 +760,7 @@ func TestDebianFirstAnchorPassesThroughWhenSpoolCannotStart(t *testing.T) {
 		_, _ = io.WriteString(w, release)
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	invalidWorkDir := filepath.Join(t.TempDir(), "work")
 	require.NoError(t, os.WriteFile(invalidWorkDir, []byte("not a directory"), 0o600))
 	handler.spooler = storeio.NewSpooler(invalidWorkDir, int64(len(release)), nil)
@@ -606,7 +781,7 @@ func TestDebianArtifactCacheIsIndependentFromMetadataGeneration(t *testing.T) {
 		_, _ = io.WriteString(w, "package-body")
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/pool/main/d/demo.deb?variant=one", nil))
@@ -638,7 +813,7 @@ func TestDebianArtifactAcceptsAPTPercentEncodingAndSharesCache(t *testing.T) {
 		_, _ = io.WriteString(w, "pve-package")
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 
 	for index, requestPath := range []string{
 		"/pool/main/f/frr/frr_10.6.1-1%2bpve3_amd64.deb",
@@ -675,7 +850,7 @@ func TestDebianNestedRootKeepsByHashCompressionVariantsDistinct(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL+"/mirror")
+	handler := newDebianTestHandler(t, server.URL+"/mirror")
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/debian/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
@@ -713,7 +888,7 @@ func TestDebianRejectsGenerationWhenOneCompressedRepresentationMismatches(t *tes
 		}
 	}))
 	t.Cleanup(server.Close)
-	handler, _ := newDebianTestHandler(t, server.URL)
+	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.Error(t, err)

@@ -24,8 +24,6 @@ const DefaultStatusDiskSampleInterval = 15 * time.Minute
 const DefaultStatusDiskHistoryWindow = 24 * time.Hour
 const DefaultStatusEventLimit = 500
 
-var driverSet = builtinDrivers
-
 func normalizeDownloadHost(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || strings.Contains(value, "://") {
@@ -74,7 +72,6 @@ func planEntries(
 		taskScheduler,
 	)
 	plan.ReservePathPrefix(statusAPIPath, "status API")
-	drivers := driverSet()
 	for _, configured := range doc.Instances {
 		decl := configured
 		selected, err := decl.SelectMode()
@@ -82,7 +79,7 @@ func planEntries(
 			plan.CloseStores()
 			return nil, err
 		}
-		driver, ok := drivers[selected.Mode]
+		planMode, ok := modePlanners[selected.Mode]
 		if !ok {
 			plan.CloseStores()
 			return nil, fmt.Errorf("instance %s: unsupported mode %q", selected.Name, selected.Mode)
@@ -92,7 +89,7 @@ func planEntries(
 			plan.CloseStores()
 			return nil, err
 		}
-		if err := driver.Plan(ctx, instancePlan); err != nil {
+		if err := planMode(ctx, instancePlan); err != nil {
 			plan.CloseStores()
 			return nil, err
 		}

@@ -34,15 +34,21 @@ func metadataAnchorPath(cleanPath string) (string, bool) {
 	}
 	name := strings.TrimPrefix(cleanPath, "summaries/")
 	switch {
-	case strings.HasSuffix(name, ".gz"):
-		digest := strings.TrimSuffix(name, ".gz")
-		return "summary.idx", len(digest) == 64 && isLowerHex(digest)
 	case strings.HasSuffix(name, ".idx.sig"):
 		digest := strings.TrimSuffix(name, ".idx.sig")
 		return "summary.idx", len(digest) == 64 && isLowerHex(digest)
 	default:
 		return "", false
 	}
+}
+
+func indexedSummaryDigestFromPath(cleanPath string) (string, bool) {
+	const prefix = "summaries/"
+	if !strings.HasPrefix(cleanPath, prefix) || !strings.HasSuffix(cleanPath, ".gz") {
+		return "", false
+	}
+	digest := strings.TrimSuffix(strings.TrimPrefix(cleanPath, prefix), ".gz")
+	return digest, len(digest) == 64 && isLowerHex(digest)
 }
 
 func isDescriptorPath(cleanPath string) bool {

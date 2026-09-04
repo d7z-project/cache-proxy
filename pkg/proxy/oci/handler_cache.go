@@ -180,7 +180,7 @@ func (h *handler) writeManifestTemp(w http.ResponseWriter, req *http.Request, st
 		"X-Cache":               cache,
 		"Docker-Content-Digest": state.ManifestDigest,
 	}
-	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, tempFile)
+	status, bytes, err := h.writeResponse(w, req.Method, headers, tempFile)
 	return status, cache, bytes, err
 }
 
@@ -248,7 +248,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	cleanupDownload = false
 
 	headers := objectHeaders(respHeader, contentLen, "MISS")
-	status, bytes, err := h.writeResponse(w, req.Method, http.StatusOK, headers, pr)
+	status, bytes, err := h.writeResponse(w, req.Method, headers, pr)
 	return status, "MISS", bytes, err
 }
 
@@ -297,7 +297,7 @@ func (h *handler) readState(ctx context.Context, objectPath string) (refState, e
 		return refState{}, err
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return refState{}, errors.New("oci ref state contains multiple documents")
 		}

@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/apk"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/cargo"
@@ -18,20 +20,18 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
-func builtinDrivers() map[string]proxyruntime.ModeDriver {
-	return map[string]proxyruntime.ModeDriver{
-		config.ModeAPK:     apk.NewDriver(),
-		config.ModeCargo:   cargo.NewDriver(),
-		config.ModeDEB:     deb.NewDriver(),
-		config.ModeFile:    file.NewDriver(),
-		config.ModeFlatpak: flatpak.NewDriver(),
-		config.ModeGit:     git.NewDriver(),
-		config.ModeGo:      gomod.NewDriver(),
-		config.ModeMaven:   maven.NewDriver(),
-		config.ModeNPM:     npm.NewDriver(),
-		config.ModeOCI:     oci.NewDriver(),
-		config.ModePacman:  pacman.NewDriver(),
-		config.ModePyPI:    pypi.NewDriver(),
-		config.ModeRPM:     rpm.NewDriver(),
-	}
+var modePlanners = map[string]func(context.Context, *proxyruntime.InstancePlan) error{
+	config.ModeAPK:     apk.Plan,
+	config.ModeCargo:   cargo.Plan,
+	config.ModeDEB:     deb.Plan,
+	config.ModeFile:    file.Plan,
+	config.ModeFlatpak: flatpak.Plan,
+	config.ModeGit:     git.Plan,
+	config.ModeGo:      gomod.Plan,
+	config.ModeMaven:   maven.Plan,
+	config.ModeNPM:     npm.Plan,
+	config.ModeOCI:     oci.Plan,
+	config.ModePacman:  pacman.Plan,
+	config.ModePyPI:    pypi.Plan,
+	config.ModeRPM:     rpm.Plan,
 }

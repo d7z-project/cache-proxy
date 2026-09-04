@@ -96,14 +96,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
-	if handled, _, _ := h.metadata.ServeCurrent(w, request, cleaned, isRepomdPath(cleaned)); handled {
+	if handled, _, _ := h.metadata.ServeCurrent(w, request, cleaned, path.Base(path.Dir(cleaned)) == "repodata"); handled {
 		return
 	}
 	if isRPMArtifactPath(cleaned) && request.Header.Get("Authorization") == "" && request.Header.Get("Cookie") == "" {
 		_, _ = h.artifacts.Serve(w, request, cleaned)
 		return
 	}
-	if request.Method != http.MethodGet || !isRepomdPath(cleaned) || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" {
+	if request.Method != http.MethodGet || path.Base(cleaned) != "repomd.xml" || path.Base(path.Dir(cleaned)) != "repodata" || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" {
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
@@ -197,10 +197,18 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 			size := item.Size
 			expectedSize = &size
 		}
-		metadataPath := joinRoot(anchor.Root, location)
-		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: metadataPath, ExpectedSize: expectedSize, Checksums: []filerepo.Checksum{{Algorithm: item.SumType, Digest: item.Checksum}}})
+		metadataPath := path.Join(anchor.Root, location)
+		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{
+			Path:             metadataPath,
+			ExpectedSize:     expectedSize,
+			Checksums:        []filerepo.Checksum{{Algorithm: item.SumType, Digest: item.Checksum}},
+			AllowUnavailable: true,
+		})
 		if err != nil {
 			return err
+		}
+		if blob == nil {
+			continue
 		}
 		if item.OpenChecksum != "" || item.OpenSize >= 0 {
 			reader, err := blob.Open(ctx)
@@ -216,12 +224,9 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 				return closeErr
 			}
 		}
-		if err := session.RetainObject(metadataPath); err != nil {
-			return err
-		}
 	}
 	for _, suffix := range []string{".asc", ".sig"} {
-		if _, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: anchor.Path + suffix, Optional: true}); err != nil {
+		if _, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: anchor.Path + suffix, AllowUnavailable: true}); err != nil {
 			return err
 		}
 	}
@@ -334,17 +339,6 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 	return n, err
 }
 
-func isRepomdPath(cleaned string) bool {
-	return path.Base(cleaned) == "repomd.xml" && path.Base(path.Dir(cleaned)) == "repodata"
-}
-
-func joinRoot(root, name string) string {
-	if root == "." || root == "" {
-		return strings.TrimPrefix(name, "/")
-	}
-	return strings.TrimSuffix(root, "/") + "/" + strings.TrimPrefix(name, "/")
-}
-
 func (h *handler) artifactKey(cleaned string, request *http.Request) string {
 	digest := sha256.Sum256([]byte(h.origin.String() + "\x00" + cleaned + "\x00" + request.URL.RawQuery + "\x00" + request.Header.Get("Accept-Encoding")))
 	return "refs/" + hex.EncodeToString(digest[:])
@@ -375,13 +369,11 @@ func (h *handler) fetchUpstream(ctx context.Context, method, cleaned, rawQuery s
 	return h.client.DoRead(ctx, request, class)
 }
 
-func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
+func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)
-		return http.StatusBadGateway
 	}
-	return status
 }
 
 func (h *handler) CloseContext(ctx context.Context) error {

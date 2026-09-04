@@ -5,6 +5,11 @@ set -Eeuo pipefail
 out=${1:?output directory required}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+export GNUPGHOME="$work/gnupg"
+mkdir -m 0700 "$GNUPGHOME"
+gpg --batch --quiet --pinentry-mode loopback --passphrase '' \
+  --faked-system-time "$SOURCE_DATE_EPOCH!" \
+  --quick-generate-key 'cache-proxy e2e <e2e@example.invalid>' rsa2048 sign 0
 
 for state in initial updated; do
   major=1
@@ -12,7 +17,8 @@ for state in initial updated; do
   version="$major.0.0+e2e1"
   root="$out/$state/deb"
   package_work="$work/pkg-$state"
-  mkdir -p "$root/pool/main/e/e2e-deb" "$root/dists/stable/main/binary-amd64" "$root/flat"
+  mkdir -p "$root/pool/main/e/e2e-deb" "$root/dists/stable/main/binary-amd64" \
+    "$root/dists/stable/main/binary-arm64" "$root/flat"
   mkdir -p "$package_work/DEBIAN" "$package_work/usr/share/e2e-deb"
   cat >"$package_work/DEBIAN/control" <<EOF
 Package: e2e-deb
@@ -40,6 +46,9 @@ Description: cache-proxy end-to-end fixture
 
 EOF
   gzip -n -c "$root/dists/stable/main/binary-amd64/Packages" >"$root/dists/stable/main/binary-amd64/Packages.gz"
+  cp "$root/dists/stable/main/binary-amd64/Packages" "$root/dists/stable/main/binary-arm64/Packages"
+  gzip -n -c "$root/dists/stable/main/binary-arm64/Packages" >"$root/dists/stable/main/binary-arm64/Packages.gz"
+  rm "$root/dists/stable/main/binary-arm64/Packages"
 
   release="$root/dists/stable/Release"
   cat >"$release" <<EOF
@@ -48,17 +57,20 @@ Label: cache-proxy-e2e
 Suite: stable
 Codename: stable
 Date: Tue, 0${major} Jan 2024 00:00:00 UTC
-Architectures: amd64 all
+Architectures: amd64 arm64
 Components: main
 Description: cache-proxy end-to-end repository $state
 Acquire-By-Hash: yes
 SHA256:
 EOF
-  for relative in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
+  for relative in main/binary-amd64/Packages main/binary-amd64/Packages.gz main/binary-arm64/Packages.gz; do
     file="$root/dists/stable/$relative"
     printf ' %s %16s %s\n' "$(sha256sum "$file" | awk '{print $1}')" "$(wc -c <"$file" | tr -d ' ')" "$relative" >>"$release"
   done
-	rm "$root/dists/stable/main/binary-amd64/Packages"
+  rm "$root/dists/stable/main/binary-amd64/Packages"
+  gpg --batch --yes --quiet --pinentry-mode loopback --passphrase '' \
+    --faked-system-time "$SOURCE_DATE_EPOCH!" --digest-algo SHA256 \
+    --output "$root/dists/stable/InRelease" --clearsign "$release"
 
   cp "$package" "$root/flat/e2e-deb_${version}_all.deb"
   cat >"$root/flat/Packages" <<EOF
@@ -73,6 +85,7 @@ Description: cache-proxy end-to-end flat fixture
 
 EOF
   gzip -n -c "$root/flat/Packages" >"$root/flat/Packages.gz"
+  printf 'usr/share/e2e-deb/payload.txt e2e-deb\n' | gzip -n >"$root/flat/Contents-all.gz"
   cat >"$root/flat/Release" <<EOF
 Origin: cache-proxy-e2e-flat
 Label: cache-proxy-e2e-flat
@@ -84,9 +97,12 @@ Description: cache-proxy end-to-end flat repository $state
 Acquire-By-Hash: yes
 SHA256:
 EOF
-  for relative in Packages Packages.gz; do
+  for relative in Packages Packages.gz Contents-all.gz; do
     file="$root/flat/$relative"
     printf ' %s %16s %s\n' "$(sha256sum "$file" | awk '{print $1}')" "$(wc -c <"$file" | tr -d ' ')" "$relative" >>"$root/flat/Release"
   done
-	rm "$root/flat/Packages"
+  rm "$root/flat/Packages"
+  gpg --batch --yes --quiet --pinentry-mode loopback --passphrase '' \
+    --faked-system-time "$SOURCE_DATE_EPOCH!" --digest-algo SHA256 \
+    --output "$root/flat/InRelease" --clearsign "$root/flat/Release"
 done

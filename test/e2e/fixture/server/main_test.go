@@ -60,3 +60,30 @@ func TestTransparentPathProbeEchoesExactRequestURI(t *testing.T) {
 	require.Equal(t, "/apk/__e2e_path__/asset.css?theme=dark", response.Body.String())
 	require.Equal(t, 1, server.counts["GET /apk/__e2e_path__/asset.css"])
 }
+
+func TestFixtureFaultTargetsOneExactPathAndResetClearsIt(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "initial", "deb", "dists", "stable")
+	require.NoError(t, os.MkdirAll(directory, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "Release"), []byte("release"), 0o644))
+	server := &fixtureServer{
+		root: root, counts: make(map[string]int), headers: make(map[string]http.Header), faults: make(map[string]int),
+	}
+
+	fault := httptest.NewRecorder()
+	server.ServeHTTP(fault, httptest.NewRequest(http.MethodPost, "/__e2e/fault?path=%2Fdeb%2Fdists%2Fstable%2FRelease&status=404", nil))
+	require.Equal(t, http.StatusNoContent, fault.Code)
+
+	unavailable := httptest.NewRecorder()
+	server.ServeHTTP(unavailable, httptest.NewRequest(http.MethodGet, "/deb/dists/stable/Release", nil))
+	require.Equal(t, http.StatusNotFound, unavailable.Code)
+
+	reset := httptest.NewRecorder()
+	server.ServeHTTP(reset, httptest.NewRequest(http.MethodPost, "/__e2e/reset", nil))
+	require.Equal(t, http.StatusNoContent, reset.Code)
+
+	available := httptest.NewRecorder()
+	server.ServeHTTP(available, httptest.NewRequest(http.MethodGet, "/deb/dists/stable/Release", nil))
+	require.Equal(t, http.StatusOK, available.Code)
+	require.Equal(t, "release", available.Body.String())
+}

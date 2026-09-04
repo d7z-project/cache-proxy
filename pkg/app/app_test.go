@@ -3,8 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -424,7 +425,7 @@ func TestPrepareHandlersCancelsStartedInstancesOnLaterStartFailure(t *testing.T)
 	started := &cleanupContextInstance{}
 	failed := startContextInstance{
 		onStart: func(context.Context) error {
-			return fmt.Errorf("boom")
+			return errors.New("boom")
 		},
 	}
 	app := &App{
@@ -537,13 +538,22 @@ func TestOpenStopsSchedulerWhenPrepareHandlersFails(t *testing.T) {
 	defer cancel()
 
 	var runs atomic.Int32
-	prev := driverSet
-	driverSet = func() map[string]proxyruntime.ModeDriver {
-		drivers := prev()
-		drivers[config.ModeFile] = startFailingDriver{runs: &runs}
-		return drivers
+	previousPlanners := modePlanners
+	modePlanners = maps.Clone(modePlanners)
+	modePlanners[config.ModeFile] = func(_ context.Context, plan *proxyruntime.InstancePlan) error {
+		plan.Scheduler().Register(scheduler.TaskDef{
+			Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
+			Interval: 10 * time.Millisecond,
+			Handler: func(context.Context) (*scheduler.TaskOutcome, error) {
+				runs.Add(1)
+				return nil, nil
+			},
+		})
+		return plan.BindPath("/files", startContextInstance{
+			onStart: func(context.Context) error { return errors.New("boom") },
+		})
 	}
-	defer func() { driverSet = prev }()
+	defer func() { modePlanners = previousPlanners }()
 
 	doc := testDocument(t.TempDir(), []config.Instance{
 		fileInstance(t, "files", "/files", "https://example.com", file.Options{}),
@@ -581,13 +591,13 @@ func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 	}
 
 	var got config.CleanupConfig
-	prev := driverSet
-	driverSet = func() map[string]proxyruntime.ModeDriver {
-		drivers := prev()
-		drivers[config.ModeFile] = cleanupConfigDriver{seen: &got}
-		return drivers
+	previousPlanners := modePlanners
+	modePlanners = maps.Clone(modePlanners)
+	modePlanners[config.ModeFile] = func(_ context.Context, plan *proxyruntime.InstancePlan) error {
+		got = plan.CleanupConfig()
+		return plan.BindPath("/files", startContextInstance{})
 	}
-	defer func() { driverSet = prev }()
+	defer func() { modePlanners = previousPlanners }()
 
 	app := openApp(ctx, t, doc)
 	defer closeApp(t, app)
@@ -960,37 +970,4 @@ func (s *cleanupContextInstance) Start(ctx context.Context) error {
 func (s *cleanupContextInstance) Stop(context.Context) error {
 	s.stopped.Store(true)
 	return s.ctx.Err()
-}
-
-type startFailingDriver struct{ runs *atomic.Int32 }
-
-func (startFailingDriver) Mode() string { return config.ModeFile }
-
-func (d startFailingDriver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	plan.Scheduler().Register(scheduler.TaskDef{
-		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
-		Interval: 10 * time.Millisecond,
-		Handler: func(context.Context) (*scheduler.TaskOutcome, error) {
-			if d.runs != nil {
-				d.runs.Add(1)
-			}
-			return nil, nil
-		},
-	})
-	return plan.BindPath("/files", startContextInstance{
-		onStart: func(context.Context) error {
-			return fmt.Errorf("boom")
-		},
-	})
-}
-
-type cleanupConfigDriver struct{ seen *config.CleanupConfig }
-
-func (cleanupConfigDriver) Mode() string { return config.ModeFile }
-
-func (d cleanupConfigDriver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
-	if d.seen != nil {
-		*d.seen = plan.CleanupConfig()
-	}
-	return plan.BindPath("/files", startContextInstance{})
 }

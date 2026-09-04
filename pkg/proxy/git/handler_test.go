@@ -13,13 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-billy/v5/memfs"
+	"github.com/go-git/go-billy/v5/osfs"
 	gitlib "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/storage/memory"
-	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
 
 	proxytransport "gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
@@ -32,7 +33,7 @@ func TestColdMirrorPassesThroughSmartHTTP(t *testing.T) {
 		_, _ = io.WriteString(w, "advertisement")
 	}))
 	defer upstream.Close()
-	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New()})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -65,7 +66,7 @@ func TestGitReadOnlyProtocolSurface(t *testing.T) {
 		_, _ = io.WriteString(w, "pack")
 	}))
 	defer upstream.Close()
-	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New()})
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 
 	response := httptest.NewRecorder()
@@ -101,7 +102,7 @@ func TestGitUnknownReadResourcesRemainTransparent(t *testing.T) {
 		_, _ = io.WriteString(w, request.Method+" "+request.URL.RequestURI())
 	}))
 	defer upstream.Close()
-	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New()})
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 
 	for _, test := range []struct {
@@ -137,7 +138,7 @@ func TestSyncingMirrorPassesThroughWithSharedAdmission(t *testing.T) {
 	release, err := gate.Acquire(context.Background(), upstream.URL, proxytransport.AdmissionForeground)
 	require.NoError(t, err)
 	handler := newGitHandler(gitConfig{
-		name: "test", upstream: upstream.URL + "/repo", billyFs: newBillyAdapter(afero.NewMemMapFs(), ""), upstreamGate: gate,
+		name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New(), upstreamGate: gate,
 	})
 	handler.repositoryMu.Lock()
 
@@ -183,7 +184,7 @@ func TestGitSyncPublishesUpstreamCommit(t *testing.T) {
 
 	handler := newGitHandler(gitConfig{
 		name: "test", upstream: upstreamPath,
-		billyFs: newBillyAdapter(afero.NewBasePathFs(afero.NewOsFs(), t.TempDir()), ""),
+		billyFs: osfs.New(t.TempDir(), osfs.WithBoundOS()),
 	})
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 	require.NoError(t, handler.Sync(context.Background()))
@@ -220,13 +221,13 @@ func TestBuildAuthExpandsEnvironmentAndRejectsEmptyCredentials(t *testing.T) {
 }
 
 func TestGitHandlerAppliesDefaultOperationTimeout(t *testing.T) {
-	handler := newGitHandler(gitConfig{billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	handler := newGitHandler(gitConfig{billyFs: memfs.New()})
 	require.Equal(t, defaultOperationTimeout, handler.operationTimeout)
 	require.Equal(t, defaultOperationTimeout, handler.bootstrapClient.Timeout)
 }
 
 func TestGitHandlerRejectsRequestsAfterStop(t *testing.T) {
-	handler := newGitHandler(gitConfig{billyFs: newBillyAdapter(afero.NewMemMapFs(), "")})
+	handler := newGitHandler(gitConfig{billyFs: memfs.New()})
 	require.NoError(t, handler.Stop(context.Background()))
 
 	recorder := httptest.NewRecorder()

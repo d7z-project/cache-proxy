@@ -18,14 +18,14 @@ import (
 )
 
 type Options struct {
-	Auth *AuthConfig `json:"auth,omitempty" yaml:"auth,omitempty"`
+	Auth *AuthConfig `yaml:"auth,omitempty"`
 }
 
 type AuthConfig struct {
-	Type     string `json:"type" yaml:"type"`
-	Username string `json:"username,omitempty" yaml:"username,omitempty"`
-	Password string `json:"password,omitempty" yaml:"password,omitempty"`
-	Token    string `json:"token,omitempty" yaml:"token,omitempty"`
+	Type     string `yaml:"type"`
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
+	Token    string `yaml:"token,omitempty"`
 }
 
 type Block struct {
@@ -42,12 +42,7 @@ const (
 	blobRetention = config.DefaultRetention
 )
 
-type Driver struct{}
-
-func NewDriver() proxyruntime.ModeDriver { return Driver{} }
-func (Driver) Mode() string              { return config.ModeOCI }
-
-func (Driver) Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
+func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	var options Options
 	if err := plan.Decode(&options); err != nil {
 		return err

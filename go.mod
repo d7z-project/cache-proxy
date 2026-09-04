@@ -10,7 +10,6 @@ require (
 	github.com/google/go-containerregistry v0.21.7
 	github.com/klauspost/compress v1.18.6
 	github.com/prometheus/client_golang v1.23.2
-	github.com/spf13/afero v1.15.0
 	github.com/stretchr/testify v1.11.1
 	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/mod v0.38.0
@@ -45,6 +44,7 @@ require (
 	github.com/prometheus/procfs v0.21.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect
+	github.com/spf13/afero v1.15.0 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
