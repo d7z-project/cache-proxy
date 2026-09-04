@@ -138,16 +138,20 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		}
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
-	flight, leader := h.flights.Begin(key)
+	flightKey := key
+	if cached != nil {
+		flightKey += "\x00fetched=" + cached.Fetched.UTC().Format(time.RFC3339Nano)
+	}
+	flight, leader := h.flights.Begin(flightKey)
 	if leader {
 		if current, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
 			if cached == nil || current.Fetched.After(cached.Fetched) {
-				h.flights.Finish(key, flight, nil)
+				h.flights.Finish(flightKey, flight, nil)
 				return serveStoredGoResponse(w, request, current, "HIT"), "HIT"
 			}
 			_ = current.Reader.Close()
 		}
-		return h.fetchModule(w, request, parsed, key, flight, cached)
+		return h.fetchModule(w, request, parsed, key, flightKey, flight, cached)
 	}
 	if err := h.flights.Wait(request.Context(), flight); err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
@@ -160,7 +164,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	return http.StatusBadGateway, "ERROR"
 }
 
-func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, parsed moduleRequest, key string, flight *storeio.Flight, cached *storeio.ResponseObject) (int, string) {
+func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, parsed moduleRequest, objectKey, flightKey string, flight *storeio.Flight, cached *storeio.ResponseObject) (int, string) {
 	upstreamHeader := request.Header.Clone()
 	if cached != nil && cached.Origin == h.origin.String() {
 		if value := cached.Header.Get("ETag"); value != "" {
@@ -172,9 +176,9 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 	}
 	response, err := h.openUpstream(h.lifecycle.Context(), h.origin, http.MethodGet, parsed.cacheKey, upstreamHeader)
 	if err != nil {
-		h.flights.Finish(key, flight, err)
+		h.flights.Finish(flightKey, flight, err)
 		if cached != nil {
-			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, objectKey); openErr == nil {
 				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
 			}
 		}
@@ -183,9 +187,9 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 	}
 	if response.StatusCode == http.StatusNotModified && cached != nil {
 		_ = response.Body.Close()
-		updateErr := storeio.TouchResponse(h.lifecycle.Context(), h.store, goTenant, key, response.Header)
-		h.flights.Finish(key, flight, updateErr)
-		if refreshed, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+		updateErr := storeio.TouchResponse(h.lifecycle.Context(), h.store, goTenant, objectKey, response.Header)
+		h.flights.Finish(flightKey, flight, updateErr)
+		if refreshed, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, objectKey); openErr == nil {
 			return serveStoredGoResponse(w, request, refreshed, "REVALIDATED"), "REVALIDATED"
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -194,16 +198,16 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 	if response.StatusCode != http.StatusOK {
 		if response.StatusCode >= http.StatusInternalServerError && cached != nil {
 			_ = response.Body.Close()
-			h.flights.Finish(key, flight, nil)
-			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
+			h.flights.Finish(flightKey, flight, nil)
+			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, objectKey); openErr == nil {
 				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
 			}
 		}
-		h.flights.Finish(key, flight, nil)
+		h.flights.Finish(flightKey, flight, nil)
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	if !goCacheable(request, response) {
-		h.flights.Finish(key, flight, nil)
+		h.flights.Finish(flightKey, flight, nil)
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	maxSize := int64(64 << 20)
@@ -216,11 +220,11 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 		maxSize = 2 << 30
 	}
 	if response.ContentLength > maxSize {
-		h.flights.Finish(key, flight, errors.New("go module response exceeds size limit"))
+		h.flights.Finish(flightKey, flight, errors.New("go module response exceeds size limit"))
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
-		Body: response.Body, ObjectPath: key, Spooler: h.client.EnsureSpooler(h.workDir), MaxBytes: maxSize, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
+		Body: response.Body, ObjectPath: objectKey, Spooler: h.client.EnsureSpooler(h.workDir), MaxBytes: maxSize, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		VerifyFn: func(reader io.ReadSeeker) error {
 			size, err := reader.Seek(0, io.SeekEnd)
 			if err != nil {
@@ -239,12 +243,12 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 			return validateModuleResponse(parsed, file)
 		},
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(ctx, h.store, goTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
+			return storeio.PutResponse(ctx, h.store, goTenant, objectKey, h.origin.String(), http.StatusOK, response.Header, "", body)
 		},
-		Done: func(err error) { h.flights.Finish(key, flight, err) },
+		Done: func(err error) { h.flights.Finish(flightKey, flight, err) },
 	})
 	if err != nil {
-		h.flights.Finish(key, flight, err)
+		h.flights.Finish(flightKey, flight, err)
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	defer func() { _ = reader.Close() }()

@@ -205,9 +205,18 @@ func TestGoModuleMutableListPublishesUpstreamUpdate(t *testing.T) {
 	require.Equal(t, http.StatusOK, first.Code)
 	require.Equal(t, "v1.0.0\n", first.Body.String())
 	require.Eventually(t, func() bool { return cachedBody() == "v1.0.0\n" }, time.Second, time.Millisecond)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	require.NoError(t, handler.flights.Do(waitCtx, key, func() error { return nil }))
+	// Model the interval where a streamed response is visible before its miss flight finishes.
+	pendingInitialFill, leader := handler.flights.Begin(key)
+	require.True(t, leader)
+	defer handler.flights.Finish(key, pendingInitialFill, nil)
 
 	revision.Store(2)
-	request := httptest.NewRequest(http.MethodGet, target, nil)
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRequest()
+	request := httptest.NewRequestWithContext(requestCtx, http.MethodGet, target, nil)
 	request.Header.Set("Cache-Control", "no-cache")
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, request)
@@ -216,6 +225,7 @@ func TestGoModuleMutableListPublishesUpstreamUpdate(t *testing.T) {
 	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
 	require.Equal(t, `"v1"`, conditional.Load())
 	require.Eventually(t, func() bool { return cachedBody() == "v2.0.0\n" }, time.Second, time.Millisecond)
+	handler.flights.Finish(key, pendingInitialFill, nil)
 
 	third := requestGoProxy(t, handler, target, false)
 	require.Equal(t, http.StatusOK, third.Code)
