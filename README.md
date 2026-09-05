@@ -7,9 +7,9 @@
 A self-hosted, read-only caching proxy for package registries, Linux
 repositories, container images, Git repositories, and HTTP files.
 
-Run multiple isolated instances in one process, reduce repeated downloads,
-and monitor cache activity through a built-in dashboard and Prometheus metrics.
-Each instance uses protocol-specific caching and one configured upstream.
+Reduce repeated downloads across machines and CI jobs, and monitor cache activity
+through a built-in dashboard and Prometheus metrics. A single process can serve
+multiple registries, each with its own upstream, cache, and refresh settings.
 
 [Installation](#installation) | [Quick Start](#quick-start) |
 [Configuration](#configuration) | [Client Setup](#client-setup) |
@@ -17,12 +17,12 @@ Each instance uses protocol-specific caching and one configured upstream.
 
 ## Features
 
-- Protocol-aware metadata refresh and content verification.
-- Shared downloads for concurrent requests to the same cached object.
-- Global and per-host concurrency limits, request pacing, and upstream cooldowns.
-- Atomic metadata snapshots for Linux and Flatpak/OSTree repositories.
-- Persistent storage, background cleanup, and policy-controlled offline reuse.
-- Dashboard with client configuration, maintenance errors, and storage statistics.
+- Use native package clients with protocol-aware caching and content verification.
+- Reuse cached downloads across clients and service restarts.
+- Share upstream transfers when multiple clients request the same object.
+- Control metadata freshness, download concurrency, and upstream request rates.
+- Inspect storage usage, network activity, maintenance errors, and client setup
+  instructions in the dashboard.
 
 ### Supported Modes
 
@@ -32,37 +32,50 @@ Each instance uses protocol-specific caching and one configured upstream.
 | `npm` | Package metadata and tarballs; audit queries pass through |
 | `go` | Go modules and an optional checksum database |
 | `maven` | Metadata, artifacts, signatures, and checksums |
-| `cargo` | Sparse indexes, crates, and fetch-only Git indexes |
+| `cargo` | Sparse and Git registry indexes, and crates |
 | `pypi` | Simple HTML/JSON indexes and distributions |
 | `deb` | Debian standard, nested, and flat repositories |
-| `apk` | Alpine indexes, packages, and sidecars |
+| `apk` | Alpine package indexes, packages, and signatures |
 | `rpm` | rpm-md metadata and RPM packages |
-| `pacman` | Databases, packages, deltas, and sidecars |
+| `pacman` | Arch Linux package databases, packages, deltas, and signatures |
 | `flatpak` | Flatpak/OSTree summaries, objects, and static deltas |
 | `oci` | OCI Distribution manifests and blobs |
-| `git` | Git smart HTTP backed by a local bare mirror |
+| `git` | Git repositories over smart HTTP |
 
-Repository layouts, architectures, metadata paths, and compression variants
-are handled by the selected mode. Repository modes do not need custom path rules.
-Git instances each mirror one repository.
+Each instance connects to one HTTP(S) upstream. Repository modes handle their
+supported layouts automatically; custom cache rules are available for `file`
+instances. Each `git` instance mirrors one repository. All modes provide read-only
+upstream access.
 
 ## Installation
 
 ### Container
 
-Images are published to GitHub Container Registry. The `main` tag follows the
-default branch; release images use release version tags.
+Use Docker or Podman with the image published to GitHub Container Registry:
 
 ```bash
 docker pull ghcr.io/d7z-project/cache-proxy:main
 ```
+
+The `main` tag follows the default branch. Pin a release image tag for a
+repeatable deployment. See [Quick Start](#quick-start) for a complete container setup.
 
 ### Binary
 
 Download a Linux binary and `SHA256SUMS` from
 [GitHub Releases](https://github.com/d7z-project/cache-proxy/releases).
 Available binary architectures are `amd64`, `arm64`, and `loong64`.
-Verify the checksum, make the binary executable, and run it with `-config`.
+Verify the checksum and make the downloaded binary executable. Use
+[config.example.yaml](config.example.yaml) as a starting configuration:
+
+```bash
+chmod +x cache-proxy-amd64
+./cache-proxy-amd64 -config config.example.yaml -validate
+./cache-proxy-amd64 -config config.example.yaml
+```
+
+Replace `amd64` with your architecture. The example enables Debian and npm on
+`127.0.0.1:18080` and stores data in `./data`.
 
 ### From Source
 
@@ -72,17 +85,14 @@ Requires Go 1.26 or newer and Make.
 git clone https://github.com/d7z-project/cache-proxy.git
 cd cache-proxy
 make cache-proxy
-cp config.example.yaml cache-proxy.yaml
-./cache-proxy -config cache-proxy.yaml -validate
-./cache-proxy -config cache-proxy.yaml
 ```
 
-The example enables Debian and npm on `127.0.0.1:18080` and stores data in
-`./data`. Other modes can be enabled individually.
+Run the resulting `./cache-proxy` with `-config` as shown above.
 
 ## Quick Start
 
-For a local npm cache, create `cache-proxy.yaml`:
+This example runs an npm cache accessible from the local machine.
+Create `cache-proxy.yaml`:
 
 ```yaml
 server:
@@ -109,7 +119,8 @@ docker run -d --name cache-proxy \
   -config /etc/cache-proxy.yaml
 ```
 
-Open [the dashboard](http://127.0.0.1:18080/) and configure npm:
+Open [the dashboard](http://127.0.0.1:18080/) to view the instance and its status.
+Configure npm to download through the cache:
 
 ```bash
 npm config set registry http://127.0.0.1:18080/npm
@@ -121,9 +132,9 @@ controls for your deployment.
 
 ## Configuration
 
-[config.example.yaml](config.example.yaml) documents all settings, their
-purposes, defaults, and examples for every mode. Example values are explicitly
-distinguished from application defaults.
+See [config.example.yaml](config.example.yaml) for the complete configuration
+reference, including defaults and an instance example for every mode. Only Debian
+and npm are enabled in that file; enable and customize the instances you need.
 
 Configuration uses strict YAML: unknown fields, invalid URLs, duplicate instance
 names, and conflicting listeners fail validation. Durations use Go syntax
@@ -133,14 +144,18 @@ names, and conflicting listeners fail validation. Durations use Go syntax
 ./cache-proxy -config cache-proxy.yaml -validate
 ```
 
-### Instances
+### Listeners and Instances
+
+`server.bind` sets the main listener, `server.backend` sets the persistent data
+directory, and `server.public_url` sets the public address used in dashboard
+client instructions.
 
 | Setting | Purpose |
 |---|---|
-| `name` | Required unique identifier using letters, digits, underscores, or hyphens |
+| `name` | Unique identifier using letters, digits, underscores, or hyphens |
 | `enabled` | Enable the instance; defaults to `false` |
-| `mode` | Required protocol mode from the table above |
-| `upstream` | Required single HTTP(S) upstream base URL |
+| `mode` | Protocol mode from [Supported Modes](#supported-modes) |
+| `upstream` | Single HTTP(S) upstream base URL |
 | `path` | Mount on the main HTTP listener |
 | `bind` | Use a dedicated listener; required for OCI |
 | `display_url` | Public client address for a dedicated OCI listener |
@@ -148,9 +163,14 @@ names, and conflicting listeners fail validation. Durations use Go syntax
 | `refresh.interval` | Mutable freshness limit and repository polling interval |
 | `options` | Mode-specific configuration |
 
-Specify exactly one of `path` or `bind`. Upstream high availability can be
-provided by DNS or a load balancer at the configured address. HTTP transport
-supports HTTP, HTTPS, SOCKS5, and SOCKS5H outbound proxies.
+Each instance requires `name`, `mode`, `upstream`, and exactly one of `path` or
+`bind`. Use a dedicated listener for OCI. Upstream high availability can be
+provided by DNS or a load balancer at the configured address.
+
+Use `transport.proxy` for an outbound HTTP, HTTPS, SOCKS5, or SOCKS5H proxy.
+Without an explicit setting, HTTP transport follows the proxy environment
+variables. Git and OCI upstream credentials are configured in `options.auth`;
+credential fields support environment variable expansion.
 
 ### Refresh and Rate Limits
 
@@ -169,35 +189,22 @@ For file `http_cache` rules, `refresh.interval` is a freshness ceiling and a
 fallback when upstream omits a lifetime. Without it, caching requires explicit
 upstream freshness.
 
-Repository polling is staggered across roots; other mutable objects refresh
-on demand. Shorter upstream cache policies take precedence. Refresh settings
+Repository polling is staggered; other mutable objects refresh on demand.
+Shorter upstream cache policies take precedence. Refresh settings
 do not extend protocol expiry, signed URL validity, or immutable object retention.
 
 Use `storage.download` to control global concurrency, per-host concurrency,
 and request pacing. The `hosts` mapping overrides limits for a hostname with an
 optional port. Limits apply across instances, including redirect and authentication
-requests. Real upstream `429` responses establish cooldowns that honor
+requests. Upstream `429` responses establish cooldowns that honor
 `Retry-After`. Tune both refresh intervals and download limits to upstream quotas.
-
-### Mode Options
-
-| Mode | Options |
-|---|---|
-| `file` | `pass_headers`; `rules` with `match` and `policy` |
-| `git` | `auth`, `sync_interval`, `operation_timeout` |
-| `go` | `sumdb`, `goprivate`, `disable_module_fetch_header` |
-| `oci` | `auth` |
-
-File policies are `http_cache`, `immutable`, and `passthrough`; the last
-matching rule wins. Git auth supports `basic` and `token`; OCI auth supports
-`none`, `basic`, and `bearer`. Credential fields support environment variable
-expansion. Other modes use the shared instance settings.
 
 ## Client Setup
 
-The dashboard provides client configuration for each enabled instance. Replace
-the example hostname with your public address and enable the corresponding
-instances in your configuration.
+The dashboard provides client configuration for every enabled instance, including
+Maven, Alpine, RPM, Pacman, and Flatpak. The examples below cover common clients.
+Replace the hostname with your public address and enable instances at the matching
+paths before using them.
 
 ```bash
 npm config set registry https://mirrors.example.com/npm
@@ -218,7 +225,9 @@ replace-with = "cache-proxy"
 ```
 
 Linux package managers use the instance URL in place of the upstream base.
-For example, standard and flat Debian sources in `/etc/apt/sources.list.d/cache-proxy.list`:
+Keep the distribution, components, and signing keys appropriate to your repository.
+For example, standard and flat Debian sources in
+`/etc/apt/sources.list.d/cache-proxy.list`:
 
 ```text
 deb https://mirrors.example.com/debian bookworm main
@@ -239,11 +248,18 @@ docker pull registry.example.com/library/alpine:3.20
 
 ## Operations
 
-### Deployment and Storage
+### Security
+
+For shared access, terminate TLS and configure client authentication or network
+access controls at your ingress. The optional `metrics.token` protects only the
+Prometheus endpoint, not the dashboard or proxy routes. Upstream credentials
+authenticate cache-proxy to the upstream; they do not restrict client access.
+
+### Storage and Upgrades
 
 Use a dedicated persistent backend volume with one writer process. Instance data
-is stored under `<backend>/instances/<name>/<mode>/` in `blobs`, `state`, and
-`work` directories. Send `SIGINT` or `SIGTERM` for graceful shutdown.
+is stored under `<backend>/instances/<name>/<mode>/`. Send `SIGINT` or `SIGTERM`
+for graceful shutdown.
 
 Backend formats are internal and have no compatibility guarantee across builds.
 Invalid cache records are treated as misses and cleaned up. Plan for cache
@@ -254,42 +270,31 @@ controls cleanup batching and dry runs. `storage.orphan_policy` selects reportin
 or automatic cleanup of inactive instance data. Object size and temporary download
 limits are not a total backend disk quota; monitor available storage.
 
-Terminate TLS and configure client access controls at your ingress. The optional
-`metrics.token` protects only the Prometheus endpoint, not the dashboard or proxy
-routes. Upstream credentials belong to individual instances.
-
 ### Freshness and Offline Use
 
 Mutable metadata uses conditional upstream validation. Cached content can remain
 available during transient failures when request, upstream, and protocol policies
-allow reuse. Downloads for the same cached object share an upstream transfer.
+allow reuse. Offline availability is limited to content already cached and still
+eligible for reuse; this service is not a complete upstream mirror.
 
 Explicit `no-cache` or `max-age=0` requests require validation even when data is
 cached. APT normally requests index validation; offline use requires client settings
 that permit cache reuse. Existing repository metadata requests that require refresh
 wait up to 30 seconds, or the client's shorter deadline, and return `504` on timeout.
 
-Repository metadata is published as a verified atomic snapshot. A failed refresh
-leaves committed metadata and independently cached packages intact. Debian
-`Valid-Until` limits reuse even after successful conditional validation. Atomic
-publication keeps each snapshot coherent, but unversioned URLs do not provide
-snapshot isolation across separate client requests.
+Repository metadata is verified before an updated snapshot replaces the cached
+one. A failed refresh leaves the committed cache intact, subject to its expiry
+and validation requirements. Debian `Valid-Until` remains effective. Unversioned
+repository URLs can still change between separate client requests.
 
-Debian repositories advertising `Acquire-By-Hash: yes` refresh only Release
-metadata and signatures. Indexes are downloaded on demand and verified against
-their declared size and strong checksums before serving; unrelated architectures,
-translations, and compression variants are not prefetched. Canonical index requests
-use the current Release's content identity, preferring SHA512 over SHA256. If an
-index's by-hash URL returns `403` or `404`, a uniquely identified canonical index
-can be used only after the same verification. Repositories without by-hash retain
-complete metadata snapshots. This selection is automatic for standard, nested,
-and flat layouts. Only downloaded indexes are available offline; a historical
-hash removed upstream cannot be recovered unless already cached.
+For Debian repositories with `Acquire-By-Hash: yes`, indexes are downloaded and
+verified on demand, reducing refresh traffic for unused architectures and index
+variants. Other Debian repositories cache complete metadata snapshots. The mode
+selects this behavior automatically for standard, nested, and flat layouts.
 
-First-time repository anchor requests stream from upstream while the cache is
-populated. Upstream `no-store` responses are not retained. Repository-tree modes preserve
-root and directory requests and pass safe, unclassified same-origin resources
-through; Go and OCI retain their protocol endpoint boundaries.
+Upstream `no-store` responses are not retained. Repository-tree modes pass root,
+directory, and unclassified same-origin resource requests through to the upstream;
+Go and OCI expose their protocol endpoints only.
 
 ### Monitoring
 
@@ -302,15 +307,21 @@ through; Go and OCI retain their protocol endpoint boundaries.
 | `/-/status/network` | Instance and upstream request statistics |
 | `/metrics` | Prometheus metrics; configurable through `metrics.path` |
 
-Review maintenance errors in the dashboard or events API, and process logs with
-`docker logs cache-proxy` for container deployments. Upstream statistics group
-requests by origin without including credentials or resource paths.
+Review maintenance errors in the dashboard or events API. For container logs:
+
+```bash
+docker logs --tail 100 -f cache-proxy
+```
+
+For repeated `429` responses, review per-host limits and metadata refresh intervals.
+For timeouts, check upstream reachability and instance transport settings.
+For storage errors, check backend permissions, free space, and download limits.
 
 ## Development
 
-Architecture, engineering, and testing requirements are documented in [AGENTS.md](AGENTS.md).
-Protocol implementations live in `pkg/proxy/<mode>`.
-Changes to cache behavior should include protocol tests and the relevant native-client E2E case.
+Contributions are welcome through [issues](https://github.com/d7z-project/cache-proxy/issues)
+and pull requests. See [AGENTS.md](AGENTS.md) for architecture and engineering
+requirements. The local checks require Go 1.26 or newer and Make:
 
 ```bash
 make fmt
@@ -320,23 +331,15 @@ make test-race
 make test-fuzz
 ```
 
-Run `make tidy` after dependency changes and `make cache-proxy` for a static build.
-
-Measure status-history read allocations with
-`go test ./pkg/app -run '^$' -bench '^BenchmarkStatusHistoryReads$' -benchmem`.
-
-End-to-end tests require Docker or Podman on native Linux. Proxy, fixture, probes,
-and package clients run in host-network containers.
+End-to-end tests require Docker or Podman on native Linux and run the service
+and native package clients in host-network containers:
 
 ```bash
 make test-e2e
 E2E_RUNTIME=podman E2E_SUITE=deb make test-e2e
 ```
 
-`E2E_SUITE` accepts any supported mode; omitting it runs every mode. Cases cover
-cold downloads, warm reuse, upstream updates, and persistent-cache offline restart.
-Debian standard and flat repositories are tested separately, each with and without
-by-hash support, including unused-index request counters.
+`E2E_SUITE` accepts any supported mode; omitting it runs every mode.
 
 ## License
 
