@@ -21,7 +21,7 @@ gpgcheck=0
 repo_gpgcheck=0
 metadata_expire=0
 EOF
-    dnf -y --setopt=reposdir=/tmp/repos --disablerepo="*" --enablerepo=e2e --nogpgcheck install e2e-rpm >/dev/null
+    dnf -y --setopt=timeout=5 --setopt=retries=1 --setopt=reposdir=/tmp/repos --disablerepo="*" --enablerepo=e2e --nogpgcheck install e2e-rpm >/dev/null
     grep -qx "$2" /usr/share/e2e-rpm/payload.txt
   '
   e2e_client rpm cold "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
@@ -45,7 +45,13 @@ EOF
   e2e_set_fixture_state updated
   e2e_wait_header_changed "$E2E_PROXY_URL/rpm/repodata/repomd.xml" ETag "$previous_etag"
   e2e_client rpm update "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
+  e2e_wait_cache_hit "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
   e2e_offline_restart
-  e2e_client rpm offline "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
+  e2e_wait_cache_hit "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
+  e2e_client rpm offline "$E2E_FEDORA_IMAGE" '
+    dnf -y --setopt=timeout=5 --setopt=retries=1 --disablerepo="*" --nogpgcheck install "$1/rpm/e2e-rpm-2.0.0-1.noarch.rpm" >/dev/null
+    grep -qx cache-proxy-e2e-updated /usr/share/e2e-rpm/payload.txt
+  ' "$E2E_PROXY_URL"
+  e2e_assert_offline_validation rpm "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
   e2e_restore_online
 }

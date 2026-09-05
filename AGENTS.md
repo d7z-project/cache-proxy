@@ -17,6 +17,7 @@
 
 - helper 必须对应实际复用或清晰的职责边界；短小单次转发逻辑保持内联
 - `transport` 统一 upstream HTTP client、body idle timeout、URL path segment 转义、通用 revalidation/cacheability 判断和响应转发；协议包保留身份、凭据作用域和生命周期决策
+- HTTP freshness 的纯计算与 header 合并位于 runtime，供 transport 和 filerepo 共用；storeio 记录响应接收时间与年龄，304 不重置内容创建时间
 - `artifactcache` 统一稳定包对象的 fill、flight、conditional revalidation、stale 和 streaming 生命周期；协议包保留路径分类、缓存键、freshness 和内容校验
 - 缓存响应直接使用 `storeio.ResponseObject`；协议专用结构只承载额外状态
 - npm / PyPI 的签名下载地址复用 `signedtoken` 的有界 HMAC envelope；payload 字段、期限、digest 和目标 URL 仍由协议包校验
@@ -24,15 +25,18 @@
 - error 文本小写开头，通过 `%w` 保留可判定错误链
 - 协议、缓存键、持久化格式或调度时序变化必须明确记录并补测试
 - 大块逻辑按状态转换和资源所有权拆分，避免薄包装与重复生命周期代码
+- filerepo 按 generation 管理、刷新调度、对象校验、状态持久化和 GC 分文件，保持同包内直接协作；不为文件拆分引入额外接口层
 
 ## YAML 与运行时配置
 
 - YAML 字段使用 `snake_case`，必填字段不使用 `omitempty`
 - duration、expiration 和 byte size 分别复用 `config.Duration`、`config.Expiration`、`config.ByteSize`
 - 配置保持严格解码，未知字段必须报错
+- instance 的可选 refresh.interval 至少为 1s，约束可变 metadata 的本地期限与周期检查；上游更短期限优先，Git 使用 options.sync_interval；immutable identity 与 retention 不受该字段影响
 - `upstream` 是每个 instance 的必填 HTTP(S) 标量；高可用由该地址前方的 DNS 或负载均衡提供
 - 每个 instance 使用独立的 `<backend>/instances/<name>/<mode>/{blobs,state,work}`
 - 自建持久化 state 只描述当前结构，使用严格解码以及身份、路径或摘要校验
+- response metadata 的读取、更新、删除和 GC 共用严格校验；ValidatedAt 描述验证接收时间，CreatedAt 描述当前内容创建时间；backend 格式与运行构建绑定
 - 所有下载临时文件共享进程级 spool budget；`StartStream` 和 `CaptureResponse` 必须使用 plan 派生的 `Spooler`
 - handler 在构造阶段固定持有 plan 派生的 `Spooler`；请求热路径不得重复从 work 目录解析或创建 spooler
 
@@ -46,7 +50,8 @@
 - 首次合格 anchor 请求立即透传上游，同时由生命周期 context 捕获；并发请求读取完成的 pending/current anchor
 - 已有 current 时 metadata 优先读取 current；仅当 current 不含请求路径时，协议明确标记且路径可绑定版本的对象才能从无歧义的 previous snapshot 读取；其余 miss 或本地 blob 丢失触发 refresh 并交回协议 handler，以原请求对同一 upstream 透明 `BYPASS`，禁止生成 `503` 或负缓存状态
 - current miss 或本地 blob 丢失触发的 refresh 必须在 anchor 返回 `304` 或内容 digest 未变化时重新构建 candidate，使恢复可用的对象无需等待 anchor 变化即可进入 snapshot；普通周期 poll 不重建未变化的 candidate
-- current anchor 收到显式 `no-cache` / `max-age=0` 时触发后台 refresh，本次响应仍读取已提交 generation
+- current anchor 收到显式 `no-cache` / `max-age=0` 或上游要求验证时，等待验证及必要的原子发布；请求等待最多 30s，取消或超时不取消 scheduler 工作
+- generation 验证时间与 header 存于绑定精确 candidate 的 current marker，不改写 snapshot 或 PublishedAt；no-store 退役该 root 的 current/pending 路由，active reader 继续受 GC 保护
 - artifact 和 package sidecar 使用 generation-independent response key，且不依赖 metadata refresh 成功
 - Debian 支持标准、嵌套和 flat root；InRelease 与 Release 同时存在时必须归一化一致
 - Debian instance 根路径和未分类的同源资源透明直通；目录请求必须保留尾斜线
@@ -64,6 +69,7 @@
 - logical response key 映射到 SHA256 分片路径，metadata 中保存并验证原 logical key
 - 调度器单 goroutine 串行执行；达到 batch 上限时短延迟 continuation
 - metadata refresh 按 repository root 串行处理 pending、显式 poll 和周期 poll；失败 candidate 使用有上限退避并在重试前重新验证 anchor
+- 周期 poll 只选到期 root，以 instance/root 的稳定偏移在周期的 80%-100% 检查；失败 pending 不阻塞其他 root，零 freshness 不形成后台忙循环，任务执行预算与调度周期分离
 - `TriggerNow` 只唤醒内存调度状态；scheduler 的单一执行循环在 metadata refresh/GC 完成后持久化其调度时间，metadata 请求热路径不执行状态文件 fsync
 - response cleaner 及其游标由一个串行调度任务独占；任务事件通过 Result 和 Err 表达结果与完整错误上下文
 - response、OCI 和 generation GC 按 inspected objects 计 batch，并通过内存游标继续

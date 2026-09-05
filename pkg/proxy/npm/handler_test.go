@@ -40,6 +40,43 @@ func newNPMTestHandler(t *testing.T, upstream string) *handler {
 	return handler
 }
 
+func TestPackumentHeadApplies304CachePolicy(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("ETag", `"source"`)
+		w.Header().Set("Cache-Control", "max-age=60")
+		if n == 2 {
+			if request.Header.Get("If-None-Match") != `"source"` {
+				http.Error(w, "validator mismatch", 400)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"name":"pkg","versions":{},"revision":%d}`, n)
+	}))
+	defer server.Close()
+	h := newNPMTestHandler(t, server.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pkg", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	etag := w.Header().Get("ETag")
+	req := httptest.NewRequest(http.MethodHead, "/pkg", nil)
+	req.Header.Set("Cache-Control", "no-cache")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Empty(t, w.Body.String())
+	require.Equal(t, etag, w.Header().Get("ETag"))
+	require.Equal(t, "no-cache", w.Header().Get("Cache-Control"))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pkg", nil))
+	require.Equal(t, int32(3), calls.Load())
+	require.Contains(t, w.Body.String(), `"revision":3`)
+}
+
 func TestPackumentSeparatesValidatorAndAuthorizesTarball(t *testing.T) {
 	tarball := []byte("tarball body")
 	digest := sha512.Sum512(tarball)

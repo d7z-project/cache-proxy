@@ -66,17 +66,18 @@ func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, c
 		CacheKey: h.artifactKey,
 	}
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance:       name,
-		Mode:           config.ModeDEB,
-		Tenant:         "deb-metadata",
-		Upstream:       origin.String(),
-		StateDir:       stateDir,
-		WorkDir:        workDir,
-		Spooler:        spooler,
-		AnchorMaxBytes: maxReleaseSize,
-		Store:          blobs,
-		Scheduler:      taskScheduler,
-		KeepPrevious:   2,
+		RefreshInterval: client.RefreshInterval(15 * time.Minute),
+		Instance:        name,
+		Mode:            config.ModeDEB,
+		Tenant:          "deb-metadata",
+		Upstream:        origin.String(),
+		StateDir:        stateDir,
+		WorkDir:         workDir,
+		Spooler:         spooler,
+		AnchorMaxBytes:  maxReleaseSize,
+		Store:           blobs,
+		Scheduler:       taskScheduler,
+		KeepPrevious:    2,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
@@ -165,7 +166,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		return http.StatusBadGateway, "ERROR"
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
+	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
@@ -184,10 +185,10 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		return http.StatusOK, "BYPASS"
 	}
 	defer func() { _ = spool.Close() }()
-	stageErr := error(nil)
+	var stageErr error
 	if _, err := parseReleaseManifest(h.lifecycle.Context(), spool.File); err == nil {
 		_, _ = spool.File.Seek(0, io.SeekStart)
-		stageErr = h.metadata.StageAnchor(h.lifecycle.Context(), root, cleaned, response.Header, spool.File)
+		stageErr = h.metadata.StageAnchor(storeio.WithResponseTiming(h.lifecycle.Context(), response), root, cleaned, response.Header, spool.File)
 		if stageErr != nil {
 			slog.Warn("debian metadata staging failed", "path", cleaned, "err", stageErr)
 		}
@@ -209,6 +210,13 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 	}
 	if err := reader.Close(); err != nil {
 		return err
+	}
+	if value := manifest.Fields["valid-until"]; value != "" {
+		expires, err := http.ParseTime(value)
+		if err != nil {
+			return fmt.Errorf("parse Debian Valid-Until: %w", err)
+		}
+		session.ValidUntil = expires
 	}
 	alternateName := "Release"
 	if path.Base(anchor.Path) == "Release" {
@@ -328,7 +336,7 @@ func (h *handler) fetchUpstream(ctx context.Context, method, requestPath, rawQue
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range []string{"Accept", "Accept-Encoding", "Authorization", "Range", "If-None-Match", "If-Modified-Since", "User-Agent"} {
+	for _, name := range []string{"Accept", "Accept-Encoding", "Authorization", "Range", "If-None-Match", "If-Modified-Since", "User-Agent", "Cache-Control", "Pragma"} {
 		for _, value := range headers.Values(name) {
 			request.Header.Add(name, value)
 		}

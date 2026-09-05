@@ -9,10 +9,15 @@ e2e_run_maven() {
 	e2e_reset_fixture
 	e2e_assert_transparent_paths maven /maven /maven cache
   local script='
-    mvn -B -ntp \
+    cat >/tmp/settings.xml <<EOF
+<settings><servers><server><id>e2e</id><configuration><httpHeaders>
+  <property><name>Cache-Control</name><value>max-age=60</value></property>
+</httpHeaders></configuration></server></servers></settings>
+EOF
+    mvn -s /tmp/settings.xml -B -ntp \
       -DremoteRepositories=e2e::default::"$1/maven" \
       org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
-      -Dartifact="com.example:e2e-maven:$2" -Dtransitive=false >/dev/null
+      -Dartifact="com.example:e2e-maven:$2" -Dtransitive=false >/tmp/maven.log 2>&1 || { cat /tmp/maven.log; exit 1; }
     test -f "/root/.m2/repository/com/example/e2e-maven/$2/e2e-maven-$2.jar"
   '
   e2e_client maven cold "$E2E_MAVEN_CLIENT_IMAGE" "$script" "$E2E_PROXY_URL" 1.0.0
@@ -24,7 +29,9 @@ e2e_run_maven() {
   e2e_set_fixture_state updated
   e2e_wait_contains "$E2E_PROXY_URL/maven/com/example/e2e-maven/maven-metadata.xml" '<latest>2.0.0</latest>'
   e2e_client maven update "$E2E_MAVEN_CLIENT_IMAGE" "$script" "$E2E_PROXY_URL" 2.0.0
+  e2e_wait_cache_hit "$E2E_PROXY_URL/maven/com/example/e2e-maven/maven-metadata.xml"
   e2e_offline_restart
   e2e_client maven offline "$E2E_MAVEN_CLIENT_IMAGE" "$script" "$E2E_PROXY_URL" 2.0.0
+  e2e_assert_offline_validation maven "$E2E_PROXY_URL/maven/com/example/e2e-maven/maven-metadata.xml"
   e2e_restore_online
 }

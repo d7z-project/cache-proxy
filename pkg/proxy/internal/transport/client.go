@@ -32,6 +32,7 @@ type Client struct {
 	idleBodyTimeout     time.Duration
 	spoolMu             sync.Mutex
 	spooler             *storeio.Spooler
+	refreshInterval     time.Duration
 }
 
 func (c *Client) EnsureSpooler(workDir string) *storeio.Spooler {
@@ -73,7 +74,15 @@ func NewPlanClient(plan *proxyruntime.InstancePlan, mode string) (*Client, error
 		return nil, err
 	}
 	client.spooler = storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget())
+	client.refreshInterval = plan.RefreshInterval(0)
 	return client, nil
+}
+
+func (c *Client) RefreshInterval(fallback time.Duration) time.Duration {
+	if c.refreshInterval > 0 {
+		return c.refreshInterval
+	}
+	return fallback
 }
 
 func ConfigureHTTPClient(client *UpstreamHTTPClient, instance string, cfg *config.TransportConfig) {
@@ -147,6 +156,7 @@ func (c *Client) send(ctx context.Context, request *http.Request, class Admissio
 		return nil, fmt.Errorf("upstream request: %w", err)
 	}
 	responseURL := request.URL
+	storeio.RecordResponseTiming(response, started, time.Now())
 	if response.Request != nil && response.Request.URL != nil {
 		responseURL = response.Request.URL
 	}

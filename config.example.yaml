@@ -1,0 +1,256 @@
+# cache-proxy example configuration. Only Debian and npm are enabled here.
+# Validate: ./cache-proxy -config config.example.yaml -validate
+# Run:      ./cache-proxy -config config.example.yaml
+#
+# Comments describe purposes and application defaults when settings are omitted.
+# Example values may differ from defaults. Required settings have no default.
+# Unknown YAML fields are rejected. Durations use 500ms / 15m / 24h;
+# sizes use binary units such as MiB / GiB. All upstream access is read-only.
+
+server:
+  # Main HTTP listener. Default: 127.0.0.1:18080 (local access only).
+  # Use 0.0.0.0:18080 for container/public access and secure the ingress with
+  # access controls, TLS and firewall rules as appropriate.
+  bind: 127.0.0.1:18080
+  # Persistent storage root. Default: /tmp/cache-proxy.
+  # Relative paths use the process working directory; mount a volume in containers.
+  # Instance data is isolated under instances/<name>/<mode>/.
+  backend: ./data
+  # External base URL for dashboard client commands. Default: inferred from requests.
+  # Set this to the public address when using a reverse proxy.
+  # public_url: https://mirrors.example.com
+  status:
+    disk_sample_interval: 15m # Disk usage sampling interval. Default: 15m.
+    disk_history_window: 24h # Disk usage history retention window. Default: 24h.
+    event_limit: 500 # Maximum retained maintenance events. Default: 500.
+
+metrics:
+  path: /metrics # Prometheus endpoint path. Default: /metrics.
+  # Metrics Bearer token. Default: empty (no token required).
+  # A nonempty value requires Authorization: Bearer <token> on metrics only.
+  token: ""
+
+storage:
+  # Inactive instance data policy. Default: report.
+  # report lists orphaned data; auto enables its automatic cleanup.
+  orphan_policy: report
+  gc:
+    # Unreferenced blob retention. Default: 24h.
+    # This is neither the metadata refresh interval nor a total disk quota.
+    blob: 24h
+  cleanup:
+    dry_run: false # Report cleanup candidates without deleting them. Default: false.
+    batch_size: 500 # Objects inspected per cleanup pass. Default: 500.
+  download:
+    # Conservative example limits, not a guarantee of staying within upstream quotas.
+    max_active: 64 # Process-wide active upstream request limit. Default: 256.
+    max_active_per_host: 4 # Per-host concurrency across instances. Default: 16.
+    min_interval: 200ms # Minimum time between request starts per host. Default: 5ms.
+    max_cache_object_size: 2GiB # Maximum cached object size. Default: 2GiB.
+    # Process-wide temporary download budget, not a total backend quota. Default: 8GiB.
+    max_active_spool_size: 8GiB
+    # Per-host overrides. Default: empty; hosts use the shared settings above.
+    # Keys are hostnames with an optional port, without a scheme or path.
+    # Omitted max_active/min_interval inherit max_active_per_host/min_interval.
+    # Redirect and authentication requests use their actual host's limits.
+    # Real upstream 429 responses also establish cooldowns using Retry-After.
+    hosts:
+      registry.npmjs.org:
+        max_active: 4
+        min_interval: 200ms
+      registry-1.docker.io:
+        max_active: 2
+        min_interval: 1s
+      auth.docker.io:
+        max_active: 2
+        min_interval: 1s
+
+# Instances. Default: empty list.
+# Shared instance fields:
+#   name: required unique identifier using letters, digits, underscores or hyphens.
+#   enabled: starts the instance when true; default: false.
+#   mode: required protocol implementation; no default.
+#   upstream: required single HTTP(S) upstream base URL; no default.
+#   path: mount on server.bind; no default. Specify exactly one of path or bind.
+#   bind: dedicated listener; no default. Required instead of path for OCI.
+#   display_url: external OCI client address; default: derived from the listener.
+#   transport: optional instance HTTP settings; defaults illustrated below.
+#   options: optional mode-specific settings; defaults documented per mode below.
+#
+# refresh.interval controls mutable freshness and repository polling; minimum: 1s.
+# Repository roots are checked serially at stable 80-100% interval offsets;
+# other mutable objects are revalidated on demand. Shorter upstream cache policy
+# takes precedence. Immutable objects, protocol expiry and signed URL expiry retain
+# their own policies. Shorter intervals trade more upstream traffic for faster updates.
+# Git uses options.sync_interval instead. Each example below notes its mode's defaults.
+instances:
+  # Debian standard, nested and flat repositories are detected automatically.
+  # No architecture or repository-layout setting is needed.
+  - name: debian
+    enabled: true
+    mode: deb
+    path: /debian
+    upstream: https://deb.debian.org/debian
+    refresh:
+      interval: 30m # Repository metadata polling. Default: 15m.
+    # Shared HTTP transport settings. Omit this block to use the defaults below.
+    # Git uses transport.proxy and options.operation_timeout for its own transport.
+    transport:
+      # Outbound proxy. Default: HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment behavior.
+      # Supported schemes: http, https, socks5, socks5h.
+      # proxy: http://127.0.0.1:7890
+      # Upstream User-Agent override. Default: cache-proxy; browser requests may
+      # retain their inbound User-Agent when no explicit override is configured.
+      # ua: cache-proxy
+      dial_timeout: 10s # Connection establishment timeout. Default: 3s.
+      header_timeout: 30s # Response header timeout. Default: 30s.
+      idle_body_timeout: 30s # Timeout for a blocked upstream body read. Default: 5m.
+      max_request_duration: 30m # Total HTTP request timeout. Default: 30m.
+      max_idle_conns: 64 # Maximum idle connections per transport. Default: 100.
+
+  # Separate instance for security updates, with a shorter example polling interval.
+  - name: debian-security
+    enabled: false
+    mode: deb
+    path: /debian-security
+    upstream: https://security.debian.org/debian-security
+    refresh:
+      interval: 5m # Repository metadata polling. Default: 15m.
+
+  - name: alpine
+    enabled: false
+    mode: apk
+    path: /alpine
+    upstream: https://dl-cdn.alpinelinux.org/alpine
+    refresh:
+      interval: 1h # Repository metadata polling. Default: 15m.
+
+  - name: archlinux
+    enabled: false
+    mode: pacman
+    path: /archlinux
+    upstream: https://mirrors.kernel.org/archlinux
+    refresh:
+      interval: 15m # Repository metadata polling. Default: 15m.
+
+  - name: rocky
+    enabled: false
+    mode: rpm
+    path: /rocky
+    upstream: https://dl.rockylinux.org/pub/rocky
+    refresh:
+      interval: 1h # Repository metadata polling. Default: 15m.
+
+  - name: npm
+    enabled: true
+    mode: npm
+    path: /npm
+    upstream: https://registry.npmjs.org
+    refresh:
+      interval: 2m # Mutable package metadata freshness. Default: 1m.
+
+  - name: pypi
+    enabled: false
+    mode: pypi
+    path: /pypi
+    upstream: https://pypi.org
+    refresh:
+      interval: 5m # Mutable project index freshness. Default: 1m.
+
+  - name: cargo
+    enabled: false
+    mode: cargo
+    path: /cargo
+    upstream: https://index.crates.io
+    refresh:
+      interval: 5m # Mutable registry metadata freshness. Default: 1m.
+
+  - name: go
+    enabled: false
+    mode: go
+    path: /go
+    upstream: https://proxy.golang.org
+    refresh:
+      interval: 5m # Mutable module metadata freshness. Default: 1m.
+    options:
+      sumdb:
+        enabled: true # Enable checksum database proxying. Default: true.
+        name: sum.golang.org # Checksum database name. Default: sum.golang.org.
+        url: https://sum.golang.org # Database upstream. Default: https://sum.golang.org.
+      # Private module patterns rejected without forwarding upstream. Default: [].
+      goprivate: []
+      # Honor Disable-Module-Fetch requests by serving cached modules only. Default: false.
+      disable_module_fetch_header: false
+
+  - name: maven
+    enabled: false
+    mode: maven
+    path: /maven
+    upstream: https://repo.maven.apache.org/maven2
+    refresh:
+      # Mutable metadata and SNAPSHOT freshness. Defaults: metadata 1m, SNAPSHOT 5m.
+      interval: 15m
+
+  - name: flathub
+    enabled: false
+    mode: flatpak
+    path: /flathub
+    upstream: https://dl.flathub.org/repo
+    refresh:
+      # Summary polling and mutable ref freshness. Defaults: summaries 15m, refs 1m.
+      interval: 15m
+
+  - name: dockerhub
+    enabled: false
+    mode: oci
+    bind: 127.0.0.1:15000
+    # Public client address; use the real HTTPS address behind a reverse proxy.
+    display_url: http://127.0.0.1:15000
+    upstream: https://registry-1.docker.io
+    refresh:
+      interval: 5m # Mutable tag freshness. Default: 2m.
+    options:
+      # Upstream credentials. Default: none (anonymous access).
+      # Anonymous Bearer challenges are still handled by the protocol.
+      # basic requires username/password; bearer requires token. Credential fields
+      # support environment expansion, e.g. password: "${REGISTRY_PASSWORD}".
+      auth:
+        type: none
+
+  - name: git
+    enabled: false
+    mode: git
+    path: /git/cache-proxy.git
+    # Each instance mirrors one repository, not an entire Git hosting service.
+    upstream: https://github.com/d7z-project/cache-proxy.git
+    options:
+      sync_interval: 15m # Mirror synchronization interval. Default: 5m.
+      operation_timeout: 5m # Timeout for an individual Git operation. Default: 2m.
+      # Upstream credentials. Default: no authentication.
+      # basic requires username/password; token uses password to carry the token.
+      # Credential fields support environment variable expansion.
+      # auth:
+      #   type: basic
+      #   username: "${GIT_USERNAME}"
+      #   password: "${GIT_PASSWORD}"
+
+  - name: files
+    enabled: false
+    mode: file
+    path: /files
+    # Placeholder for a generic file server; replace before enabling this instance.
+    upstream: https://downloads.example.com
+    refresh:
+      # HTTP cache freshness ceiling/fallback. Default: no override; caching requires
+      # an explicit upstream freshness lifetime when this interval is omitted.
+      interval: 30m
+    options:
+      pass_headers: [] # Additional request headers allowed upstream. Default: [].
+      # Default: no rules (passthrough). Last matching rule wins.
+      # Match paths are relative to the instance root, without a leading slash.
+      # http_cache follows HTTP caching policy; passthrough forwards directly;
+      # immutable caches paths whose content the upstream guarantees will not change.
+      # Each rule requires both match and policy; neither field has a default.
+      rules:
+        - match: "**"
+          policy: http_cache

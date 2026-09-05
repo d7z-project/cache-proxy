@@ -37,6 +37,97 @@ func TestResolveRequestClassifiesManifest(t *testing.T) {
 	require.Equal(t, "latest", resolved.ref)
 }
 
+func TestOCIStrictFollowerCancellationKeepsLeader(t *testing.T) {
+	var calls atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := "old"
+		if calls.Add(1) > 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			body = "new"
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Docker-Content-Digest", sha256Digest(body))
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(upstream.Close)
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	h := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
+	url := "/v2/demo/manifests/latest"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, url, nil))
+	require.Equal(t, "old", w.Body.String())
+	leader := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, url, nil))
+		leader <- w
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("validation did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, url, nil).WithContext(ctx)
+	req.Header.Set("Cache-Control", "no-cache")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.NotEqual(t, http.StatusOK, w.Code)
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case w := <-leader:
+		require.Equal(t, "new", w.Body.String())
+		require.Equal(t, http.StatusOK, w.Code)
+	case <-time.After(time.Second):
+		t.Fatal("leader did not complete")
+	}
+	require.Equal(t, int32(2), calls.Load())
+}
+
+func TestOCIContendedReferenceBypassesWithoutWaitingForLock(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"schemaVersion":2}`)
+	}))
+	t.Cleanup(upstream.Close)
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	h := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+	t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
+	lock := h.refLocks.Get(h.refStatePath("demo", "latest"))
+	lock.Lock()
+	defer lock.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/v2/demo/manifests/latest", nil).WithContext(ctx)
+		req.Header.Set("Cache-Control", "no-cache")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		done <- w
+	}()
+	select {
+	case w := <-done:
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "BYPASS", w.Header().Get("X-Cache"))
+	case <-ctx.Done():
+		t.Fatal("request waited for an unrelated reference lock")
+	}
+}
+
 func TestValidateConfigExpandsAuthEnvironment(t *testing.T) {
 	t.Setenv("OCI_TEST_USERNAME", "registry-user")
 	t.Setenv("OCI_TEST_PASSWORD", "registry-password")

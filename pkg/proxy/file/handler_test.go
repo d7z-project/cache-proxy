@@ -110,6 +110,28 @@ func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 	require.Equal(t, int32(2), requests.Load())
 }
 
+func TestFileNoStoreRefreshDropsPreviousReference(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, "new")
+	}))
+	t.Cleanup(upstream.Close)
+	h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	req := httptest.NewRequest(http.MethodGet, "/artifact", nil)
+	key := cacheKey(h.origin, "artifact", req)
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
+	req.Header.Set("Cache-Control", "no-cache")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "new", w.Body.String())
+	object, err := storeio.OpenResponse(context.Background(), h.store, objectTenant, key)
+	if object != nil {
+		_ = object.Reader.Close()
+	}
+	require.Error(t, err)
+}
+
 func TestFileReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 	var requests atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

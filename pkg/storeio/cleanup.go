@@ -2,10 +2,8 @@ package storeio
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io/fs"
-	"strings"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
@@ -81,7 +79,7 @@ func (c *responseCleaner) cleanBatch(ctx context.Context) (bool, error) {
 			}
 			for _, entry := range objects {
 				objectPath := secondPath + "/" + entry.Name()
-				if entry.IsDir() || c.cursor != "" && strings.Compare(objectPath, c.cursor) <= 0 {
+				if entry.IsDir() || c.cursor != "" && objectPath <= c.cursor {
 					continue
 				}
 				if err := ctx.Err(); err != nil {
@@ -93,9 +91,8 @@ func (c *responseCleaner) cleanBatch(ctx context.Context) (bool, error) {
 					return false, statErr
 				}
 				if statErr == nil {
-					var metadata storedResponseMetadata
-					decodeErr := json.Unmarshal([]byte(info.Options["metadata"]), &metadata)
-					corrupt := decodeErr != nil || metadata.DeleteAt.IsZero() || metadata.LogicalKey == "" || responsePath(metadata.LogicalKey) != objectPath
+					metadata, decodeErr := decodeResponseMetadata(info.Options["metadata"])
+					corrupt := decodeErr != nil || responsePath(metadata.LogicalKey) != objectPath
 					if (corrupt || !now.Before(metadata.DeleteAt)) && !c.opts.DryRun {
 						if deleteErr := c.store.DeleteObject(ctx, c.tenant, objectPath); deleteErr != nil && !errors.Is(deleteErr, fs.ErrNotExist) {
 							return false, deleteErr

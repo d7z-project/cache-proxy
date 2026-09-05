@@ -17,6 +17,9 @@ e2e_run_deb_repository() {
     fi
   ' "$E2E_FIXTURE_URL" "$unavailable_path"
   local script='
+    if [ "${4:-}" = offline ]; then
+      printf "Acquire::http::No-Cache \"false\";\nAcquire::https::No-Cache \"false\";\nAcquire::http::Max-Age \"60\";\nAcquire::https::Max-Age \"60\";\n" >/etc/apt/apt.conf.d/99-e2e-cache
+    fi
     rm -f /etc/apt/sources.list.d/*
     printf "%s\n" "$2" >/etc/apt/sources.list
     apt-get -o Acquire::Check-Date=false -o Acquire::Languages=none update >/dev/null
@@ -51,8 +54,10 @@ e2e_run_deb_repository() {
   e2e_wait_header_changed "$E2E_PROXY_URL$anchor" ETag "$previous_etag"
   e2e_client "deb-$layout" update "$E2E_DEBIAN_IMAGE" "$script" "$E2E_PROXY_URL" "$source" cache-proxy-e2e-updated
   e2e_assert_bypass_status "deb-$layout-updated-unavailable" "$E2E_PROXY_URL$unavailable_path" 404
+  e2e_wait_cache_hit "$E2E_PROXY_URL$anchor"
   e2e_offline_restart
-  e2e_client "deb-$layout" offline "$E2E_DEBIAN_IMAGE" "$script" "$E2E_PROXY_URL" "$source" cache-proxy-e2e-updated
+  e2e_client "deb-$layout" offline "$E2E_DEBIAN_IMAGE" "$script" "$E2E_PROXY_URL" "$source" cache-proxy-e2e-updated offline
+  e2e_assert_offline_validation deb "$E2E_PROXY_URL$anchor"
   e2e_restore_online
 }
 

@@ -97,7 +97,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 	externalBase := proxyruntime.ExternalBaseURL(request)
 	key := pypiRefKey(h.origin.String(), cleaned, request.URL.RawQuery, request.Header.Get("Accept"), scope, externalBase)
 	object, cachedErr := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key)
-	if cachedErr == nil && time.Since(object.Fetched) < simpleFreshness && !transport.RequestForcesRevalidation(request) {
+	if cachedErr == nil && time.Since(object.CreatedAt) < fileAuthorizationTTL/2 && proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, min(h.client.RefreshInterval(simpleFreshness), fileAuthorizationTTL/2)) && !proxyruntime.RequestForcesRevalidation(request) {
 		servePyPIObject(w, request, object, "HIT")
 		return
 	}
@@ -105,17 +105,18 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 		_ = object.Reader.Close()
 	}
 	if request.Method == http.MethodHead {
-		if stale, err := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); err == nil {
-			servePyPIObject(w, request, stale, "STALE")
-		} else {
-			h.forwardUpstream(w, request, cleaned)
-		}
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	flight, leader := h.flights.Begin("ref:" + key)
 	if !leader {
 		_ = h.flights.Wait(request.Context(), flight)
 		if joined, err := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); err == nil {
+			if object != nil && !joined.ValidatedAt.After(object.ValidatedAt) {
+				_ = joined.Reader.Close()
+				h.forwardUpstream(w, request, cleaned)
+				return
+			}
 			servePyPIObject(w, request, joined, "COALESCED")
 			return
 		}
@@ -124,14 +125,14 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 	}
 	defer h.flights.Finish("ref:"+key, flight, nil)
 	if current, err := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); err == nil {
-		if object == nil || current.Fetched.After(object.Fetched) {
+		if object == nil || current.ValidatedAt.After(object.ValidatedAt) {
 			servePyPIObject(w, request, current, "HIT")
 			return
 		}
 		_ = current.Reader.Close()
 	}
 	upstreamHeader := request.Header.Clone()
-	if object != nil && object.Origin == h.origin.String() {
+	if object != nil && object.Origin == h.origin.String() && time.Since(object.CreatedAt) < fileAuthorizationTTL/2 {
 		if value := object.Header.Get("X-Source-ETag"); value != "" {
 			upstreamHeader.Set("If-None-Match", value)
 		}
@@ -144,8 +145,13 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 		if response != nil {
 			_ = response.Body.Close()
 		}
-		if object != nil {
+		if object != nil && proxyruntime.StaleAllowed(request, object.Header) {
 			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); openErr == nil {
+				if !proxyruntime.StaleAllowed(request, stale.Header) || time.Since(stale.CreatedAt) >= fileAuthorizationTTL/2 {
+					_ = stale.Reader.Close()
+					transport.WriteError(w, http.StatusBadGateway)
+					return
+				}
 				servePyPIObject(w, request, stale, "STALE")
 				return
 			}
@@ -155,8 +161,8 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 	}
 	if response.StatusCode == http.StatusNotModified && object != nil {
 		_ = response.Body.Close()
-		_ = storeio.TouchResponse(h.lifecycle.Context(), h.store, pypiTenant, key, nil)
-		if refreshed, openErr := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); openErr == nil {
+		header := transport.SourceRevalidationHeader(response.Header)
+		if refreshed, _ := storeio.RevalidateResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, pypiTenant, key, header); refreshed != nil {
 			servePyPIObject(w, request, refreshed, "REVALIDATED")
 			return
 		}
@@ -168,6 +174,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 		return
 	}
 	if !pypiCacheable(request, response) {
+		_ = storeio.DeleteResponse(h.lifecycle.Context(), h.store, pypiTenant, key)
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
@@ -221,7 +228,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 	header.Set("Content-Length", fmt.Sprintf("%d", size))
 	header.Set("ETag", `"sha256-`+hex.EncodeToString(digest.Sum(nil))+`"`)
 	_, _ = output.Seek(0, io.SeekStart)
-	if err := storeio.PutResponse(h.lifecycle.Context(), h.store, pypiTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest.Sum(nil)), output); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, pypiTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest.Sum(nil)), output); err != nil {
 		_, _ = output.Seek(0, io.SeekStart)
 		h.writeSpool(w, request, header, output, "BYPASS")
 		return
@@ -360,7 +367,7 @@ func (h *handler) serveFile(w http.ResponseWriter, request *http.Request, route 
 		key = "files/" + authorization.Algorithm + "/" + strings.ToLower(authorization.Digest)
 	}
 	if object, err := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); err == nil {
-		if authorization.Digest != "" || time.Since(object.Fetched) < time.Hour {
+		if authorization.Digest != "" || time.Since(object.ValidatedAt) < time.Hour {
 			servePyPIObject(w, request, object, "HIT")
 			return
 		}
@@ -386,7 +393,7 @@ func (h *handler) serveFile(w http.ResponseWriter, request *http.Request, route 
 	flight, leader := h.flights.Begin(key)
 	if leader {
 		if object, err := storeio.OpenResponse(request.Context(), h.store, pypiTenant, key); err == nil {
-			if authorization.Digest != "" || time.Since(object.Fetched) < time.Hour {
+			if authorization.Digest != "" || time.Since(object.ValidatedAt) < time.Hour {
 				h.flights.Finish(key, flight, nil)
 				servePyPIObject(w, request, object, "HIT")
 				return
@@ -424,7 +431,7 @@ func (h *handler) serveFile(w http.ResponseWriter, request *http.Request, route 
 			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error { return verifyPyPIFile(reader, authorization) },
 			StoreFn: func(ctx context.Context, body io.Reader) error {
-				return storeio.PutResponse(ctx, h.store, pypiTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, authorization.Digest, body)
+				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, pypiTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, authorization.Digest, body)
 			}, Done: func(err error) { h.flights.Finish(key, flight, err) },
 		})
 		if err != nil {
@@ -582,9 +589,9 @@ func pypiCacheable(request *http.Request, response *http.Response) bool {
 
 func servePyPIObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) {
 	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.Header)
+	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
 	w.Header().Del("X-Source-ETag")
 	w.Header().Del("X-Source-Last-Modified")
 	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, "", object.Fetched, object.Reader)
+	http.ServeContent(w, request, "", object.ValidatedAt, object.Reader)
 }

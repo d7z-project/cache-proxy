@@ -118,28 +118,30 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	externalBase := proxyruntime.ExternalBaseURL(request)
 	key := "packuments/" + variant + "/" + hashKey(h.origin.String()+"\x00"+packageName+"\x00"+request.Header.Get("Accept")+"\x00"+credentialScope(request)+"\x00"+externalBase)
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); err == nil {
-		if time.Since(cached.Fetched) < packumentFreshness && !transport.RequestForcesRevalidation(request) {
+		if time.Since(cached.CreatedAt) < tarballAuthorizationTTL/2 && proxyruntime.ResponseFresh(cached.Header, cached.ValidatedAt, min(h.client.RefreshInterval(packumentFreshness), tarballAuthorizationTTL/2)) && !proxyruntime.RequestForcesRevalidation(request) {
 			return serveCached(w, request, cached, "HIT"), "HIT"
 		}
 		_ = cached.Reader.Close()
-		if request.Method == http.MethodHead {
-			cached, openErr := storeio.OpenResponse(request.Context(), h.store, npmTenant, key)
-			if openErr == nil {
-				return serveCached(w, request, cached, "STALE"), "STALE"
-			}
-		}
 		leader, revalidated := false, false
 		var direct *http.Response
 		var fallback *transformedPackument
+		var validated *storeio.ResponseObject
 		err = h.flights.Do(request.Context(), key, func() error {
 			leader = true
 			response, fetchErr := h.fetchPackument(request, packageName, cached)
 			if fetchErr != nil {
 				return fetchErr
 			}
-			if response == nil {
+			if response.StatusCode == http.StatusNotModified {
+				_ = response.Body.Close()
 				revalidated = true
-				return storeio.TouchResponse(h.lifecycle.Context(), h.store, npmTenant, key, nil)
+				header := transport.SourceRevalidationHeader(response.Header)
+				var updateErr error
+				validated, updateErr = storeio.RevalidateResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, npmTenant, key, header)
+				if validated != nil {
+					return nil
+				}
+				return updateErr
 			}
 			if response.StatusCode >= http.StatusInternalServerError {
 				defer func() { _ = response.Body.Close() }()
@@ -159,6 +161,10 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 			return fetchErr
 		})
 		if err != nil {
+			if !proxyruntime.StaleAllowed(request, cached.Header) || time.Since(cached.CreatedAt) >= tarballAuthorizationTTL/2 {
+				transport.WriteError(w, http.StatusBadGateway)
+				return http.StatusBadGateway, "ERROR"
+			}
 			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); openErr == nil {
 				return serveCached(w, request, stale, "STALE"), "STALE"
 			}
@@ -169,12 +175,19 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 			defer func() { _ = direct.Body.Close() }()
 			return transport.WriteResponse(w, request, direct, "BYPASS"), "BYPASS"
 		}
+		if leader && validated != nil {
+			return serveCached(w, request, validated, "REVALIDATED"), "REVALIDATED"
+		}
 		if leader && fallback != nil {
 			defer fallback.close()
 			return fallback.serve(w, request, "BYPASS"), "BYPASS"
 		}
 		refreshed, openErr := storeio.OpenResponse(request.Context(), h.store, npmTenant, key)
 		if openErr != nil {
+			return h.forwardUpstream(w, request, cleaned), "BYPASS"
+		}
+		if !leader && !refreshed.ValidatedAt.After(cached.ValidatedAt) {
+			_ = refreshed.Reader.Close()
 			return h.forwardUpstream(w, request, cleaned), "BYPASS"
 		}
 		result := "COALESCED"
@@ -243,8 +256,10 @@ func (h *handler) fetchPackument(request *http.Request, packageName string, cach
 		return nil, err
 	}
 	upstreamRequest.Header.Set("Accept", request.Header.Get("Accept"))
+	upstreamRequest.Header.Set("Cache-Control", request.Header.Get("Cache-Control"))
+	upstreamRequest.Header.Set("Pragma", request.Header.Get("Pragma"))
 	copyCredential(upstreamRequest.Header, request.Header)
-	if cached != nil && cached.Origin == h.origin.String() {
+	if cached != nil && cached.Origin == h.origin.String() && time.Since(cached.CreatedAt) < tarballAuthorizationTTL/2 {
 		if etag := cached.Header.Get("X-Source-ETag"); etag != "" {
 			upstreamRequest.Header.Set("If-None-Match", etag)
 		}
@@ -255,10 +270,6 @@ func (h *handler) fetchPackument(request *http.Request, packageName string, cach
 	response, err := h.client.DoRead(h.lifecycle.Context(), upstreamRequest, transport.AdmissionForeground)
 	if err != nil {
 		return nil, err
-	}
-	if response.StatusCode == http.StatusNotModified && cached != nil {
-		_ = response.Body.Close()
-		return nil, nil
 	}
 	return response, nil
 }
@@ -312,7 +323,7 @@ func (h *handler) transformAndCommit(request *http.Request, packageName, key str
 	if _, err := output.Seek(0, io.SeekStart); err != nil {
 		return originalFallback()
 	}
-	if err := storeio.PutResponse(h.lifecycle.Context(), h.store, npmTenant, key, h.origin.String(), http.StatusOK, headers, "", output); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, npmTenant, key, h.origin.String(), http.StatusOK, headers, "", output); err != nil {
 		if _, seekErr := output.Seek(0, io.SeekStart); seekErr != nil {
 			return nil, errors.Join(err, seekErr)
 		}
@@ -469,7 +480,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 		key = "tarballs/integrity/" + hashKey(authorization.Integrity+"\x00"+credentialScope(request))
 	}
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); err == nil {
-		if authorization.Integrity != "" || authorization.Shasum != "" || time.Since(cached.Fetched) < time.Hour {
+		if authorization.Integrity != "" || authorization.Shasum != "" || time.Since(cached.ValidatedAt) < time.Hour {
 			return serveCached(w, request, cached, "HIT"), "HIT"
 		}
 		_ = cached.Reader.Close()
@@ -498,7 +509,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 	flight, leader := h.flights.Begin(key)
 	if leader {
 		if cached, err := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); err == nil {
-			if authorization.Integrity != "" || authorization.Shasum != "" || time.Since(cached.Fetched) < time.Hour {
+			if authorization.Integrity != "" || authorization.Shasum != "" || time.Since(cached.ValidatedAt) < time.Hour {
 				h.flights.Finish(key, flight, nil)
 				return serveCached(w, request, cached, "HIT"), "HIT"
 			}
@@ -533,7 +544,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error { return verifyTarball(reader, authorization) },
 			StoreFn: func(ctx context.Context, body io.Reader) error {
-				return storeio.PutResponse(ctx, h.store, npmTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, "", body)
+				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, npmTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, "", body)
 			},
 			Done: func(err error) { h.flights.Finish(key, flight, err) },
 		})
@@ -743,10 +754,10 @@ func hashKey(value string) string {
 
 func serveCached(w http.ResponseWriter, request *http.Request, cached *storeio.ResponseObject, result string) int {
 	defer func() { _ = cached.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), cached.Header)
+	transport.CopyEndToEndHeaders(w.Header(), cached.ResponseHeader())
 	w.Header().Del("X-Source-ETag")
 	w.Header().Del("X-Source-Last-Modified")
 	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, "", cached.Fetched, cached.Reader)
+	http.ServeContent(w, request, "", cached.ValidatedAt, cached.Reader)
 	return http.StatusOK
 }

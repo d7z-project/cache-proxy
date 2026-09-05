@@ -1,10 +1,7 @@
 package oci
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -24,16 +21,6 @@ func safePath(value string) bool {
 		}
 	}
 	return true
-}
-
-func hashKey(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
-}
-
-func responseBytes(headers map[string]string) uint64 {
-	value, _ := strconv.ParseUint(headers["Content-Length"], 10, 64)
-	return value
 }
 
 func cacheSupportsRequestUserAgent(client *transport.UpstreamHTTPClient, request *http.Request, options map[string]string) bool {

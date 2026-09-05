@@ -43,10 +43,10 @@ func newHandler(origin *url.URL, workDir string, store *blobfs.Store, client *tr
 		FreshnessForPath: func(requestPath string) time.Duration {
 			base := path.Base(requestPath)
 			if strings.HasPrefix(base, "maven-metadata.xml") {
-				return metadataFreshness
+				return client.RefreshInterval(metadataFreshness)
 			}
 			if strings.Contains(strings.ToUpper(requestPath), "SNAPSHOT") {
-				return snapshotFreshness
+				return client.RefreshInterval(snapshotFreshness)
 			}
 			return releaseFreshness
 		},

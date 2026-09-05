@@ -6,12 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method, upstreamPath, rawQuery, userAgent string, headers map[string]string) (*http.Response, error) {
@@ -53,6 +55,7 @@ func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method
 		}
 		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
 		counted := &countingReadCloser{ReadCloser: h.client.WrapBody(response.Body)}
+		storeio.RecordResponseTiming(response, start, time.Now())
 		status := response.StatusCode
 		response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
 			releaseStats()
@@ -126,7 +129,8 @@ func (h *handler) writeResponse(w http.ResponseWriter, method string, headers ma
 	}
 	w.WriteHeader(http.StatusOK)
 	if method == http.MethodHead || body == nil {
-		return http.StatusOK, responseBytes(headers), nil
+		size, _ := strconv.ParseUint(headers["Content-Length"], 10, 64)
+		return http.StatusOK, size, nil
 	}
 	written, err := io.Copy(w, body)
 	return http.StatusOK, uint64(written), err

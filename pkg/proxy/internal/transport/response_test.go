@@ -27,13 +27,6 @@ func TestResponseCachePolicy(t *testing.T) {
 		require.False(t, ResponseCacheable(response, false), name)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "https://example.test", nil)
-	request.Header.Set("Cache-Control", "max-age=0")
-	require.True(t, RequestForcesRevalidation(request))
-	request.Header.Set("Cache-Control", "public, no-cache")
-	require.True(t, RequestForcesRevalidation(request))
-	request.Header.Set("Cache-Control", "public, max-age=60")
-	require.False(t, RequestForcesRevalidation(request))
 }
 
 func TestEscapePathSegments(t *testing.T) {

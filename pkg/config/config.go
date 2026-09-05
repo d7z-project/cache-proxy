@@ -137,7 +137,12 @@ type Instance struct {
 	DisplayURL string           `yaml:"display_url,omitempty"`
 	Upstream   string           `yaml:"upstream"`
 	Transport  *TransportConfig `yaml:"transport,omitempty"`
+	Refresh    *RefreshConfig   `yaml:"refresh,omitempty"`
 	Options    *OptionsBlock    `yaml:"options,omitempty"`
+}
+
+type RefreshConfig struct {
+	Interval Duration `yaml:"interval"`
 }
 
 type TransportConfig struct {
@@ -219,6 +224,14 @@ func (b *OptionsBlock) DecodeStrict(target any) error {
 }
 
 func (i Instance) SelectMode() (SelectedMode, error) {
+	if i.Refresh != nil {
+		if i.Refresh.Interval.Duration() < time.Second {
+			return SelectedMode{}, errors.New("refresh.interval must be at least 1s")
+		}
+		if strings.TrimSpace(i.Mode) == ModeGit {
+			return SelectedMode{}, errors.New("git uses options.sync_interval for refresh")
+		}
+	}
 	name := strings.TrimSpace(i.Name)
 	if !ValidInstanceName(name) {
 		return SelectedMode{}, fmt.Errorf("invalid instance name %q: must match %s", i.Name, validNameRE.String())

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/blobfs"
 
@@ -210,6 +211,13 @@ func (i *InstancePlan) Path() string                        { return strings.Tri
 func (i *InstancePlan) Bind() string                        { return strings.TrimSpace(i.declaration.Bind) }
 func (i *InstancePlan) DisplayURL() string                  { return strings.TrimSpace(i.declaration.DisplayURL) }
 func (i *InstancePlan) Transport() *config.TransportConfig  { return i.declaration.Transport }
+
+func (i *InstancePlan) RefreshInterval(fallback time.Duration) time.Duration {
+	if i.declaration.Refresh != nil {
+		return i.declaration.Refresh.Interval.Duration()
+	}
+	return fallback
+}
 
 func (i *InstancePlan) Upstream() string { return strings.TrimSpace(i.declaration.Upstream) }
 

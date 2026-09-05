@@ -59,15 +59,16 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 	}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance:  instance,
-		Mode:      config.ModeAPK,
-		Tenant:    "apk-metadata",
-		Upstream:  origin.String(),
-		StateDir:  stateDir,
-		WorkDir:   workDir,
-		Spooler:   spooler,
-		Store:     store,
-		Scheduler: taskScheduler,
+		RefreshInterval: client.RefreshInterval(15 * time.Minute),
+		Instance:        instance,
+		Mode:            config.ModeAPK,
+		Tenant:          "apk-metadata",
+		Upstream:        origin.String(),
+		StateDir:        stateDir,
+		WorkDir:         workDir,
+		Spooler:         spooler,
+		Store:           store,
+		Scheduler:       taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
@@ -155,7 +156,7 @@ func (h *handler) serveIndexAnchor(w http.ResponseWriter, request *http.Request,
 		transport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
+	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
 		transport.WriteResponse(w, request, response, "BYPASS")
@@ -181,7 +182,7 @@ func (h *handler) serveIndexAnchor(w http.ResponseWriter, request *http.Request,
 	defer func() { _ = spool.Close() }()
 	_, _ = spool.File.Seek(0, io.SeekStart)
 	root := path.Dir(cleaned)
-	stageErr := h.metadata.StageAnchorID(h.lifecycle.Context(), rootID, root, cleaned, response.Header, spool.File)
+	stageErr := h.metadata.StageAnchorID(storeio.WithResponseTiming(h.lifecycle.Context(), response), rootID, root, cleaned, response.Header, spool.File)
 	if stageErr != nil {
 		slog.Warn("apk metadata staging failed", "path", cleaned, "err", stageErr)
 	}

@@ -55,7 +55,7 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return nil
 	}
 	handler := newHandler(plan.Name(), Block{
-		Upstream: upstream, Transport: plan.Transport(), MetadataTTL: metadataTTL, WorkDir: filepath.Join(plan.StoreRoot(), "work"),
+		Upstream: upstream, Transport: plan.Transport(), MetadataTTL: plan.RefreshInterval(metadataTTL), WorkDir: filepath.Join(plan.StoreRoot(), "work"),
 		Spooler: storeio.NewSpooler(filepath.Join(plan.StoreRoot(), "work"), plan.MaxCacheObjectSize(), plan.SpoolBudget()), Options: options,
 	}, blobRetention, plan.Store(), plan.Stats(), plan.UpstreamGate())
 	if plan.DisplayURL() != "" {

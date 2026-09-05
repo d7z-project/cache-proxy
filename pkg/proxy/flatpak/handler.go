@@ -46,15 +46,16 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 	h := &handler{origin: origin, spooler: spooler, store: store, client: client, lifecycle: storeio.NewLifecycle()}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance:  instance,
-		Mode:      config.ModeFlatpak,
-		Tenant:    "flatpak-metadata",
-		Upstream:  origin.String(),
-		StateDir:  stateDir,
-		WorkDir:   workDir,
-		Spooler:   spooler,
-		Store:     store,
-		Scheduler: taskScheduler,
+		RefreshInterval: client.RefreshInterval(15 * time.Minute),
+		Instance:        instance,
+		Mode:            config.ModeFlatpak,
+		Tenant:          "flatpak-metadata",
+		Upstream:        origin.String(),
+		StateDir:        stateDir,
+		WorkDir:         workDir,
+		Spooler:         spooler,
+		Store:           store,
+		Scheduler:       taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, header, transport.AdmissionRefresh)
 		},
@@ -150,7 +151,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	objectPath := isObjectPath(cleaned)
 	deltaPath := isDeltaPath(cleaned)
 	if strings.HasPrefix(cleaned, "refs/") || deltaPath || objectPath {
-		freshness := mutableFreshness
+		freshness := h.client.RefreshInterval(mutableFreshness)
 		if deltaPath || objectPath {
 			freshness = deltaFreshness
 		}
@@ -190,7 +191,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
+	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
 		transport.WriteResponse(w, request, response, "BYPASS")
@@ -212,7 +213,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 	}
 	defer func() { _ = spool.Close() }()
 	_, _ = spool.File.Seek(0, io.SeekStart)
-	stageErr := h.metadata.StageAnchorID(h.lifecycle.Context(), rootID, ".", cleaned, response.Header, spool.File)
+	stageErr := h.metadata.StageAnchorID(storeio.WithResponseTiming(h.lifecycle.Context(), response), rootID, ".", cleaned, response.Header, spool.File)
 	if stageErr != nil {
 		slog.Warn("flatpak metadata staging failed", "path", cleaned, "err", stageErr)
 	}
@@ -264,7 +265,7 @@ func (h *handler) serveVerifiedObject(w http.ResponseWriter, request *http.Reque
 			Body: response.Body, ObjectPath: key, Spooler: h.spooler, MaxBytes: maxBytes, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: verify,
 			StoreFn: func(ctx context.Context, body io.Reader) error {
-				return storeio.PutResponse(ctx, h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, digest, body)
+				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, digest, body)
 			}, Done: func(err error) { h.flights.Finish(key, flight, err) },
 		})
 		if err != nil {
@@ -316,16 +317,15 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		_ = object.Reader.Close()
 		object = nil
 	}
-	if object != nil && time.Since(object.Fetched) < freshness && !transport.RequestForcesRevalidation(request) {
+	if object != nil && proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, freshness) && !proxyruntime.RequestForcesRevalidation(request) {
 		serveFlatpakObject(w, request, object, "HIT")
 		return
 	}
 	if request.Header.Get("Range") != "" {
 		if object != nil {
-			serveFlatpakObject(w, request, object, "STALE")
-		} else {
-			h.forwardUpstream(w, request, cleaned)
+			_ = object.Reader.Close()
 		}
+		h.forwardUpstream(w, request, cleaned)
 		return
 	}
 	if request.Method == http.MethodHead {
@@ -343,6 +343,11 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 			_ = object.Reader.Close()
 		}
 		if updated, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); err == nil {
+			if object != nil && !updated.ValidatedAt.After(object.ValidatedAt) {
+				_ = updated.Reader.Close()
+				h.forwardUpstream(w, request, cleaned)
+				return
+			}
 			serveFlatpakObject(w, request, updated, "COALESCED")
 			return
 		}
@@ -350,7 +355,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		return
 	}
 	if current, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); err == nil {
-		if object == nil || current.Fetched.After(object.Fetched) {
+		if object == nil || current.ValidatedAt.After(object.ValidatedAt) {
 			if object != nil {
 				_ = object.Reader.Close()
 			}
@@ -372,6 +377,11 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		}
 		if object != nil {
 			h.flights.Finish(flightKey, flight, fetchErr)
+			if !proxyruntime.StaleAllowed(request, object.Header) {
+				_ = object.Reader.Close()
+				transport.WriteError(w, http.StatusBadGateway)
+				return
+			}
 			serveFlatpakObject(w, request, object, "STALE")
 			return
 		}
@@ -381,7 +391,10 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 	}
 	if response.StatusCode == http.StatusNotModified && object != nil {
 		_ = response.Body.Close()
-		_ = storeio.TouchResponse(h.lifecycle.Context(), h.store, flatpakTenant, key, response.Header)
+		timingCtx := storeio.WithResponseTiming(h.lifecycle.Context(), response)
+		_ = storeio.TouchResponse(timingCtx, h.store, flatpakTenant, key, response.Header)
+		object.ValidatedAt, response.Header = storeio.ResponseTimingHeader(timingCtx, response.Header)
+		object.Header = proxyruntime.MergeRevalidationHeader(object.Header, response.Header)
 		h.flights.Finish(flightKey, flight, nil)
 		serveFlatpakObject(w, request, object, "REVALIDATED")
 		return
@@ -390,6 +403,9 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		_ = object.Reader.Close()
 	}
 	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) {
+		if response.StatusCode == http.StatusOK {
+			_ = storeio.DeleteResponse(h.lifecycle.Context(), h.store, flatpakTenant, key)
+		}
 		h.flights.Finish(flightKey, flight, nil)
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
@@ -399,7 +415,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 	reader, streamErr := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
 		Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(ctx, h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
 		},
 		Done: func(err error) { h.flights.Finish(flightKey, flight, err) },
 	})
@@ -418,14 +434,35 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, cleaned string) {
 	externalBase := strings.TrimRight(proxyruntime.ExternalBaseURL(request), "/")
 	key := flatpakRefKey(h.origin.String(), cleaned, externalBase)
-	if object, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); err == nil && time.Since(object.Fetched) < mutableFreshness {
-		serveFlatpakObject(w, request, object, "HIT")
-		return
+	object, _ := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key)
+	if object != nil {
+		if proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, h.client.RefreshInterval(mutableFreshness)) && !proxyruntime.RequestForcesRevalidation(request) {
+			serveFlatpakObject(w, request, object, "HIT")
+			return
+		}
+		_ = object.Reader.Close()
 	}
 	if request.Method == http.MethodHead {
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
+	flight, leader := h.flights.Begin(key)
+	if !leader {
+		if err := h.flights.Wait(request.Context(), flight); err != nil {
+			transport.WriteError(w, http.StatusGatewayTimeout)
+			return
+		}
+		if updated, err := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key); err == nil {
+			if object == nil || updated.ValidatedAt.After(object.ValidatedAt) {
+				serveFlatpakObject(w, request, updated, "COALESCED")
+				return
+			}
+			_ = updated.Reader.Close()
+		}
+		h.forwardUpstream(w, request, cleaned)
+		return
+	}
+	defer h.flights.Finish(key, flight, nil)
 	response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, request.Header)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
@@ -437,6 +474,7 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 		return
 	}
 	if !transport.ResponseCacheable(response, false) {
+		_ = storeio.DeleteResponse(h.lifecycle.Context(), h.store, flatpakTenant, key)
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
@@ -456,7 +494,7 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 	header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	header.Set("ETag", `"sha256-`+hex.EncodeToString(digest[:])+`"`)
 	result := "MISS"
-	if err := storeio.PutResponse(h.lifecycle.Context(), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest[:]), bytes.NewReader(body)); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest[:]), bytes.NewReader(body)); err != nil {
 		result = "BYPASS"
 	}
 	transport.CopyEndToEndHeaders(w.Header(), header)
@@ -505,7 +543,7 @@ func flatpakRefKey(values ...string) string {
 
 func serveFlatpakObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) {
 	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.Header)
+	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
 	w.Header().Set("X-Cache", result)
 	if object.Status != http.StatusOK {
 		w.WriteHeader(object.Status)
@@ -514,5 +552,5 @@ func serveFlatpakObject(w http.ResponseWriter, request *http.Request, object *st
 		}
 		return
 	}
-	http.ServeContent(w, request, path.Base(request.URL.Path), object.Fetched, object.Reader)
+	http.ServeContent(w, request, path.Base(request.URL.Path), object.ValidatedAt, object.Reader)
 }

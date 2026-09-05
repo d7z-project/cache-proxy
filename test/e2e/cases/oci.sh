@@ -33,7 +33,9 @@ e2e_run_oci() {
   ' "http://$E2E_OCI_URL"
   e2e_oci_pull update updated
 
+  e2e_wait_cache_hit "http://$E2E_OCI_URL/v2/e2e/image/manifests/latest"
   e2e_offline_restart
   e2e_oci_pull offline updated
+  e2e_assert_offline_validation oci "http://$E2E_OCI_URL/v2/e2e/image/manifests/latest"
   e2e_restore_online
 }

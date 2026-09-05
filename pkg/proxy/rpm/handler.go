@@ -62,16 +62,17 @@ func newHandler(instance string, origin *url.URL, stateDir, workDir string, blob
 	}
 	var err error
 	h.metadata, err = filerepo.New(filerepo.Config{
-		Instance:       instance,
-		Mode:           config.ModeRPM,
-		Tenant:         "rpm-metadata",
-		Upstream:       origin.String(),
-		StateDir:       stateDir,
-		WorkDir:        workDir,
-		Spooler:        spooler,
-		AnchorMaxBytes: maxRepomdSize,
-		Store:          blobs,
-		Scheduler:      taskScheduler,
+		RefreshInterval: client.RefreshInterval(15 * time.Minute),
+		Instance:        instance,
+		Mode:            config.ModeRPM,
+		Tenant:          "rpm-metadata",
+		Upstream:        origin.String(),
+		StateDir:        stateDir,
+		WorkDir:         workDir,
+		Spooler:         spooler,
+		AnchorMaxBytes:  maxRepomdSize,
+		Store:           blobs,
+		Scheduler:       taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
@@ -140,7 +141,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
+	if response.StatusCode != http.StatusOK || !transport.ResponseCacheable(response, false) || response.Header.Get("Content-Encoding") != "" && !strings.EqualFold(response.Header.Get("Content-Encoding"), "identity") {
 		h.flights.Finish(flightKey, flight, nil)
 		finished = true
 		transport.WriteResponse(w, request, response, "BYPASS")
@@ -165,7 +166,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	stageErr := parseErr
 	if parseErr == nil {
 		_, _ = spool.File.Seek(0, io.SeekStart)
-		stageErr = h.metadata.StageAnchor(h.lifecycle.Context(), root, cleaned, response.Header, spool.File)
+		stageErr = h.metadata.StageAnchor(storeio.WithResponseTiming(h.lifecycle.Context(), response), root, cleaned, response.Header, spool.File)
 		if stageErr != nil {
 			slog.Warn("rpm metadata staging failed", "path", cleaned, "err", stageErr)
 		}

@@ -33,6 +33,25 @@ func TestValidateRejectsNilDocument(t *testing.T) {
 	require.ErrorContains(t, Validate(nil), "config document is nil")
 }
 
+func TestExampleConfiguration(t *testing.T) {
+	for _, enableAll := range []bool{false, true} {
+		name := "default"
+		if enableAll {
+			name = "all instances enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			doc, err := config.LoadFile("../../config.example.yaml")
+			require.NoError(t, err)
+			if enableAll {
+				for i := range doc.Instances {
+					doc.Instances[i].Enabled = true
+				}
+			}
+			require.NoError(t, Validate(doc))
+		})
+	}
+}
+
 func TestDisabledInstanceDoesNotRegisterRuntimeTasks(t *testing.T) {
 	doc, err := config.Decode(strings.NewReader(`
 server:

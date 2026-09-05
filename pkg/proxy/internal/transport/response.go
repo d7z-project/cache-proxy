@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
 // EscapePathSegments preserves path separators while escaping each protocol
@@ -17,22 +20,30 @@ func EscapePathSegments(value string) string {
 	return strings.Join(parts, "/")
 }
 
-// RequestForcesRevalidation reports whether the request explicitly asks the
-// proxy to validate a cached response with its origin.
-func RequestForcesRevalidation(request *http.Request) bool {
-	control := strings.ToLower(request.Header.Get("Cache-Control"))
-	return strings.Contains(control, "no-cache") || strings.Contains(control, "max-age=0")
+// SourceRevalidationHeader preserves downstream validators for rewritten bodies.
+func SourceRevalidationHeader(source http.Header) http.Header {
+	header := source.Clone()
+	for _, name := range []string{"ETag", "Last-Modified"} {
+		if value := header.Get(name); value != "" {
+			header.Set("X-Source-"+name, value)
+		}
+		header.Del(name)
+	}
+	return header
 }
 
 // ResponseCacheable applies the response policy shared by package protocols.
 // allowPrivate is true only when the cache key is scoped to the request's
 // credentials.
 func ResponseCacheable(response *http.Response, allowPrivate bool) bool {
-	control := strings.ToLower(response.Header.Get("Cache-Control"))
-	if strings.Contains(control, "no-store") || strings.Contains(response.Header.Get("Vary"), "*") {
+	if response.Request != nil && proxyruntime.ParseCachePolicy(response.Request.Header, time.Now(), 0).NoStore {
 		return false
 	}
-	private := strings.Contains(control, "private") || response.Header.Get("Set-Cookie") != ""
+	policy := proxyruntime.ParseCachePolicy(response.Header, time.Now(), 0)
+	if policy.NoStore || strings.Contains(response.Header.Get("Vary"), "*") {
+		return false
+	}
+	private := policy.Private || response.Header.Get("Set-Cookie") != ""
 	return !private || allowPrivate
 }
 

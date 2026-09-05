@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 
+e2e_assert_offline_validation() {
+  local mode=$1 url=$2
+  e2e_client "$mode" strict-offline "$E2E_TOOLS_IMAGE" '
+    status=$(curl --silent --show-error --max-time 35 --output /tmp/body --write-out "%{http_code}" -H "Cache-Control: no-cache" "$1")
+    case "$status" in
+      502|504) ;;
+      *) printf "strict validation returned %s while upstream was offline\n" "$status" >&2; exit 1 ;;
+    esac
+  ' "$url"
+}
+
 e2e_fail() {
   printf 'E2E failure: %s\n' "$*" >&2
   return 1

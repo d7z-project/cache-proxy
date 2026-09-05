@@ -33,6 +33,21 @@ func TestSchedulerRunsTasksSerially(t *testing.T) {
 	require.Len(t, scheduler.Snapshot(), 2)
 }
 
+func TestTaskTimeoutIsIndependentOfInterval(t *testing.T) {
+	s := newScheduler()
+	s.ctx = context.Background()
+	key := NewTaskKey("repo", TypeExpireCleanup, "")
+	var deadline time.Time
+	s.Register(TaskDef{Key: key, Interval: time.Second, Timeout: 30 * time.Minute, Handler: func(ctx context.Context) (*TaskOutcome, error) {
+		deadline, _ = ctx.Deadline()
+		return nil, nil
+	}})
+	started := time.Now()
+	s.runTask(key)
+	require.True(t, deadline.After(started.Add(29*time.Minute)))
+	require.True(t, deadline.Before(time.Now().Add(31*time.Minute)))
+}
+
 func TestSchedulerCheckpointTracksMetadataCompletion(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "scheduler.json")
 	s, err := NewPersistent(statePath)

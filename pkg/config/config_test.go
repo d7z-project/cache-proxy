@@ -56,6 +56,24 @@ instances:
 	require.NoError(t, selected.Options.DecodeStrict(&options))
 }
 
+func TestInstanceRefreshInterval(t *testing.T) {
+	for _, interval := range []string{"0s", "-1s", "999ms", "1s", "30m"} {
+		doc, err := Decode(strings.NewReader("instances:\n  - name: test\n    mode: deb\n    path: /deb\n    upstream: https://example.test\n    refresh:\n      interval: " + interval + "\n"))
+		require.NoError(t, err)
+		_, err = doc.Instances[0].SelectMode()
+		if interval == "1s" || interval == "30m" {
+			require.NoError(t, err)
+		} else {
+			require.ErrorContains(t, err, "at least 1s")
+		}
+	}
+	_, err := Decode(strings.NewReader("instances:\n  - refresh:\n      unexpected: 1s\n"))
+	require.Error(t, err)
+	instance := Instance{Name: "git", Mode: ModeGit, Path: "/git", Upstream: "https://example.test", Refresh: &RefreshConfig{Interval: Duration(time.Minute)}}
+	_, err = instance.SelectMode()
+	require.ErrorContains(t, err, "sync_interval")
+}
+
 func TestDecodeRejectsUnknownFields(t *testing.T) {
 	_, err := Decode(strings.NewReader(`
 instances:

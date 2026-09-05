@@ -24,6 +24,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func TestFlatpakReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
@@ -35,6 +36,28 @@ func TestFlatpakReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 	h.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/objects/object", nil))
 	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
 	require.Zero(t, requests.Load())
+}
+
+func TestFlatpakMutableErrorPreservesCommittedReference(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(upstream.Close)
+	h := newFlatpakTestHandler(t, upstream.URL)
+	key := flatpakRefKey(h.origin.String(), "refs/heads/stable", "")
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
+	req := httptest.NewRequest(http.MethodGet, "/refs/heads/stable", nil)
+	req.Header.Set("Cache-Control", "no-cache")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	object, err := storeio.OpenResponse(context.Background(), h.store, flatpakTenant, key)
+	require.NoError(t, err)
+	defer object.Reader.Close()
+	body, err := io.ReadAll(object.Reader)
+	require.NoError(t, err)
+	require.Equal(t, "old", string(body))
 }
 
 func TestFlatpakRootDirectoriesAndUnknownResourcesRemainTransparent(t *testing.T) {

@@ -33,7 +33,9 @@ EOF
   e2e_set_fixture_state updated
   e2e_wait_header_changed "$E2E_PROXY_URL/pacman/e2e.db" ETag "$previous_etag"
   e2e_client pacman update "$E2E_ARCH_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
+  e2e_wait_cache_hit "$E2E_PROXY_URL/pacman/e2e.db"
   e2e_offline_restart
   e2e_client pacman offline "$E2E_ARCH_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
+  e2e_assert_offline_validation pacman "$E2E_PROXY_URL/pacman/e2e.db"
   e2e_restore_online
 }

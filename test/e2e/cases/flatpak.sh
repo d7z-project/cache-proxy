@@ -73,6 +73,7 @@ e2e_run_flatpak() {
   cached_object_paths=$(e2e_fixture_counts TRANSFER /flatpak/repo/objects/ |
     awk '$1 !~ /\.commitmeta$/ { print $1 }')
   [[ -n $cached_object_paths ]] || e2e_fail 'Flatpak install did not cache any immutable objects'
+  e2e_wait_cache_hit "$E2E_PROXY_URL/flatpak/summary.idx"
   e2e_offline_restart
   e2e_client flatpak offline "$E2E_TOOLS_IMAGE" '
 	    curl --fail --silent --show-error "$1/flatpak/summary.idx" >/dev/null
@@ -82,5 +83,6 @@ e2e_run_flatpak() {
 	      curl --fail --silent --show-error "$1/flatpak$object_path" >/dev/null
 	    done
 	  ' "$E2E_PROXY_URL" "$cached_object_paths"
+  e2e_assert_offline_validation flatpak "$E2E_PROXY_URL/flatpak/summary.idx"
   e2e_restore_online
 }

@@ -36,7 +36,9 @@ EOF
   e2e_set_fixture_state updated
   e2e_wait_contains "$E2E_PROXY_URL/cargo/e2/e-/e2e-crate" '"vers":"2.0.0"'
   e2e_client cargo update "$E2E_RUST_IMAGE" "$script" "$E2E_PROXY_URL" 2.0.0
+  e2e_wait_cache_hit "$E2E_PROXY_URL/cargo/e2/e-/e2e-crate"
   e2e_offline_restart
   e2e_client cargo offline "$E2E_RUST_IMAGE" "$script" "$E2E_PROXY_URL" 2.0.0
+  e2e_assert_offline_validation cargo "$E2E_PROXY_URL/cargo/e2/e-/e2e-crate"
   e2e_restore_online
 }

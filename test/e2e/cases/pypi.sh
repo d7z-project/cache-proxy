@@ -11,21 +11,26 @@ e2e_run_pypi() {
   local script='
     mkdir /tmp/download
     pip download --disable-pip-version-check --no-cache-dir --no-deps \
-      --refresh-package e2e-pkg \
       --trusted-host 127.0.0.1 --index-url "$1/pypi/simple/" \
       --dest /tmp/download "e2e-pkg==$2" >/dev/null
     test -f "/tmp/download/e2e_pkg-$2-py3-none-any.whl"
   '
   e2e_client pypi cold "$E2E_PYTHON_IMAGE" "$script" "$E2E_PROXY_URL" 1.0.0
-  local before
+  local before native_accept
   before=$(e2e_fixture_count GET /pypi/files/e2e_pkg-1.0.0-py3-none-any.whl)
   ((before >= 1)) || e2e_fail 'PyPI wheel did not reach the fixture'
   e2e_client pypi warm "$E2E_PYTHON_IMAGE" "$script" "$E2E_PROXY_URL" 1.0.0
   e2e_assert_count_unchanged GET /pypi/files/e2e_pkg-1.0.0-py3-none-any.whl "$before" 'PyPI wheel was fetched during warm download'
+  native_accept=$(e2e_fixture_header GET /pypi/simple/e2e-pkg/ Accept)
   e2e_set_fixture_state updated
   e2e_wait_contains "$E2E_PROXY_URL/pypi/simple/e2e-pkg/" e2e_pkg-2.0.0-py3-none-any.whl
+  e2e_client pypi refresh-native "$E2E_TOOLS_IMAGE" '
+    curl --fail --silent --show-error -H "Accept: $2" -H "Cache-Control: no-cache" "$1/pypi/simple/e2e-pkg/" | grep -Fq e2e_pkg-2.0.0-py3-none-any.whl
+  ' "$E2E_PROXY_URL" "$native_accept"
   e2e_client pypi update "$E2E_PYTHON_IMAGE" "$script" "$E2E_PROXY_URL" 2.0.0
+  e2e_wait_cache_hit "$E2E_PROXY_URL/pypi/simple/e2e-pkg/"
   e2e_offline_restart
   e2e_client pypi offline "$E2E_PYTHON_IMAGE" "$script" "$E2E_PROXY_URL" 2.0.0
+  e2e_assert_offline_validation pypi "$E2E_PROXY_URL/pypi/simple/e2e-pkg/"
   e2e_restore_online
 }

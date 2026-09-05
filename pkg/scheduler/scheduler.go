@@ -56,6 +56,7 @@ func (k TaskKey) Type() TaskType   { return k.typ }
 func (k TaskKey) RootID() string   { return k.rootID }
 
 type TaskDef struct {
+	Timeout        time.Duration
 	Key            TaskKey
 	Interval       time.Duration
 	RunImmediately bool
@@ -83,6 +84,7 @@ type TaskRun struct {
 }
 
 type scheduledTask struct {
+	timeout   time.Duration
 	info      TaskInfo
 	handler   TaskHandler
 	triggered bool
@@ -151,7 +153,7 @@ func (s *Scheduler) Register(def TaskDef) {
 			next = saved
 		}
 	}
-	s.tasks[def.Key] = &scheduledTask{info: TaskInfo{Key: def.Key, Status: StatusIdle, NextRun: next, Interval: def.Interval}, handler: def.Handler}
+	s.tasks[def.Key] = &scheduledTask{info: TaskInfo{Key: def.Key, Status: StatusIdle, NextRun: next, Interval: def.Interval}, handler: def.Handler, timeout: def.Timeout}
 	s.mu.Unlock()
 	s.signal()
 }
@@ -271,12 +273,16 @@ func (s *Scheduler) runTask(key TaskKey) {
 	task.info.Status = StatusRunning
 	handler := task.handler
 	interval := task.info.Interval
+	timeout := task.timeout
 	s.mu.Unlock()
 
 	started := time.Now()
 	deadline := interval / 2
 	if deadline < time.Minute {
 		deadline = time.Minute
+	}
+	if timeout > 0 {
+		deadline = timeout
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, deadline)
 	outcome, err := handler(ctx)

@@ -20,6 +20,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
@@ -41,6 +42,8 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		representation = manifestAccept
 	}
 	requestHeaders := map[string]string{"Accept": representation}
+	requestHeaders["Cache-Control"] = req.Header.Get("Cache-Control")
+	requestHeaders["Pragma"] = req.Header.Get("Pragma")
 	statePath := h.refStatePath(resolved.repo, resolved.ref, representation)
 	previousState, previousStateErr := h.readState(ctx, statePath)
 	if previousStateErr == nil {
@@ -61,7 +64,20 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		if previousStateErr != nil {
 			return 0, "", 0, previousStateErr
 		}
-		previousState.FetchedAt = time.Now().UTC()
+		previousState.FetchedAt, response.Header = storeio.ResponseTimingHeader(storeio.WithResponseTiming(cacheCtx, response), response.Header)
+		header := proxyruntime.MergeRevalidationHeader(previousState.Header, response.Header)
+		previousState.Header = header
+		if etag := header.Get("ETag"); etag != "" {
+			previousState.ETag = etag
+		}
+		if modified := header.Get("Last-Modified"); modified != "" {
+			previousState.LastModified = modified
+		}
+		if !transport.ResponseCacheable(&http.Response{Header: header}, false) {
+			_ = h.store.DeleteObject(cacheCtx, h.name, statePath)
+			status, size, err := h.serveManifestState(ctx, w, req, previousState, "BYPASS")
+			return status, "BYPASS", size, err
+		}
 		if stateErr := h.writeState(cacheCtx, previousState); stateErr != nil {
 			slog.Warn("oci revalidation state update failed; serving committed manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", stateErr)
 			status, bytes, serveErr := h.serveManifestState(ctx, w, req, previousState, "STALE")
@@ -79,6 +95,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		return status, "BYPASS", bytes, copyErr
 	}
 	if !transport.ResponseCacheable(response, false) {
+		_ = h.store.DeleteObject(cacheCtx, h.name, statePath)
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
@@ -121,8 +138,9 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	if isSHA256Digest(resolved.ref) {
 		expireAfter = config.ExpirationNever
 	}
-	fetchedAt := time.Now().UTC()
+	fetchedAt, responseHeader := storeio.ResponseTimingHeader(storeio.WithResponseTiming(cacheCtx, response), response.Header)
 	state := refState{
+		Header:         responseHeader,
 		SourceUpstream: h.upstream,
 		Repo:           resolved.repo,
 		Ref:            resolved.ref,
@@ -171,6 +189,11 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 }
 
 func (h *handler) writeManifestTemp(w http.ResponseWriter, req *http.Request, state refState, tempFile io.Reader, cache string) (int, string, uint64, error) {
+	status, bytes, err := h.writeResponse(w, req.Method, manifestResponseHeaders(state, cache), tempFile)
+	return status, cache, bytes, err
+}
+
+func manifestResponseHeaders(state refState, cache string) map[string]string {
 	headers := map[string]string{
 		"Content-Type":          state.ContentType,
 		"Content-Length":        strconv.FormatInt(state.ContentLength, 10),
@@ -180,8 +203,11 @@ func (h *handler) writeManifestTemp(w http.ResponseWriter, req *http.Request, st
 		"X-Cache":               cache,
 		"Docker-Content-Digest": state.ManifestDigest,
 	}
-	status, bytes, err := h.writeResponse(w, req.Method, headers, tempFile)
-	return status, cache, bytes, err
+	for _, name := range []string{"Cache-Control", "Expires", "Date"} {
+		headers[name] = state.Header.Get(name)
+	}
+	headers["Age"] = strconv.FormatInt(int64(proxyruntime.ResponseAge(state.Header, state.FetchedAt, time.Now())/time.Second), 10)
+	return headers
 }
 
 func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, ready chan struct{}) (int, string, uint64, error) {

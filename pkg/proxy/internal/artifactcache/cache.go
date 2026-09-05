@@ -13,6 +13,7 @@ import (
 	"gopkg.d7z.net/blobfs"
 
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
@@ -45,7 +46,7 @@ func (c *Cache) Serve(w http.ResponseWriter, request *http.Request, requestPath 
 		if c.FreshnessForPath != nil {
 			freshness = c.FreshnessForPath(requestPath)
 		}
-		if time.Since(object.Fetched) < freshness && !transport.RequestForcesRevalidation(request) {
+		if proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, freshness) && !proxyruntime.RequestForcesRevalidation(request) {
 			return serveCached(w, request, object, "HIT"), "HIT"
 		}
 		if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
@@ -60,7 +61,10 @@ func (c *Cache) Serve(w http.ResponseWriter, request *http.Request, requestPath 
 	}
 	flight, leader := c.Flights.Begin(key)
 	if !leader {
-		_ = c.Flights.Wait(request.Context(), flight)
+		if err := c.Flights.Wait(request.Context(), flight); err != nil {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
 		if cached, err := storeio.OpenResponse(request.Context(), c.Store, c.Tenant, key); err == nil {
 			return serveCached(w, request, cached, "COALESCED"), "COALESCED"
 		}
@@ -90,13 +94,18 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 	if !leader {
 		_ = c.Flights.Wait(request.Context(), flight)
 		if updated, err := storeio.OpenResponse(request.Context(), c.Store, c.Tenant, key); err == nil {
-			if updated.Fetched.After(object.Fetched) {
+			if updated.ValidatedAt.After(object.ValidatedAt) {
 				_ = object.Reader.Close()
 				return serveCached(w, request, updated, "COALESCED"), "COALESCED"
 			}
 			_ = updated.Reader.Close()
 		}
-		return serveCached(w, request, object, "STALE"), "STALE"
+		if proxyruntime.StaleAllowed(request, object.Header) {
+			return serveCached(w, request, object, "STALE"), "STALE"
+		}
+		_ = object.Reader.Close()
+		transport.WriteError(w, http.StatusBadGateway)
+		return http.StatusBadGateway, "ERROR"
 	}
 
 	conditional := request.Header.Clone()
@@ -108,6 +117,15 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 	}
 	response, err := c.FetchUpstream(c.Lifecycle.Context(), http.MethodGet, requestPath, request.URL.RawQuery, conditional)
 	if err != nil || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError {
+		if !proxyruntime.StaleAllowed(request, object.Header) {
+			_ = object.Reader.Close()
+			c.Flights.Finish(flightKey, flight, err)
+			if response != nil {
+				return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
+			}
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
 		if response != nil {
 			_ = response.Body.Close()
 		}
@@ -116,11 +134,14 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 	}
 	if response.StatusCode == http.StatusNotModified {
 		_ = response.Body.Close()
-		err = storeio.TouchResponse(c.Lifecycle.Context(), c.Store, c.Tenant, key, response.Header)
+		timingCtx := storeio.WithResponseTiming(c.Lifecycle.Context(), response)
+		object.ValidatedAt, response.Header = storeio.ResponseTimingHeader(timingCtx, response.Header)
+		object.Header = proxyruntime.MergeRevalidationHeader(object.Header, response.Header)
+		err = storeio.TouchResponse(timingCtx, c.Store, c.Tenant, key, response.Header)
 		c.Flights.Finish(flightKey, flight, err)
 		result := "REVALIDATED"
 		if err != nil {
-			result = "STALE"
+			result = "BYPASS"
 		}
 		return serveCached(w, request, object, result), result
 	}
@@ -140,7 +161,7 @@ func (c *Cache) streamAndCache(w http.ResponseWriter, request *http.Request, res
 	reader, err := storeio.StartStream(c.Lifecycle.Context(), storeio.StreamConfig{
 		Body: response.Body, ObjectPath: key, Spooler: c.Spooler, Lifecycle: c.Lifecycle, ExpectedSize: &response.ContentLength,
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(ctx, c.Store, c.Tenant, key, c.Upstream, http.StatusOK, response.Header, "", body)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), c.Store, c.Tenant, key, c.Upstream, http.StatusOK, response.Header, "", body)
 		},
 		Done: func(err error) { c.Flights.Finish(flightKey, flight, err) },
 	})
@@ -167,8 +188,8 @@ func (c *Cache) forwardUpstream(w http.ResponseWriter, request *http.Request, re
 
 func serveCached(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) int {
 	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.Header)
+	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
 	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, path.Base(request.URL.Path), object.Fetched, object.Reader)
+	http.ServeContent(w, request, path.Base(request.URL.Path), object.ValidatedAt, object.Reader)
 	return http.StatusOK
 }

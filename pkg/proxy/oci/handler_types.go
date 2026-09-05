@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"net/http"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type authHandler struct {
 }
 
 type refState struct {
+	Header         http.Header       `yaml:"header,omitempty"`
 	SourceUpstream string            `yaml:"source_upstream"`
 	Repo           string            `yaml:"repo"`
 	Ref            string            `yaml:"ref"`
@@ -49,6 +51,7 @@ type ociChallenge struct {
 }
 
 type handler struct {
+	manifestFlights storeio.FlightGroup
 	name            string
 	upstream        string
 	expireAfter     config.Expiration

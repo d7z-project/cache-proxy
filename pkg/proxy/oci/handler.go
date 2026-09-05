@@ -2,6 +2,8 @@ package oci
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -228,9 +230,6 @@ func (h *handler) cleanupExpiredObject(ctx context.Context, objectPath, objectKi
 		return err
 	}
 	fetchedAt, fetchedAtErr := time.Parse(time.RFC3339Nano, info.Options["fetched-at"])
-	if fetchedAtErr != nil {
-		fetchedAt, fetchedAtErr = time.Parse(http.TimeFormat, info.Options["fetched-at"])
-	}
 	if fetchedAtErr == nil && time.Since(fetchedAt) <= h.expireAfter.Duration() {
 		return nil
 	}
@@ -322,7 +321,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 	statePath := h.refStatePath(resolved.repo, resolved.ref, req.Header.Get("Accept"))
 	state, err := h.readState(ctx, statePath)
-	if err == nil && h.manifestFresh(resolved, state) && !transport.RequestForcesRevalidation(req) {
+	if err == nil && h.manifestFresh(resolved, state) && !proxyruntime.RequestForcesRevalidation(req) {
 		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
 			slog.Debug("oci manifest cache hit", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 			return status, "HIT", bytes, nil
@@ -330,19 +329,31 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 	}
 
 	staleState := state
+	flight, leader := h.manifestFlights.Begin(statePath)
+	if !leader {
+		if err := h.manifestFlights.Wait(ctx, flight); err != nil {
+			return 0, "", 0, err
+		}
+		if updated, err := h.readState(ctx, statePath); err == nil && updated.FetchedAt.After(state.FetchedAt) {
+			status, size, err := h.serveManifestState(ctx, w, req, updated, "COALESCED")
+			return status, "COALESCED", size, err
+		}
+		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
+	}
+	defer h.manifestFlights.Finish(statePath, flight, nil)
 	lock := h.refLocks.Get(statePath)
 	if !lock.TryLock() {
-		if staleState.Repo != "" {
+		if staleState.Repo != "" && proxyruntime.StaleAllowed(req, staleState.Header) {
 			if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, staleState, "STALE"); cacheErr == nil {
 				return status, "STALE", bytes, nil
 			}
 		}
-		lock.Lock()
+		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	defer lock.Unlock()
 
 	state, err = h.readState(ctx, statePath)
-	if err == nil && h.manifestFresh(resolved, state) && !transport.RequestForcesRevalidation(req) {
+	if err == nil && h.manifestFresh(resolved, state) && !proxyruntime.RequestForcesRevalidation(req) {
 		if status, bytes, cacheErr := h.serveManifestState(ctx, w, req, state, "HIT"); cacheErr == nil {
 			return status, "HIT", bytes, nil
 		}
@@ -355,7 +366,7 @@ func (h *handler) serveManifest(ctx context.Context, w http.ResponseWriter, req 
 		slog.Debug("oci manifest fetched", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref)
 		return status, cache, bytes, nil
 	}
-	if staleState.Repo != "" {
+	if staleState.Repo != "" && proxyruntime.StaleAllowed(req, staleState.Header) {
 		slog.Debug("oci manifest fetch failed, serving stale", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "err", fetchErr)
 		if staleStatus, staleBytes, cacheErr := h.serveManifestState(ctx, w, req, staleState, "STALE"); cacheErr == nil {
 			return staleStatus, "STALE", staleBytes, nil
@@ -388,16 +399,7 @@ func (h *handler) serveManifestState(ctx context.Context, w http.ResponseWriter,
 		!cacheSupportsRequestUserAgent(h.client, req, info.Options) {
 		return 0, 0, errors.New("cached OCI manifest does not match committed state")
 	}
-	headers := map[string]string{
-		"Content-Length":        strconv.FormatInt(state.ContentLength, 10),
-		"Content-Type":          state.ContentType,
-		"ETag":                  state.ETag,
-		"Last-Modified":         state.LastModified,
-		"Vary":                  state.Vary,
-		"X-Cache":               cache,
-		"Docker-Content-Digest": state.ManifestDigest,
-	}
-	return h.writeResponse(w, req.Method, headers, reader)
+	return h.writeResponse(w, req.Method, manifestResponseHeaders(state, cache), reader)
 }
 
 func (h *handler) manifestFresh(resolved request, state refState) bool {
@@ -407,7 +409,7 @@ func (h *handler) manifestFresh(resolved request, state refState) bool {
 	if isSHA256Digest(resolved.ref) {
 		return true
 	}
-	return h.metadataTTL > 0 && time.Since(state.FetchedAt) <= h.metadataTTL
+	return state.Header != nil && proxyruntime.ResponseFresh(state.Header, state.FetchedAt, h.metadataTTL)
 }
 
 func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
@@ -508,7 +510,8 @@ func (h *handler) refStatePath(repo, ref string, representation ...string) strin
 	if len(representation) > 0 && representation[0] != "" {
 		accept = representation[0]
 	}
-	return path.Join("oci/refs", repo, hashKey(ref+"\x00"+accept), "state.yaml")
+	digest := sha256.Sum256([]byte(ref + "\x00" + accept))
+	return path.Join("oci/refs", repo, hex.EncodeToString(digest[:]), "state.yaml")
 }
 
 func (h *handler) manifestPath(digest string) string {

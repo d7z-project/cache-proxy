@@ -125,7 +125,7 @@ Validate configuration without opening listeners:
 
 Configuration uses strict YAML decoding. Unknown fields, malformed URLs,
 duplicate instance names, and listener conflicts prevent startup. See
-[`config.local.yaml`](config.local.yaml) for a complete multi-instance example.
+[`config.example.yaml`](config.example.yaml) for a commented multi-instance example.
 
 All duration values use Go duration syntax, such as `500ms`, `15m`, or `24h`.
 Byte sizes accept binary suffixes such as `512MiB` and `2GiB`.
@@ -175,6 +175,7 @@ Every instance configures one upstream repository or registry.
 | `bind` | one listener | Dedicated listener; required by `oci` |
 | `display_url` | no | Client-facing address for a dedicated OCI listener |
 | `transport` | no | Per-instance HTTP transport settings |
+| `refresh.interval` | no | Mutable freshness limit and repository polling interval, at least `1s` |
 | `options` | no | Mode-specific settings |
 
 Exactly one of `path` or `bind` is required. Each instance has one configured
@@ -189,6 +190,23 @@ SOCKS5H.
 `idle_body_timeout` bounds each blocked upstream body read, including OCI
 token responses. Downloads that keep making progress remain subject to
 `max_request_duration`.
+
+### Refresh Timing
+
+Set `refresh: {interval: 30m}` on an instance to control its mutable metadata.
+Linux repository and Flatpak anchors default to 15 minutes. npm, PyPI, Cargo,
+Go mutable metadata, Maven metadata and Flatpak mutable references default to
+one minute; OCI tags default to two minutes, Maven SNAPSHOT files to five minutes.
+Git uses `options.sync_interval` instead. File `http_cache` rules use the configured
+interval as a freshness ceiling and a fallback when the upstream gives no lifetime;
+without it, file responses require an explicit upstream freshness lifetime.
+
+Upstream cache policy can require earlier validation. The interval does not
+extend signed URL validity, protocol expiry, immutable object lifetime or retention.
+Discovered repository roots are checked serially with stable 80-100% interval
+offsets; other mutable objects are revalidated on demand. Shared-host admission
+limits and upstream `Retry-After` still apply. These settings reduce bursts but
+do not guarantee an upstream quota will never be exceeded.
 
 ### Mode Options
 
@@ -261,7 +279,15 @@ docker pull registry.example.com:5000/IMAGE:TAG
 ## Cache Behavior
 
 Mutable metadata is conditionally refreshed against its configured upstream.
-Committed stale data remains available during transient upstream failures.
+Committed stale data remains available during transient upstream failures when
+the request and upstream cache policy permit it. Explicit `no-cache` or
+`max-age=0` requests require validation; `HEAD` follows the same policy as `GET`.
+Response age includes time spent downloading and publishing, and successful
+conditional validation updates freshness without changing the representation.
+Native clients can request validation on every invocation. In particular, APT
+normally sends `max-age=0` for indexes. Offline cache reuse therefore requires
+client settings that permit reuse; a forced validation fails when upstream is
+unavailable, even when the object exists locally.
 Large objects stream to the requesting client while cache publication is in
 progress, and concurrent requests for the same object share one transfer.
 
@@ -269,6 +295,15 @@ Linux repository and Flatpak/OSTree metadata is published as an atomically
 verified snapshot. Package artifacts and sidecars use stable cache identities,
 so an unsuccessful metadata refresh does not invalidate already cached package
 content. Digest-addressed objects are verified before publication.
+
+A strict request for an existing repository anchor waits up to 30 seconds for
+validation and any required candidate publication; a shorter client deadline
+takes precedence. Timeout returns 504 while scheduled work continues. A failed
+candidate does not delete the committed generation or cached packages. The first
+anchor request streams upstream directly. An upstream no-store policy retires
+cached metadata routing for that root so subsequent reads pass through.
+Debian `Valid-Until` bounds anchor reuse. Atomic publication keeps a generation
+coherent but cannot provide cross-request snapshot isolation for unversioned URLs.
 
 Flatpak static deltas use a finite cache lifetime and rely on client-side
 content verification.
@@ -292,6 +327,11 @@ Each enabled instance uses an isolated directory:
 Backend contents are private application state. Use a dedicated persistent
 volume and allow one `cache-proxy` process to write to it. Send `SIGINT` or
 `SIGTERM` for graceful shutdown.
+
+Backend formats are internal to the running build, with no compatibility
+guarantee across builds. Response records are strictly validated; invalid records
+are treated as cache misses and reclaimed by cleanup. Repository snapshots retain
+their protocol validation and atomic publication rules.
 
 Metadata refresh and metadata GC schedules are checkpointed after completion
 and restored on restart. Maintenance events expose the task result and full

@@ -22,7 +22,9 @@ e2e_run_go() {
   e2e_set_fixture_state updated
   e2e_wait_contains "$E2E_PROXY_URL/go/example.com/e2e/@v/list" v1.1.0
   e2e_client go update "$E2E_GO_IMAGE" "$script" "$E2E_PROXY_URL" v1.1.0
+  e2e_wait_cache_hit "$E2E_PROXY_URL/go/example.com/e2e/@v/list"
   e2e_offline_restart
   e2e_client go offline "$E2E_GO_IMAGE" "$script" "$E2E_PROXY_URL" v1.1.0
+  e2e_assert_offline_validation go "$E2E_PROXY_URL/go/example.com/e2e/@v/list"
   e2e_restore_online
 }

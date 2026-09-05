@@ -25,7 +25,9 @@ e2e_run_apk() {
   e2e_set_fixture_state updated
   e2e_wait_header_changed "$E2E_PROXY_URL/apk/v3.20/main/x86_64/APKINDEX.tar.gz" ETag "$previous_etag"
   e2e_client apk update "$E2E_ALPINE_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
+  e2e_wait_cache_hit "$E2E_PROXY_URL/apk/v3.20/main/x86_64/APKINDEX.tar.gz"
   e2e_offline_restart
   e2e_client apk offline "$E2E_ALPINE_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
+  e2e_assert_offline_validation apk "$E2E_PROXY_URL/apk/v3.20/main/x86_64/APKINDEX.tar.gz"
   e2e_restore_online
 }

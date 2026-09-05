@@ -11,9 +11,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.d7z.net/blobfs"
@@ -93,8 +91,8 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 
 	key := cacheKey(h.origin, cleaned, request)
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); err == nil {
-		fresh := policy == "immutable" || responseFresh(cached.Header, cached.Fetched)
-		if transport.RequestForcesRevalidation(request) {
+		fresh := policy == "immutable" || proxyruntime.ResponseFresh(cached.Header, cached.ValidatedAt, h.client.RefreshInterval(0))
+		if proxyruntime.RequestForcesRevalidation(request) {
 			fresh = false
 		}
 		if fresh {
@@ -138,7 +136,14 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 			return localError(w, http.StatusGatewayTimeout), "ERROR", true
 		}
 		if updated, openErr := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); openErr == nil {
+			if !updated.ValidatedAt.After(cached.ValidatedAt) && !proxyruntime.StaleAllowed(request, updated.Header) {
+				_ = updated.Reader.Close()
+				return localError(w, http.StatusBadGateway), "ERROR", true
+			}
 			return serveStored(w, request, updated, "COALESCED"), "COALESCED", true
+		}
+		if !proxyruntime.StaleAllowed(request, cached.Header) {
+			return localError(w, http.StatusBadGateway), "ERROR", true
 		}
 		return serveStored(w, request, cached, "STALE"), "STALE", true
 	}
@@ -158,23 +163,27 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 	response, err := h.client.DoRead(h.lifecycle.Context(), upstreamRequest, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(key, flight, err)
+		if !proxyruntime.StaleAllowed(request, cached.Header) {
+			return localError(w, http.StatusBadGateway), "ERROR", true
+		}
 		status := serveStored(w, request, cached, "STALE")
 		return status, "STALE", true
 	}
 	if response.StatusCode == http.StatusNotModified {
 		_ = response.Body.Close()
-		if err := storeio.TouchResponse(h.lifecycle.Context(), h.store, objectTenant, key, response.Header); err == nil {
-			for _, name := range []string{"Cache-Control", "Expires", "ETag", "Last-Modified", "Vary"} {
-				if values := response.Header.Values(name); len(values) > 0 {
-					cached.Header[name] = append([]string(nil), values...)
-				}
-			}
-		}
+		timingCtx := storeio.WithResponseTiming(h.lifecycle.Context(), response)
+		_ = storeio.TouchResponse(timingCtx, h.store, objectTenant, key, response.Header)
+		cached.ValidatedAt, response.Header = storeio.ResponseTimingHeader(timingCtx, response.Header)
+		cached.Header = proxyruntime.MergeRevalidationHeader(cached.Header, response.Header)
 		h.flights.Finish(key, flight, nil)
 		status := serveStored(w, request, cached, "REVALIDATED")
 		return status, "REVALIDATED", true
 	}
 	if response.StatusCode >= 500 {
+		if !proxyruntime.StaleAllowed(request, cached.Header) {
+			h.flights.Finish(key, flight, fmt.Errorf("upstream returned %d", response.StatusCode))
+			return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS", true
+		}
 		_ = response.Body.Close()
 		h.flights.Finish(key, flight, fmt.Errorf("upstream returned %d", response.StatusCode))
 		status := serveStored(w, request, cached, "STALE")
@@ -182,6 +191,9 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 	}
 	_ = cached.Reader.Close()
 	if response.StatusCode != http.StatusOK || !cacheable(request, response) {
+		if response.StatusCode == http.StatusOK {
+			_ = storeio.DeleteResponse(h.lifecycle.Context(), h.store, objectTenant, key)
+		}
 		h.flights.Finish(key, flight, nil)
 		status := transport.WriteResponse(w, request, response, "BYPASS")
 		return status, "BYPASS", true
@@ -241,7 +253,7 @@ func (h *handler) streamAndStoreFlight(w http.ResponseWriter, request *http.Requ
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, "file", 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, "file", -1) },
 		StoreFn: func(ctx context.Context, reader io.Reader) error {
-			return storeio.PutResponse(ctx, h.store, objectTenant, key, origin, http.StatusOK, response.Header, "", reader)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, objectTenant, key, origin, http.StatusOK, response.Header, "", reader)
 		},
 		Done: func(err error) { h.flights.Finish(key, flight, err) },
 	})
@@ -324,25 +336,6 @@ func cacheKey(origin *url.URL, cleaned string, request *http.Request) string {
 	return path.Join("file", hex.EncodeToString(hash.Sum(nil)))
 }
 
-func responseFresh(headers http.Header, fetched time.Time) bool {
-	cacheControl := strings.ToLower(headers.Get("Cache-Control"))
-	if strings.Contains(cacheControl, "no-cache") {
-		return false
-	}
-	for _, directive := range strings.Split(cacheControl, ",") {
-		name, value, found := strings.Cut(strings.TrimSpace(directive), "=")
-		if !found || name != "s-maxage" && name != "max-age" {
-			continue
-		}
-		seconds, err := strconv.ParseInt(strings.Trim(value, `"`), 10, 64)
-		return err == nil && time.Since(fetched) < time.Duration(seconds)*time.Second
-	}
-	if expires, err := http.ParseTime(headers.Get("Expires")); err == nil {
-		return time.Now().Before(expires)
-	}
-	return false
-}
-
 func cacheable(request *http.Request, response *http.Response) bool {
 	requestControl := strings.ToLower(request.Header.Get("Cache-Control"))
 	return response.StatusCode == http.StatusOK && !strings.Contains(requestControl, "no-store") &&
@@ -351,12 +344,12 @@ func cacheable(request *http.Request, response *http.Response) bool {
 
 func serveStored(w http.ResponseWriter, request *http.Request, cached *storeio.ResponseObject, cacheResult string) int {
 	defer func() { _ = cached.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), cached.Header)
+	transport.CopyEndToEndHeaders(w.Header(), cached.ResponseHeader())
 	w.Header().Set("X-Cache", cacheResult)
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(request.URL.Path)))
 	}
-	http.ServeContent(w, request, "", cached.Fetched, cached.Reader)
+	http.ServeContent(w, request, "", cached.ValidatedAt, cached.Reader)
 	return http.StatusOK
 }
 

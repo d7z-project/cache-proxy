@@ -11,7 +11,7 @@ e2e_run_npm() {
   local install_script='
     mkdir /tmp/project && cd /tmp/project
     printf "{\"name\":\"consumer\",\"version\":\"1.0.0\",\"dependencies\":{\"e2e-pkg\":\"%s\"}}\n" "$2" >package.json
-    npm install --registry="$1/npm/" --prefer-online --ignore-scripts --no-fund --no-audit
+    npm install --registry="$1/npm/" "${4:---prefer-online}" --ignore-scripts --no-fund --no-audit
     test "$(node -e "process.stdout.write(require(\"e2e-pkg\"))")" = "$3"
   '
   e2e_client npm cold "$E2E_NODE_IMAGE" "$install_script" "$E2E_PROXY_URL" 1.0.0 cache-proxy-e2e-initial
@@ -34,7 +34,9 @@ e2e_run_npm() {
       -H "Accept: $2" -H "Cache-Control: no-cache" "$1/npm/e2e-pkg" | grep -Fq '"'"'"latest":"2.0.0"'"'"'
   ' "$E2E_PROXY_URL" "$npm_accept"
   e2e_client npm update "$E2E_NODE_IMAGE" "$install_script" "$E2E_PROXY_URL" 2.0.0 cache-proxy-e2e-updated
+  e2e_wait_cache_hit "$E2E_PROXY_URL/npm/e2e-pkg"
   e2e_offline_restart
-  e2e_client npm offline "$E2E_NODE_IMAGE" "$install_script" "$E2E_PROXY_URL" 2.0.0 cache-proxy-e2e-updated
+  e2e_client npm offline "$E2E_NODE_IMAGE" "$install_script" "$E2E_PROXY_URL" 2.0.0 cache-proxy-e2e-updated --prefer-offline
+  e2e_assert_offline_validation npm "$E2E_PROXY_URL/npm/e2e-pkg"
   e2e_restore_online
 }
