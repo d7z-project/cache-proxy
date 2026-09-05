@@ -6,11 +6,35 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
+
+func FuzzReleaseTime(f *testing.F) {
+	for _, value := range []string{
+		"Sat, 12 Sep 2026 18:34:00 UTC", "Sat, 12 Sep 2026 18:34:00 GMT",
+		"Sun, 6 Sep 2026 8:4:5 +0000", "Sun, 6 Sep 2026 8:4:5 Z",
+		"Sat, 12 Sep 2026 18:34:00 +0800", "", "not a date",
+	} {
+		f.Add(value)
+	}
+	f.Fuzz(func(t *testing.T, value string) {
+		if len(value) > 256 {
+			t.Skip()
+		}
+		parsed, err := parseReleaseTime(value)
+		if err != nil {
+			return
+		}
+		require.Equal(t, time.UTC, parsed.Location())
+		roundTrip, err := parseReleaseTime(parsed.Format(time.RFC1123))
+		require.NoError(t, err)
+		require.Equal(t, parsed, roundTrip)
+	})
+}
 
 func FuzzReleaseManifest(f *testing.F) {
 	f.Add("Acquire-By-Hash: yes\nSHA256:\n " + strings.Repeat("a", 64) + " 12 main/binary-amd64/Packages.xz\n")

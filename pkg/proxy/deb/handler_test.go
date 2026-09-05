@@ -101,6 +101,84 @@ func TestDebianFirstAnchorPassesThroughThenPublishesFullClosure(t *testing.T) {
 	require.Equal(t, int32(2), metadataRequests.Load())
 }
 
+func TestDebianValidUntilSnapshotLifecycle(t *testing.T) {
+	for _, root := range []string{"dists/trixie", "flat"} {
+		for _, state := range []string{"valid", "expired", "absent", "invalid"} {
+			t.Run(root+"/"+state, func(t *testing.T) {
+				anchorPath := "/" + root + "/InRelease"
+				if root == "flat" {
+					anchorPath = "/flat/Release"
+				}
+				packages := "Package: demo\nArchitecture: all\n"
+				release := fmt.Sprintf("SHA256:\n %x %d Packages\n", sha256.Sum256([]byte(packages)), len(packages))
+				var expires time.Time
+				switch state {
+				case "valid", "expired":
+					expires = time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+					if state == "expired" {
+						expires = expires.Add(-48 * time.Hour)
+					}
+					release = "Valid-Until: " + expires.Format(time.RFC1123) + "\n" + release
+				case "invalid":
+					release = "Valid-Until: invalid\n" + release
+				}
+				var anchorRequests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					switch request.URL.Path {
+					case anchorPath:
+						anchorRequests.Add(1)
+						if request.Header.Get("If-None-Match") == `"release"` {
+							w.WriteHeader(http.StatusNotModified)
+							return
+						}
+						w.Header().Set("ETag", `"release"`)
+						_, _ = io.WriteString(w, release)
+					case "/" + root + "/Packages":
+						_, _ = io.WriteString(w, packages)
+					default:
+						http.NotFound(w, request)
+					}
+				}))
+				t.Cleanup(server.Close)
+				handler := newDebianTestHandler(t, server.URL)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				first := httptest.NewRecorder()
+				handler.ServeHTTP(first, httptest.NewRequestWithContext(ctx, http.MethodGet, anchorPath, nil))
+				require.Equal(t, http.StatusOK, first.Code)
+				require.Equal(t, release, first.Body.String())
+				_, err := handler.metadata.Refresh(ctx, 10)
+				if state == "invalid" {
+					require.ErrorContains(t, err, "parse Debian Valid-Until")
+					require.Nil(t, handler.metadata.Current(root))
+					return
+				}
+				require.NoError(t, err)
+				current := handler.metadata.Current(root)
+				require.NotNil(t, current)
+				require.True(t, expires.Equal(current.ValidUntil))
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequestWithContext(ctx, http.MethodGet, anchorPath, nil))
+				if state == "expired" {
+					require.Equal(t, http.StatusBadGateway, response.Code)
+					require.Equal(t, int32(2), anchorRequests.Load())
+					require.True(t, expires.Equal(handler.metadata.Current(root).ValidUntil))
+					return
+				}
+				require.Equal(t, http.StatusOK, response.Code)
+				require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+				require.Equal(t, release, response.Body.String())
+				require.Equal(t, int32(1), anchorRequests.Load())
+				metadata := httptest.NewRecorder()
+				handler.ServeHTTP(metadata, httptest.NewRequestWithContext(ctx, http.MethodGet, "/"+root+"/Packages", nil))
+				require.Equal(t, http.StatusOK, metadata.Code)
+				require.Equal(t, "HIT", metadata.Header().Get("X-Cache"))
+				require.Equal(t, packages, metadata.Body.String())
+			})
+		}
+	}
+}
+
 func TestDebianPublishesUpstreamGenerationUpdate(t *testing.T) {
 	for name, paths := range map[string]struct {
 		anchor   string

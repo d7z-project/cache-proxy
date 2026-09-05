@@ -212,7 +212,7 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		return err
 	}
 	if value := manifest.Fields["valid-until"]; value != "" {
-		expires, err := http.ParseTime(value)
+		expires, err := parseReleaseTime(value)
 		if err != nil {
 			return fmt.Errorf("parse Debian Valid-Until: %w", err)
 		}

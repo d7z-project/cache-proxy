@@ -57,6 +57,7 @@ Label: cache-proxy-e2e
 Suite: stable
 Codename: stable
 Date: Tue, 0${major} Jan 2024 00:00:00 UTC
+Valid-Until: Fri, 01 Jan 2100 00:00:00 UTC
 Architectures: amd64 arm64
 Components: main
 Description: cache-proxy end-to-end repository $state
@@ -92,6 +93,7 @@ Label: cache-proxy-e2e-flat
 Suite: ./
 Codename: flat
 Date: Tue, 0${major} Jan 2024 00:00:00 UTC
+Valid-Until: Fri, 01 Jan 2100 00:00:00 UTC
 Architectures: amd64 all
 Description: cache-proxy end-to-end flat repository $state
 Acquire-By-Hash: yes

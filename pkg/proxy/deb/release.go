@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
@@ -28,6 +29,27 @@ type releaseManifest struct {
 	AcquireByHash bool
 	Entries       []releaseEntry
 	Fields        map[string]string
+}
+
+func parseReleaseTime(value string) (time.Time, error) {
+	if len(value) > 128 {
+		return time.Time{}, fmt.Errorf("release date exceeds size limit")
+	}
+	fields := strings.Fields(value)
+	if len(fields) != 6 {
+		return time.Time{}, fmt.Errorf("invalid release date")
+	}
+	// Debian permits these four UTC spellings, unlike HTTP's literal GMT suffix.
+	switch fields[5] {
+	case "+0000", "UTC", "GMT", "Z":
+	default:
+		return time.Time{}, fmt.Errorf("invalid release date timezone %q", fields[5])
+	}
+	if strings.IndexFunc(fields[4], func(r rune) bool { return r != ':' && (r < '0' || r > '9') }) >= 0 {
+		return time.Time{}, fmt.Errorf("invalid release date clock")
+	}
+	// The zone-free layout parses in UTC and also accepts non-zero-padded fields.
+	return time.Parse("Mon, 2 Jan 2006 15:4:5", strings.Join(fields[:5], " "))
 }
 
 func parseReleaseManifest(ctx context.Context, reader io.Reader) (releaseManifest, error) {
