@@ -28,21 +28,13 @@ type homeInstance struct {
 	StatusExtra string
 }
 
-func (a *App) serveHome(w http.ResponseWriter, req *http.Request) {
-	a.renderHomePage(w, req, a.homePageData(req, sortedEntries(a.entries), false))
-}
-
-func (a *App) serveBindHome(w http.ResponseWriter, req *http.Request, entry *proxyruntime.Entry) {
-	a.renderHomePage(w, req, a.homePageData(req, []*proxyruntime.Entry{entry}, true))
-}
-
-func (a *App) renderHomePage(w http.ResponseWriter, req *http.Request, data homeData) {
+func (a *App) serveHome(w http.ResponseWriter, req *http.Request, entries []*proxyruntime.Entry, single bool) {
 	if req.Method == http.MethodHead {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	renderHome(w, data)
+	renderHome(w, a.homePageData(req, entries, single))
 }
 
 func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, single bool) homeData {

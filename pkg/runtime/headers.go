@@ -18,18 +18,13 @@ func CopyEndToEndHeaders(destination, source http.Header) {
 	}
 	for name, values := range source {
 		canonical := http.CanonicalHeaderKey(name)
-		if _, declared := connectionHeaders[canonical]; declared || isHopByHopHeader(canonical) {
+		if _, declared := connectionHeaders[canonical]; declared {
+			continue
+		}
+		switch canonical {
+		case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
 			continue
 		}
 		destination[canonical] = append([]string(nil), values...)
-	}
-}
-
-func isHopByHopHeader(name string) bool {
-	switch name {
-	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
-		return true
-	default:
-		return false
 	}
 }

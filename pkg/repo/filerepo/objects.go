@@ -174,9 +174,6 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 		return nil, &retryableRefreshError{err: err}
 	}
 	defer func() { _ = spool.Close() }()
-	if spec.ExpectedSize != nil && spool.Size != *spec.ExpectedSize {
-		return nil, &retryableRefreshError{err: fmt.Errorf("metadata %s size mismatch: got %d, want %d", spec.Path, spool.Size, *spec.ExpectedSize)}
-	}
 	for index, checksum := range checksums {
 		if actual := hex.EncodeToString(checksumHashers[index].Sum(nil)); actual != checksum.Digest {
 			return nil, &retryableRefreshError{err: fmt.Errorf("metadata %s %s mismatch", spec.Path, checksum.Algorithm)}
@@ -186,9 +183,6 @@ func (s *RefreshSession) Fetch(ctx context.Context, spec ObjectSpec) (*Blob, err
 		objectKey = candidatePrefix(s.rootID, s.generation, s.candidateID) + "/objects/sha256/" + spool.SHA256
 	}
 	if err := s.handler.config.Store.MkdirAll(s.handler.config.Tenant+"/"+path.Dir(objectKey), 0o755); err != nil {
-		return nil, &retryableRefreshError{err: err}
-	}
-	if _, err := spool.File.Seek(0, io.SeekStart); err != nil {
 		return nil, &retryableRefreshError{err: err}
 	}
 	encodedHeader, _ := json.Marshal(cloneHeader(response.Header))

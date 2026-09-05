@@ -37,7 +37,12 @@ var supportedLocales = []localeOption{
 
 func init() {
 	for _, locale := range supportedLocales {
-		i18nMaps[locale.Code] = loadI18N(locale.Code)
+		data := mustReadHomeAsset("assets/" + locale.Code + ".json")
+		var translations map[string]string
+		if err := json.Unmarshal(data, &translations); err != nil {
+			panic(err)
+		}
+		i18nMaps[locale.Code] = translations
 	}
 
 	htmlData := mustReadHomeAsset("assets/home.html")
@@ -116,15 +121,6 @@ func detectLocale(req *http.Request) string {
 		}
 	}
 	return "en"
-}
-
-func loadI18N(locale string) map[string]string {
-	data := mustReadHomeAsset("assets/" + locale + ".json")
-	translations := make(map[string]string)
-	if err := json.Unmarshal(data, &translations); err != nil {
-		panic(err)
-	}
-	return translations
 }
 
 func matchLocale(tag string) string {

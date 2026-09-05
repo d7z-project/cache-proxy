@@ -86,7 +86,7 @@ Description: cache-proxy end-to-end flat fixture
 
 EOF
   gzip -n -c "$root/flat/Packages" >"$root/flat/Packages.gz"
-  printf 'usr/share/e2e-deb/payload.txt e2e-deb\n' | gzip -n >"$root/flat/Contents-all.gz"
+  printf 'usr/share/e2e-deb/payload-%s.txt e2e-deb\n' "$state" | gzip -n >"$root/flat/Contents-all.gz"
   cat >"$root/flat/Release" <<EOF
 Origin: cache-proxy-e2e-flat
 Label: cache-proxy-e2e-flat
@@ -107,4 +107,21 @@ EOF
   gpg --batch --yes --quiet --pinentry-mode loopback --passphrase '' \
     --faked-system-time "$SOURCE_DATE_EPOCH!" --digest-algo SHA256 \
     --output "$root/flat/InRelease" --clearsign "$root/flat/Release"
+
+  # Separate native-client cases exercise repositories without by-hash support.
+  mkdir -p "$root/canonical"
+  cp -a "$root/dists" "$root/pool" "$root/flat" "$root/canonical/"
+  for directory in "$root/canonical/dists/stable" "$root/canonical/flat"; do
+    sed -i '/^Acquire-By-Hash:/d' "$directory/Release"
+    gpg --batch --yes --quiet --pinentry-mode loopback --passphrase '' \
+      --faked-system-time "$SOURCE_DATE_EPOCH!" --digest-algo SHA256 \
+      --output "$directory/InRelease" --clearsign "$directory/Release"
+  done
+  # Requested indexes have real immutable URLs. Optional indexes exercise the
+  # verified canonical fallback when their by-hash URL is unavailable.
+  for file in "$root/dists/stable/main/binary-amd64/Packages.gz" "$root/flat/Packages.gz"; do
+    directory=$(dirname "$file")/by-hash/SHA256
+    mkdir -p "$directory"
+    cp "$file" "$directory/$(sha256sum "$file" | awk '{print $1}')"
+  done
 done

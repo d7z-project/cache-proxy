@@ -32,6 +32,7 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return err
 	}
 	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), debArtifactTenant, plan.Store(), plan.CleanupConfig())
+	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), debIndexTenant, plan.Store(), plan.CleanupConfig())
 	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{
 		Handler:      handler,
 		CloseContext: handler.CloseContext,

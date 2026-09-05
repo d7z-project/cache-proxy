@@ -19,7 +19,7 @@ type crateState struct {
 	Checksums map[string]string `json:"checksums"`
 }
 
-func stateName(scope string) string {
+func registryStateName(scope string) string {
 	return filepath.ToSlash(filepath.Join("registries", scope, "config.json"))
 }
 
@@ -30,7 +30,7 @@ func crateStateName(scope, name string) string {
 
 func loadRegistryState(stateDir, scope string) (registryState, error) {
 	var state registryState
-	if err := storeio.ReadJSON(stateDir, stateName(scope), &state); err != nil {
+	if err := storeio.ReadJSON(stateDir, registryStateName(scope), &state); err != nil {
 		return registryState{}, err
 	}
 	if state.Download == "" {

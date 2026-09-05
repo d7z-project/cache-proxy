@@ -25,6 +25,7 @@
 - error 文本小写开头，通过 `%w` 保留可判定错误链
 - 协议、缓存键、持久化格式或调度时序变化必须明确记录并补测试
 - 大块逻辑按状态转换和资源所有权拆分，避免薄包装与重复生命周期代码
+- Debian 索引的 GET/HEAD 共用受限回退策略，缓存读取与 flight 后复查共用身份校验；完整响应校验负责关闭 upstream body，调用者负责已验证 spool 的发布与释放
 - filerepo 按 generation 管理、刷新调度、对象校验、状态持久化和 GC 分文件，保持同包内直接协作；不为文件拆分引入额外接口层
 
 ## YAML 与运行时配置
@@ -55,9 +56,11 @@
 - artifact 和 package sidecar 使用 generation-independent response key，且不依赖 metadata refresh 成功
 - Debian 支持标准、嵌套和 flat root；InRelease 与 Release 同时存在时必须归一化一致
 - Debian instance 根路径和未分类的同源资源透明直通；目录请求必须保留尾斜线
-- Debian Release 的每个 strong-checksum entry 是独立可用性单元；上游 `200` 必须通过声明大小和所有 strong checksum 才能进入 snapshot，上游 `403` / `404` 则省略该 entry，`429`、其他非 `200`、传输或持久化错误必须中止 candidate
-- Debian candidate 的续传对象键同时绑定精确 Release path 和 digest；相同内容的其他 entry 禁止被当作该路径已经验证可用。压缩、未压缩以及不同目录中的 entry 均保持独立
-- Acquire-By-Hash 首选 by-hash，仅在其返回 `403` / `404` 时回退同 upstream canonical；canonical 通过原 entry 大小和摘要校验后才能与该 entry 的 by-hash alias 指向同一 blob；通过校验的 SHA256/SHA512 by-hash 路径可从精确 previous snapshot 读取，canonical 与固定名称签名保持 current-only
+- Debian 根据 Release 的 Acquire-By-Hash 自动选择索引策略，标准、嵌套与 flat 一致：支持时 generation 只发布原始 anchor 与签名，不预取索引；不支持时继续构建完整 metadata snapshot。两种方式都完整解析 Release 并校验 Valid-Until 和双 anchor 一致性
+- Debian 非 by-hash Release 的每个 strong-checksum entry 是独立可用性单元；上游 `200` 必须通过声明大小和所有 strong checksum 才能进入 snapshot，上游 `403` / `404` 则省略该 entry，`429`、其他非 `200`、传输或持久化错误必须中止 candidate。续传键绑定精确 Release path 和 digest
+- Debian by-hash 索引按需下载，canonical 绑定当前 Release，SHA512 优先于 SHA256；只有 hash 地址返回 `403` / `404` 且 entry 唯一时才回退同 upstream canonical，相同内容的其他 canonical entry 不可作为可用性证明。有歧义的 canonical 请求以精确 entry 独立缓存
+- Debian 索引完整通过声明大小和所有已知 strong checksum 后才能响应成功或发布到独立 deb-indexes response namespace；缓存身份绑定 upstream 与强摘要路径，未声明的历史 by-hash 仅按精确 URL 摘要校验，不推测 canonical。错误响应不缓存，未下载的索引不保证离线可用
+- Debian lazy metadata miss 不触发 generation 全量重建；请求通过 filerepo snapshot lease 固定 current/previous 并受 GC reader 保护，canonical 和固定名称签名保持 current-only，只有精确 by-hash 可读取 previous 的声明。索引共享 storeio spool budget、flight、生命周期与 response GC，不保留无界描述符映射
 - RPM generation 发布 `repomd.xml` 与上游实际可用且通过 wire/open size 和 checksum 校验的引用对象；引用对象只有 `403` / `404` 可以省略，其他失败中止 candidate。RPM metadata 全部保持 current-only，禁止按 location 文件名推测不可变性并从 previous snapshot 回退
 - Flatpak `summary.idx` generation 只绑定已验证索引及其签名；优先 digest-specific signature，仅在 `403` / `404` 时回退 `summary.idx.sig`。`summaries/<sha256>.gz` 按请求下载，解压后 SHA256 校验通过才进入不含 generation 的内容缓存，禁止预取其他架构或 subset
 - OSTree delta index、detached commit metadata 与 indexed-summary delta 必须严格识别编码路径并使用有限的成功响应缓存，不绑定 summary generation且不缓存缺失响应
@@ -72,6 +75,7 @@
 - 周期 poll 只选到期 root，以 instance/root 的稳定偏移在周期的 80%-100% 检查；失败 pending 不阻塞其他 root，零 freshness 不形成后台忙循环，任务执行预算与调度周期分离
 - `TriggerNow` 只唤醒内存调度状态；scheduler 的单一执行循环在 metadata refresh/GC 完成后持久化其调度时间，metadata 请求热路径不执行状态文件 fsync
 - response cleaner 及其游标由一个串行调度任务独占；任务事件通过 Result 和 Err 表达结果与完整错误上下文
+- 状态历史由 appStatus 直接持有有界环形缓冲；摘要只读取最后一次采样，事件查询只复制所请求的最近窗口，返回副本不共享可写缓冲
 - response、OCI 和 generation GC 按 inspected objects 计 batch，并通过内存游标继续
 - generation GC 保护 current、pending、active reader、grace-period candidate 和 `current.yaml` 精确提交且校验通过的 previous candidate，并回收无引用或损坏 candidate 与空状态目录
 - inactive current 或 pending root 通过 last-seen 与 generation GC 完整退役
@@ -92,6 +96,7 @@
 - 上游 read 请求必须移除 method override 与实体 header；非 read 重定向不得改变 origin、method 或 path
 - 所有外部 5xx 使用 `runtime.WriteError` 或 transport 等价入口
 - 下载与 metadata 捕获流式写入临时文件；已知 digest 的对象校验后发布
+- SpoolWithExpectedSize 成功时保证声明大小匹配且文件位于起始位置；调用者保留协议摘要校验，不重复大小验证或无消费情况下的 rewind
 - conditional validator 绑定原 upstream；`304` 与相同摘要 `200` 推进 freshness
 - 上游 body（包括 OCI token 响应）统一使用 transport 的单次阻塞读取超时，并由请求总期限限制完整传输时长
 - admission 按每次实际 HTTP transport 请求的 host 执行，包括重定向各 hop；真实 `429` 只影响实际响应 host

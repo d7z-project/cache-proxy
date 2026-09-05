@@ -30,6 +30,7 @@ const maxReleaseSize = 16 << 20
 
 const (
 	debArtifactTenant    = "deb-artifacts"
+	debIndexTenant       = "deb-indexes"
 	debArtifactFreshness = 24 * time.Hour
 )
 
@@ -43,6 +44,7 @@ type handler struct {
 	flights   storeio.FlightGroup
 	metadata  *filerepo.GenerationManager
 	artifacts artifactcache.Cache
+	store     *blobfs.Store
 }
 
 func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, client *transport.Client, stats *metrics.Stats, taskScheduler *scheduler.Scheduler) (*handler, error) {
@@ -51,7 +53,7 @@ func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, c
 		return nil, fmt.Errorf("parse debian upstream: %w", err)
 	}
 	spooler := client.EnsureSpooler(workDir)
-	h := &handler{name: name, origin: origin, spooler: spooler, client: client, stats: stats, lifecycle: storeio.NewLifecycle()}
+	h := &handler{name: name, origin: origin, spooler: spooler, client: client, stats: stats, lifecycle: storeio.NewLifecycle(), store: blobs}
 	h.artifacts = artifactcache.Cache{
 		Tenant:    debArtifactTenant,
 		Upstream:  origin.String(),
@@ -125,13 +127,32 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned string) (int, string) {
+	if cleaned == "" || strings.HasSuffix(cleaned, "/") ||
+		request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" {
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
+	}
+	if request.URL.RawQuery != "" {
+		if isArtifactPath(cleaned) {
+			return h.artifacts.Serve(w, request, cleaned)
+		}
+		return h.forwardUpstream(w, request, cleaned), "BYPASS"
+	}
+	if !isAnchorPath(cleaned) && path.Base(cleaned) != "Release.gpg" {
+		// Resolve committed metadata before looking up an on-demand index.
+		if handled, status, result := h.metadata.ServeCurrent(w, request, cleaned, false); handled {
+			return status, result
+		}
+		if status, result, handled := h.serveIndex(w, request, cleaned); handled {
+			return status, result
+		}
+	}
 	if handled, status, result := h.metadata.ServeCurrent(w, request, cleaned, isMetadataPath(cleaned)); handled {
 		return status, result
 	}
-	if isArtifactPath(cleaned) && request.Header.Get("Authorization") == "" && request.Header.Get("Cookie") == "" {
+	if isArtifactPath(cleaned) {
 		return h.artifacts.Serve(w, request, cleaned)
 	}
-	if request.Method != http.MethodGet || !isAnchorPath(cleaned) || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" || request.Header.Get("Range") != "" {
+	if request.Method != http.MethodGet || !isAnchorPath(cleaned) || request.Header.Get("Range") != "" {
 		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	root := path.Dir(cleaned)
@@ -246,44 +267,26 @@ func (h *handler) buildSnapshot(ctx context.Context, session *filerepo.RefreshSe
 		}
 		hasRelease = hasRelease || alternateName == "Release"
 	}
-	for _, entry := range manifest.Entries {
-		if entry.SHA256 == "" && entry.SHA512 == "" {
-			return fmt.Errorf("release entry %s has no strong digest", entry.Path)
-		}
-		canonical := joinRoot(anchor.Root, entry.Path)
-		fetchPath := canonical
-		fallbackFetchPath := ""
-		aliases := make([]string, 0, 2)
-		if manifest.AcquireByHash {
+	if !manifest.AcquireByHash {
+		for _, entry := range manifest.Entries {
+			canonical := joinRoot(anchor.Root, entry.Path)
+			expectedSize := entry.Size
+			checksums := make([]filerepo.Checksum, 0, 2)
+			aliases := make([]string, 0, 2)
 			if entry.SHA256 != "" {
-				fetchPath = releaseByHashPath(canonical, "SHA256", entry.SHA256)
-			} else {
-				fetchPath = releaseByHashPath(canonical, "SHA512", entry.SHA512)
+				checksums = append(checksums, filerepo.Checksum{Algorithm: "sha256", Digest: entry.SHA256})
+				aliases = append(aliases, releaseByHashPath(canonical, "SHA256", entry.SHA256))
 			}
-			fallbackFetchPath = canonical
-		}
-		expectedSize := entry.Size
-		checksums := make([]filerepo.Checksum, 0, 2)
-		if entry.SHA256 != "" {
-			checksums = append(checksums, filerepo.Checksum{Algorithm: "sha256", Digest: entry.SHA256})
-			aliases = append(aliases, releaseByHashPath(canonical, "SHA256", entry.SHA256))
-		}
-		if entry.SHA512 != "" {
-			checksums = append(checksums, filerepo.Checksum{Algorithm: "sha512", Digest: entry.SHA512})
-			aliases = append(aliases, releaseByHashPath(canonical, "SHA512", entry.SHA512))
-		}
-		blob, err := session.Fetch(ctx, filerepo.ObjectSpec{
-			Path: canonical, FetchPath: fetchPath, FallbackFetchPath: fallbackFetchPath, Aliases: aliases,
-			ExpectedSize: &expectedSize, Checksums: checksums, AllowUnavailable: true,
-		})
-		if err != nil {
-			return err
-		}
-		if manifest.AcquireByHash && blob != nil {
-			for _, alias := range aliases {
-				if err := session.RetainObject(alias); err != nil {
-					return err
-				}
+			if entry.SHA512 != "" {
+				checksums = append(checksums, filerepo.Checksum{Algorithm: "sha512", Digest: entry.SHA512})
+				aliases = append(aliases, releaseByHashPath(canonical, "SHA512", entry.SHA512))
+			}
+			_, err := session.Fetch(ctx, filerepo.ObjectSpec{
+				Path: canonical, Aliases: aliases,
+				ExpectedSize: &expectedSize, Checksums: checksums, AllowUnavailable: true,
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}

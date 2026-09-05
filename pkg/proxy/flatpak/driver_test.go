@@ -87,8 +87,11 @@ func TestFlatpakRootDirectoriesAndUnknownResourcesRemainTransparent(t *testing.T
 
 func TestDescriptorRewriteUsesTrustedExternalBase(t *testing.T) {
 	request := proxyruntime.WithExternalBaseURL(httptest.NewRequest(http.MethodGet, "/repo.flatpakrepo", nil), "https://proxy.example/flatpak")
-	rewritten := rewriteDescriptor(request, []byte("[Flatpak Repo]\nUrl=https://upstream.example/repo\n"))
-	require.Contains(t, string(rewritten), "Url=https://proxy.example/flatpak")
+	for _, ending := range []string{"\n", "\r\n", ""} {
+		input := "[Flatpak Repo]\nTitle=Repository\nUrl=https://upstream.example/repo" + ending
+		rewritten := rewriteDescriptor(request, []byte(input))
+		require.Equal(t, "[Flatpak Repo]\nTitle=Repository\nUrl=https://proxy.example/flatpak"+ending, string(rewritten))
+	}
 }
 
 func TestOSTreeDigestObjectIsVerifiedBeforeCacheHit(t *testing.T) {

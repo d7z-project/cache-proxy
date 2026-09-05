@@ -30,6 +30,34 @@ func newValidationManager(t *testing.T, fetch FetchFunc) *GenerationManager {
 	return h
 }
 
+func TestMetadataFetchPublishesOnlyExactDeclaredSize(t *testing.T) {
+	for _, body := range []string{"ab", "abc", "abcd"} {
+		t.Run(body, func(t *testing.T) {
+			h := newValidationManager(t, func(context.Context, string, http.Header) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), ContentLength: -1, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			h.config.Build = func(ctx context.Context, session *RefreshSession, _ Anchor) error {
+				expected := int64(3)
+				_, err := session.Fetch(ctx, ObjectSpec{Path: "repo/index", ExpectedSize: &expected})
+				return err
+			}
+			require.NoError(t, h.StageAnchor(context.Background(), "repo", "repo/Release", nil, strings.NewReader("new")))
+			_, err := h.Refresh(context.Background(), 1)
+			if len(body) != 3 {
+				require.Error(t, err)
+				require.Equal(t, digestString([]byte("old")), h.Current("repo").Generation)
+				return
+			}
+			require.NoError(t, err)
+			response := httptest.NewRecorder()
+			handled, code, _ := h.ServeCurrent(response, httptest.NewRequest(http.MethodGet, "/repo/index", nil), "repo/index", true)
+			require.True(t, handled)
+			require.Equal(t, http.StatusOK, code)
+			require.Equal(t, body, response.Body.String())
+		})
+	}
+}
+
 func TestGenerationStrictValidationPublishesBeforeServing(t *testing.T) {
 	var requests atomic.Int32
 	h := newValidationManager(t, func(context.Context, string, http.Header) (*http.Response, error) {

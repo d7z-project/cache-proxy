@@ -15,18 +15,14 @@ func rewriteDescriptor(req *http.Request, data []byte) []byte {
 		if !ok || key != "Url" {
 			continue
 		}
-		lines[i] = replaceINIValue(line, key, base)
+		switch {
+		case strings.HasSuffix(line, "\r\n"):
+			lines[i] = key + "=" + base + "\r\n"
+		case strings.HasSuffix(line, "\n"):
+			lines[i] = key + "=" + base + "\n"
+		default:
+			lines[i] = key + "=" + base
+		}
 	}
 	return []byte(strings.Join(lines, ""))
-}
-
-func replaceINIValue(line, key, value string) string {
-	switch {
-	case strings.HasSuffix(line, "\r\n"):
-		return key + "=" + value + "\r\n"
-	case strings.HasSuffix(line, "\n"):
-		return key + "=" + value + "\n"
-	default:
-		return key + "=" + value
-	}
 }

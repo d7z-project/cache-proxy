@@ -275,8 +275,19 @@ leaves committed metadata and independently cached packages intact. Debian
 publication keeps each snapshot coherent, but unversioned URLs do not provide
 snapshot isolation across separate client requests.
 
-First-time repository metadata requests stream from upstream while the cache is
-populated. Upstream `no-store` requires passthrough. Repository-tree modes preserve
+Debian repositories advertising `Acquire-By-Hash: yes` refresh only Release
+metadata and signatures. Indexes are downloaded on demand and verified against
+their declared size and strong checksums before serving; unrelated architectures,
+translations, and compression variants are not prefetched. Canonical index requests
+use the current Release's content identity, preferring SHA512 over SHA256. If an
+index's by-hash URL returns `403` or `404`, a uniquely identified canonical index
+can be used only after the same verification. Repositories without by-hash retain
+complete metadata snapshots. This selection is automatic for standard, nested,
+and flat layouts. Only downloaded indexes are available offline; a historical
+hash removed upstream cannot be recovered unless already cached.
+
+First-time repository anchor requests stream from upstream while the cache is
+populated. Upstream `no-store` responses are not retained. Repository-tree modes preserve
 root and directory requests and pass safe, unclassified same-origin resources
 through; Go and OCI retain their protocol endpoint boundaries.
 
@@ -297,8 +308,9 @@ requests by origin without including credentials or resource paths.
 
 ## Development
 
-Engineering and testing requirements are documented in [AGENTS.md](AGENTS.md).
+Architecture, engineering, and testing requirements are documented in [AGENTS.md](AGENTS.md).
 Protocol implementations live in `pkg/proxy/<mode>`.
+Changes to cache behavior should include protocol tests and the relevant native-client E2E case.
 
 ```bash
 make fmt
@@ -310,6 +322,9 @@ make test-fuzz
 
 Run `make tidy` after dependency changes and `make cache-proxy` for a static build.
 
+Measure status-history read allocations with
+`go test ./pkg/app -run '^$' -bench '^BenchmarkStatusHistoryReads$' -benchmem`.
+
 End-to-end tests require Docker or Podman on native Linux. Proxy, fixture, probes,
 and package clients run in host-network containers.
 
@@ -320,7 +335,8 @@ E2E_RUNTIME=podman E2E_SUITE=deb make test-e2e
 
 `E2E_SUITE` accepts any supported mode; omitting it runs every mode. Cases cover
 cold downloads, warm reuse, upstream updates, and persistent-cache offline restart.
-Debian standard and flat repositories are tested separately.
+Debian standard and flat repositories are tested separately, each with and without
+by-hash support, including unused-index request counters.
 
 ## License
 

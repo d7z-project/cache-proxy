@@ -249,7 +249,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.Method == http.MethodGet && req.URL.Path == "/" {
-		a.serveHome(w, req)
+		a.serveHome(w, req, sortedEntries(a.entries), false)
 		return
 	}
 	if strings.HasPrefix(req.URL.Path, statusAPIPath) {
@@ -459,7 +459,7 @@ type bindHomeHandler struct {
 
 func (h bindHomeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if (req.Method == http.MethodGet || req.Method == http.MethodHead) && req.URL.Path == "/" {
-		h.app.serveBindHome(w, req, h.entry)
+		h.app.serveHome(w, req, []*proxyruntime.Entry{h.entry}, true)
 		return
 	}
 	h.next.ServeHTTP(w, req)

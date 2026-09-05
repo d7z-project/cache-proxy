@@ -268,7 +268,13 @@ func (h *handler) rewriteSimpleJSON(source io.Reader, destination io.Writer, pro
 			}
 			var hashes map[string]string
 			_ = json.Unmarshal(file["hashes"], &hashes)
-			algorithm, digest := strongestPyPIHash(hashes)
+			var algorithm, digest string
+			for _, candidate := range []string{"sha512", "sha256"} {
+				if value := hashes[candidate]; value != "" {
+					algorithm, digest = candidate, value
+					break
+				}
+			}
 			rewritten, err := h.authorizeFile(target, project, filename, algorithm, digest, externalBase, scope)
 			if err != nil {
 				return err
@@ -477,15 +483,6 @@ func verifyPyPIFile(reader io.ReadSeeker, authorization fileAuthorization) error
 		return errors.New("pypi file hash mismatch")
 	}
 	return nil
-}
-
-func strongestPyPIHash(hashes map[string]string) (string, string) {
-	for _, algorithm := range []string{"sha512", "sha256"} {
-		if digest := hashes[algorithm]; digest != "" {
-			return algorithm, digest
-		}
-	}
-	return "", ""
 }
 
 func hashFromFragment(fragment string) (string, string) {

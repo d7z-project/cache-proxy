@@ -28,6 +28,10 @@ e2e_run_deb_repository() {
   '
   e2e_client "deb-$layout" cold "$E2E_DEBIAN_IMAGE" "$script" "$E2E_PROXY_URL" "$source" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL$anchor"
+  if [[ $layout == *-by-hash ]]; then
+    e2e_assert_count_unchanged GET "$metadata_path" 0 "Debian $layout fetched a canonical index despite an available by-hash object"
+    e2e_assert_count_unchanged GET "$unavailable_path" 1 "Debian $layout prefetched an unused index"
+  fi
   e2e_wait_cache_hit "$E2E_PROXY_URL$metadata_path"
   e2e_assert_bypass_status "deb-$layout-unavailable" "$E2E_PROXY_URL$unavailable_path" 404
   e2e_clear_fixture_fault "$unavailable_path"
@@ -64,10 +68,16 @@ e2e_run_deb_repository() {
 e2e_run_deb() {
   e2e_reset_fixture
   e2e_assert_transparent_paths deb /deb /deb bypass
-  e2e_run_deb_repository standard "deb [arch=amd64 trusted=yes] $E2E_PROXY_URL/deb stable main" \
+  e2e_run_deb_repository standard-by-hash "deb [arch=amd64 trusted=yes] $E2E_PROXY_URL/deb stable main" \
     /deb/dists/stable/InRelease /deb/pool/main/e/e2e-deb/e2e-deb_1.0.0+e2e1_all.deb \
     /deb/dists/stable/main/binary-amd64/Packages.gz /deb/dists/stable/main/binary-arm64/Packages.gz
-  e2e_run_deb_repository flat "deb [arch=amd64 trusted=yes] $E2E_PROXY_URL/deb/flat ./" \
+  e2e_run_deb_repository flat-by-hash "deb [arch=amd64 trusted=yes] $E2E_PROXY_URL/deb/flat ./" \
     /deb/flat/InRelease /deb/flat/e2e-deb_1.0.0+e2e1_all.deb \
     /deb/flat/Packages.gz /deb/flat/Contents-all.gz
+  e2e_run_deb_repository standard-canonical "deb [arch=amd64 trusted=yes] $E2E_PROXY_URL/deb/canonical stable main" \
+    /deb/canonical/dists/stable/InRelease /deb/canonical/pool/main/e/e2e-deb/e2e-deb_1.0.0+e2e1_all.deb \
+    /deb/canonical/dists/stable/main/binary-amd64/Packages.gz /deb/canonical/dists/stable/main/binary-arm64/Packages.gz
+  e2e_run_deb_repository flat-canonical "deb [arch=amd64 trusted=yes] $E2E_PROXY_URL/deb/canonical/flat ./" \
+    /deb/canonical/flat/InRelease /deb/canonical/flat/e2e-deb_1.0.0+e2e1_all.deb \
+    /deb/canonical/flat/Packages.gz /deb/canonical/flat/Contents-all.gz
 }

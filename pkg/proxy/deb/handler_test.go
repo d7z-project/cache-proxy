@@ -276,6 +276,10 @@ func TestDebianRetainsPreviousAcquireByHashObject(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := h.metadata.Refresh(context.Background(), 1)
 	require.NoError(t, err)
+	require.Zero(t, oldObjectRequests.Load())
+	warm := httptest.NewRecorder()
+	h.ServeHTTP(warm, httptest.NewRequest(http.MethodGet, byHashPaths[0], nil))
+	require.Equal(t, http.StatusOK, warm.Code)
 	require.Equal(t, int32(1), oldObjectRequests.Load())
 	revision.Store(2)
 	more, err := h.metadata.Refresh(context.Background(), 1)
@@ -431,11 +435,13 @@ func TestDebianUnavailableArchitectureDoesNotBlockGeneration(t *testing.T) {
 			require.NoError(t, err)
 			current := handler.metadata.Current("dists/trixie")
 			require.NotNil(t, current)
+			require.Zero(t, armRequests.Load())
+			require.Zero(t, armByHashRequests.Load())
 
 			amd64Response := httptest.NewRecorder()
 			handler.ServeHTTP(amd64Response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/binary-amd64/Packages.gz", nil))
 			require.Equal(t, http.StatusOK, amd64Response.Code)
-			require.Equal(t, "HIT", amd64Response.Header().Get("X-Cache"))
+			require.Equal(t, "MISS", amd64Response.Header().Get("X-Cache"))
 			require.Equal(t, amd64Packages, amd64Response.Body.Bytes())
 
 			arm64Path := "/dists/trixie/main/binary-arm64/Packages.gz"
@@ -446,15 +452,15 @@ func TestDebianUnavailableArchitectureDoesNotBlockGeneration(t *testing.T) {
 			require.Empty(t, unavailable.Header().Get("Retry-After"))
 
 			armStatus.Store(http.StatusOK)
-			for range 2 {
+			for _, result := range []string{"MISS", "HIT"} {
 				available := httptest.NewRecorder()
 				handler.ServeHTTP(available, httptest.NewRequest(http.MethodGet, arm64Path, nil))
 				require.Equal(t, http.StatusOK, available.Code)
-				require.Equal(t, "BYPASS", available.Header().Get("X-Cache"))
+				require.Equal(t, result, available.Header().Get("X-Cache"))
 				require.Equal(t, arm64Packages, available.Body.Bytes())
 			}
-			require.Equal(t, int32(4), armRequests.Load())
-			require.Equal(t, int32(1), armByHashRequests.Load())
+			require.Equal(t, int32(2), armRequests.Load())
+			require.Equal(t, int32(2), armByHashRequests.Load())
 		})
 	}
 }
@@ -689,8 +695,8 @@ func TestDebianByHashFallsBackToVerifiedCanonicalIndex(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), byHashRequests.Load())
-	require.Equal(t, int32(1), canonicalRequests.Load())
+	require.Zero(t, byHashRequests.Load())
+	require.Zero(t, canonicalRequests.Load())
 
 	for _, requestPath := range []string{"/dists/trixie/main/Packages", byHashPath} {
 		response := httptest.NewRecorder()
@@ -698,6 +704,8 @@ func TestDebianByHashFallsBackToVerifiedCanonicalIndex(t *testing.T) {
 		require.Equal(t, http.StatusOK, response.Code)
 		require.Equal(t, packages, response.Body.Bytes())
 	}
+	require.Equal(t, int32(1), byHashRequests.Load())
+	require.Equal(t, int32(1), canonicalRequests.Load())
 }
 
 func TestDebianByHashCanonicalFallbackMustMatchRelease(t *testing.T) {
@@ -718,8 +726,11 @@ func TestDebianByHashCanonicalFallbackMustMatchRelease(t *testing.T) {
 	handler := newDebianTestHandler(t, server.URL)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dists/trixie/InRelease", nil))
 	_, err := handler.metadata.Refresh(context.Background(), 10)
-	require.Error(t, err)
-	require.Nil(t, handler.metadata.Current("dists/trixie"))
+	require.NoError(t, err)
+	require.NotNil(t, handler.metadata.Current("dists/trixie"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/dists/trixie/main/Packages", nil))
+	require.Equal(t, http.StatusBadGateway, response.Code)
 }
 
 func TestDebianSHA512MismatchDoesNotPublish(t *testing.T) {

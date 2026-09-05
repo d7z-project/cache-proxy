@@ -41,15 +41,10 @@ type taskEvent struct {
 }
 
 type appStatus struct {
-	store *statusStore
-
 	diskSampleInterval time.Duration
 	diskHistoryWindow  time.Duration
-	eventLimit         int
 	wg                 sync.WaitGroup
-}
 
-type statusStore struct {
 	diskMu     sync.RWMutex
 	disk       []diskSample
 	diskNext   int
@@ -69,13 +64,10 @@ func newAppStatus(cfg config.ServerStatusConfig) *appStatus {
 		diskCapacity = 1
 	}
 	return &appStatus{
-		store: &statusStore{
-			disk:   make([]diskSample, diskCapacity),
-			events: make([]taskEvent, cfg.EventLimit),
-		},
+		disk:               make([]diskSample, diskCapacity),
+		events:             make([]taskEvent, cfg.EventLimit),
 		diskSampleInterval: diskInterval,
 		diskHistoryWindow:  diskWindow,
-		eventLimit:         cfg.EventLimit,
 	}
 }
 
@@ -122,16 +114,16 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 }
 
 func (s *appStatus) appendEvent(event taskEvent) {
-	if len(s.store.events) == 0 {
+	if len(s.events) == 0 {
 		return
 	}
-	s.store.eventMu.Lock()
-	s.store.events[s.store.eventNext] = event
-	s.store.eventNext = (s.store.eventNext + 1) % len(s.store.events)
-	if s.store.eventNext == 0 {
-		s.store.eventFilled = true
+	s.eventMu.Lock()
+	s.events[s.eventNext] = event
+	s.eventNext = (s.eventNext + 1) % len(s.events)
+	if s.eventNext == 0 {
+		s.eventFilled = true
 	}
-	s.store.eventMu.Unlock()
+	s.eventMu.Unlock()
 }
 
 func (s *appStatus) summary(app *App) statusSummary {
@@ -139,11 +131,17 @@ func (s *appStatus) summary(app *App) statusSummary {
 		Healthy:            true,
 		DiskSampleInterval: int64(s.diskSampleInterval / time.Second),
 		DiskHistoryWindow:  int64(s.diskHistoryWindow / time.Second),
-		EventLimit:         s.eventLimit,
+		EventLimit:         len(s.events),
 	}
-	if samples := s.diskSamples(); len(samples) > 0 {
-		summary.LastSampleAt = samples[len(samples)-1].At
+	s.diskMu.RLock()
+	if s.diskFilled || s.diskNext > 0 {
+		last := s.diskNext - 1
+		if last < 0 {
+			last = len(s.disk) - 1
+		}
+		summary.LastSampleAt = s.disk[last].At
 	}
+	s.diskMu.RUnlock()
 	if len(app.stores) == 0 {
 		return summary
 	}
@@ -164,22 +162,15 @@ func (s *appStatus) summary(app *App) statusSummary {
 }
 
 func (s *appStatus) diskSamples() []diskSample {
-	s.store.diskMu.RLock()
-	defer s.store.diskMu.RUnlock()
-	return ringSnapshot(s.store.disk, s.store.diskNext, s.store.diskFilled)
+	s.diskMu.RLock()
+	defer s.diskMu.RUnlock()
+	return ringSnapshot(s.disk, s.diskNext, s.diskFilled, 0)
 }
 
 func (s *appStatus) taskEvents(limit int) []taskEvent {
-	if limit <= 0 || limit > s.eventLimit {
-		limit = s.eventLimit
-	}
-	s.store.eventMu.RLock()
-	defer s.store.eventMu.RUnlock()
-	all := ringSnapshot(s.store.events, s.store.eventNext, s.store.eventFilled)
-	if len(all) > limit {
-		all = all[len(all)-limit:]
-	}
-	return all
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	return ringSnapshot(s.events, s.eventNext, s.eventFilled, limit)
 }
 
 func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
@@ -195,28 +186,37 @@ func (s *appStatus) recordDiskUsage(ctx context.Context, app *App) {
 			total += stats.Bytes.LogicalObjectBytes
 		}
 	}
-	s.store.diskMu.Lock()
-	s.store.disk[s.store.diskNext] = diskSample{
+	s.diskMu.Lock()
+	s.disk[s.diskNext] = diskSample{
 		At:         time.Now().Format(time.RFC3339),
 		TotalBytes: total,
 	}
-	s.store.diskNext = (s.store.diskNext + 1) % len(s.store.disk)
-	if s.store.diskNext == 0 {
-		s.store.diskFilled = true
+	s.diskNext = (s.diskNext + 1) % len(s.disk)
+	if s.diskNext == 0 {
+		s.diskFilled = true
 	}
-	s.store.diskMu.Unlock()
+	s.diskMu.Unlock()
 }
 
-func ringSnapshot[T any](items []T, next int, filled bool) []T {
-	if len(items) == 0 {
+func ringSnapshot[T any](items []T, next int, filled bool, limit int) []T {
+	count := len(items)
+	if !filled {
+		count = next
+	}
+	if limit > 0 {
+		count = min(count, limit)
+	}
+	if count == 0 {
 		return nil
 	}
-	if !filled {
-		return append([]T(nil), items[:next]...)
+	start := next - count
+	if start < 0 {
+		start += len(items)
 	}
-	snapshot := make([]T, 0, len(items))
-	snapshot = append(snapshot, items[next:]...)
-	return append(snapshot, items[:next]...)
+	first := min(count, len(items)-start)
+	snapshot := make([]T, 0, count)
+	snapshot = append(snapshot, items[start:start+first]...)
+	return append(snapshot, items[:count-first]...)
 }
 
 func (a *App) serveStatus(w http.ResponseWriter, req *http.Request) {

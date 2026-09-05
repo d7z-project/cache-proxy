@@ -31,13 +31,6 @@ func (h *handler) authorizationForChallenge(ctx context.Context, challenge ociCh
 	}
 }
 
-func (h *handler) staticAuthorization() string {
-	if h.options.Auth == nil || strings.ToLower(h.options.Auth.Type) != "bearer" || h.options.Auth.Token == "" {
-		return ""
-	}
-	return "Bearer " + h.options.Auth.Token
-}
-
 func (h *handler) basicAuthorization() string {
 	if h.options.Auth == nil || strings.ToLower(h.options.Auth.Type) != "basic" {
 		return ""

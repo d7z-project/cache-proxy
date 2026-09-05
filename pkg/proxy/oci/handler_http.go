@@ -37,8 +37,8 @@ func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method
 			request.Header.Set(key, value)
 		}
 		request.Header.Set("User-Agent", userAgent)
-		if authorization == "" {
-			authorization = h.staticAuthorization()
+		if auth := h.options.Auth; authorization == "" && auth != nil && strings.ToLower(auth.Type) == "bearer" && auth.Token != "" {
+			authorization = "Bearer " + auth.Token
 		}
 		if authorization != "" {
 			request.Header.Set("Authorization", authorization)

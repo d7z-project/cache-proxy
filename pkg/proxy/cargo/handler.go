@@ -88,7 +88,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		h.serveConfig(w, request)
 		return
 	}
-	if isCargoGitReadRequest(cleaned, request) || !isSparseIndexPath(cleaned) {
+	crateName := strings.ToLower(path.Base(cleaned))
+	if isCargoGitReadRequest(cleaned, request) || crateName == "" || cratePrefix(crateName)+"/"+crateName != cleaned {
 		h.forwardUpstream(w, request, cleaned)
 		return
 	}
@@ -213,7 +214,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 	authRequired := false
 	_ = json.Unmarshal(configDocument["auth-required"], &authRequired)
 	state := registryState{Download: download, AuthRequired: authRequired}
-	if err := storeio.WriteJSON(h.stateDir, stateName(scope), state); err != nil {
+	if err := storeio.WriteJSON(h.stateDir, registryStateName(scope), state); err != nil {
 		h.writeSpooled(w, response.Header, spool.File, "BYPASS")
 		return
 	}
@@ -521,11 +522,6 @@ func parseSparseIndex(reader io.Reader, cleaned string) (crateState, error) {
 		return crateState{}, errors.New("empty cargo sparse index")
 	}
 	return state, nil
-}
-
-func isSparseIndexPath(cleaned string) bool {
-	name := strings.ToLower(path.Base(cleaned))
-	return name != "" && cratePrefix(name)+"/"+name == cleaned
 }
 
 func isCargoGitReadRequest(cleaned string, request *http.Request) bool {
