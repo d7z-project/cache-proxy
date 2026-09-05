@@ -16,17 +16,13 @@ func ForwardRead(ctx context.Context, client *Client, origin *url.URL, writer ht
 	if err != nil {
 		return 0, err
 	}
-	return forwardReadTarget(ctx, client, target, writer, inbound, inbound.Header)
+	return ForwardReadTarget(ctx, client, target, writer, inbound, inbound.Header)
 }
 
 // ForwardReadTarget proxies a read request to an already protocol-authorized target.
 // Callers provide the exact safe upstream headers so local authorization
 // tokens are not accidentally disclosed to a signed cross-origin URL.
 func ForwardReadTarget(ctx context.Context, client *Client, target *url.URL, writer http.ResponseWriter, inbound *http.Request, header http.Header) (int, error) {
-	return forwardReadTarget(ctx, client, target, writer, inbound, header)
-}
-
-func forwardReadTarget(ctx context.Context, client *Client, target *url.URL, writer http.ResponseWriter, inbound *http.Request, header http.Header) (int, error) {
 	if !proxyruntime.RequireReadMethod(writer, inbound.Method) {
 		return http.StatusMethodNotAllowed, nil
 	}

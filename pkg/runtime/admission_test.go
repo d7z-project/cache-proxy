@@ -3,11 +3,104 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestAdmissionRetiresIdleHostsWithoutObservation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := testUpstreamGate(UpstreamGateConfig{MaxActive: 1})
+		for i := range 100 {
+			release, err := gate.Acquire(context.Background(), fmt.Sprintf("https://cdn%d.example/file", i), AdmissionForeground)
+			require.NoError(t, err)
+			release()
+		}
+		gate.mu.Lock()
+		require.Empty(t, gate.hosts)
+		gate.mu.Unlock()
+		release, err := gate.Acquire(context.Background(), "https://active.example", AdmissionForeground)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		waiting := acquireAsync(ctx, gate, "https://queued.example", AdmissionForeground)
+		synctest.Wait()
+		cancel()
+		require.ErrorIs(t, (<-waiting).err, context.Canceled)
+		release()
+		gate.mu.Lock()
+		require.Empty(t, gate.hosts)
+		gate.mu.Unlock()
+	})
+}
+
+func TestAdmissionRetainsPacingAndCooldownUntilExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := testUpstreamGate(UpstreamGateConfig{MinInterval: time.Second, Hosts: map[string]UpstreamHostGateConfig{"configured.example": {}}})
+		release, err := gate.Acquire(context.Background(), "https://dynamic.example", AdmissionForeground)
+		require.NoError(t, err)
+		release()
+		gate.mu.Lock()
+		require.Contains(t, gate.hosts, "dynamic.example")
+		gate.mu.Unlock()
+		gate.Snapshot()
+		gate.mu.Lock()
+		require.Contains(t, gate.hosts, "dynamic.example")
+		gate.mu.Unlock()
+		waiting := acquireAsync(context.Background(), gate, "https://dynamic.example", AdmissionForeground)
+		synctest.Wait()
+		select {
+		case <-waiting:
+			t.Fatal("minimum interval was lost")
+		default:
+		}
+		time.Sleep(time.Second)
+		result := <-waiting
+		require.NoError(t, result.err)
+		gate.RateLimited("https://dynamic.example", "2")
+		result.release()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		gate.mu.Lock()
+		require.Contains(t, gate.hosts, "dynamic.example")
+		gate.mu.Unlock()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		gate.mu.Lock()
+		require.NotContains(t, gate.hosts, "dynamic.example")
+		gate.mu.Unlock()
+		gate.mu.Lock()
+		require.Contains(t, gate.hosts, "configured.example")
+		gate.mu.Unlock()
+	})
+}
+
+func TestAdmissionBoundsDynamicHostState(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := testUpstreamGate(UpstreamGateConfig{})
+		for i := range maxDynamicAdmissionHosts {
+			gate.hosts[fmt.Sprintf("cdn%d.example", i)] = &upstreamHostGate{maxActive: 1, cooldownUntil: time.Now().Add(time.Second)}
+		}
+		_, err := gate.Acquire(context.Background(), "https://new.example", AdmissionForeground)
+		require.ErrorIs(t, err, ErrAdmissionOverloaded)
+		gate.mu.Lock()
+		require.Len(t, gate.hosts, maxDynamicAdmissionHosts)
+		gate.mu.Unlock()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		gate.mu.Lock()
+		require.Empty(t, gate.hosts)
+		gate.mu.Unlock()
+		release, err := gate.Acquire(context.Background(), "https://new.example", AdmissionForeground)
+		require.NoError(t, err)
+		release()
+		gate.mu.Lock()
+		require.Empty(t, gate.hosts)
+		gate.mu.Unlock()
+	})
+}
 
 func testUpstreamGate(cfg UpstreamGateConfig) *UpstreamGate {
 	if cfg.MaxActive == 0 {

@@ -24,6 +24,8 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
+const objectTenant = "objects"
+
 type handlerConfig struct {
 	name        string
 	upstream    string
@@ -90,8 +92,8 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	}
 
 	key := cacheKey(h.origin, cleaned, request)
-	if cached, err := openStored(request.Context(), h.store, key); err == nil {
-		fresh := policy == "immutable" || responseFresh(cached.headers, cached.fetched)
+	if cached, err := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); err == nil {
+		fresh := policy == "immutable" || responseFresh(cached.Header, cached.Fetched)
 		if transport.RequestForcesRevalidation(request) {
 			fresh = false
 		}
@@ -120,9 +122,9 @@ func (h *handler) policy(cleaned string) string {
 	return selected
 }
 
-func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, cleaned, key string, cached *storedResponse) (int, string, bool) {
-	defer func() { _ = cached.reader.Close() }()
-	origin, err := url.Parse(cached.origin)
+func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, cleaned, key string, cached *storeio.ResponseObject) (int, string, bool) {
+	defer func() { _ = cached.Reader.Close() }()
+	origin, err := url.Parse(cached.Origin)
 	if err != nil {
 		return 0, "", false
 	}
@@ -135,7 +137,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 		if err := h.flights.Wait(request.Context(), flight); err != nil && request.Context().Err() != nil {
 			return localError(w, http.StatusGatewayTimeout), "ERROR", true
 		}
-		if updated, openErr := openStored(request.Context(), h.store, key); openErr == nil {
+		if updated, openErr := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); openErr == nil {
 			return serveStored(w, request, updated, "COALESCED"), "COALESCED", true
 		}
 		return serveStored(w, request, cached, "STALE"), "STALE", true
@@ -147,10 +149,10 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 	}
 	h.copyRequestHeaders(upstreamRequest.Header, request.Header)
 	transport.SanitizeReadRequestHeaders(upstreamRequest.Header)
-	if etag := cached.headers.Get("ETag"); etag != "" {
+	if etag := cached.Header.Get("ETag"); etag != "" {
 		upstreamRequest.Header.Set("If-None-Match", etag)
 	}
-	if modified := cached.headers.Get("Last-Modified"); modified != "" {
+	if modified := cached.Header.Get("Last-Modified"); modified != "" {
 		upstreamRequest.Header.Set("If-Modified-Since", modified)
 	}
 	response, err := h.client.DoRead(h.lifecycle.Context(), upstreamRequest, transport.AdmissionForeground)
@@ -164,7 +166,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 		if err := storeio.TouchResponse(h.lifecycle.Context(), h.store, objectTenant, key, response.Header); err == nil {
 			for _, name := range []string{"Cache-Control", "Expires", "ETag", "Last-Modified", "Vary"} {
 				if values := response.Header.Values(name); len(values) > 0 {
-					cached.headers[name] = append([]string(nil), values...)
+					cached.Header[name] = append([]string(nil), values...)
 				}
 			}
 		}
@@ -178,7 +180,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 		status := serveStored(w, request, cached, "STALE")
 		return status, "STALE", true
 	}
-	_ = cached.reader.Close()
+	_ = cached.Reader.Close()
 	if response.StatusCode != http.StatusOK || !cacheable(request, response) {
 		h.flights.Finish(key, flight, nil)
 		status := transport.WriteResponse(w, request, response, "BYPASS")
@@ -196,13 +198,13 @@ func (h *handler) fill(w http.ResponseWriter, request *http.Request, cleaned str
 			return localError(w, http.StatusGatewayTimeout), "ERROR"
 		}
 		if waitErr == nil {
-			if cached, err := openStored(request.Context(), h.store, key); err == nil {
+			if cached, err := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); err == nil {
 				return serveStored(w, request, cached, "COALESCED"), "COALESCED"
 			}
 		}
 		return localError(w, http.StatusBadGateway), "ERROR"
 	}
-	if cached, err := openStored(request.Context(), h.store, key); err == nil {
+	if cached, err := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); err == nil {
 		h.flights.Finish(key, flight, nil)
 		return serveStored(w, request, cached, "HIT"), "HIT"
 	}
@@ -347,14 +349,14 @@ func cacheable(request *http.Request, response *http.Response) bool {
 		transport.ResponseCacheable(response, false)
 }
 
-func serveStored(w http.ResponseWriter, request *http.Request, cached *storedResponse, cacheResult string) int {
-	defer func() { _ = cached.reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), cached.headers)
+func serveStored(w http.ResponseWriter, request *http.Request, cached *storeio.ResponseObject, cacheResult string) int {
+	defer func() { _ = cached.Reader.Close() }()
+	transport.CopyEndToEndHeaders(w.Header(), cached.Header)
 	w.Header().Set("X-Cache", cacheResult)
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(request.URL.Path)))
 	}
-	http.ServeContent(w, request, "", cached.fetched, cached.reader)
+	http.ServeContent(w, request, "", cached.Fetched, cached.Reader)
 	return http.StatusOK
 }
 

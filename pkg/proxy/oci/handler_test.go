@@ -862,6 +862,37 @@ func TestOCIConcurrentManifestMissPublishesOneConsistentWriter(t *testing.T) {
 	require.Equal(t, bodyA, cached.Body.String())
 }
 
+func TestOCICleanupRepeatedCyclesPreserveFreshRefs(t *testing.T) {
+	for _, retention := range []config.Expiration{config.Expiration(time.Hour), config.ExpirationNever} {
+		t.Run(fmt.Sprint(retention), func(t *testing.T) {
+			store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			h := newHandler("oci", Block{Upstream: "https://registry.example"}, retention, store, nil, nil)
+			t.Cleanup(func() { require.NoError(t, h.Stop(context.Background())) })
+			for i := range 3 {
+				require.NoError(t, h.writeState(context.Background(), refState{
+					Repo: "demo", Ref: fmt.Sprint(i), FetchedAt: time.Now(), ExpireAfter: retention, ManifestDigest: sha256Digest("manifest"),
+				}))
+			}
+			for range 3 {
+				for batch := 0; ; batch++ {
+					require.Less(t, batch, 20)
+					more, err := h.Cleanup(context.Background(), config.CleanupConfig{BatchSize: 1})
+					require.NoError(t, err)
+					if !more {
+						break
+					}
+				}
+				for i := range 3 {
+					_, err := h.readState(context.Background(), h.refStatePath("demo", fmt.Sprint(i)))
+					require.NoError(t, err)
+				}
+			}
+		})
+	}
+}
+
 func TestOCICleanupSkipsActiveRef(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())

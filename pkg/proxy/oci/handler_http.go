@@ -52,7 +52,7 @@ func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method
 			return nil, err
 		}
 		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
-		counted := &countingReadCloser{ReadCloser: newMinimumRateReadCloser(h.client.WrapBody(response.Body))}
+		counted := &countingReadCloser{ReadCloser: h.client.WrapBody(response.Body)}
 		status := response.StatusCode
 		response.Body = &closeCallbackBody{ReadCloser: counted, done: func() {
 			releaseStats()

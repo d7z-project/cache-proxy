@@ -138,6 +138,7 @@ func FuzzParallelStreams(f *testing.F) {
 	f.Add([]byte("payload"), uint8(8), uint8(1), uint64(0x55), uint16(1))
 	f.Add([]byte("payload"), uint8(4), uint8(2), uint64(0x0a), uint16(2))
 	f.Add([]byte{}, uint8(2), uint8(3), uint64(0), uint16(1))
+	f.Add([]byte("fallback"), uint8(8), uint8(2), uint64(0xffff), uint16(1))
 	f.Fuzz(func(t *testing.T, input []byte, workerInput, expectedInput uint8, earlyCloseMask uint64, chunkInput uint16) {
 		if len(input) > 32<<10 {
 			t.Skip()
@@ -174,6 +175,7 @@ func FuzzParallelStreams(f *testing.F) {
 		clients := make(chan clientResult, workerCount)
 		done := make([]chan error, workerCount)
 		stored := make([]atomic.Bool, workerCount)
+		upstreams := make([]*chunkedReadCloser, workerCount)
 		for i := range workerCount {
 			index := i
 			done[i] = make(chan error, 1)
@@ -181,8 +183,9 @@ func FuzzParallelStreams(f *testing.F) {
 			if expectedMode != 0 {
 				declaredSize = &expectedSize
 			}
+			upstreams[i] = &chunkedReadCloser{reader: bytes.NewReader(body), chunkSize: chunkSize}
 			reader, err := StartStream(context.Background(), StreamConfig{
-				Body:         &chunkedReadCloser{reader: bytes.NewReader(body), chunkSize: chunkSize},
+				Body:         upstreams[i],
 				ObjectPath:   fmt.Sprintf("object-%d", i),
 				Spooler:      spooler,
 				Lifecycle:    lifecycle,
@@ -204,7 +207,10 @@ func FuzzParallelStreams(f *testing.F) {
 			go func(index int, reader io.ReadCloser) {
 				if earlyCloseMask&(uint64(1)<<index) != 0 {
 					buffer := make([]byte, min(chunkSize, max(len(body), 1)))
-					_, readErr := reader.Read(buffer)
+					var readErr error
+					if earlyCloseMask&(uint64(1)<<(index+8)) == 0 {
+						_, readErr = reader.Read(buffer)
+					}
 					if errors.Is(readErr, io.EOF) {
 						readErr = nil
 					}
@@ -237,6 +243,9 @@ func FuzzParallelStreams(f *testing.F) {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		require.NoError(t, lifecycle.Close(closeCtx))
+		for _, upstream := range upstreams {
+			require.EqualValues(t, 1, upstream.closed.Load())
+		}
 		used, limit := budget.Usage()
 		require.Zero(t, used)
 		require.Equal(t, maxObjectSize*int64(workerCount), limit)
@@ -318,6 +327,7 @@ func FuzzLifecycleParallelClose(f *testing.F) {
 type chunkedReadCloser struct {
 	reader    *bytes.Reader
 	chunkSize int
+	closed    atomic.Int32
 }
 
 func (r *chunkedReadCloser) Read(buffer []byte) (int, error) {
@@ -329,4 +339,4 @@ func (r *chunkedReadCloser) Read(buffer []byte) (int, error) {
 	return n, err
 }
 
-func (*chunkedReadCloser) Close() error { return nil }
+func (r *chunkedReadCloser) Close() error { r.closed.Add(1); return nil }

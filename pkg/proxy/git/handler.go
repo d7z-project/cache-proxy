@@ -1,13 +1,16 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -26,9 +29,13 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
+const maxUploadPackRequestBytes = 16 << 20
+
+var errMirrorBusy = errors.New("git mirror is busy")
+
 type gitConfig struct {
 	name             string
-	billyFs          billy.Filesystem
+	repositoryFS     billy.Filesystem
 	upstream         string
 	auth             transport.AuthMethod
 	proxyURL         string
@@ -42,14 +49,13 @@ type gitHandler struct {
 	auth             transport.AuthMethod
 	proxyURL         string
 	operationTimeout time.Duration
-	billyFs          billy.Filesystem
+	repositoryFS     billy.Filesystem
 	bootstrapClient  *http.Client
 	upstreamGate     *proxytransport.UpstreamGate
 
 	repositoryMu sync.RWMutex
 	repository   *gitlib.Repository
 	server       transport.Transport
-	syncing      bool
 	lastError    string
 	lifecycle    *storeio.Lifecycle
 }
@@ -73,13 +79,13 @@ func newGitHandler(cfg gitConfig) *gitHandler {
 	proxytransport.ConfigureAdmission(bootstrapClient, cfg.upstreamGate)
 	return &gitHandler{
 		name: cfg.name, upstream: cfg.upstream, auth: cfg.auth, proxyURL: cfg.proxyURL,
-		operationTimeout: cfg.operationTimeout, billyFs: cfg.billyFs,
+		operationTimeout: cfg.operationTimeout, repositoryFS: cfg.repositoryFS,
 		bootstrapClient: bootstrapClient, upstreamGate: cfg.upstreamGate, lifecycle: storeio.NewLifecycle(),
 	}
 }
 
 func (h *gitHandler) Start(context.Context) error {
-	storage := filesystem.NewStorage(h.billyFs, cache.NewObjectLRUDefault())
+	storage := filesystem.NewStorage(h.repositoryFS, cache.NewObjectLRUDefault())
 	repository, err := gitlib.Open(storage, nil)
 	if err != nil {
 		return nil
@@ -109,10 +115,13 @@ func (h *gitHandler) Sync(ctx context.Context) error {
 }
 
 func (h *gitHandler) syncRepository(ctx context.Context) error {
-	h.repositoryMu.Lock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !h.repositoryMu.TryLock() {
+		return errMirrorBusy
+	}
 	defer h.repositoryMu.Unlock()
-	h.syncing = true
-	defer func() { h.syncing = false }()
 
 	releaseAdmission, err := h.upstreamGate.Acquire(ctx, h.upstream, proxytransport.AdmissionRefresh)
 	if err != nil {
@@ -124,10 +133,10 @@ func (h *gitHandler) syncRepository(ctx context.Context) error {
 		if err := h.clearRepository(); err != nil {
 			return err
 		}
-		storage := filesystem.NewStorage(h.billyFs, cache.NewObjectLRUDefault())
+		storage := filesystem.NewStorage(h.repositoryFS, cache.NewObjectLRUDefault())
 		options := &gitlib.CloneOptions{URL: h.upstream, Auth: h.auth, Tags: gitlib.AllTags}
 		if h.proxyURL != "" {
-			options.ProxyOptions = proxyOptions(h.proxyURL)
+			options.ProxyOptions = transport.ProxyOptions{URL: h.proxyURL}
 		}
 		repository, err := gitlib.CloneContext(ctx, storage, nil, options)
 		if err != nil {
@@ -150,7 +159,7 @@ func (h *gitHandler) syncRepository(ctx context.Context) error {
 		RefSpecs: []gitconfig.RefSpec{"+refs/*:refs/*"},
 	}
 	if h.proxyURL != "" {
-		options.ProxyOptions = proxyOptions(h.proxyURL)
+		options.ProxyOptions = transport.ProxyOptions{URL: h.proxyURL}
 	}
 	err = h.repository.FetchContext(ctx, options)
 	if errors.Is(err, gitlib.NoErrAlreadyUpToDate) {
@@ -165,12 +174,12 @@ func (h *gitHandler) syncRepository(ctx context.Context) error {
 }
 
 func (h *gitHandler) clearRepository() error {
-	entries, err := h.billyFs.ReadDir(".")
+	entries, err := h.repositoryFS.ReadDir(".")
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read git mirror directory: %w", err)
 	}
 	for _, entry := range entries {
-		if err := billyutil.RemoveAll(h.billyFs, entry.Name()); err != nil {
+		if err := billyutil.RemoveAll(h.repositoryFS, entry.Name()); err != nil {
 			return fmt.Errorf("clear git mirror %s: %w", entry.Name(), err)
 		}
 	}
@@ -199,6 +208,29 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer done()
+	if req.Method == http.MethodPost {
+		if req.ContentLength > maxUploadPackRequestBytes {
+			http.Error(w, "git request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		controller := http.NewResponseController(w)
+		_ = controller.SetReadDeadline(time.Now().Add(h.operationTimeout))
+		defer func() { _ = controller.SetReadDeadline(time.Time{}) }()
+		defer req.Body.Close()
+		body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, maxUploadPackRequestBytes))
+		if err != nil {
+			status := http.StatusBadRequest
+			var oversized *http.MaxBytesError
+			if errors.As(err, &oversized) {
+				status = http.StatusRequestEntityTooLarge
+			} else if os.IsTimeout(err) {
+				status = http.StatusRequestTimeout
+			}
+			http.Error(w, http.StatusText(status), status)
+			return
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+	}
 	if !isGitReadRequest(req) || shouldForwardGitRead(req) {
 		h.forwardUpstream(w, req, cleaned)
 		return
@@ -213,8 +245,8 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.forwardUpstream(w, req, cleaned)
 		return
 	}
+	defer h.repositoryMu.RUnlock()
 	serveGitHTTP(w, req, h.server, h.name)
-	h.repositoryMu.RUnlock()
 }
 
 func (h *gitHandler) DashboardStatus() (color, label, extra string) {
@@ -223,13 +255,7 @@ func (h *gitHandler) DashboardStatus() (color, label, extra string) {
 	}
 	defer h.repositoryMu.RUnlock()
 	if h.repository != nil {
-		if h.syncing {
-			return "green", "ready", "syncing"
-		}
 		return "green", "ready", h.lastError
-	}
-	if h.syncing {
-		return "blue", "cloning...", ""
 	}
 	if h.lastError != "" {
 		return "red", "failed", h.lastError
@@ -249,8 +275,4 @@ func (h *gitHandler) writeAdmissionError(w http.ResponseWriter, err error) {
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
 	proxytransport.WriteError(w, status)
-}
-
-func proxyOptions(rawURL string) transport.ProxyOptions {
-	return transport.ProxyOptions{URL: rawURL}
 }

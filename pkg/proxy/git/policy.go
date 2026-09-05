@@ -65,11 +65,11 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err := os.MkdirAll(repositoryRoot, 0o755); err != nil {
 		return fmt.Errorf("instance %s: create git repository directory: %w", plan.Name(), err)
 	}
-	billyFs := osfs.New(repositoryRoot, osfs.WithBoundOS())
+	repositoryFS := osfs.New(repositoryRoot, osfs.WithBoundOS())
 
 	handler := newGitHandler(gitConfig{
 		name:             plan.Name(),
-		billyFs:          billyFs,
+		repositoryFS:     repositoryFS,
 		upstream:         upstream,
 		auth:             auth,
 		proxyURL:         proxyURL,
@@ -87,7 +87,11 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		Interval:       syncInterval,
 		RunImmediately: true,
 		Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-			return nil, handler.Sync(ctx)
+			err := handler.Sync(ctx)
+			if errors.Is(err, errMirrorBusy) {
+				return &scheduler.TaskOutcome{Result: "deferred", ContinueAfter: 2 * time.Second}, nil
+			}
+			return nil, err
 		},
 	})
 	return plan.BindPath(plan.Path(), handler)

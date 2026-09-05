@@ -27,13 +27,45 @@ import (
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 )
 
+func TestDashboardStatusReflectsMirrorState(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		for _, lastError := range []string{"", "upstream unavailable"} {
+			handler := &gitHandler{lastError: lastError}
+			if ready {
+				handler.repository = &gitlib.Repository{}
+			}
+			color, label, detail := handler.DashboardStatus()
+			switch {
+			case ready:
+				require.Equal(t, "green", color)
+				require.Equal(t, "ready", label)
+				require.Equal(t, lastError, detail)
+			case lastError != "":
+				require.Equal(t, "red", color)
+				require.Equal(t, "failed", label)
+				require.Equal(t, lastError, detail)
+			default:
+				require.Equal(t, "gray", color)
+				require.Equal(t, "starting", label)
+				require.Empty(t, detail)
+			}
+			handler.repositoryMu.Lock()
+			color, label, detail = handler.DashboardStatus()
+			handler.repositoryMu.Unlock()
+			require.Equal(t, "blue", color)
+			require.Equal(t, "syncing", label)
+			require.Empty(t, detail)
+		}
+	}
+}
+
 func TestColdMirrorPassesThroughSmartHTTP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		require.Equal(t, "/repo/info/refs", req.URL.Path)
 		_, _ = io.WriteString(w, "advertisement")
 	}))
 	defer upstream.Close()
-	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New()})
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", repositoryFS: memfs.New()})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/info/refs?service=git-upload-pack", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -66,7 +98,7 @@ func TestGitReadOnlyProtocolSurface(t *testing.T) {
 		_, _ = io.WriteString(w, "pack")
 	}))
 	defer upstream.Close()
-	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New()})
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", repositoryFS: memfs.New()})
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 
 	response := httptest.NewRecorder()
@@ -102,7 +134,7 @@ func TestGitUnknownReadResourcesRemainTransparent(t *testing.T) {
 		_, _ = io.WriteString(w, request.Method+" "+request.URL.RequestURI())
 	}))
 	defer upstream.Close()
-	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New()})
+	handler := newGitHandler(gitConfig{name: "test", upstream: upstream.URL + "/repo", repositoryFS: memfs.New()})
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 
 	for _, test := range []struct {
@@ -138,7 +170,7 @@ func TestSyncingMirrorPassesThroughWithSharedAdmission(t *testing.T) {
 	release, err := gate.Acquire(context.Background(), upstream.URL, proxytransport.AdmissionForeground)
 	require.NoError(t, err)
 	handler := newGitHandler(gitConfig{
-		name: "test", upstream: upstream.URL + "/repo", billyFs: memfs.New(), upstreamGate: gate,
+		name: "test", upstream: upstream.URL + "/repo", repositoryFS: memfs.New(), upstreamGate: gate,
 	})
 	handler.repositoryMu.Lock()
 
@@ -184,7 +216,7 @@ func TestGitSyncPublishesUpstreamCommit(t *testing.T) {
 
 	handler := newGitHandler(gitConfig{
 		name: "test", upstream: upstreamPath,
-		billyFs: osfs.New(t.TempDir(), osfs.WithBoundOS()),
+		repositoryFS: osfs.New(t.TempDir(), osfs.WithBoundOS()),
 	})
 	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
 	require.NoError(t, handler.Sync(context.Background()))
@@ -221,13 +253,13 @@ func TestBuildAuthExpandsEnvironmentAndRejectsEmptyCredentials(t *testing.T) {
 }
 
 func TestGitHandlerAppliesDefaultOperationTimeout(t *testing.T) {
-	handler := newGitHandler(gitConfig{billyFs: memfs.New()})
+	handler := newGitHandler(gitConfig{repositoryFS: memfs.New()})
 	require.Equal(t, defaultOperationTimeout, handler.operationTimeout)
 	require.Equal(t, defaultOperationTimeout, handler.bootstrapClient.Timeout)
 }
 
 func TestGitHandlerRejectsRequestsAfterStop(t *testing.T) {
-	handler := newGitHandler(gitConfig{billyFs: memfs.New()})
+	handler := newGitHandler(gitConfig{repositoryFS: memfs.New()})
 	require.NoError(t, handler.Stop(context.Background()))
 
 	recorder := httptest.NewRecorder()

@@ -105,6 +105,7 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if err != nil {
 		return "", time.Time{}, err
 	}
+	response.Body = h.client.WrapBody(response.Body)
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusTooManyRequests {
 		limitedURL := tokenURL.String()
@@ -113,7 +114,6 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 		}
 		return "", time.Time{}, h.upstreamGate.RateLimited(limitedURL, response.Header.Get("Retry-After"))
 	}
-	response.Body = newMinimumRateReadCloser(response.Body)
 	if response.StatusCode != http.StatusOK {
 		return "", time.Time{}, errors.New("oci token request failed")
 	}

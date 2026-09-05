@@ -151,7 +151,7 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool,
 			}
 			h.cleanupPhase, h.cleanupCursor = "manifests", ""
 			if h.expireAfter.IsNever() || h.expireAfter.IsUnset() {
-				h.cleanupPhase, h.cleanupRefs = "refs", nil
+				h.cleanupPhase, h.cleanupRefs = "", nil
 				return false, nil
 			}
 		case "manifests":
@@ -181,7 +181,7 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool,
 			if err != nil || !complete {
 				return !complete, err
 			}
-			h.cleanupPhase, h.cleanupCursor, h.cleanupRefs = "refs", "", nil
+			h.cleanupPhase, h.cleanupCursor, h.cleanupRefs = "", "", nil
 			return false, nil
 		}
 	}

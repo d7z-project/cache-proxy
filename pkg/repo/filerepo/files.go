@@ -459,15 +459,14 @@ func (h *GenerationManager) GC(ctx context.Context, limit int) (bool, error) {
 	if h.gcPhase == generationGCIdle {
 		h.gcPhase = generationGCRetire
 		h.gcRetained = make(map[string]bool)
-		h.gcProtected = make(map[string]bool)
 	}
 	switch h.gcPhase {
 	case generationGCRetire:
 		return h.retireInactiveRoots(ctx, limit, now)
-	case generationGCScan:
-		return h.scanGenerationCandidates(ctx, limit, now)
-	case generationGCDelete:
-		return h.deleteGenerationCandidates(ctx, limit)
+	case generationGCMarkers:
+		return h.scanCommittedGenerations(ctx, limit)
+	case generationGCSnapshots:
+		return h.deleteUnusedSnapshots(ctx, limit, now)
 	case generationGCBlobs:
 		return h.deleteUnretainedGenerationBlobs(ctx, limit, now)
 	default:
@@ -547,12 +546,14 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 		delete(h.retryWindows, rootID)
 		delete(h.retiring, rootID)
 		delete(h.pollQueued, rootID)
+		delete(h.forceRebuildQueued, rootID)
 		queued := h.pollQueue[:0]
 		for _, queuedRootID := range h.pollQueue {
 			if queuedRootID != rootID {
 				queued = append(queued, queuedRootID)
 			}
 		}
+		clear(h.pollQueue[len(queued):])
 		h.pollQueue = queued
 		h.mu.Unlock()
 		h.commitMu.Unlock()
@@ -561,7 +562,7 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 		}
 		h.gcCursor = rootID
 	}
-	h.gcPhase, h.gcCursor = generationGCScan, ""
+	h.gcPhase, h.gcCursor = generationGCMarkers, ""
 	return true, nil
 }
 
@@ -575,105 +576,70 @@ func (h *GenerationManager) hasActiveReadersLocked(rootID string) bool {
 	return false
 }
 
-func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit int, now time.Time) (bool, error) {
+func (h *GenerationManager) scanCommittedGenerations(ctx context.Context, limit int) (bool, error) {
 	inspected := 0
 	complete := true
 	err := filepath.WalkDir(statePath(h.config.StateDir, "repositories"), func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || name <= h.gcCursor || entry.Name() != "snapshot.json" && entry.Name() != "current.yaml" {
+		if entry.IsDir() {
+			if entry.Name() == "generations" {
+				return filepath.SkipDir
+			}
 			return nil
+		}
+		if name <= h.gcCursor || entry.Name() != "current.yaml" {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if inspected >= limit {
 			complete = false
 			return fs.SkipAll
 		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		inspected++
-		if entry.Name() == "current.yaml" {
-			var marker currentMarker
-			if err := readYAML("/", name, &marker); err != nil {
-				slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", err)
-				h.gcCursor = name
-				return nil
-			}
-			if err := h.validateCurrentMarker(filepath.Base(filepath.Dir(name)), marker); err != nil {
-				slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", err)
-				h.gcCursor = name
-				return nil
-			}
-			currentReference := snapshotReference{
-				Generation:     marker.Generation,
-				CandidateID:    marker.CandidateID,
-				SnapshotSHA256: marker.SnapshotSHA256,
-			}
-			if _, err := h.loadSnapshot(ctx, marker.RootID, marker.Root, marker.Upstream, currentReference); err != nil {
-				slog.Warn("invalid current metadata snapshot ignored during GC", "path", name, "err", err)
-				h.gcCursor = name
-				return nil
-			}
-			h.gcProtected[marker.RootID+"\x00"+marker.CandidateID] = true
-			h.gcRetained[candidatePrefix(marker.RootID, marker.Generation, marker.CandidateID)] = true
-			seenCandidateIDs := map[string]struct{}{marker.CandidateID: {}}
-			retainedCount := 0
-			for _, reference := range marker.Previous {
-				if retainedCount >= h.config.KeepPrevious {
-					break
-				}
-				if _, duplicate := seenCandidateIDs[reference.CandidateID]; duplicate {
-					continue
-				}
-				if _, err := h.loadSnapshot(ctx, marker.RootID, marker.Root, marker.Upstream, reference); err != nil {
-					slog.Warn("invalid retained metadata snapshot ignored during GC", "path", name, "candidate", reference.CandidateID, "err", err)
-					continue
-				}
-				seenCandidateIDs[reference.CandidateID] = struct{}{}
-				retainedCount++
-				h.gcProtected[marker.RootID+"\x00"+reference.CandidateID] = true
-				h.gcRetained[candidatePrefix(marker.RootID, reference.Generation, reference.CandidateID)] = true
-			}
+		var marker currentMarker
+		markerErr := readYAML("/", name, &marker)
+		if markerErr == nil {
+			markerErr = h.validateCurrentMarker(filepath.Base(filepath.Dir(name)), marker)
+		}
+		if markerErr != nil {
+			slog.Warn("invalid current metadata marker ignored during GC", "path", name, "err", markerErr)
 			h.gcCursor = name
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		prefix, pathErr := candidateStatePrefix(h.config.StateDir, name)
-		var snapshot Snapshot
-		snapshotErr := readJSON("/", name, maxSnapshotStateSize, &snapshot)
-		if snapshotErr == nil {
-			snapshotErr = prepareSnapshot(&snapshot)
-		}
-		if snapshotErr == nil {
-			snapshotErr = pathErr
-		}
-		if snapshotErr == nil && (filepath.Clean(name) != statePath(h.config.StateDir, snapshotName(snapshot.RootID, snapshot.Generation, snapshot.CandidateID)) || prefix != candidatePrefix(snapshot.RootID, snapshot.Generation, snapshot.CandidateID)) {
-			snapshotErr = errors.New("snapshot path does not match its identity")
-		}
-		if snapshotErr != nil {
-			slog.Warn("invalid metadata snapshot scheduled for GC", "path", name, "err", snapshotErr)
-			if pathErr == nil && now.Sub(info.ModTime()) >= h.config.GracePeriod && !h.gcRetained[prefix] {
-				h.gcCandidates = append(h.gcCandidates, gcCandidate{name: name, modified: info.ModTime(), prefix: prefix})
+		current := snapshotReference{Generation: marker.Generation, CandidateID: marker.CandidateID, SnapshotSHA256: marker.SnapshotSHA256}
+		if _, err := h.loadSnapshot(ctx, marker.RootID, marker.Root, marker.Upstream, current); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+			slog.Warn("invalid current metadata snapshot ignored during GC", "path", name, "err", err)
 			h.gcCursor = name
 			return nil
 		}
-		keys := make(map[string]struct{})
-		for _, object := range snapshot.Objects {
-			if object.Key != "" {
-				keys[object.Key] = struct{}{}
+		h.gcRetained[candidatePrefix(marker.RootID, marker.Generation, marker.CandidateID)] = true
+		seen := map[string]bool{marker.CandidateID: true}
+		retained := 0
+		for _, previous := range marker.Previous {
+			if retained >= h.config.KeepPrevious {
+				break
 			}
+			if seen[previous.CandidateID] {
+				continue
+			}
+			if _, err := h.loadSnapshot(ctx, marker.RootID, marker.Root, marker.Upstream, previous); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				slog.Warn("invalid retained metadata snapshot ignored during GC", "path", name, "candidate", previous.CandidateID, "err", err)
+				continue
+			}
+			seen[previous.CandidateID] = true
+			retained++
+			h.gcRetained[candidatePrefix(marker.RootID, previous.Generation, previous.CandidateID)] = true
 		}
-		candidate := gcCandidate{name: name, modified: info.ModTime(), prefix: prefix, snapshot: snapshot, keys: make([]string, 0, len(keys))}
-		for key := range keys {
-			candidate.keys = append(candidate.keys, key)
-		}
-		sort.Strings(candidate.keys)
-		h.gcCandidates = append(h.gcCandidates, candidate)
 		h.gcCursor = name
 		return nil
 	})
@@ -683,109 +649,95 @@ func (h *GenerationManager) scanGenerationCandidates(ctx context.Context, limit 
 	if err != nil || !complete {
 		return !complete, err
 	}
-
-	h.mu.RLock()
-	protected := make(map[string]bool, len(h.gcProtected)+len(h.current)+len(h.retained)+len(h.pending)+len(h.readers))
-	for identity := range h.gcProtected {
-		protected[identity] = true
-	}
-	for rootID, current := range h.current {
-		protected[rootID+"\x00"+current.snapshot.CandidateID] = true
-		h.gcRetained[candidatePrefix(rootID, current.snapshot.Generation, current.snapshot.CandidateID)] = true
-	}
-	for rootID, previousSnapshots := range h.retained {
-		for _, previousSnapshot := range previousSnapshots {
-			protected[rootID+"\x00"+previousSnapshot.snapshot.CandidateID] = true
-			h.gcRetained[candidatePrefix(rootID, previousSnapshot.snapshot.Generation, previousSnapshot.snapshot.CandidateID)] = true
-		}
-	}
-	for rootID, pending := range h.pending {
-		protected[rootID+"\x00"+pending.CandidateID] = true
-		h.gcRetained[candidatePrefix(rootID, pending.Generation, pending.CandidateID)] = true
-	}
-	for readerKey := range h.readers {
-		protected[readerKey] = true
-	}
-	h.mu.RUnlock()
-	sort.Slice(h.gcCandidates, func(i, j int) bool { return h.gcCandidates[i].modified.After(h.gcCandidates[j].modified) })
-	deletable := h.gcCandidates[:0]
-	for _, candidate := range h.gcCandidates {
-		if candidate.snapshot.RootID == "" {
-			if !h.gcRetained[candidate.prefix] && now.Sub(candidate.modified) >= h.config.GracePeriod {
-				deletable = append(deletable, candidate)
-			}
-			continue
-		}
-		identity := candidate.snapshot.RootID + "\x00" + candidate.snapshot.CandidateID
-		prefix := candidate.prefix
-		if protected[identity] || now.Sub(candidate.modified) < h.config.GracePeriod {
-			h.gcRetained[prefix] = true
-			continue
-		}
-		deletable = append(deletable, candidate)
-	}
-	h.gcCandidates = deletable
-	h.gcPhase, h.gcCursor = generationGCDelete, ""
+	h.gcPhase, h.gcCursor = generationGCSnapshots, ""
 	return true, nil
 }
 
-func (h *GenerationManager) deleteGenerationCandidates(ctx context.Context, limit int) (bool, error) {
+func (h *GenerationManager) deleteUnusedSnapshots(ctx context.Context, limit int, now time.Time) (bool, error) {
 	inspected := 0
-	for h.gcCandidateIndex < len(h.gcCandidates) {
-		candidate := &h.gcCandidates[h.gcCandidateIndex]
-		h.mu.RLock()
-		currentSnapshot := h.current[candidate.snapshot.RootID]
-		pending := h.pending[candidate.snapshot.RootID]
-		candidateInUse := h.gcRetained[candidate.prefix]
-		if !candidateInUse && candidate.snapshot.RootID != "" {
-			candidateInUse = currentSnapshot != nil && currentSnapshot.snapshot.CandidateID == candidate.snapshot.CandidateID ||
-				pending.CandidateID == candidate.snapshot.CandidateID ||
-				h.readers[candidate.snapshot.RootID+"\x00"+candidate.snapshot.CandidateID] != 0
+	complete := true
+	err := filepath.WalkDir(statePath(h.config.StateDir, "repositories"), func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		if !candidateInUse {
-			for _, previousSnapshot := range h.retained[candidate.snapshot.RootID] {
-				if previousSnapshot.snapshot.CandidateID == candidate.snapshot.CandidateID {
-					candidateInUse = true
-					break
-				}
-			}
+		if entry.IsDir() || name <= h.gcCursor || entry.Name() != "snapshot.json" {
+			return nil
 		}
-		h.mu.RUnlock()
-		if candidateInUse {
-			h.gcRetained[candidate.prefix] = true
-			h.gcCandidateIndex++
-			h.gcObjectIndex = 0
-			continue
-		}
-		for h.gcObjectIndex < len(candidate.keys) {
-			if inspected >= limit {
-				return true, nil
-			}
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			key := candidate.keys[h.gcObjectIndex]
-			if err := h.config.Store.DeleteObject(ctx, h.config.Tenant, key); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return false, err
-			}
-			h.gcObjectIndex++
-			inspected++
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if inspected >= limit {
-			return true, nil
-		}
-		if err := os.Remove(candidate.name); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return false, err
-		}
-		if err := removeEmptyStateParents(candidate.name, statePath(h.config.StateDir, "repositories")); err != nil {
-			return false, err
+			complete = false
+			return fs.SkipAll
 		}
 		inspected++
-		h.gcCandidateIndex++
-		h.gcObjectIndex = 0
+		prefix, err := candidateStatePrefix(h.config.StateDir, name)
+		if err != nil {
+			slog.Warn("invalid metadata candidate path ignored during GC", "path", name, "err", err)
+			h.gcCursor = name
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if now.Sub(info.ModTime()) < h.config.GracePeriod {
+			h.gcRetained[prefix] = true
+		}
+		h.commitMu.Lock()
+		if !h.gcRetained[prefix] && !h.candidateInUse(prefix) {
+			err = os.Remove(name)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				err = removeEmptyStateParents(name, statePath(h.config.StateDir, "repositories"))
+			}
+		}
+		h.commitMu.Unlock()
+		if err != nil {
+			return err
+		}
+		h.gcCursor = name
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	if err != nil || !complete {
+		return !complete, err
 	}
 	h.gcPhase, h.gcCursor = generationGCBlobs, ""
 	return true, nil
+}
+
+// candidateInUse is checked under commitMu before deletion, so publication
+// cannot race the final protection check. Reader accounting remains under mu.
+func (h *GenerationManager) candidateInUse(prefix string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for rootID, current := range h.current {
+		if candidatePrefix(rootID, current.snapshot.Generation, current.snapshot.CandidateID) == prefix {
+			return true
+		}
+	}
+	for rootID, previousSnapshots := range h.retained {
+		for _, previous := range previousSnapshots {
+			if candidatePrefix(rootID, previous.snapshot.Generation, previous.snapshot.CandidateID) == prefix {
+				return true
+			}
+		}
+	}
+	for rootID, pending := range h.pending {
+		if candidatePrefix(rootID, pending.Generation, pending.CandidateID) == prefix {
+			return true
+		}
+	}
+	parts := strings.Split(prefix, "/")
+	for identity, count := range h.readers {
+		rootID, candidateID, ok := strings.Cut(identity, "\x00")
+		if count > 0 && ok && candidateID == parts[3] && path.Base(repositoryDirectory(rootID)) == parts[1] {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *GenerationManager) deleteUnretainedGenerationBlobs(ctx context.Context, limit int, now time.Time) (bool, error) {
@@ -798,16 +750,16 @@ func (h *GenerationManager) deleteUnretainedGenerationBlobs(ctx context.Context,
 		if entry.IsDir() || objectPath <= h.gcCursor {
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if inspected >= limit {
 			complete = false
 			return fs.SkipAll
 		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		inspected++
 		parts := strings.Split(objectPath, "/")
-		if len(parts) < 5 {
+		if len(parts) < 5 || !validSHA256(parts[1]) || !validSHA256(parts[2]) || !validCandidateID(parts[3]) {
 			h.gcCursor = objectPath
 			return nil
 		}
@@ -824,39 +776,11 @@ func (h *GenerationManager) deleteUnretainedGenerationBlobs(ctx context.Context,
 			h.gcCursor = objectPath
 			return nil
 		}
-		h.mu.RLock()
-		candidateInUse := false
-		for rootID, currentSnapshot := range h.current {
-			if candidatePrefix(rootID, currentSnapshot.snapshot.Generation, currentSnapshot.snapshot.CandidateID) == prefix {
-				candidateInUse = true
-				break
-			}
-		}
-		if !candidateInUse {
-			for rootID, previousSnapshots := range h.retained {
-				for _, previousSnapshot := range previousSnapshots {
-					if candidatePrefix(rootID, previousSnapshot.snapshot.Generation, previousSnapshot.snapshot.CandidateID) == prefix {
-						candidateInUse = true
-						break
-					}
-				}
-				if candidateInUse {
-					break
-				}
-			}
-		}
-		if !candidateInUse {
-			for rootID, pending := range h.pending {
-				if candidatePrefix(rootID, pending.Generation, pending.CandidateID) == prefix {
-					candidateInUse = true
-					break
-				}
-			}
-		}
-		h.mu.RUnlock()
-		if !candidateInUse {
+		h.commitMu.Lock()
+		if !h.candidateInUse(prefix) {
 			err = h.config.Store.DeleteObject(ctx, h.config.Tenant, objectPath)
 		}
+		h.commitMu.Unlock()
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -869,8 +793,7 @@ func (h *GenerationManager) deleteUnretainedGenerationBlobs(ctx context.Context,
 	if err != nil || !complete {
 		return !complete, err
 	}
-	h.gcPhase, h.gcCursor, h.gcCandidates, h.gcRetained, h.gcProtected = generationGCIdle, "", nil, nil, nil
-	h.gcCandidateIndex, h.gcObjectIndex = 0, 0
+	h.gcPhase, h.gcCursor, h.gcRetained = generationGCIdle, "", nil
 	return false, nil
 }
 

@@ -37,13 +37,8 @@ type TaskHandler func(context.Context) (*TaskOutcome, error)
 
 type TaskOutcome struct {
 	Result        string
-	ReasonCode    string
-	Detail        string
-	Message       string
 	ContinueAfter time.Duration
 }
-
-var ErrTaskSkipped = errors.New("task skipped")
 
 type TaskKey struct {
 	instance string
@@ -84,9 +79,6 @@ type TaskRun struct {
 	FinishedAt time.Time
 	Duration   time.Duration
 	Result     string
-	ReasonCode string
-	Detail     string
-	Message    string
 	Err        string
 }
 
@@ -108,7 +100,6 @@ type Scheduler struct {
 	stopped   bool
 	statePath string
 	persisted map[string]time.Time
-	persistMu sync.Mutex
 }
 
 func newScheduler() *Scheduler {
@@ -294,7 +285,7 @@ func (s *Scheduler) runTask(key TaskKey) {
 	run := TaskRun{Key: key, StartedAt: started, FinishedAt: finished, Duration: finished.Sub(started)}
 	var continueAfter time.Duration
 	if outcome != nil {
-		run.Result, run.ReasonCode, run.Detail, run.Message = outcome.Result, outcome.ReasonCode, outcome.Detail, outcome.Message
+		run.Result = outcome.Result
 		continueAfter = outcome.ContinueAfter
 	}
 	if run.Result == "" {
@@ -329,7 +320,9 @@ func (s *Scheduler) runTask(key TaskKey) {
 	}
 	observer := s.observer
 	s.mu.Unlock()
-	_ = s.persist()
+	if persistentTask(key.typ) {
+		_ = s.persist()
+	}
 	if observer != nil {
 		observer(run)
 	}
@@ -339,12 +332,11 @@ func persistentTask(taskType TaskType) bool {
 	return taskType == TypeMetadataRefresh || taskType == TypeMetadataGC
 }
 
+// persist runs only on the scheduler loop; mu protects the snapshot from triggers.
 func (s *Scheduler) persist() error {
 	if s.statePath == "" {
 		return nil
 	}
-	s.persistMu.Lock()
-	defer s.persistMu.Unlock()
 	s.mu.Lock()
 	nextRun := make(map[string]time.Time)
 	for key, task := range s.tasks {

@@ -37,9 +37,6 @@ type taskEvent struct {
 	FinishedAt string `json:"finished_at"`
 	DurationMS int64  `json:"duration_ms"`
 	Result     string `json:"result"`
-	StateFrom  string `json:"state_from,omitempty"`
-	ReasonCode string `json:"reason_code,omitempty"`
-	Detail     string `json:"detail,omitempty"`
 	Message    string `json:"message,omitempty"`
 }
 
@@ -112,10 +109,6 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 	if target == "" {
 		target = "/"
 	}
-	message := run.Message
-	if message == "" {
-		message = run.Err
-	}
 	s.appendEvent(taskEvent{
 		Storage:    run.Key.Instance(),
 		TaskType:   string(run.Key.Type()),
@@ -124,9 +117,7 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 		FinishedAt: run.FinishedAt.Format(time.RFC3339),
 		DurationMS: run.Duration.Milliseconds(),
 		Result:     run.Result,
-		ReasonCode: run.ReasonCode,
-		Detail:     run.Detail,
-		Message:    message,
+		Message:    run.Err,
 	})
 }
 

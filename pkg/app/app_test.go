@@ -605,6 +605,25 @@ func TestOpenPassesCleanupConfigIntoPlan(t *testing.T) {
 	require.Equal(t, doc.Storage.Cleanup, got)
 }
 
+func TestStatusTaskEventPreservesFailureDetails(t *testing.T) {
+	status := newAppStatus(config.ServerStatusConfig{
+		DiskSampleInterval: config.Duration(time.Minute),
+		DiskHistoryWindow:  config.Duration(time.Hour),
+		EventLimit:         8,
+	})
+	status.observeTaskRun(scheduler.TaskRun{
+		Key:    scheduler.NewTaskKey("debian", scheduler.TypeMetadataRefresh, "dists/trixie"),
+		Result: "failed",
+		Err:    "Packages.xz: upstream request timed out",
+	})
+	events := status.taskEvents(1)
+	require.Len(t, events, 1)
+	require.Equal(t, "debian", events[0].Storage)
+	require.Equal(t, "dists/trixie", events[0].Target)
+	require.Equal(t, "failed", events[0].Result)
+	require.Equal(t, "Packages.xz: upstream request timed out", events[0].Message)
+}
+
 func TestStatusEndpointsReturnJSON(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -685,7 +704,7 @@ func TestStatusNetworkEndpointIncludesUpstreamEdges(t *testing.T) {
 	require.Equal(t, int64(1), payload.Upstreams[0].ActiveUpstreamRequests)
 	require.Len(t, payload.Edges, 1)
 	require.Equal(t, "files", payload.Edges[0].Instance)
-	require.Equal(t, upstream, payload.Edges[0].UpstreamURL)
+	require.Equal(t, "https://mirror.example.test", payload.Edges[0].UpstreamURL)
 	require.Equal(t, "502", payload.Edges[0].LastStatus)
 	require.Equal(t, "502", payload.Edges[0].LastError)
 	require.Equal(t, float64(25), payload.Edges[0].LatencyMS)

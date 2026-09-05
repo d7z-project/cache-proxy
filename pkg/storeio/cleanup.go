@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"strings"
-	"sync"
 	"time"
 
 	"gopkg.d7z.net/blobfs"
@@ -42,8 +41,8 @@ func RegisterResponseCleanup(taskScheduler *scheduler.Scheduler, instance, tenan
 	})
 }
 
+// responseCleaner and its cursor belong to one serial scheduler task.
 type responseCleaner struct {
-	mu     sync.Mutex
 	store  *blobfs.Store
 	tenant string
 	opts   config.CleanupConfig
@@ -51,8 +50,6 @@ type responseCleaner struct {
 }
 
 func (c *responseCleaner) cleanBatch(ctx context.Context) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	filesystem := c.store.TenantFS(c.tenant)
 	first, err := fs.ReadDir(filesystem, "responses")
 	if errors.Is(err, fs.ErrNotExist) {

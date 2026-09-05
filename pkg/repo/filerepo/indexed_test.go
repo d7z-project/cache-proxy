@@ -1121,11 +1121,15 @@ func TestGenerationManagerRetiresInactiveRoot(t *testing.T) {
 	require.NoError(t, err)
 	snapshot := handler.Current("repo")
 	key := snapshot.byPath["repo/Release"].Key
+	handler.requestCurrentPoll("repo", true)
 	handler.mu.Lock()
 	handler.lastSeen["repo"] = time.Now().Add(-time.Hour)
 	handler.mu.Unlock()
 	drainGenerationGC(t, handler)
 	require.Nil(t, handler.Current("repo"))
+	require.Empty(t, handler.forceRebuildQueued)
+	require.Empty(t, handler.pollQueued)
+	require.Empty(t, handler.pollQueue)
 	_, err = store.StatObject(context.Background(), "metadata", key)
 	require.Error(t, err)
 	_, err = os.Stat(statePath(stateDir, currentName("repo")))
@@ -1662,6 +1666,81 @@ func TestGenerationManagerGCBoundsInactiveRootInspection(t *testing.T) {
 	}
 }
 
+func TestGenerationManagerGCProcessesHistoryInSmallBatches(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	cfg := Config{
+		Instance: "history", Mode: "test", Tenant: "metadata", Upstream: "https://upstream.example", StateDir: t.TempDir(), WorkDir: t.TempDir(), Store: store,
+		Fetch:        func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.EOF },
+		Build:        func(context.Context, *RefreshSession, Anchor) error { return nil },
+		KeepPrevious: 1, GracePeriod: time.Nanosecond,
+	}
+	h, err := New(cfg)
+	require.NoError(t, err)
+	var keys []string
+	publish := func(body string) {
+		require.NoError(t, h.StageAnchor(context.Background(), "repo", "repo/Release", nil, strings.NewReader(body)))
+		_, err := h.Refresh(context.Background(), 1)
+		require.NoError(t, err)
+		keys = append(keys, h.Current("repo").byPath["repo/Release"].Key)
+	}
+	for i := range 12 {
+		publish(fmt.Sprint(i))
+	}
+	for range 2 {
+		_, err = h.GC(context.Background(), 1)
+		require.NoError(t, err)
+	}
+	require.Equal(t, generationGCSnapshots, h.gcPhase)
+	publish("updated during GC")
+	for batch := 0; ; batch++ {
+		require.Less(t, batch, 100)
+		before := 0
+		for _, key := range keys {
+			if _, err := store.StatObject(context.Background(), "metadata", key); err == nil {
+				before++
+			}
+		}
+		more, err := h.GC(context.Background(), 1)
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(h.gcRetained), 2)
+		after := 0
+		for _, key := range keys {
+			if _, err := store.StatObject(context.Background(), "metadata", key); err == nil {
+				after++
+			}
+		}
+		require.LessOrEqual(t, before-after, 1)
+		if !more {
+			break
+		}
+	}
+	for _, key := range keys[len(keys)-2:] {
+		_, err := store.StatObject(context.Background(), "metadata", key)
+		require.NoError(t, err)
+	}
+	// Restart midway through a new cycle; only the committed marker restores state.
+	_, err = h.GC(context.Background(), 1)
+	require.NoError(t, err)
+	h, err = New(cfg)
+	require.NoError(t, err)
+	drainGenerationGC(t, h)
+	for _, key := range keys[:len(keys)-2] {
+		_, err := store.StatObject(context.Background(), "metadata", key)
+		require.Error(t, err)
+	}
+	for _, key := range keys[len(keys)-2:] {
+		_, err := store.StatObject(context.Background(), "metadata", key)
+		require.NoError(t, err)
+	}
+	require.NoError(t, h.StageAnchor(context.Background(), "repo", "repo/Release", nil, strings.NewReader("pending")))
+	pendingKey := h.pending["repo"].Key
+	drainGenerationGC(t, h)
+	_, err = store.StatObject(context.Background(), "metadata", pendingKey)
+	require.NoError(t, err)
+}
+
 func TestGenerationManagerGCRetriesInterruptedCandidateDeletion(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
@@ -1690,7 +1769,7 @@ func TestGenerationManagerGCRetriesInterruptedCandidateDeletion(t *testing.T) {
 	more, err = handler.GC(context.Background(), 100)
 	require.NoError(t, err)
 	require.True(t, more)
-	require.Equal(t, generationGCDelete, handler.gcPhase)
+	require.Equal(t, generationGCSnapshots, handler.gcPhase)
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +31,62 @@ func TestSchedulerRunsTasksSerially(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return len(runs) == 2 }, time.Second, time.Millisecond)
 	require.Len(t, scheduler.Snapshot(), 2)
+}
+
+func TestSchedulerCheckpointTracksMetadataCompletion(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "scheduler.json")
+	s, err := NewPersistent(statePath)
+	require.NoError(t, err)
+	s.ctx = context.Background()
+	for _, typ := range []TaskType{TypeMetadataRefresh, TypeMetadataGC, TypeBlobGC, TypeExpireCleanup, TypeGitSync} {
+		s.Register(TaskDef{Key: NewTaskKey("repo", typ, ""), Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) { return nil, nil }})
+	}
+	s.runTask(NewTaskKey("repo", TypeMetadataRefresh, ""))
+	checkpointTime := time.Unix(1700000000, 0)
+	require.NoError(t, os.Chtimes(statePath, checkpointTime, checkpointTime))
+	checkpoint, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	for _, typ := range []TaskType{TypeBlobGC, TypeExpireCleanup, TypeGitSync} {
+		s.runTask(NewTaskKey("repo", typ, ""))
+		info, err := os.Stat(statePath)
+		require.NoError(t, err)
+		require.Equal(t, checkpointTime, info.ModTime())
+		data, err := os.ReadFile(statePath)
+		require.NoError(t, err)
+		require.Equal(t, checkpoint, data)
+	}
+	s.runTask(NewTaskKey("repo", TypeMetadataGC, ""))
+	info, err := os.Stat(statePath)
+	require.NoError(t, err)
+	require.True(t, info.ModTime().After(checkpointTime))
+	restored, err := NewPersistent(statePath)
+	require.NoError(t, err)
+	require.Len(t, restored.persisted, 2)
+	for _, task := range s.Snapshot() {
+		require.EqualValues(t, 1, task.RunCount)
+		if persistentTask(task.Key.Type()) {
+			require.True(t, task.NextRun.Equal(restored.persisted[task.Key.String()]))
+		}
+	}
+}
+
+func BenchmarkSchedulerMaintenance(b *testing.B) {
+	for _, typ := range []TaskType{TypeMetadataRefresh, TypeExpireCleanup} {
+		b.Run(string(typ), func(b *testing.B) {
+			s, err := NewPersistent(filepath.Join(b.TempDir(), "scheduler.json"))
+			require.NoError(b, err)
+			s.ctx = context.Background()
+			key := NewTaskKey("repo", typ, "")
+			for _, taskType := range []TaskType{TypeMetadataRefresh, TypeExpireCleanup} {
+				s.Register(TaskDef{Key: NewTaskKey("repo", taskType, ""), Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) { return nil, nil }})
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				s.runTask(key)
+			}
+		})
+	}
 }
 
 func TestSchedulerPersistsOnlyMetadataTiming(t *testing.T) {
@@ -95,7 +153,9 @@ func TestSchedulerTriggerNowAndContinuation(t *testing.T) {
 }
 
 func TestSchedulerRetainsTriggerDuringRunningTask(t *testing.T) {
-	scheduler := newScheduler()
+	statePath := filepath.Join(t.TempDir(), "scheduler.json")
+	scheduler, err := NewPersistent(statePath)
+	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	scheduler.Start(ctx)
 	t.Cleanup(func() {
@@ -104,24 +164,58 @@ func TestSchedulerRetainsTriggerDuringRunningTask(t *testing.T) {
 	})
 
 	key := NewTaskKey("deb", TypeMetadataRefresh, "")
-	started := make(chan struct{}, 2)
+	started := make(chan struct{})
+	completed := make(chan TaskRun, 2)
+	scheduler.SetRunObserver(func(run TaskRun) { completed <- run })
 	release := make(chan struct{})
-	scheduler.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) {
-		started <- struct{}{}
-		if len(started) == 1 {
-			<-release
+	runs := 0
+	scheduler.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(ctx context.Context) (*TaskOutcome, error) {
+		runs++
+		if runs == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 		return nil, nil
 	}})
 	require.True(t, scheduler.TriggerNow(key))
-	<-started
-	require.True(t, scheduler.TriggerNow(key))
-	close(release)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("trigger received while running was lost")
+	case <-time.After(5 * time.Second):
+		t.Fatal("task did not start")
 	}
+	var clients sync.WaitGroup
+	var rejected atomic.Int32
+	for range 32 {
+		clients.Go(func() {
+			if !scheduler.TriggerNow(key) {
+				rejected.Add(1)
+			}
+			_ = scheduler.Snapshot()
+		})
+	}
+	clients.Wait()
+	require.Zero(t, rejected.Load())
+	close(release)
+	for range 2 {
+		select {
+		case run := <-completed:
+			require.Empty(t, run.Err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("trigger received while running was lost")
+		}
+	}
+	cancel()
+	require.NoError(t, scheduler.Stop(context.Background()))
+	infos := scheduler.Snapshot()
+	require.EqualValues(t, 2, infos[0].RunCount)
+	restored, err := NewPersistent(statePath)
+	require.NoError(t, err)
+	restored.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) { return nil, nil }})
+	require.Equal(t, infos[0].NextRun.UTC(), restored.Snapshot()[0].NextRun.UTC())
 }
 
 func TestSchedulerHonorsErrorContinuation(t *testing.T) {

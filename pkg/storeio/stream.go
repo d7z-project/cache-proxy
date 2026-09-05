@@ -335,6 +335,13 @@ func (f *growingFile) releaseProducer() {
 
 func (f *growingFile) cleanup() {
 	f.cleanupOnce.Do(func() {
+		f.mu.Lock()
+		fallback := f.fallback
+		f.fallback = nil
+		f.mu.Unlock()
+		if fallback != nil {
+			_ = fallback.Close()
+		}
 		_ = os.Remove(f.path)
 		if f.release != nil {
 			f.release()

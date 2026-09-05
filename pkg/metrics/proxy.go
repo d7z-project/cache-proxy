@@ -1,8 +1,12 @@
 package metrics
 
 import (
+	"maps"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +47,43 @@ func newMetricsCollector(reg prometheus.Registerer) *metricsCollector {
 type instanceEntry struct {
 	mu   sync.Mutex
 	data InstanceStats
+}
+
+const maxUpstreamOrigins = 64
+
+// upstreamOrigin excludes resource paths and credentials from long-lived stats.
+func upstreamOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return "other"
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "other"
+	}
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if scheme == "http" && port == "80" || scheme == "https" && port == "443" {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return (&url.URL{Scheme: scheme, Host: host}).String()
+}
+
+func (e *instanceEntry) upstreamBucket(origin string) string {
+	if _, exists := e.data.Upstreams[origin]; !exists {
+		count := len(e.data.Upstreams)
+		if _, overflow := e.data.Upstreams["other"]; overflow {
+			count--
+		}
+		if count >= maxUpstreamOrigins {
+			return "other"
+		}
+	}
+	return origin
 }
 
 type Stats struct {
@@ -112,6 +153,11 @@ func (s *Stats) RecordRequest(instance, mode, method, cache string, status int, 
 		cache = "UNKNOWN"
 	}
 	statusText := strconv.Itoa(status)
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
+	default:
+		method = "OTHER"
+	}
 	s.metrics.requestsTotal.WithLabelValues(instance, mode, method, cache, statusText).Inc()
 	if bytes > 0 {
 		s.metrics.responseBytesTotal.WithLabelValues(instance, mode, cache).Add(float64(bytes))
@@ -158,7 +204,6 @@ func (s *Stats) RecordUpstreamRequest(
 
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
-	ensureStatsMaps(&entry.data)
 	entry.data.UpstreamRequests++
 	entry.data.UpstreamStatus[statusText]++
 	entry.data.UpstreamBytes += bytes
@@ -166,6 +211,7 @@ func (s *Stats) RecordUpstreamRequest(
 		entry.data.UpstreamErrors++
 	}
 	if upstream != "" {
+		upstream = entry.upstreamBucket(upstreamOrigin(upstream))
 		upstreamStats := entry.data.Upstreams[upstream]
 		if upstreamStats.URL == "" {
 			upstreamStats.URL = upstream
@@ -215,7 +261,7 @@ func (s *Stats) BeginUpstreamRequest(instance, mode, upstream string) func() {
 func (s *Stats) addActiveUpstream(instance, mode, upstream string, delta int64) {
 	entry := s.getOrCreateEntry(instance, mode)
 	entry.mu.Lock()
-	ensureStatsMaps(&entry.data)
+	upstream = entry.upstreamBucket(upstreamOrigin(upstream))
 	entry.data.ActiveUpstreams += delta
 	if entry.data.ActiveUpstreams < 0 {
 		entry.data.ActiveUpstreams = 0
@@ -269,8 +315,8 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		ActiveUpstreams:  s.totalActiveUpstreams.Load(),
 	}
 	s.totalMu.Lock()
-	total.Cache = cloneMap(s.totalCache)
-	total.UpstreamStatus = cloneMap(s.totalUpstreamStatus)
+	total.Cache = maps.Clone(s.totalCache)
+	total.UpstreamStatus = maps.Clone(s.totalUpstreamStatus)
 	s.totalMu.Unlock()
 
 	result := StatsSnapshot{Total: total, Instances: map[string]InstanceStats{}}
@@ -301,9 +347,13 @@ func (s *Stats) getOrCreateEntry(name, mode string) *instanceEntry {
 
 func cloneInstanceStats(item InstanceStats) InstanceStats {
 	clone := item
-	clone.Cache = cloneMap(item.Cache)
-	clone.UpstreamStatus = cloneMap(item.UpstreamStatus)
-	clone.Upstreams = cloneUpstreams(item.Upstreams)
+	clone.Cache = maps.Clone(item.Cache)
+	clone.UpstreamStatus = maps.Clone(item.UpstreamStatus)
+	clone.Upstreams = make(map[string]UpstreamStats, len(item.Upstreams))
+	for upstream, stats := range item.Upstreams {
+		stats.Status = maps.Clone(stats.Status)
+		clone.Upstreams[upstream] = stats
+	}
 	return clone
 }
 
@@ -314,39 +364,4 @@ func emptyInstanceStats(mode string) InstanceStats {
 		UpstreamStatus: map[string]uint64{},
 		Upstreams:      map[string]UpstreamStats{},
 	}
-}
-
-func ensureStatsMaps(item *InstanceStats) {
-	if item.Cache == nil {
-		item.Cache = map[string]uint64{}
-	}
-	if item.UpstreamStatus == nil {
-		item.UpstreamStatus = map[string]uint64{}
-	}
-	if item.Upstreams == nil {
-		item.Upstreams = map[string]UpstreamStats{}
-	}
-}
-
-func cloneUpstreams(src map[string]UpstreamStats) map[string]UpstreamStats {
-	if len(src) == 0 {
-		return map[string]UpstreamStats{}
-	}
-	dst := make(map[string]UpstreamStats, len(src))
-	for key, value := range src {
-		value.Status = cloneMap(value.Status)
-		dst[key] = value
-	}
-	return dst
-}
-
-func cloneMap(src map[string]uint64) map[string]uint64 {
-	if len(src) == 0 {
-		return map[string]uint64{}
-	}
-	dst := make(map[string]uint64, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
 }

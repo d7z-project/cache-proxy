@@ -18,6 +18,7 @@
 - helper 必须对应实际复用或清晰的职责边界；短小单次转发逻辑保持内联
 - `transport` 统一 upstream HTTP client、body idle timeout、URL path segment 转义、通用 revalidation/cacheability 判断和响应转发；协议包保留身份、凭据作用域和生命周期决策
 - `artifactcache` 统一稳定包对象的 fill、flight、conditional revalidation、stale 和 streaming 生命周期；协议包保留路径分类、缓存键、freshness 和内容校验
+- 缓存响应直接使用 `storeio.ResponseObject`；协议专用结构只承载额外状态
 - npm / PyPI 的签名下载地址复用 `signedtoken` 的有界 HMAC envelope；payload 字段、期限、digest 和目标 URL 仍由协议包校验
 - 内部字段和跨函数状态使用完整领域名称，局部循环变量使用 Go 惯用短名称
 - error 文本小写开头，通过 `%w` 保留可判定错误链
@@ -63,11 +64,14 @@
 - logical response key 映射到 SHA256 分片路径，metadata 中保存并验证原 logical key
 - 调度器单 goroutine 串行执行；达到 batch 上限时短延迟 continuation
 - metadata refresh 按 repository root 串行处理 pending、显式 poll 和周期 poll；失败 candidate 使用有上限退避并在重试前重新验证 anchor
-- `TriggerNow` 只唤醒内存调度状态；scheduler 在任务完成后持久化，metadata 请求热路径不执行状态文件 fsync
+- `TriggerNow` 只唤醒内存调度状态；scheduler 的单一执行循环在 metadata refresh/GC 完成后持久化其调度时间，metadata 请求热路径不执行状态文件 fsync
+- response cleaner 及其游标由一个串行调度任务独占；任务事件通过 Result 和 Err 表达结果与完整错误上下文
 - response、OCI 和 generation GC 按 inspected objects 计 batch，并通过内存游标继续
 - generation GC 保护 current、pending、active reader、grace-period candidate 和 `current.yaml` 精确提交且校验通过的 previous candidate，并回收无引用或损坏 candidate 与空状态目录
 - inactive current 或 pending root 通过 last-seen 与 generation GC 完整退役
 - Git scheduler 串行执行 mirror sync；repository lock 保护 mirror 状态转换
+- Git 本地响应必须 defer 释放读锁；upload-pack body 在获取 repository lock 前按 16 MiB 与 operation_timeout 有界读取，sync 使用 TryLock，忙时 2 秒后继续调度
+- generation GC 跨批次只保留候选前缀与游标，不积累完整历史 snapshot 或对象键列表；删除前在 commitMu 下再次检查运行时引用
 
 ## 网络、安全与资源
 
@@ -83,11 +87,15 @@
 - 所有外部 5xx 使用 `runtime.WriteError` 或 transport 等价入口
 - 下载与 metadata 捕获流式写入临时文件；已知 digest 的对象校验后发布
 - conditional validator 绑定原 upstream；`304` 与相同摘要 `200` 推进 freshness
+- 上游 body（包括 OCI token 响应）统一使用 transport 的单次阻塞读取超时，并由请求总期限限制完整传输时长
 - admission 按每次实际 HTTP transport 请求的 host 执行，包括重定向各 hop；真实 `429` 只影响实际响应 host
 - upstream body EOF/close 后立即释放 admission，本地校验和 publication 不占用传输槽
 - 同一对象 miss/revalidate 使用 flight 合并；客户端断开不取消已开始的生命周期缓存填充
 - 普通对象 spool 在传输中失败时停止缓存写入并继续向当前客户端传递剩余 upstream body
 - 只有真实 upstream `429` 建立 host cooldown，并遵守 `Retry-After`
+- admission 在释放、取消和定时唤醒时回收空闲动态 host，保留 pacing/cooldown 到期语义；额外动态 host 上限 4096，Snapshot 只读
+- upstream 统计按 origin 聚合，每个 instance 上限 64 个 origin 与一个 other 桶；非标准 HTTP method 聚合为 OTHER
+- stream 最后一个 reader 与 producer 退出后必须关闭遗留 fallback body，关闭操作在 growing-file mutex 外执行
 - Flatpak/OSTree immutable objects 发布前校验；static delta 使用有限 retention 并依赖客户端验证内容
 - 启动只清理 instance work 目录内超过 24 小时且以 `.cache-proxy-tmp-` 开头的自有文件
 

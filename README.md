@@ -29,7 +29,7 @@ concurrent cache misses share the same upstream transfer.
 | Mode | Cached content |
 |---|---|
 | `file` | HTTP files selected by configurable cache rules |
-| `npm` | Packuments, verified tarballs, and audit responses |
+| `npm` | Packuments and verified tarballs; audit queries pass through |
 | `go` | Go module proxy content and an optional checksum database |
 | `maven` | Maven metadata, artifacts, signatures, and checksums |
 | `cargo` | Sparse indexes, verified crates, and fetch-only Git indexes |
@@ -156,6 +156,11 @@ Host-specific admission settings use
 `storage.download.hosts.<host>.max_active` and `min_interval`. Host names are
 normalized and may include a port.
 
+Admission retains at most 4096 additional dynamic hosts. Idle dynamic entries
+expire after their pacing interval and any upstream cooldown; cleanup does not
+depend on dashboard access. New hosts are rejected at capacity until space is
+available, without interrupting admitted transfers.
+
 ### Instances
 
 Every instance configures one upstream repository or registry.
@@ -181,6 +186,10 @@ The optional `transport` mapping accepts `proxy`, `ua`, `dial_timeout`,
 `max_idle_conns`. Supported proxy schemes are HTTP, HTTPS, SOCKS5, and
 SOCKS5H.
 
+`idle_body_timeout` bounds each blocked upstream body read, including OCI
+token responses. Downloads that keep making progress remain subject to
+`max_request_duration`.
+
 ### Mode Options
 
 Mode options are placed below the instance's `options` mapping.
@@ -196,6 +205,12 @@ File rule policies are `http_cache`, `immutable`, and `passthrough`. Git auth
 supports `basic` and `token`; OCI auth supports `none`, `basic`, and `bearer`.
 Credential values support shell-style environment expansion. Other modes do
 not require mode-specific options.
+
+Git upload-pack request bodies are limited to 16 MiB and must arrive within
+`operation_timeout`. Oversized requests receive `413`; timed-out reads receive
+`408`. Mirror synchronization also uses this timeout. When a local reader holds
+the mirror, synchronization is deferred for 2 seconds while other maintenance
+tasks continue.
 
 ## Client Setup
 
@@ -255,6 +270,9 @@ verified snapshot. Package artifacts and sidecars use stable cache identities,
 so an unsuccessful metadata refresh does not invalidate already cached package
 content. Digest-addressed objects are verified before publication.
 
+Flatpak static deltas use a finite cache lifetime and rely on client-side
+content verification.
+
 Repository-tree modes preserve repository roots and directory trailing
 slashes. Safe, unclassified same-origin read resources pass through to the
 configured upstream. Go module and OCI modes keep their protocol endpoint
@@ -275,6 +293,10 @@ Backend contents are private application state. Use a dedicated persistent
 volume and allow one `cache-proxy` process to write to it. Send `SIGINT` or
 `SIGTERM` for graceful shutdown.
 
+Metadata refresh and metadata GC schedules are checkpointed after completion
+and restored on restart. Maintenance events expose the task result and full
+error message in the dashboard and status API.
+
 ### Status and Metrics
 
 | Endpoint | Description |
@@ -286,7 +308,16 @@ volume and allow one `cache-proxy` process to write to it. Send `SIGINT` or
 | `/-/status/network` | Instance, upstream, and admission statistics |
 | `metrics.path` | Prometheus metrics |
 
+Upstream statistics group requests by origin (scheme, host, and port), excluding
+credentials and resource paths. Each instance retains up to 64 origins plus an
+`other` aggregate. Nonstandard HTTP methods share the `OTHER` metric label.
+
 ## Development
+
+Protocol implementations live in `pkg/proxy/<mode>`, with each mode's `Plan`
+registered in `pkg/app/drivers.go`. Shared response storage lives in `storeio`,
+repository snapshots in `filerepo`, and upstream HTTP handling in `transport`.
+See [AGENTS.md](AGENTS.md) for engineering and test requirements.
 
 Run the local checks with:
 

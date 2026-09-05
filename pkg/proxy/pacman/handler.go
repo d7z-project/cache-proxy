@@ -71,7 +71,10 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
 			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
-		Build: h.buildDatabaseSnapshot,
+		Build: func(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
+			_, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: anchor.Path + ".sig", AllowUnavailable: true})
+			return err
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -186,13 +189,6 @@ func (h *handler) serveDatabaseAnchor(w http.ResponseWriter, request *http.Reque
 	}
 	h.flights.Finish(flightKey, flight, stageErr)
 	finished = true
-}
-
-func (h *handler) buildDatabaseSnapshot(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
-	if _, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: anchor.Path + ".sig", AllowUnavailable: true}); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned, rawQuery string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {

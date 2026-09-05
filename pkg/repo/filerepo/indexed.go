@@ -144,21 +144,13 @@ type liveSnapshot struct {
 	snapshotSHA256 string
 }
 
-type gcCandidate struct {
-	name     string
-	modified time.Time
-	prefix   string
-	snapshot Snapshot
-	keys     []string
-}
-
 type generationGCPhase uint8
 
 const (
 	generationGCIdle generationGCPhase = iota
 	generationGCRetire
-	generationGCScan
-	generationGCDelete
+	generationGCMarkers
+	generationGCSnapshots
 	generationGCBlobs
 )
 
@@ -192,11 +184,7 @@ type GenerationManager struct {
 	gcMu               sync.Mutex
 	gcPhase            generationGCPhase
 	gcCursor           string
-	gcCandidates       []gcCandidate
-	gcCandidateIndex   int
-	gcObjectIndex      int
 	gcRetained         map[string]bool
-	gcProtected        map[string]bool
 }
 
 type retryableRefreshError struct {
@@ -579,7 +567,9 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (rootID string, force
 		if retry.candidateID == current.snapshot.CandidateID && now.Before(retry.notBefore) {
 			continue
 		}
-		h.pollQueue = append(h.pollQueue[:index], h.pollQueue[index+1:]...)
+		copy(h.pollQueue[index:], h.pollQueue[index+1:])
+		h.pollQueue[len(h.pollQueue)-1] = ""
+		h.pollQueue = h.pollQueue[:len(h.pollQueue)-1]
 		delete(h.pollQueued, rootID)
 		forceRebuild := h.forceRebuildQueued[rootID]
 		delete(h.forceRebuildQueued, rootID)
@@ -591,6 +581,7 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (rootID string, force
 			compacted = append(compacted, rootID)
 		}
 	}
+	clear(h.pollQueue[len(compacted):])
 	h.pollQueue = compacted
 	if len(h.pollQueue) == 0 {
 		h.pollCycleActive = false

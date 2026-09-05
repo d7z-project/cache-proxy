@@ -18,6 +18,7 @@ import (
 
 	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func newTestHandler(t *testing.T, upstream string, rules []Rule) *handler {
@@ -66,9 +67,9 @@ func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 
 	key := cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Eventually(t, func() bool {
-		reader, err := openStored(context.Background(), handler.store, key)
+		reader, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, key)
 		if err == nil {
-			_ = reader.reader.Close()
+			_ = reader.Reader.Close()
 			return true
 		}
 		return false
@@ -92,12 +93,12 @@ func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 	require.Equal(t, "REFRESH", second.Header().Get("X-Cache"))
 	require.Equal(t, int32(2), requests.Load())
 	require.Eventually(t, func() bool {
-		reader, err := openStored(context.Background(), handler.store, key)
+		reader, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, key)
 		if err != nil {
 			return false
 		}
-		defer func() { _ = reader.reader.Close() }()
-		body, err := io.ReadAll(reader.reader)
+		defer func() { _ = reader.Reader.Close() }()
+		body, err := io.ReadAll(reader.Reader)
 		return err == nil && string(body) == "payload-v2"
 	}, time.Second, time.Millisecond)
 
@@ -216,12 +217,12 @@ func TestFileConcurrentRevalidationUsesSingleTransfer(t *testing.T) {
 	require.Equal(t, http.StatusOK, first.Code)
 	key := cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Eventually(t, func() bool {
-		object, err := openStored(context.Background(), handler.store, key)
+		object, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, key)
 		if err != nil {
 			return false
 		}
-		defer func() { _ = object.reader.Close() }()
-		body, err := io.ReadAll(object.reader)
+		defer func() { _ = object.Reader.Close() }()
+		body, err := io.ReadAll(object.Reader)
 		return err == nil && string(body) == "initial"
 	}, time.Second, time.Millisecond)
 	require.Eventually(t, func() bool {
@@ -280,11 +281,11 @@ func TestFileCredentialsBypassAndCachedRangeUsesCompleteObject(t *testing.T) {
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Equal(t, http.StatusOK, first.Code)
 	require.Eventually(t, func() bool {
-		object, err := openStored(context.Background(), handler.store, cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil)))
+		object, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil)))
 		if err != nil {
 			return false
 		}
-		_ = object.reader.Close()
+		_ = object.Reader.Close()
 		return true
 	}, time.Second, time.Millisecond)
 

@@ -182,15 +182,11 @@
       target.className = "event-target-main";
       target.textContent = event.target || "/";
       targetCell.appendChild(target);
-      var details = [event.reason_code, event.detail, event.message].map(function (value) {
-        return String(value || "").trim();
-      }).filter(function (value, index, values) {
-        return value && values.indexOf(value) === index;
-      });
-      if (details.length) {
+      var message = String(event.message || "").trim();
+      if (message) {
         var detail = document.createElement("span");
         detail.className = "event-detail" + (result === "success" || result === "skipped" ? "" : " event-detail-error");
-        detail.textContent = details.join("\n");
+        detail.textContent = message;
         targetCell.appendChild(detail);
       }
       var resultCell = appendCell(row, "");

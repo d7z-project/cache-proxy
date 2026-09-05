@@ -147,7 +147,7 @@ func handleUploadPack(w http.ResponseWriter, r *http.Request, svr transport.Tran
 	req := packp.NewUploadPackRequest()
 	if err := req.Decode(r.Body); err != nil {
 		slog.Error("git upload-pack decode failed", "instance", name, "err", err)
-		proxytransport.WriteError(w, http.StatusInternalServerError)
+		http.Error(w, "invalid git upload-pack request", http.StatusBadRequest)
 		return
 	}
 

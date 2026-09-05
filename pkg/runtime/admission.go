@@ -14,6 +14,7 @@ import (
 )
 
 const maxAdmissionWaiters = 4096
+const maxDynamicAdmissionHosts = 4096
 const maxAdmissionWaitersPerHost = 512
 const maxForegroundBurst = 8
 const refreshAdmissionMaxWait = time.Second
@@ -148,12 +149,17 @@ func (g *UpstreamGate) Acquire(ctx context.Context, upstream string, class Admis
 
 	g.mu.Lock()
 	state := g.hostStateLocked(host)
+	if state == nil {
+		g.mu.Unlock()
+		return nil, ErrAdmissionOverloaded
+	}
 	if class == AdmissionRefresh && time.Now().Before(state.cooldownUntil) {
 		err := &UpstreamRateLimitError{Host: host, RetryAfter: state.cooldownUntil}
 		g.mu.Unlock()
 		return nil, err
 	}
 	if g.foreground.Len()+g.refresh.Len() >= maxAdmissionWaiters || state.queued >= maxAdmissionWaitersPerHost {
+		g.retireIdleHostLocked(host, time.Now())
 		g.mu.Unlock()
 		return nil, ErrAdmissionOverloaded
 	}
@@ -189,6 +195,10 @@ func (g *UpstreamGate) RateLimited(upstream, retryAfter string) *UpstreamRateLim
 
 	g.mu.Lock()
 	state := g.hostStateLocked(host)
+	if state == nil {
+		g.mu.Unlock()
+		return &UpstreamRateLimitError{Host: host, RetryAfter: now.Add(delay)}
+	}
 	if candidate := now.Add(delay); candidate.After(state.cooldownUntil) {
 		state.cooldownUntil = candidate
 	}
@@ -224,11 +234,6 @@ func (g *UpstreamGate) Snapshot() UpstreamGateSnapshot {
 		}
 	}
 	for host, state := range g.hosts {
-		_, configured := g.hostConfigs[host]
-		if !configured && state.active == 0 && state.queued == 0 && !now.Before(state.cooldownUntil) {
-			delete(g.hosts, host)
-			continue
-		}
 		hostSnapshot := UpstreamHostGateSnapshot{
 			Active:      state.active,
 			Queued:      state.queued,
@@ -264,6 +269,7 @@ func (g *UpstreamGate) cancelOrReleaseWaiter(waiter *gateWaiter) {
 	} else {
 		g.removeWaiterLocked(waiter)
 	}
+	g.retireIdleHostLocked(waiter.host, time.Now())
 	g.grantWaitersLocked()
 	g.mu.Unlock()
 }
@@ -273,9 +279,36 @@ func (g *UpstreamGate) hostStateLocked(host string) *upstreamHostGate {
 	if state != nil {
 		return state
 	}
+	if len(g.hosts) >= len(g.hostConfigs)+maxDynamicAdmissionHosts {
+		for idleHost := range g.hosts {
+			g.retireIdleHostLocked(idleHost, time.Now())
+		}
+		if len(g.hosts) >= len(g.hostConfigs)+maxDynamicAdmissionHosts {
+			return nil
+		}
+	}
 	state = g.newHostState(host)
 	g.hosts[host] = state
 	return state
+}
+
+func (g *UpstreamGate) retireIdleHostLocked(host string, now time.Time) {
+	state := g.hosts[host]
+	if state == nil || state.active != 0 || state.queued != 0 {
+		return
+	}
+	if _, configured := g.hostConfigs[host]; configured {
+		return
+	}
+	retainUntil := state.lastStarted.Add(state.minInterval)
+	if state.cooldownUntil.After(retainUntil) {
+		retainUntil = state.cooldownUntil
+	}
+	if now.Before(retainUntil) {
+		g.scheduleWakeLocked(retainUntil)
+		return
+	}
+	delete(g.hosts, host)
 }
 
 func (g *UpstreamGate) newHostState(host string) *upstreamHostGate {
@@ -387,6 +420,10 @@ func (g *UpstreamGate) scheduleWakeLocked(at time.Time) {
 		if sequence == g.wakeSequence {
 			g.wakeTimer = nil
 			g.wakeAt = time.Time{}
+			now := time.Now()
+			for host := range g.hosts {
+				g.retireIdleHostLocked(host, now)
+			}
 			g.grantWaitersLocked()
 		}
 		g.mu.Unlock()
@@ -400,6 +437,7 @@ func (g *UpstreamGate) releaseFunc(host string) func() {
 			g.mu.Lock()
 			g.active--
 			g.hostStateLocked(host).active--
+			g.retireIdleHostLocked(host, time.Now())
 			g.grantWaitersLocked()
 			g.mu.Unlock()
 		})
