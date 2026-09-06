@@ -1,14 +1,40 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestFixtureHeaderDelayCancellationAndRemoval(t *testing.T) {
+	s := &fixtureServer{root: t.TempDir(), counts: make(map[string]int), headers: make(map[string]http.Header)}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/__e2e/fault?path=/rpm/repodata/repomd.xml&status=delay", nil))
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Equal(t, 3*time.Second, s.faults["/rpm/repodata/repomd.xml"].headerDelay)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/rpm/repodata/repomd.xml", nil).WithContext(ctx))
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("delay ignored request cancellation")
+	}
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/__e2e/fault?path=/rpm/repodata/repomd.xml", nil))
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Empty(t, s.faults)
+}
 
 func TestFixtureUpdateChangesValidatorsAtomically(t *testing.T) {
 	root := t.TempDir()
@@ -67,7 +93,7 @@ func TestFixtureFaultTargetsOneExactPathAndResetClearsIt(t *testing.T) {
 	require.NoError(t, os.MkdirAll(directory, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "Release"), []byte("release"), 0o644))
 	server := &fixtureServer{
-		root: root, counts: make(map[string]int), headers: make(map[string]http.Header), faults: make(map[string]int),
+		root: root, counts: make(map[string]int), headers: make(map[string]http.Header), faults: make(map[string]fixtureFault),
 	}
 
 	fault := httptest.NewRecorder()
@@ -94,7 +120,7 @@ func TestFixtureCacheAgeControlChangesHeadersAndResetRestoresDefault(t *testing.
 	require.NoError(t, os.MkdirAll(directory, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "payload.txt"), []byte("payload"), 0o644))
 	server := &fixtureServer{
-		root: root, counts: make(map[string]int), headers: make(map[string]http.Header), faults: make(map[string]int),
+		root: root, counts: make(map[string]int), headers: make(map[string]http.Header), faults: make(map[string]fixtureFault),
 	}
 
 	setAge := httptest.NewRecorder()

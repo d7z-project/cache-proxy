@@ -1,4 +1,8 @@
 {
+  "validation": "Validation",
+  "cache_age": "Age du cache",
+  "freshness_lifetime": "Duree de fraicheur",
+  "validated_at": "Derniere validation",
   "title": "Proxy de cache",
   "dashboard": "Tableau d'exploitation",
   "system_overview": "Vue du système",

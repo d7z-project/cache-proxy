@@ -5,27 +5,43 @@ import (
 	"errors"
 	"os"
 	"time"
+
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
+var errValidationWait = errors.New("metadata validation wait ended")
+
 // Waiting requests do not own scheduler work or candidate lifetime.
-func (h *GenerationManager) waitForValidation(ctx context.Context, rootID string, baseline time.Time) error {
+func (h *GenerationManager) waitForValidation(ctx context.Context, rootID string, baseline time.Time, validation scheduler.ValidationDetails) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	started := time.Now()
-	h.requestCurrentPoll(rootID, false, baseline)
+	h.requestCurrentPoll(rootID, false, baseline, validation)
 	for {
 		h.mu.RLock()
 		current := h.current[rootID]
-		_, pending := h.pending[rootID]
+		candidate, pending := h.pending[rootID]
 		changed := h.changed
 		var err error
 		complete := current == nil || !pending && current.validatedAt.After(baseline)
-		if current != nil && current.lastAttempt.After(started) {
-			err = current.lastError
+		if current != nil {
+			candidateID := current.snapshot.CandidateID
+			if pending {
+				candidateID = candidate.CandidateID
+			}
+			retry := h.retryWindows[rootID]
+			if retry.candidateID == candidateID && !current.polling && time.Now().Before(retry.notBefore) {
+				err = retry.err
+			}
 		}
 		h.mu.RUnlock()
-		if complete || err != nil {
+		if complete {
+			return nil
+		}
+		if err != nil {
 			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(errValidationWait, err)
 		}
 		if h.config.Scheduler == nil {
 			if _, _, err := h.runRefresh(ctx, 1); err != nil {
@@ -34,7 +50,7 @@ func (h *GenerationManager) waitForValidation(ctx context.Context, rootID string
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			// Read completion once more before reporting the wait deadline.
 		case <-changed:
 		}
 	}

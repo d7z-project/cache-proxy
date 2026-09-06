@@ -1,4 +1,8 @@
 {
+  "validation": "검증 조건",
+  "cache_age": "캐시 경과 시간",
+  "freshness_lifetime": "유효 기간",
+  "validated_at": "마지막 검증",
   "title": "캐시 프록시",
   "dashboard": "운영 대시보드",
   "system_overview": "시스템 개요",

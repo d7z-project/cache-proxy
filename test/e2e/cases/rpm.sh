@@ -48,6 +48,35 @@ EOF
   e2e_wait_header_changed "$E2E_PROXY_URL/rpm/repodata/repomd.xml" ETag "$previous_etag"
   e2e_client rpm update "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
   e2e_wait_cache_hit "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
+  e2e_set_fixture_fault /rpm/repodata/repomd.xml delay
+  e2e_client rpm validation-timeout "$E2E_TOOLS_IMAGE" '
+    status=$(curl --silent --show-error --max-time 5 -H "Cache-Control: no-cache" \
+      -D /tmp/headers -o /tmp/body -w "%{http_code}" "$1/rpm/repodata/repomd.xml")
+    test "$status" = 504
+    grep -Eiq "^X-Cache-Error:[[:space:]]*upstream_timeout" /tmp/headers
+  ' "$E2E_PROXY_URL"
+  local anchor_before
+  anchor_before=$(e2e_fixture_count GET /rpm/repodata/repomd.xml)
+  e2e_client rpm validation-backoff "$E2E_TOOLS_IMAGE" '
+    for attempt in 1 2 3; do
+      status=$(curl --silent --show-error --max-time 2 -H "Cache-Control: no-cache" \
+        -o /dev/null -w "%{http_code}" "$1/rpm/repodata/repomd.xml")
+      test "$status" = 504
+    done
+  ' "$E2E_PROXY_URL"
+  e2e_assert_count_unchanged GET /rpm/repodata/repomd.xml "$anchor_before" 'RPM backoff retried upstream'
+  e2e_clear_fixture_fault /rpm/repodata/repomd.xml
+  e2e_client rpm validation-recovery "$E2E_TOOLS_IMAGE" '
+    for attempt in $(seq 1 90); do
+      status=$(curl --silent --show-error --max-time 5 -H "Cache-Control: no-cache" \
+        -o /dev/null -w "%{http_code}" "$1/rpm/repodata/repomd.xml")
+      if [ "$status" = 200 ]; then exit 0; fi
+      test "$status" = 504
+      sleep 1
+    done
+    exit 1
+  ' "$E2E_PROXY_URL"
+  e2e_client rpm recovered-install "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-updated
   e2e_offline_restart
   e2e_wait_cache_hit "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
   e2e_client rpm offline "$E2E_FEDORA_IMAGE" '

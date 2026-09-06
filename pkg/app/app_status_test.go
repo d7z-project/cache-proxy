@@ -12,6 +12,17 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/config"
 )
 
+func TestInstanceUsageReturnsIndependentSnapshot(t *testing.T) {
+	for _, cached := range []map[string]int64{nil, {"one": 5}} {
+		app := &App{instanceUsageCache: cached, instanceUsageCachedAt: time.Now()}
+		usage := app.instanceUsage(context.Background(), []string{"one"})
+		require.NotNil(t, usage)
+		require.Equal(t, cached["one"], usage["one"])
+		usage["one"] = 100
+		require.NotEqual(t, usage["one"], app.instanceUsageCache["one"])
+	}
+}
+
 func TestStatusSummaryReadsLatestDiskSample(t *testing.T) {
 	for _, test := range []struct {
 		next   int

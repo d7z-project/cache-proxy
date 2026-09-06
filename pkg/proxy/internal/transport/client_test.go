@@ -2,7 +2,9 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -111,19 +113,65 @@ func TestClientAppliesUserAgentAndIdleBodyTimeout(t *testing.T) {
 	require.Eventually(t, func() bool { return gate.Snapshot().Active == 0 }, time.Second, time.Millisecond)
 }
 
-func TestClientBoundsStalledResponseHeaders(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		time.Sleep(100 * time.Millisecond)
-	}))
-	t.Cleanup(upstream.Close)
-	gate := proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
-	client, err := NewClient("test", "file", &config.TransportConfig{HeaderTimeout: config.Duration(20 * time.Millisecond)}, gate, metrics.NewStats(prometheus.NewRegistry()))
-	require.NoError(t, err)
-	request, err := http.NewRequest(http.MethodGet, upstream.URL, nil)
-	require.NoError(t, err)
-	_, err = client.DoRead(context.Background(), request, AdmissionForeground)
-	require.Error(t, err)
-	require.Eventually(t, func() bool { return gate.Snapshot().Active == 0 }, time.Second, time.Millisecond)
+func TestClientFailureReleasesAdmissionAcrossHTTPVersions(t *testing.T) {
+	for _, protocol := range []string{"http1", "http2"} {
+		for _, fault := range []string{"headers", "body", "disconnect"} {
+			t.Run(protocol+"/"+fault, func(t *testing.T) {
+				seen := make(chan int, 1)
+				upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					seen <- r.ProtoMajor
+					if fault == "disconnect" {
+						panic(http.ErrAbortHandler)
+					}
+					if fault == "body" {
+						w.Header().Set("Content-Length", "2")
+						_, _ = io.WriteString(w, "a")
+						w.(http.Flusher).Flush()
+					}
+					<-r.Context().Done()
+				}))
+				upstream.EnableHTTP2 = protocol == "http2"
+				upstream.StartTLS()
+				t.Cleanup(upstream.Close)
+				gate := proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
+				client, err := NewClient("test", "rpm", &config.TransportConfig{HeaderTimeout: config.Duration(200 * time.Millisecond), IdleBodyTimeout: config.Duration(100 * time.Millisecond)}, gate, metrics.NewStats(prometheus.NewRegistry()))
+				require.NoError(t, err)
+				base := client.httpClient.Transport.(*admissionRoundTripper).base.(*http.Transport)
+				base.TLSClientConfig = upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+				t.Cleanup(base.CloseIdleConnections)
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				request, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.URL, nil)
+				require.NoError(t, err)
+				response, err := client.DoRead(ctx, request, AdmissionForeground)
+				if fault == "body" {
+					require.NoError(t, err)
+					_, err = io.ReadAll(response.Body)
+					require.NoError(t, response.Body.Close())
+					require.ErrorIs(t, err, ErrIdleBodyTimeout)
+				}
+				require.Error(t, err)
+				var timeout net.Error
+				if fault == "disconnect" {
+					require.False(t, errors.As(err, &timeout) && timeout.Timeout())
+				} else {
+					require.ErrorAs(t, err, &timeout)
+					require.True(t, timeout.Timeout())
+				}
+				select {
+				case major := <-seen:
+					if protocol == "http2" {
+						require.Equal(t, 2, major)
+					} else {
+						require.Equal(t, 1, major)
+					}
+				case <-ctx.Done():
+					t.Fatal("upstream did not receive request")
+				}
+				require.Eventually(t, func() bool { return gate.Snapshot().Active == 0 }, time.Second, time.Millisecond)
+			})
+		}
+	}
 }
 
 func TestRedirectDowngradeStripsCredentials(t *testing.T) {

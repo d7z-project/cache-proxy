@@ -1,4 +1,8 @@
 {
+  "validation": "验证条件",
+  "cache_age": "缓存年龄",
+  "freshness_lifetime": "新鲜有效期",
+  "validated_at": "上次验证",
   "title": "缓存代理",
   "dashboard": "运行状态面板",
   "system_overview": "系统概览",

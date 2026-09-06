@@ -72,7 +72,7 @@ func (h *GenerationManager) runRefresh(ctx context.Context, limit int) (bool, *s
 				processed++
 				processedPending = true
 				if err := h.refreshPending(ctx, pending, retry, outcome); err != nil {
-					h.recordRefreshFailure(pending.RootID, pending.CandidateID)
+					h.recordPendingFailure(pending.RootID, pending.CandidateID, err)
 					return h.hasRunnableRefresh(time.Now()), outcome, err
 				}
 				continue
@@ -86,7 +86,7 @@ func (h *GenerationManager) runRefresh(ctx context.Context, limit int) (bool, *s
 			break
 		}
 		processed++
-		*outcome = scheduler.TaskOutcome{Target: rootID, Reason: poll.reason, Phase: "check", QueueDuration: max(0, time.Since(poll.readyAt))}
+		*outcome = scheduler.TaskOutcome{Validation: poll.validation, Target: rootID, Reason: poll.reason, Phase: "check", QueueDuration: max(0, time.Since(poll.readyAt))}
 		if err := h.pollCurrent(ctx, rootID, poll.forceRebuild, outcome); err != nil {
 			return h.hasRunnableRefresh(time.Now()), outcome, err
 		}
@@ -107,7 +107,18 @@ func (h *GenerationManager) refreshPending(ctx context.Context, pending pendingA
 	if retry.notBefore.After(readyAt) {
 		readyAt = retry.notBefore
 	}
-	*outcome = scheduler.TaskOutcome{Target: pending.RootID, Reason: pending.reason, Phase: "build", Result: "published", QueueDuration: max(0, time.Since(readyAt))}
+	*outcome = scheduler.TaskOutcome{Validation: pending.validation, Target: pending.RootID, Reason: pending.reason, Phase: "build", Result: "published", QueueDuration: max(0, time.Since(readyAt))}
+	defer func() {
+		h.mu.Lock()
+		if live, ok := h.pending[pending.RootID]; ok && live.CandidateID == pending.CandidateID {
+			outcome.Validation.Merge(live.validation)
+		}
+		if live := h.current[pending.RootID]; live != nil && live.snapshot.CandidateID == pending.CandidateID {
+			outcome.Validation.Merge(live.validation)
+			live.validation = scheduler.ValidationDetails{}
+		}
+		h.mu.Unlock()
+	}()
 	if outcome.Reason == "" {
 		outcome.Reason = "initial"
 	}
@@ -213,6 +224,7 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, pollRequest,
 		}
 		current.polling = true
 		current.pollingRebuild = poll.forceRebuild
+		current.validation = poll.validation
 		return rootID, poll, true
 	}
 	compacted := h.pollQueue[:0]
@@ -229,24 +241,24 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, pollRequest,
 	return "", pollRequest{}, false
 }
 
-func (h *GenerationManager) recordRefreshFailure(rootID, candidateID string) {
+func (h *GenerationManager) recordPendingFailure(rootID, candidateID string, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if current := h.current[rootID]; current != nil {
-		current.lastAttempt = time.Now()
-		current.lastError = errors.New("metadata candidate validation failed")
-	}
 	pending, exists := h.pending[rootID]
 	if !exists || pending.CandidateID != candidateID {
 		return
 	}
-	retry := h.retryWindows[rootID]
+	h.retryWindows[rootID] = h.retryWindows[rootID].afterFailure(candidateID, err)
+}
+
+func (retry retryWindow) afterFailure(candidateID string, err error) retryWindow {
 	if retry.candidateID != candidateID {
 		retry = retryWindow{candidateID: candidateID}
 	}
 	retry.failures++
+	retry.err = err
 	retry.notBefore = time.Now().Add(refreshRetryDelay(candidateID, retry.failures))
-	h.retryWindows[rootID] = retry
+	return retry
 }
 
 func refreshRetryDelay(candidateID string, failures int) time.Duration {
@@ -421,7 +433,7 @@ func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forc
 		return nil
 	}
 	outcome.Result = "unchanged"
-	defer func() { h.finishCurrentPoll(snapshot, pollErr, forceRebuild) }()
+	defer func() { h.finishCurrentPoll(snapshot, pollErr, forceRebuild, outcome) }()
 
 	validators := make(http.Header)
 	validators.Set("Cache-Control", "no-cache")
@@ -487,27 +499,25 @@ func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forc
 	return err
 }
 
-func (h *GenerationManager) finishCurrentPoll(snapshot *Snapshot, pollErr error, forceRebuild bool) {
+func (h *GenerationManager) finishCurrentPoll(snapshot *Snapshot, pollErr error, forceRebuild bool, outcome *scheduler.TaskOutcome) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if current := h.current[snapshot.RootID]; current != nil {
+	if current := h.current[snapshot.RootID]; current != nil && current.snapshot.CandidateID == snapshot.CandidateID {
+		outcome.Validation.Merge(current.validation)
 		current.polling = false
 		current.pollingRebuild = false
+		current.validation = scheduler.ValidationDetails{}
 	}
 	if pollErr == nil {
 		delete(h.retryWindows, snapshot.RootID)
 		return
 	}
 	if current := h.current[snapshot.RootID]; current != nil && current.snapshot.CandidateID == snapshot.CandidateID {
-		current.lastAttempt, current.lastError = time.Now(), pollErr
-		retry := h.retryWindows[snapshot.RootID]
-		if retry.candidateID != snapshot.CandidateID {
-			retry = retryWindow{candidateID: snapshot.CandidateID}
-		}
-		retry.failures++
-		retry.notBefore = time.Now().Add(refreshRetryDelay(snapshot.CandidateID, retry.failures))
-		h.retryWindows[snapshot.RootID] = retry
+		h.retryWindows[snapshot.RootID] = h.retryWindows[snapshot.RootID].afterFailure(snapshot.CandidateID, pollErr)
 		h.enqueuePollLocked(snapshot.RootID, forceRebuild)
+		queued := h.pollRequests[snapshot.RootID]
+		queued.validation.Merge(outcome.Validation)
+		h.pollRequests[snapshot.RootID] = queued
 		h.pollCycleActive = true
 	}
 }
@@ -549,8 +559,10 @@ func (h *GenerationManager) updateCurrentFreshness(ctx context.Context, rootID, 
 	}
 	updated.validatedAt, updated.header = validatedAt, merged
 	updated.nextPoll = h.nextPollAt(rootID, validatedAt, updated.snapshot.PublishedAt)
-	updated.lastError = nil
 	h.mu.Lock()
+	if live := h.current[rootID]; live != nil && live.snapshot.CandidateID == candidateID {
+		updated.validation.Merge(live.validation)
+	}
 	h.current[rootID] = &updated
 	h.mu.Unlock()
 	return nil
@@ -601,7 +613,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 		}
 		var retryableError *retryableRefreshError
 		if !errors.As(err, &retryableError) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			h.discardCandidate(rootID, pending)
+			h.discardCandidate(rootID, pending, err)
 		}
 		return err
 	}
@@ -657,7 +669,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 	h.mu.RUnlock()
 	if !sameCandidate {
 		h.commitMu.Unlock()
-		h.discardCandidate(rootID, pending)
+		h.discardCandidate(rootID, pending, nil)
 		return errors.New("metadata anchor changed during refresh")
 	}
 	marker := currentMarker{
@@ -689,7 +701,7 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 		return err
 	}
 	h.mu.Lock()
-	h.current[rootID] = &liveSnapshot{snapshot: snapshot, snapshotSHA256: digest, validatedAt: pending.ValidatedAt, header: pending.Header, nextPoll: h.nextPollAt(rootID, pending.ValidatedAt, snapshot.PublishedAt)}
+	h.current[rootID] = &liveSnapshot{validation: h.pending[rootID].validation, snapshot: snapshot, snapshotSHA256: digest, validatedAt: pending.ValidatedAt, header: pending.Header, nextPoll: h.nextPollAt(rootID, pending.ValidatedAt, snapshot.PublishedAt)}
 	h.removePollLocked(rootID)
 	if len(previousSnapshots) == 0 {
 		delete(h.retained, rootID)
@@ -703,13 +715,23 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 	return nil
 }
 
-func (h *GenerationManager) discardCandidate(rootID string, pending pendingAnchor) {
+func (h *GenerationManager) discardCandidate(rootID string, pending pendingAnchor, buildErr error) {
 	h.commitMu.Lock()
 	defer h.commitMu.Unlock()
 	h.mu.Lock()
 	latest, exists := h.pending[rootID]
 	sameCandidate := exists && latest.CandidateID == pending.CandidateID
 	if sameCandidate {
+		// The candidate is discarded, but validation of the still-current snapshot
+		// failed. Preserve that result until its next check or a replacement arrives.
+		if current := h.current[rootID]; current != nil && buildErr != nil {
+			candidateID := current.snapshot.CandidateID
+			h.retryWindows[rootID] = (retryWindow{}).afterFailure(candidateID, buildErr)
+			h.enqueuePollLocked(rootID, false)
+			queued := h.pollRequests[rootID]
+			queued.validation.Merge(latest.validation)
+			h.pollRequests[rootID] = queued
+		}
 		delete(h.pending, rootID)
 	}
 	h.mu.Unlock()

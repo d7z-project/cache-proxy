@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -121,6 +122,7 @@ type snapshotReference struct {
 }
 
 type pendingAnchor struct {
+	validation  scheduler.ValidationDetails
 	reason      string
 	queuedAt    time.Time
 	ValidatedAt time.Time   `json:"validated_at"`
@@ -147,8 +149,7 @@ type liveSnapshot struct {
 	validatedAt    time.Time
 	header         http.Header
 	nextPoll       time.Time
-	lastAttempt    time.Time
-	lastError      error
+	validation     scheduler.ValidationDetails
 }
 
 type generationGCPhase uint8
@@ -162,12 +163,14 @@ const (
 )
 
 type retryWindow struct {
+	err         error
 	candidateID string
 	failures    int
 	notBefore   time.Time
 }
 
 type pollRequest struct {
+	validation   scheduler.ValidationDetails
 	reason       string
 	readyAt      time.Time
 	forceRebuild bool
@@ -383,6 +386,11 @@ func (h *GenerationManager) stageAnchor(ctx context.Context, rootID, root, ancho
 	}
 	h.mu.Lock()
 	pending.queuedAt = time.Now()
+	if current := h.current[rootID]; current != nil {
+		pending.validation.Merge(current.validation)
+	}
+	pending.validation.Merge(h.pending[rootID].validation)
+	pending.validation.Merge(h.pollRequests[rootID].validation)
 	h.pending[rootID] = pending
 	h.lastSeen[rootID] = now
 	h.lastSeenPersisted[rootID] = now
@@ -400,23 +408,31 @@ func (h *GenerationManager) TriggerRefresh() {
 	}
 }
 
-func (h *GenerationManager) requestCurrentPoll(rootID string, forceRebuild bool, baseline time.Time) {
+func (h *GenerationManager) requestCurrentPoll(rootID string, forceRebuild bool, baseline time.Time, validation scheduler.ValidationDetails) {
 	h.mu.Lock()
 	if current := h.current[rootID]; current != nil && !baseline.IsZero() && current.validatedAt.After(baseline) {
 		h.mu.Unlock()
 		return
 	}
 	_, pending := h.pending[rootID]
+	if pending {
+		candidate := h.pending[rootID]
+		candidate.validation.Merge(validation)
+		h.pending[rootID] = candidate
+	} else if current := h.current[rootID]; current != nil && current.polling {
+		current.validation.Merge(validation)
+	}
 	changed := false
 	if current := h.current[rootID]; current != nil && !pending && (!current.polling || forceRebuild && !current.pollingRebuild) {
 		changed = h.enqueuePollLocked(rootID, forceRebuild)
 		queued := h.pollRequests[rootID]
+		queued.validation.Merge(validation)
 		if queued.reason == "periodic" {
 			queued.reason = "request"
 			queued.readyAt = time.Now()
-			h.pollRequests[rootID] = queued
 			changed = true
 		}
+		h.pollRequests[rootID] = queued
 		if changed {
 			for index, queuedRootID := range h.pollQueue {
 				if queuedRootID == rootID {
@@ -607,7 +623,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		if !classifiedMetadata {
 			return false, 0, ""
 		}
-		h.requestCurrentPoll(matchedRootID, true, time.Time{})
+		h.requestCurrentPoll(matchedRootID, true, time.Time{}, scheduler.ValidationDetails{})
 		return false, 0, ""
 	}
 	readerKey := selectedSnapshot.snapshot.RootID + "\x00" + selectedSnapshot.snapshot.CandidateID
@@ -618,16 +634,35 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	}
 	validated := request.Context().Value(validatedRootKey{}) == selectedRootID
 	policy := proxyruntime.ParseCachePolicy(selectedObject.Header, selectedSnapshot.validatedAt, h.config.RefreshInterval)
-	expired := !selectedSnapshot.snapshot.ValidUntil.IsZero() && !time.Now().Before(selectedSnapshot.snapshot.ValidUntil)
-	strict := isAnchor && !validated && (expired || proxyruntime.RequestForcesRevalidation(request) || policy.NoCache ||
+	now := time.Now()
+	expired := !selectedSnapshot.snapshot.ValidUntil.IsZero() && !now.Before(selectedSnapshot.snapshot.ValidUntil)
+	needsValidation := isAnchor && !validated && (expired || proxyruntime.RequestForcesRevalidation(request) || policy.NoCache ||
 		!proxyruntime.ResponseFresh(selectedObject.Header, selectedSnapshot.validatedAt, h.config.RefreshInterval))
-	if strict {
+	if needsValidation {
 		baseline := selectedSnapshot.validatedAt
+		requestPolicy := proxyruntime.ParseCachePolicy(request.Header, now, 0)
+		age := proxyruntime.ResponseAge(selectedObject.Header, baseline, now)
+		validation := scheduler.ValidationDetails{
+			ClientNoCache:    requestPolicy.NoCache || request.Header.Get("Cache-Control") == "" && strings.EqualFold(strings.TrimSpace(request.Header.Get("Pragma")), "no-cache"),
+			ClientMaxAgeZero: requestPolicy.Explicit && requestPolicy.Lifetime == 0,
+			ResponseNoCache:  policy.NoCache,
+			FreshnessExpired: age >= policy.Lifetime,
+			ProtocolExpired:  expired,
+			Age:              age,
+			Lifetime:         policy.Lifetime,
+			ValidatedAt:      baseline,
+		}
 		h.mu.Unlock()
-		if err := h.waitForValidation(request.Context(), selectedRootID, baseline); err != nil && (expired || !proxyruntime.StaleAllowed(request, selectedObject.Header)) {
+		if err := h.waitForValidation(request.Context(), selectedRootID, baseline, validation); err != nil && (expired || !proxyruntime.StaleAllowed(request, selectedObject.Header)) {
 			status := http.StatusBadGateway
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			var timeout net.Error
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.As(err, &timeout) && timeout.Timeout() {
 				status = http.StatusGatewayTimeout
+			}
+			if errors.Is(err, errValidationWait) {
+				w.Header().Set("X-Cache-Error", "validation_wait")
+			} else if status == http.StatusGatewayTimeout {
+				w.Header().Set("X-Cache-Error", "upstream_timeout")
 			}
 			proxyruntime.WriteError(w, status)
 			return true, status, "ERROR"
@@ -653,7 +688,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	}()
 	reader, err := h.config.Store.OpenObject(request.Context(), h.config.Tenant, selectedObject.Key)
 	if err != nil {
-		h.requestCurrentPoll(selectedRootID, true, time.Time{})
+		h.requestCurrentPoll(selectedRootID, true, time.Time{}, scheduler.ValidationDetails{})
 		return false, 0, ""
 	}
 	defer func() { _ = reader.Close() }()

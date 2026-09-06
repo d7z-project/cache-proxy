@@ -19,7 +19,7 @@ type fixtureServer struct {
 	mu        sync.RWMutex
 	counts    map[string]int
 	headers   map[string]http.Header
-	faults    map[string]int
+	faults    map[string]fixtureFault
 	cacheAges map[string]int64
 	updated   atomic.Bool
 }
@@ -27,6 +27,11 @@ type fixtureServer struct {
 type fixtureRevision struct {
 	directory    string
 	packageMajor int
+}
+
+type fixtureFault struct {
+	status      int
+	headerDelay time.Duration
 }
 
 func main() {
@@ -40,7 +45,7 @@ func main() {
 		publicURL: strings.TrimRight(*publicURL, "/"),
 		counts:    make(map[string]int),
 		headers:   make(map[string]http.Header),
-		faults:    make(map[string]int),
+		faults:    make(map[string]fixtureFault),
 		cacheAges: make(map[string]int64),
 	}
 	log.Printf("fixture listening on %s", *addr)
@@ -61,10 +66,19 @@ func (s *fixtureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	log.Printf("%s %s", r.Method, r.URL.RequestURI())
 	s.mu.RLock()
-	faultStatus := s.faults[r.URL.Path]
+	fault := s.faults[r.URL.Path]
 	s.mu.RUnlock()
-	if faultStatus != 0 {
-		http.Error(w, http.StatusText(faultStatus), faultStatus)
+	if fault.headerDelay > 0 {
+		timer := time.NewTimer(fault.headerDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	if fault.status != 0 {
+		http.Error(w, http.StatusText(fault.status), fault.status)
 		return
 	}
 	revision := fixtureRevision{directory: "initial", packageMajor: 1}

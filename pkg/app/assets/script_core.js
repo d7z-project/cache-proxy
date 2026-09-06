@@ -202,6 +202,17 @@
         metadata.textContent = metadataParts.join(" · ");
         targetCell.appendChild(metadata);
       }
+      if (event.validation) {
+        var validation = event.validation;
+        var validationDetail = document.createElement("span");
+        validationDetail.className = "event-detail event-detail-meta";
+        validationDetail.textContent = text("validation", "Validation") + ": " +
+          (validation.causes || []).join(", ") + " · " +
+          text("cache_age", "Cache age") + ": " + formatDuration(validation.age_ms) + " · " +
+          text("freshness_lifetime", "Freshness lifetime") + ": " + formatDuration(validation.lifetime_ms) + " · " +
+          text("validated_at", "Validated at") + ": " + formatDateTime(validation.validated_at);
+        targetCell.appendChild(validationDetail);
+      }
       var message = String(event.message || "").trim();
       if (message) {
         var detail = document.createElement("span");

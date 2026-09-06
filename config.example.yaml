@@ -107,7 +107,7 @@ instances:
       # retain their inbound User-Agent when no explicit override is configured.
       # ua: cache-proxy
       dial_timeout: 10s # Connection establishment timeout. Default: 3s.
-      header_timeout: 30s # Response header timeout. Default: 30s.
+      header_timeout: 30s # Upstream header wait; excludes body and client validation wait. Default: 30s.
       idle_body_timeout: 30s # Timeout for a blocked upstream body read. Default: 5m.
       max_request_duration: 30m # Total HTTP request timeout. Default: 30m.
       max_idle_conns: 64 # Maximum idle connections per transport. Default: 100.

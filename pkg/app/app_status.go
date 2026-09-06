@@ -30,17 +30,25 @@ type diskSample struct {
 }
 
 type taskEvent struct {
-	Storage         string `json:"storage"`
-	TaskType        string `json:"task_type"`
-	Target          string `json:"target"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
-	DurationMS      int64  `json:"duration_ms"`
-	QueueDurationMS int64  `json:"queue_duration_ms"`
-	Result          string `json:"result"`
-	Reason          string `json:"reason,omitempty"`
-	Phase           string `json:"phase,omitempty"`
-	Message         string `json:"message,omitempty"`
+	Validation      *validationEvent `json:"validation,omitempty"`
+	Storage         string           `json:"storage"`
+	TaskType        string           `json:"task_type"`
+	Target          string           `json:"target"`
+	StartedAt       string           `json:"started_at"`
+	FinishedAt      string           `json:"finished_at"`
+	DurationMS      int64            `json:"duration_ms"`
+	QueueDurationMS int64            `json:"queue_duration_ms"`
+	Result          string           `json:"result"`
+	Reason          string           `json:"reason,omitempty"`
+	Phase           string           `json:"phase,omitempty"`
+	Message         string           `json:"message,omitempty"`
+}
+
+type validationEvent struct {
+	Causes      []string `json:"causes"`
+	AgeMS       int64    `json:"age_ms"`
+	LifetimeMS  int64    `json:"lifetime_ms"`
+	ValidatedAt string   `json:"validated_at"`
 }
 
 type appStatus struct {
@@ -100,6 +108,24 @@ func (s *appStatus) stop(ctx context.Context) error {
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
+	var validation *validationEvent
+	if v := run.Validation; !v.ValidatedAt.IsZero() {
+		validation = &validationEvent{AgeMS: v.Age.Milliseconds(), LifetimeMS: v.Lifetime.Milliseconds(), ValidatedAt: v.ValidatedAt.Format(time.RFC3339)}
+		for _, cause := range []struct {
+			name   string
+			active bool
+		}{
+			{"client_no_cache", v.ClientNoCache},
+			{"client_max_age_zero", v.ClientMaxAgeZero},
+			{"response_no_cache", v.ResponseNoCache},
+			{"freshness_expired", v.FreshnessExpired},
+			{"protocol_expired", v.ProtocolExpired},
+		} {
+			if cause.active {
+				validation.Causes = append(validation.Causes, cause.name)
+			}
+		}
+	}
 	target := run.Target
 	if target == "" {
 		target = run.Key.RootID()
@@ -108,6 +134,7 @@ func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
 		target = "/"
 	}
 	s.appendEvent(taskEvent{
+		Validation:      validation,
 		Storage:         run.Key.Instance(),
 		TaskType:        string(run.Key.Type()),
 		Target:          target,

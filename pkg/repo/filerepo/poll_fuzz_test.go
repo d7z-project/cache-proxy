@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 func FuzzPollTimingAndCancellation(f *testing.F) {
@@ -50,7 +51,7 @@ func FuzzPollTimingAndCancellation(f *testing.F) {
 		var triggers sync.WaitGroup
 		force := value&1 != 0
 		for index := range 4 {
-			triggers.Go(func() { h.requestCurrentPoll(rootID, force && index == 0, time.Time{}) })
+			triggers.Go(func() { h.requestCurrentPoll(rootID, force && index == 0, time.Time{}, scheduler.ValidationDetails{}) })
 		}
 		triggers.Wait()
 		h.mu.RLock()

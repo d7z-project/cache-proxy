@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -91,9 +92,7 @@ func (a *App) instanceUsage(ctx context.Context, instances []string) map[string]
 	a.instanceUsageMu.Lock()
 	previous := a.instanceUsageCachedAt
 	result := make(map[string]int64, len(a.instanceUsageCache))
-	for instance, size := range a.instanceUsageCache {
-		result[instance] = size
-	}
+	maps.Copy(result, a.instanceUsageCache)
 	a.instanceUsageMu.Unlock()
 	if time.Since(previous) >= 5*time.Minute {
 		a.refreshInstanceUsage(ctx, instances)

@@ -1,13 +1,18 @@
 package transport
 
 import (
-	"errors"
 	"io"
 	"sync"
 	"time"
 )
 
-var ErrIdleBodyTimeout = errors.New("idle body timeout")
+var ErrIdleBodyTimeout error = idleBodyTimeoutError{}
+
+type idleBodyTimeoutError struct{}
+
+func (idleBodyTimeoutError) Error() string   { return "idle body timeout" }
+func (idleBodyTimeoutError) Timeout() bool   { return true }
+func (idleBodyTimeoutError) Temporary() bool { return true }
 
 type idleTimeoutReadCloser struct {
 	inner        io.ReadCloser

@@ -631,6 +631,7 @@ func TestStatusTaskEventUsesOutcomeDetails(t *testing.T) {
 		EventLimit:         8,
 	})
 	status.observeTaskRun(scheduler.TaskRun{
+		Validation:    scheduler.ValidationDetails{ClientNoCache: true, FreshnessExpired: true, Age: time.Minute, Lifetime: time.Second, ValidatedAt: time.Unix(1710000000, 0).UTC()},
 		Key:           scheduler.NewTaskKey("rocky", scheduler.TypeMetadataRefresh, "repo/root"),
 		Target:        "dists/rocky/repodata/repomd.xml",
 		Reason:        "periodic",
@@ -644,6 +645,11 @@ func TestStatusTaskEventUsesOutcomeDetails(t *testing.T) {
 	require.Equal(t, "periodic", event.Reason)
 	require.Equal(t, "published", event.Phase)
 	require.Equal(t, int64(1500), event.QueueDurationMS)
+	require.NotNil(t, event.Validation)
+	require.Equal(t, []string{"client_no_cache", "freshness_expired"}, event.Validation.Causes)
+	require.Equal(t, int64(60000), event.Validation.AgeMS)
+	require.Equal(t, int64(1000), event.Validation.LifetimeMS)
+	require.Equal(t, "2024-03-09T16:00:00Z", event.Validation.ValidatedAt)
 }
 
 func TestStatusEndpointsReturnJSON(t *testing.T) {

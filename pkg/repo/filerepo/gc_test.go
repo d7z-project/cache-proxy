@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"gopkg.d7z.net/blobfs"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 func TestGenerationManagerGCProtectsActiveReader(t *testing.T) {
@@ -98,7 +99,7 @@ func TestGenerationManagerRetiresInactiveRoot(t *testing.T) {
 	require.NoError(t, err)
 	snapshot := handler.Current("repo")
 	key := snapshot.byPath["repo/Release"].Key
-	handler.requestCurrentPoll("repo", true, time.Time{})
+	handler.requestCurrentPoll("repo", true, time.Time{}, scheduler.ValidationDetails{})
 	handler.mu.Lock()
 	handler.lastSeen["repo"] = time.Now().Add(-time.Hour)
 	handler.mu.Unlock()

@@ -1,4 +1,8 @@
 {
+  "validation": "検証条件",
+  "cache_age": "キャッシュ経過時間",
+  "freshness_lifetime": "有効期間",
+  "validated_at": "最終検証",
   "title": "キャッシュプロキシ",
   "dashboard": "運用ダッシュボード",
   "system_overview": "システム概要",

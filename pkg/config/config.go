@@ -237,7 +237,10 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 		return SelectedMode{}, fmt.Errorf("invalid instance name %q: must match %s", i.Name, validNameRE.String())
 	}
 	mode := strings.TrimSpace(i.Mode)
-	if !validMode(mode) {
+	switch mode {
+	case ModeFile, ModeGit, ModeOCI, ModeNPM, ModeGo, ModeMaven, ModeCargo,
+		ModePyPI, ModeFlatpak, ModeAPK, ModeDEB, ModeRPM, ModePacman:
+	default:
 		return SelectedMode{}, fmt.Errorf("instance %q has unsupported mode %q", i.Name, mode)
 	}
 	i.Mode = mode
@@ -245,16 +248,6 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 		return SelectedMode{}, fmt.Errorf("instance %q: %w", i.Name, err)
 	}
 	return SelectedMode{Name: name, Enabled: i.Enabled, Mode: mode, Options: i.Options}, nil
-}
-
-func validMode(mode string) bool {
-	switch mode {
-	case ModeFile, ModeGit, ModeOCI, ModeNPM, ModeGo, ModeMaven, ModeCargo,
-		ModePyPI, ModeFlatpak, ModeAPK, ModeDEB, ModeRPM, ModePacman:
-		return true
-	default:
-		return false
-	}
 }
 
 func (i Instance) validateDeclaration() error {

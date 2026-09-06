@@ -1179,7 +1179,7 @@ func TestGenerationManagerPendingRetryAllowsOtherRoots(t *testing.T) {
 	_, err = handler.Refresh(context.Background(), 1)
 	require.NoError(t, err)
 	require.NoError(t, handler.StageAnchorID(context.Background(), "a", "a", "a/Release", nil, bytes.NewReader([]byte("a"))))
-	handler.requestCurrentPoll("b", false, time.Time{})
+	handler.requestCurrentPoll("b", false, time.Time{}, scheduler.ValidationDetails{})
 	_, _, err = handler.runRefresh(context.Background(), 2)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	require.Equal(t, 1, handler.retryWindows["a"].failures)
@@ -1187,7 +1187,7 @@ func TestGenerationManagerPendingRetryAllowsOtherRoots(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, more)
 	require.Equal(t, int32(1), currentPolls.Load())
-	handler.requestCurrentPoll("b", false, time.Time{})
+	handler.requestCurrentPoll("b", false, time.Time{}, scheduler.ValidationDetails{})
 	more, _, err = handler.runRefresh(context.Background(), 1)
 	require.NoError(t, err)
 	require.False(t, more)
@@ -1270,7 +1270,7 @@ func TestGenerationManagerPollCycleVisitsEveryCurrentRoot(t *testing.T) {
 		require.NoError(t, refreshErr)
 		require.Equal(t, index < 2, more)
 		if index == 0 {
-			handler.requestCurrentPoll("c", false, time.Time{})
+			handler.requestCurrentPoll("c", false, time.Time{}, scheduler.ValidationDetails{})
 		}
 	}
 	require.Equal(t, map[string]int{"a/Release": 1, "b/Release": 1, "c/Release": 1}, polled)

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func (s *fixtureServer) serveControl(w http.ResponseWriter, r *http.Request) {
@@ -88,27 +89,34 @@ func (s *fixtureServer) serveControl(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case "/__e2e/fault":
 		requestPath := r.URL.Query().Get("path")
-		if requestPath == "" || !strings.HasPrefix(requestPath, "/") || strings.HasPrefix(requestPath, "/__e2e/") {
+		if requestPath == "" || len(requestPath) > 4096 || !strings.HasPrefix(requestPath, "/") || strings.HasPrefix(requestPath, "/__e2e/") {
 			http.Error(w, "fault path must be an absolute fixture path", http.StatusBadRequest)
 			return
 		}
 		switch r.Method {
 		case http.MethodPost:
-			status := 0
+			var fault fixtureFault
 			switch r.URL.Query().Get("status") {
 			case "403":
-				status = http.StatusForbidden
+				fault.status = http.StatusForbidden
 			case "404":
-				status = http.StatusNotFound
+				fault.status = http.StatusNotFound
+			case "delay":
+				fault.headerDelay = 3 * time.Second
 			default:
-				http.Error(w, "fault status must be 403 or 404", http.StatusBadRequest)
+				http.Error(w, "fault status must be 403, 404 or delay", http.StatusBadRequest)
 				return
 			}
 			s.mu.Lock()
-			if s.faults == nil {
-				s.faults = make(map[string]int)
+			if _, exists := s.faults[requestPath]; !exists && len(s.faults) >= 256 {
+				s.mu.Unlock()
+				http.Error(w, "too many fixture faults", http.StatusBadRequest)
+				return
 			}
-			s.faults[requestPath] = status
+			if s.faults == nil {
+				s.faults = make(map[string]fixtureFault)
+			}
+			s.faults[requestPath] = fault
 			s.mu.Unlock()
 		case http.MethodDelete:
 			s.mu.Lock()

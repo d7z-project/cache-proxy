@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 )
 
 func TestBackgroundPollDoesNotUseHTTPFreshness(t *testing.T) {
@@ -210,7 +211,7 @@ func TestPendingBackoffDoesNotHideDueRoot(t *testing.T) {
 	require.NoError(t, h.StageAnchorID(context.Background(), "other", "other", "other/Release", nil, strings.NewReader("other")))
 	_, err := h.Refresh(context.Background(), 10)
 	require.NoError(t, err)
-	h.requestCurrentPoll("repo", true, time.Time{})
+	h.requestCurrentPoll("repo", true, time.Time{}, scheduler.ValidationDetails{})
 	require.NoError(t, h.StageAnchor(context.Background(), "repo", "repo/Release", nil, strings.NewReader("new")))
 	h.mu.Lock()
 	h.retryWindows["repo"] = retryWindow{candidateID: h.pending["repo"].CandidateID, failures: 1, notBefore: time.Now().Add(time.Hour)}
@@ -236,7 +237,7 @@ func TestReadyRefreshAlternatesQueuedPollsAndPendingBuilds(t *testing.T) {
 		require.NoError(t, h.StageAnchor(context.Background(), root, root+"/Release", nil, strings.NewReader(root)))
 	}
 	for _, root := range []string{"a", "b", "c"} {
-		h.requestCurrentPoll("repo", false, time.Time{})
+		h.requestCurrentPoll("repo", false, time.Time{}, scheduler.ValidationDetails{})
 		more, outcome, err := h.runRefresh(context.Background(), 1)
 		require.NoError(t, err)
 		require.True(t, more)
@@ -274,7 +275,7 @@ func TestRecoveryDuringActivePollPublishesOnce(t *testing.T) {
 	})
 	h.config.Build = func(context.Context, *RefreshSession, Anchor) error { builds.Add(1); return nil }
 	previous := h.Current("repo").CandidateID
-	h.requestCurrentPoll("repo", false, time.Time{})
+	h.requestCurrentPoll("repo", false, time.Time{}, scheduler.ValidationDetails{})
 	go func() { _, _, err := h.runRefresh(ctx, 1); finished <- err }()
 	select {
 	case <-started:
@@ -283,7 +284,7 @@ func TestRecoveryDuringActivePollPublishesOnce(t *testing.T) {
 	}
 	var triggers sync.WaitGroup
 	for index := range 8 {
-		triggers.Go(func() { h.requestCurrentPoll("repo", index%2 == 0, time.Time{}) })
+		triggers.Go(func() { h.requestCurrentPoll("repo", index%2 == 0, time.Time{}, scheduler.ValidationDetails{}) })
 	}
 	triggers.Wait()
 	close(release)
@@ -311,15 +312,15 @@ func TestRequestCurrentPollCoalescesAndRetainsRecovery(t *testing.T) {
 	h := newValidationManager(t, func(context.Context, string, http.Header) (*http.Response, error) {
 		return nil, io.EOF
 	})
-	h.requestCurrentPoll("repo", false, time.Time{})
-	h.requestCurrentPoll("repo", false, time.Time{})
+	h.requestCurrentPoll("repo", false, time.Time{}, scheduler.ValidationDetails{})
+	h.requestCurrentPoll("repo", false, time.Time{}, scheduler.ValidationDetails{})
 	h.mu.RLock()
 	require.Len(t, h.pollQueue, 1)
 	require.False(t, h.pollRequests["repo"].forceRebuild)
 	h.mu.RUnlock()
 
-	h.requestCurrentPoll("repo", true, time.Time{})
-	h.requestCurrentPoll("repo", false, time.Time{})
+	h.requestCurrentPoll("repo", true, time.Time{}, scheduler.ValidationDetails{})
+	h.requestCurrentPoll("repo", false, time.Time{}, scheduler.ValidationDetails{})
 	h.mu.RLock()
 	require.Len(t, h.pollQueue, 1)
 	require.True(t, h.pollRequests["repo"].forceRebuild)
@@ -331,11 +332,11 @@ func TestRequestCurrentPollCoalescesAndRetainsRecovery(t *testing.T) {
 	h.current["repo"].polling = true
 	h.current["repo"].pollingRebuild = false
 	h.mu.Unlock()
-	h.requestCurrentPoll("repo", false, time.Time{})
+	h.requestCurrentPoll("repo", false, time.Time{}, scheduler.ValidationDetails{})
 	h.mu.RLock()
 	require.Empty(t, h.pollQueue)
 	h.mu.RUnlock()
-	h.requestCurrentPoll("repo", true, time.Time{})
+	h.requestCurrentPoll("repo", true, time.Time{}, scheduler.ValidationDetails{})
 	h.mu.RLock()
 	require.Len(t, h.pollQueue, 1)
 	require.True(t, h.pollRequests["repo"].forceRebuild)

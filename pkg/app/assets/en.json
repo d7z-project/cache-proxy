@@ -1,4 +1,8 @@
 {
+  "validation": "Validation",
+  "cache_age": "Cache age",
+  "freshness_lifetime": "Freshness lifetime",
+  "validated_at": "Validated at",
   "title": "Cache Proxy",
   "dashboard": "Operations dashboard",
   "system_overview": "System overview",

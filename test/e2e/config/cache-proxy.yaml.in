@@ -99,6 +99,8 @@ instances:
     mode: rpm
     path: /rpm
     upstream: @FIXTURE_URL@/rpm
+    transport:
+      header_timeout: 1s
     refresh:
       interval: 30s
   - name: pacman

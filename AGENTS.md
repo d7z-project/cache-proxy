@@ -42,6 +42,7 @@
 - canonical 与固定签名读取 current；previous 仅用于协议明确允许且能精确绑定内容版本的路径，不能按文件名猜测不可变性。RPM metadata 保持 current-only。
 - 首次合格 anchor 可边透传边捕获；metadata miss 或本地缺失按协议恢复并回源，不能仅因缓存未准备好制造 `503` 或负缓存。校验失败的内容不得作为成功缓存响应。
 - 修复缺失对象不能依赖 anchor 变化；普通周期检查不重建未变化的快照。显式强制验证必须等待验证结果，等待有界且不取消后台刷新。
+- 验证失败绑定对应 current 或 pending 身份并保留原始错误链；退避期间复用已知结果，不重复回源。诊断条件使用有界状态合并，不收集请求历史或凭据。
 - Debian 自动支持 standard、nested 与 flat。双 anchor 内容一致并遵守 `Valid-Until`；by-hash 索引按需验证下载，非 by-hash 构建完整 metadata snapshot。
 - Debian 每个 Release entry 独立验证大小和全部 strong checksum；续传绑定精确路径与摘要。by-hash 仅在 `403` / `404` 且 entry 无歧义时回退同源 canonical，仍须通过原校验；lazy miss 不触发全量重建。
 - Flatpak single-file/indexed summary 分别管理 generation；indexed summary 不预取其他架构或 subset，按需对象校验后缓存。可变 sidecar/delta 使用有限成功响应缓存，不绑定 summary generation。

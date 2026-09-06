@@ -35,7 +35,33 @@ const (
 
 type TaskHandler func(context.Context) (*TaskOutcome, error)
 
+// ValidationDetails describes the bounded set of conditions behind a metadata check.
+type ValidationDetails struct {
+	ClientNoCache    bool
+	ClientMaxAgeZero bool
+	ResponseNoCache  bool
+	FreshnessExpired bool
+	ProtocolExpired  bool
+	Age              time.Duration
+	Lifetime         time.Duration
+	ValidatedAt      time.Time
+}
+
+// Merge keeps the first request's timing sample and includes other waiting causes.
+func (v *ValidationDetails) Merge(other ValidationDetails) {
+	if v.ValidatedAt.IsZero() {
+		*v = other
+		return
+	}
+	v.ClientNoCache = v.ClientNoCache || other.ClientNoCache
+	v.ClientMaxAgeZero = v.ClientMaxAgeZero || other.ClientMaxAgeZero
+	v.ResponseNoCache = v.ResponseNoCache || other.ResponseNoCache
+	v.FreshnessExpired = v.FreshnessExpired || other.FreshnessExpired
+	v.ProtocolExpired = v.ProtocolExpired || other.ProtocolExpired
+}
+
 type TaskOutcome struct {
+	Validation    ValidationDetails
 	Result        string
 	Target        string
 	Reason        string
@@ -80,6 +106,7 @@ type TaskInfo struct {
 }
 
 type TaskRun struct {
+	Validation    ValidationDetails
 	Key           TaskKey
 	StartedAt     time.Time
 	FinishedAt    time.Time
@@ -287,14 +314,11 @@ func (s *Scheduler) runTask(key TaskKey) {
 	s.mu.Unlock()
 
 	started := time.Now()
-	deadline := interval / 2
-	if deadline < time.Minute {
-		deadline = time.Minute
-	}
+	runTimeout := max(interval/2, time.Minute)
 	if timeout > 0 {
-		deadline = timeout
+		runTimeout = timeout
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, deadline)
+	ctx, cancel := context.WithTimeout(s.ctx, runTimeout)
 	outcome, err := handler(ctx)
 	cancel()
 	finished := time.Now()
@@ -302,6 +326,7 @@ func (s *Scheduler) runTask(key TaskKey) {
 	var continueAfter time.Duration
 	noWork := false
 	if outcome != nil {
+		run.Validation = outcome.Validation
 		run.Target = outcome.Target
 		run.Reason = outcome.Reason
 		run.Phase = outcome.Phase
