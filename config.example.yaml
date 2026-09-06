@@ -77,11 +77,15 @@ storage:
 #   transport: optional instance HTTP settings; defaults illustrated below.
 #   options: optional mode-specific settings; defaults documented per mode below.
 #
-# refresh.interval controls mutable freshness and repository polling; minimum: 1s.
-# Repository polling is staggered; other mutable objects are revalidated on demand.
-# Shorter upstream cache policy takes precedence. Immutable objects, protocol expiry
-# and signed URL expiry retain their own policies. Shorter intervals trade more
-# upstream traffic for faster updates.
+# refresh.interval controls repository background polling and mutable-object
+# freshness; minimum: 1s. For repository generations, polling uses this interval
+# plus a stable positive 0..min(interval/20, 1m) stagger. A 1h interval therefore
+# schedules the next check after 60 to 61 minutes; a busy scheduler may delay it.
+# A shorter upstream max-age does not accelerate idle polling.
+# Initial fills, required request validation, and missing objects
+# can trigger earlier work. Immutable objects, protocol expiry and signed URL
+# expiry retain their own policies. Shorter intervals trade more upstream traffic
+# for faster updates.
 # Git uses options.sync_interval instead. Each example below notes its mode's defaults.
 instances:
   # Debian standard, nested and flat repositories are detected automatically.

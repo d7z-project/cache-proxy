@@ -113,16 +113,7 @@ func (h *GenerationManager) retireInactiveRoots(ctx context.Context, limit int, 
 		delete(h.lastSeenPersisted, rootID)
 		delete(h.retryWindows, rootID)
 		delete(h.retiring, rootID)
-		delete(h.pollQueued, rootID)
-		delete(h.forceRebuildQueued, rootID)
-		queued := h.pollQueue[:0]
-		for _, queuedRootID := range h.pollQueue {
-			if queuedRootID != rootID {
-				queued = append(queued, queuedRootID)
-			}
-		}
-		clear(h.pollQueue[len(queued):])
-		h.pollQueue = queued
+		h.removePollLocked(rootID)
 		h.mu.Unlock()
 		h.commitMu.Unlock()
 		if err := removeEmptyStateParents(statePath(h.config.StateDir, currentName(rootID)), statePath(h.config.StateDir, "repositories")); err != nil {

@@ -994,6 +994,12 @@ td:nth-child(4) {
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.event-detail-meta {
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10px;
+}
+
 .event-detail-error {
   color: var(--bad);
 }
@@ -1118,7 +1124,7 @@ td:nth-child(4) {
   }
 
   .activity-table .event-col-result {
-    width: 76px;
+    width: 100px;
   }
 
   .activity-table .event-col-target {

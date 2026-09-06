@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -246,7 +245,14 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer h.repositoryMu.RUnlock()
-	serveGitHTTP(w, req, h.server, h.name)
+	switch {
+	case req.URL.Path == "/info/refs" && req.URL.Query().Get("service") == "git-upload-pack":
+		handleInfoRefs(w, req, h.server, h.name)
+	case req.URL.Path == "/git-upload-pack":
+		handleUploadPack(w, req, h.server, h.name)
+	default:
+		http.NotFound(w, req)
+	}
 }
 
 func (h *gitHandler) DashboardStatus() (color, label, extra string) {
@@ -263,16 +269,13 @@ func (h *gitHandler) DashboardStatus() (color, label, extra string) {
 	return "gray", "starting", ""
 }
 
-func (h *gitHandler) redactedUpstream() string { return redactURL(h.upstream) }
-
-func (h *gitHandler) writeAdmissionError(w http.ResponseWriter, err error) {
-	status := http.StatusServiceUnavailable
-	var limited *proxyruntime.UpstreamRateLimitError
-	if errors.As(err, &limited) {
-		status = http.StatusTooManyRequests
+func (h *gitHandler) redactedUpstream() string {
+	u, err := url.Parse(h.upstream)
+	if err != nil {
+		return h.upstream
 	}
-	if seconds, ok := proxyruntime.AdmissionRetryAfterSeconds(err); ok {
-		w.Header().Set("Retry-After", strconv.Itoa(seconds))
-	}
-	proxytransport.WriteError(w, status)
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }

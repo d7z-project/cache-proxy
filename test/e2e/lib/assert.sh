@@ -85,6 +85,13 @@ e2e_reset_fixture_counts() {
     'curl --fail --silent --show-error -X POST "$1/__e2e/reset" >/dev/null' "$E2E_FIXTURE_URL"
 }
 
+e2e_set_fixture_cache_age() {
+  local path=$1 seconds=$2
+  e2e_run_client_shell "${E2E_RUN_ID}-cache-age-$RANDOM" "$E2E_TOOLS_IMAGE" \
+    'curl --fail --silent --show-error -X POST --get \
+      --data-urlencode "path=$1" --data-urlencode "seconds=$2" "$3/__e2e/cache-age" >/dev/null' "$path" "$seconds" "$E2E_FIXTURE_URL"
+}
+
 e2e_set_fixture_fault() {
   local path=$1 status=$2
   e2e_run_client_shell "${E2E_RUN_ID}-fault-$status-$RANDOM" "$E2E_TOOLS_IMAGE" '
@@ -235,7 +242,7 @@ e2e_wait_cache_hit() {
     i=0
     while [ "$i" -lt 60 ]; do
       if curl --silent --show-error --dump-header /tmp/headers --output /dev/null "$url" &&
-         grep -Eiq "^X-Cache: (HIT|COALESCED)" /tmp/headers; then
+         grep -Eiq "^X-Cache:[[:space:]]*HIT[[:space:]]*$" /tmp/headers; then
         exit 0
       fi
       i=$((i + 1))
@@ -244,6 +251,24 @@ e2e_wait_cache_hit() {
     printf "timed out waiting for a published cache response at %s\n" "$url" >&2
     exit 1
   ' "$url"
+}
+
+e2e_assert_generation_poll_interval() {
+  local mode=$1 proxy_anchor=$2 upstream_anchor=${3:-$2} before after forced
+  before=$(e2e_fixture_count GET "$upstream_anchor")
+  sleep 2
+  after=$(e2e_fixture_count GET "$upstream_anchor")
+  e2e_assert_eq "$before" "$after" "$mode polled metadata before its configured interval"
+
+  e2e_client "$mode" forced-metadata-validation "$E2E_TOOLS_IMAGE" '
+    headers=/tmp/headers
+    status=$(curl --fail --silent --show-error --max-time 35 --dump-header "$headers" \
+      --output /dev/null --write-out "%{http_code}" -H "Cache-Control: no-cache" "$1$2")
+    test "$status" = 200
+    grep -Eiq "^X-Cache:[[:space:]]*HIT[[:space:]]*$" "$headers"
+  ' "$E2E_PROXY_URL" "$proxy_anchor"
+  forced=$(e2e_fixture_count GET "$upstream_anchor")
+  ((forced > after)) || e2e_fail "$mode forced metadata validation did not reach the fixture"
 }
 
 e2e_assert_transparent_paths() {

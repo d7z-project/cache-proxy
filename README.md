@@ -13,7 +13,7 @@ multiple registries, each with its own upstream, cache, and refresh settings.
 
 [Installation](#installation) | [Quick Start](#quick-start) |
 [Configuration](#configuration) | [Client Setup](#client-setup) |
-[Operations](#operations) | [Development](#development)
+[Operations](#operations) | [Testing](#testing)
 
 ## Features
 
@@ -160,7 +160,7 @@ client instructions.
 | `bind` | Use a dedicated listener; required for OCI |
 | `display_url` | Public client address for a dedicated OCI listener |
 | `transport` | Outbound proxy, User-Agent, connection limits, and timeouts |
-| `refresh.interval` | Mutable freshness limit and repository polling interval |
+| `refresh.interval` | Repository background polling interval; mutable-object freshness setting |
 | `options` | Mode-specific configuration |
 
 Each instance requires `name`, `mode`, `upstream`, and exactly one of `path` or
@@ -174,24 +174,35 @@ credential fields support environment variable expansion.
 
 ### Refresh and Rate Limits
 
-Set `refresh: {interval: 30m}` on an instance to adjust mutable metadata
-freshness. The minimum interval is `1s`.
+Set `refresh: {interval: 30m}` on an instance to adjust its repository
+background metadata polling interval or mutable-object freshness setting. The
+minimum interval is `1s`.
 
 | Content | Default interval |
 |---|---|
-| Linux repository metadata and Flatpak summaries | 15m |
+| Linux repository metadata and Flatpak summaries (background polling) | 15m |
 | npm, PyPI, Cargo, Go and Maven mutable metadata; Flatpak mutable refs | 1m |
 | OCI tags | 2m |
 | Maven SNAPSHOT files | 5m |
 | Git mirror synchronization | 5m, through `options.sync_interval` |
 
-For file `http_cache` rules, `refresh.interval` is a freshness ceiling and a
-fallback when upstream omits a lifetime. Without it, caching requires explicit
-upstream freshness.
+For repository metadata, background polling is scheduled independently of HTTP
+freshness. Response reuse still follows the upstream policy, with
+`refresh.interval` as the local freshness ceiling and fallback.
+Polling is staggered with a stable positive offset from `0` to
+`min(interval / 20, 1m)`, so a `1h` interval schedules the next check 60 to 61
+minutes after the latest successful validation or publication. A shorter upstream
+`max-age` does not accelerate an idle background poll. The interval applies to
+each discovered repository root, not to the instance's combined event stream.
+A client request that requires validation, an initial fill, or a missing object
+can still trigger an earlier request.
+The scheduler executes tasks serially; a busy scheduler can delay a due check.
 
-Repository polling is staggered; other mutable objects refresh on demand.
-Shorter upstream cache policies take precedence. Refresh settings
-do not extend protocol expiry, signed URL validity, or immutable object retention.
+Other mutable objects refresh on demand. For file `http_cache` rules,
+`refresh.interval` remains a freshness ceiling and fallback when the upstream
+omits a lifetime; without it, caching requires explicit upstream freshness.
+Refresh settings do not extend protocol expiry, signed URL validity, or immutable
+object retention.
 
 Use `storage.download` to control global concurrency, per-host concurrency,
 and request pacing. The `hosts` mapping overrides limits for a hostname with an
@@ -303,7 +314,7 @@ Go and OCI expose their protocol endpoints only.
 | `/` | Dashboard, instance status, and client configuration |
 | `/-/status/summary` | Service and storage summary |
 | `/-/status/disk` | Disk usage history |
-| `/-/status/events` | Maintenance results and errors; accepts `limit` |
+| `/-/status/events` | Maintenance results and errors, including target, cause, phase, and queue time; accepts `limit` |
 | `/-/status/network` | Instance and upstream request statistics |
 | `/metrics` | Prometheus metrics; configurable through `metrics.path` |
 
@@ -313,15 +324,19 @@ Review maintenance errors in the dashboard or events API. For container logs:
 docker logs --tail 100 -f cache-proxy
 ```
 
+Each metadata event represents work for a concrete repository root.
+Events distinguish upstream checks (`unchanged` or `staged`) from
+snapshot publication (`published`). The target and reason identify which root
+ran and whether it was a periodic check, client validation, initial fill,
+recovery, or retry. Queue time and execution time are reported separately.
+
 For repeated `429` responses, review per-host limits and metadata refresh intervals.
 For timeouts, check upstream reachability and instance transport settings.
 For storage errors, check backend permissions, free space, and download limits.
 
-## Development
+## Testing
 
-Contributions are welcome through [issues](https://github.com/d7z-project/cache-proxy/issues)
-and pull requests. See [AGENTS.md](AGENTS.md) for architecture and engineering
-requirements. The local checks require Go 1.26 or newer and Make:
+Run the local checks with Go 1.26 or newer and Make:
 
 ```bash
 make fmt
@@ -340,6 +355,10 @@ E2E_RUNTIME=podman E2E_SUITE=deb make test-e2e
 ```
 
 `E2E_SUITE` accepts any supported mode; omitting it runs every mode.
+
+Report bugs through [issues](https://github.com/d7z-project/cache-proxy/issues),
+including your mode, relevant configuration without credentials, and error logs.
+Pull requests should include tests for the affected behavior.
 
 ## License
 

@@ -253,3 +253,127 @@ func TestSchedulerHonorsErrorContinuation(t *testing.T) {
 	second := <-runs
 	require.Less(t, second.Sub(first), time.Second)
 }
+
+func TestSchedulerNoWorkUpdatesScheduleWithoutRecordingRun(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "scheduler.json")
+	s, err := NewPersistent(statePath)
+	require.NoError(t, err)
+	s.ctx = context.Background()
+	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	observed := make(chan TaskRun, 1)
+	s.SetRunObserver(func(run TaskRun) { observed <- run })
+	s.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) {
+		return &TaskOutcome{
+			Result:        "unchanged",
+			Target:        "dists/trixie",
+			Reason:        "periodic",
+			Phase:         "checked",
+			QueueDuration: 250 * time.Millisecond,
+			NoWork:        true,
+		}, nil
+	}})
+
+	s.runTask(key)
+	info := s.Snapshot()[0]
+	require.Equal(t, uint64(0), info.RunCount)
+	require.Equal(t, uint64(0), info.ErrCount)
+	require.Equal(t, StatusIdle, info.Status)
+	require.True(t, info.LastRun.IsZero())
+	require.WithinDuration(t, time.Now().Add(time.Hour), info.NextRun, time.Second)
+	select {
+	case run := <-observed:
+		t.Fatalf("no-work task was observed: %#v", run)
+	default:
+	}
+	_, err = os.Stat(statePath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestSchedulerNoWorkPreservesPreviousFailure(t *testing.T) {
+	s := newScheduler()
+	s.ctx = context.Background()
+	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	var calls int
+	s.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("upstream unavailable")
+		}
+		return &TaskOutcome{Result: "unchanged", NoWork: true}, nil
+	}})
+
+	s.runTask(key)
+	failed := s.Snapshot()[0]
+	require.Equal(t, StatusFailed, failed.Status)
+	require.Equal(t, "upstream unavailable", failed.LastError)
+	require.Equal(t, uint64(1), failed.RunCount)
+	require.Equal(t, uint64(1), failed.ErrCount)
+
+	s.runTask(key)
+	unchanged := s.Snapshot()[0]
+	require.Equal(t, StatusFailed, unchanged.Status)
+	require.Equal(t, failed.LastRun, unchanged.LastRun)
+	require.Equal(t, failed.LastError, unchanged.LastError)
+	require.Equal(t, failed.RunCount, unchanged.RunCount)
+	require.Equal(t, failed.ErrCount, unchanged.ErrCount)
+	require.True(t, unchanged.NextRun.After(time.Now().Add(-time.Second)))
+}
+
+func TestSchedulerCopiesTaskOutcomeDetailsToRun(t *testing.T) {
+	s := newScheduler()
+	s.ctx = context.Background()
+	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	runs := make(chan TaskRun, 1)
+	s.SetRunObserver(func(run TaskRun) { runs <- run })
+	s.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(context.Context) (*TaskOutcome, error) {
+		return &TaskOutcome{
+			Result:        "published",
+			Target:        "dists/trixie/Release",
+			Reason:        "periodic",
+			Phase:         "publish",
+			QueueDuration: 2 * time.Second,
+		}, nil
+	}})
+	s.runTask(key)
+	run := <-runs
+	require.Equal(t, "published", run.Result)
+	require.Equal(t, "dists/trixie/Release", run.Target)
+	require.Equal(t, "periodic", run.Reason)
+	require.Equal(t, "publish", run.Phase)
+	require.Equal(t, 2*time.Second, run.QueueDuration)
+}
+
+func TestSchedulerNoWorkPreservesTriggerAndErrorSemantics(t *testing.T) {
+	s := newScheduler()
+	s.ctx = context.Background()
+	key := NewTaskKey("repo", TypeMetadataRefresh, "root")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls int
+	s.Register(TaskDef{Key: key, Interval: time.Hour, Handler: func(ctx context.Context) (*TaskOutcome, error) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+			return &TaskOutcome{NoWork: true, ContinueAfter: time.Hour}, nil
+		}
+		return &TaskOutcome{Result: "unchanged", NoWork: true}, errors.New("refresh failed")
+	}})
+
+	go s.runTask(key)
+	<-started
+	require.True(t, s.TriggerNow(key))
+	close(release)
+	require.Eventually(t, func() bool {
+		info := s.Snapshot()[0]
+		return info.Status == StatusIdle && !info.NextRun.After(time.Now())
+	}, time.Second, time.Millisecond)
+	// The trigger is represented by an immediate next run; execute it and ensure
+	// an error is still recorded even when the handler requested no work.
+	s.runTask(key)
+	info := s.Snapshot()[0]
+	require.Equal(t, uint64(1), info.RunCount)
+	require.Equal(t, uint64(1), info.ErrCount)
+	require.Equal(t, StatusFailed, info.Status)
+	require.Equal(t, "refresh failed", info.LastError)
+}

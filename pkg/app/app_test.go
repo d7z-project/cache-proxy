@@ -624,6 +624,28 @@ func TestStatusTaskEventPreservesFailureDetails(t *testing.T) {
 	require.Equal(t, "Packages.xz: upstream request timed out", events[0].Message)
 }
 
+func TestStatusTaskEventUsesOutcomeDetails(t *testing.T) {
+	status := newAppStatus(config.ServerStatusConfig{
+		DiskSampleInterval: config.Duration(time.Minute),
+		DiskHistoryWindow:  config.Duration(time.Hour),
+		EventLimit:         8,
+	})
+	status.observeTaskRun(scheduler.TaskRun{
+		Key:           scheduler.NewTaskKey("rocky", scheduler.TypeMetadataRefresh, "repo/root"),
+		Target:        "dists/rocky/repodata/repomd.xml",
+		Reason:        "periodic",
+		Phase:         "published",
+		QueueDuration: 1500 * time.Millisecond,
+		Duration:      3 * time.Second,
+		Result:        "published",
+	})
+	event := status.taskEvents(1)[0]
+	require.Equal(t, "dists/rocky/repodata/repomd.xml", event.Target)
+	require.Equal(t, "periodic", event.Reason)
+	require.Equal(t, "published", event.Phase)
+	require.Equal(t, int64(1500), event.QueueDurationMS)
+}
+
 func TestStatusEndpointsReturnJSON(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

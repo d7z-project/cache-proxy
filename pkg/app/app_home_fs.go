@@ -94,20 +94,24 @@ func renderHome(w http.ResponseWriter, data homeData) {
 	}
 	tpl.Funcs(template.FuncMap{
 		"t": func(key string, args ...any) string {
-			msg, ok := i18n[key]
-			if !ok {
-				msg = key
-			}
-			if len(args) == 0 {
-				return msg
-			}
-			return fmt.Sprintf(msg, args...)
+			return i18nStr(i18n, key, args...)
 		},
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tpl.Execute(w, data); err != nil {
 		slog.Warn("home template execute failed", "err", err)
 	}
+}
+
+func i18nStr(i18n map[string]string, key string, args ...any) string {
+	msg, ok := i18n[key]
+	if !ok {
+		msg = key
+	}
+	if len(args) == 0 {
+		return msg
+	}
+	return fmt.Sprintf(msg, args...)
 }
 
 func detectLocale(req *http.Request) string {

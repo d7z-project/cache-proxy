@@ -7,6 +7,7 @@ e2e_prepare_pacman() {
 e2e_run_pacman() {
 	printf '\n[pacman] database/install, generation update, warm package and offline restart\n'
 	e2e_reset_fixture
+  e2e_set_fixture_cache_age /pacman/e2e.db 1
 	e2e_assert_transparent_paths pacman /pacman /pacman bypass
   local script='
     cat >/tmp/pacman.conf <<EOF
@@ -23,6 +24,7 @@ EOF
   '
   e2e_client pacman cold "$E2E_ARCH_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/pacman/e2e.db"
+  e2e_assert_generation_poll_interval pacman /pacman/e2e.db
   local package_path=/pacman/e2e-pacman-1.0.0-1-any.pkg.tar.zst before
   before=$(e2e_fixture_count GET "$package_path")
   ((before >= 1)) || e2e_fail 'Pacman package did not reach the fixture'

@@ -12,7 +12,7 @@ func (h *GenerationManager) waitForValidation(ctx context.Context, rootID string
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	started := time.Now()
-	h.requestCurrentPoll(rootID, false)
+	h.requestCurrentPoll(rootID, false, baseline)
 	for {
 		h.mu.RLock()
 		current := h.current[rootID]
@@ -28,7 +28,7 @@ func (h *GenerationManager) waitForValidation(ctx context.Context, rootID string
 			return err
 		}
 		if h.config.Scheduler == nil {
-			if _, err := h.refresh(ctx, 1); err != nil {
+			if _, _, err := h.runRefresh(ctx, 1); err != nil {
 				return err
 			}
 		}
@@ -55,16 +55,7 @@ func (h *GenerationManager) retireCachedRoot(rootID string) error {
 	delete(h.pending, rootID)
 	delete(h.retained, rootID)
 	delete(h.retryWindows, rootID)
-	delete(h.pollQueued, rootID)
-	delete(h.forceRebuildQueued, rootID)
-	queue := h.pollQueue[:0]
-	for _, queued := range h.pollQueue {
-		if queued != rootID {
-			queue = append(queue, queued)
-		}
-	}
-	clear(h.pollQueue[len(queue):])
-	h.pollQueue = queue
+	h.removePollLocked(rootID)
 	h.mu.Unlock()
 	return nil
 }

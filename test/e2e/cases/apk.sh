@@ -7,6 +7,7 @@ e2e_prepare_apk() {
 e2e_run_apk() {
 	printf '\n[apk] native index/install, generation update, warm package and offline restart\n'
 	e2e_reset_fixture
+  e2e_set_fixture_cache_age /apk/v3.20/main/x86_64/APKINDEX.tar.gz 1
 	e2e_assert_transparent_paths apk /apk /apk bypass
   local script='
     printf "%s/apk/v3.20/main\n" "$1" >/tmp/repositories
@@ -15,6 +16,7 @@ e2e_run_apk() {
   '
   e2e_client apk cold "$E2E_ALPINE_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/apk/v3.20/main/x86_64/APKINDEX.tar.gz"
+  e2e_assert_generation_poll_interval apk /apk/v3.20/main/x86_64/APKINDEX.tar.gz
   local package_path=/apk/v3.20/main/x86_64/e2e-apk-1.0.0-r0.apk before
   before=$(e2e_fixture_count GET "$package_path")
   ((before >= 1)) || e2e_fail 'APK package did not reach the fixture'

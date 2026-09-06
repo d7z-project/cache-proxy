@@ -121,6 +121,8 @@ type snapshotReference struct {
 }
 
 type pendingAnchor struct {
+	reason      string
+	queuedAt    time.Time
 	ValidatedAt time.Time   `json:"validated_at"`
 	RootID      string      `json:"root_id"`
 	Root        string      `json:"root"`
@@ -139,11 +141,12 @@ type lastSeenMarker struct {
 
 type liveSnapshot struct {
 	polling        bool
+	pollingRebuild bool
 	snapshot       *Snapshot
 	snapshotSHA256 string
 	validatedAt    time.Time
 	header         http.Header
-	nextCheck      time.Time
+	nextPoll       time.Time
 	lastAttempt    time.Time
 	lastError      error
 }
@@ -164,33 +167,38 @@ type retryWindow struct {
 	notBefore   time.Time
 }
 
+type pollRequest struct {
+	reason       string
+	readyAt      time.Time
+	forceRebuild bool
+}
+
 type GenerationManager struct {
-	changed            chan struct{}
-	config             Config
-	mu                 sync.RWMutex
-	current            map[string]*liveSnapshot
-	retained           map[string][]*liveSnapshot
-	pending            map[string]pendingAnchor
-	readers            map[string]int
-	lastSeen           map[string]time.Time
-	lastSeenPersisted  map[string]time.Time
-	retryWindows       map[string]retryWindow
-	retiring           map[string]bool
-	commitMu           sync.Mutex
-	seenPersistMu      sync.Mutex
-	discoveryMu        sync.Mutex
-	discoveryPending   map[string]bool
-	refreshMu          sync.Mutex
-	refreshCursor      string
-	pollBeforePending  bool
-	pollQueue          []string
-	pollQueued         map[string]bool
-	forceRebuildQueued map[string]bool
-	pollCycleActive    bool
-	gcMu               sync.Mutex
-	gcPhase            generationGCPhase
-	gcCursor           string
-	gcRetained         map[string]bool
+	changed           chan struct{}
+	config            Config
+	mu                sync.RWMutex
+	current           map[string]*liveSnapshot
+	retained          map[string][]*liveSnapshot
+	pending           map[string]pendingAnchor
+	readers           map[string]int
+	lastSeen          map[string]time.Time
+	lastSeenPersisted map[string]time.Time
+	retryWindows      map[string]retryWindow
+	retiring          map[string]bool
+	commitMu          sync.Mutex
+	seenPersistMu     sync.Mutex
+	discoveryMu       sync.Mutex
+	discoveryPending  map[string]bool
+	refreshMu         sync.Mutex
+	refreshCursor     string
+	pollBeforePending bool
+	pollQueue         []string
+	pollRequests      map[string]pollRequest
+	pollCycleActive   bool
+	gcMu              sync.Mutex
+	gcPhase           generationGCPhase
+	gcCursor          string
+	gcRetained        map[string]bool
 }
 
 type retryableRefreshError struct {
@@ -238,18 +246,17 @@ func New(config Config) (*GenerationManager, error) {
 		config.AnchorMaxBytes = DefaultMaxObject
 	}
 	h := &GenerationManager{
-		config:             config,
-		current:            make(map[string]*liveSnapshot),
-		retained:           make(map[string][]*liveSnapshot),
-		pending:            make(map[string]pendingAnchor),
-		readers:            make(map[string]int),
-		lastSeen:           make(map[string]time.Time),
-		lastSeenPersisted:  make(map[string]time.Time),
-		retryWindows:       make(map[string]retryWindow),
-		retiring:           make(map[string]bool),
-		discoveryPending:   make(map[string]bool),
-		pollQueued:         make(map[string]bool),
-		forceRebuildQueued: make(map[string]bool),
+		config:            config,
+		current:           make(map[string]*liveSnapshot),
+		retained:          make(map[string][]*liveSnapshot),
+		pending:           make(map[string]pendingAnchor),
+		readers:           make(map[string]int),
+		lastSeen:          make(map[string]time.Time),
+		lastSeenPersisted: make(map[string]time.Time),
+		retryWindows:      make(map[string]retryWindow),
+		retiring:          make(map[string]bool),
+		discoveryPending:  make(map[string]bool),
+		pollRequests:      make(map[string]pollRequest),
 	}
 	if err := h.restore(); err != nil {
 		return nil, err
@@ -261,12 +268,11 @@ func New(config Config) (*GenerationManager, error) {
 			Interval: config.RefreshInterval,
 			Timeout:  30 * time.Minute,
 			Handler: func(ctx context.Context) (*scheduler.TaskOutcome, error) {
-				more, err := h.refresh(ctx, 1)
-				outcome := &scheduler.TaskOutcome{Result: "success"}
+				more, outcome, err := h.runRefresh(ctx, 1)
 				if more {
 					outcome.ContinueAfter = continuationDelay
 				} else {
-					outcome.ContinueAfter = h.nextRetryDelay(time.Now())
+					outcome.ContinueAfter = h.nextRefreshDelay(time.Now())
 				}
 				return outcome, err
 			},
@@ -293,6 +299,10 @@ func (h *GenerationManager) StageAnchor(ctx context.Context, root, anchorPath st
 }
 
 func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anchorPath string, header http.Header, body io.ReadSeeker) error {
+	return h.stageAnchor(ctx, rootID, root, anchorPath, header, body, "initial", true)
+}
+
+func (h *GenerationManager) stageAnchor(ctx context.Context, rootID, root, anchorPath string, header http.Header, body io.ReadSeeker, reason string, notify bool) error {
 	policy := proxyruntime.ParseCachePolicy(header, time.Now(), 0)
 	if policy.NoStore || policy.Private {
 		return errUncacheableMetadata
@@ -341,6 +351,7 @@ func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anc
 		return fmt.Errorf("stage metadata anchor: %w", err)
 	}
 	pending := pendingAnchor{
+		reason:      reason,
 		ValidatedAt: validatedAt,
 		RootID:      rootID,
 		Root:        root,
@@ -371,12 +382,15 @@ func (h *GenerationManager) StageAnchorID(ctx context.Context, rootID, root, anc
 		return err
 	}
 	h.mu.Lock()
+	pending.queuedAt = time.Now()
 	h.pending[rootID] = pending
 	h.lastSeen[rootID] = now
 	h.lastSeenPersisted[rootID] = now
 	delete(h.retryWindows, rootID)
 	h.mu.Unlock()
-	h.TriggerRefresh()
+	if notify {
+		h.TriggerRefresh()
+	}
 	return nil
 }
 
@@ -386,14 +400,24 @@ func (h *GenerationManager) TriggerRefresh() {
 	}
 }
 
-func (h *GenerationManager) requestCurrentPoll(rootID string, forceRebuild bool) {
+func (h *GenerationManager) requestCurrentPoll(rootID string, forceRebuild bool, baseline time.Time) {
 	h.mu.Lock()
+	if current := h.current[rootID]; current != nil && !baseline.IsZero() && current.validatedAt.After(baseline) {
+		h.mu.Unlock()
+		return
+	}
 	_, pending := h.pending[rootID]
-	if current := h.current[rootID]; current != nil && !pending && !current.polling {
-		if forceRebuild {
-			h.forceRebuildQueued[rootID] = true
+	changed := false
+	if current := h.current[rootID]; current != nil && !pending && (!current.polling || forceRebuild && !current.pollingRebuild) {
+		changed = h.enqueuePollLocked(rootID, forceRebuild)
+		queued := h.pollRequests[rootID]
+		if queued.reason == "periodic" {
+			queued.reason = "request"
+			queued.readyAt = time.Now()
+			h.pollRequests[rootID] = queued
+			changed = true
 		}
-		if h.pollQueued[rootID] {
+		if changed {
 			for index, queuedRootID := range h.pollQueue {
 				if queuedRootID == rootID {
 					copy(h.pollQueue[1:index+1], h.pollQueue[:index])
@@ -401,15 +425,10 @@ func (h *GenerationManager) requestCurrentPoll(rootID string, forceRebuild bool)
 					break
 				}
 			}
-		} else {
-			h.pollQueued[rootID] = true
-			h.pollQueue = append(h.pollQueue, "")
-			copy(h.pollQueue[1:], h.pollQueue[:len(h.pollQueue)-1])
-			h.pollQueue[0] = rootID
 		}
 	}
 	h.mu.Unlock()
-	if !pending {
+	if changed {
 		h.TriggerRefresh()
 	}
 }
@@ -588,7 +607,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		if !classifiedMetadata {
 			return false, 0, ""
 		}
-		h.requestCurrentPoll(matchedRootID, true)
+		h.requestCurrentPoll(matchedRootID, true, time.Time{})
 		return false, 0, ""
 	}
 	readerKey := selectedSnapshot.snapshot.RootID + "\x00" + selectedSnapshot.snapshot.CandidateID
@@ -601,11 +620,11 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	policy := proxyruntime.ParseCachePolicy(selectedObject.Header, selectedSnapshot.validatedAt, h.config.RefreshInterval)
 	expired := !selectedSnapshot.snapshot.ValidUntil.IsZero() && !time.Now().Before(selectedSnapshot.snapshot.ValidUntil)
 	strict := isAnchor && !validated && (expired || proxyruntime.RequestForcesRevalidation(request) || policy.NoCache ||
-		policy.MustRevalidate && !proxyruntime.ResponseFresh(selectedObject.Header, selectedSnapshot.validatedAt, h.config.RefreshInterval))
+		!proxyruntime.ResponseFresh(selectedObject.Header, selectedSnapshot.validatedAt, h.config.RefreshInterval))
 	if strict {
 		baseline := selectedSnapshot.validatedAt
 		h.mu.Unlock()
-		if err := h.waitForValidation(request.Context(), selectedRootID, baseline); err != nil {
+		if err := h.waitForValidation(request.Context(), selectedRootID, baseline); err != nil && (expired || !proxyruntime.StaleAllowed(request, selectedObject.Header)) {
 			status := http.StatusBadGateway
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				status = http.StatusGatewayTimeout
@@ -622,11 +641,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 		return true, http.StatusBadGateway, "ERROR"
 	}
 	h.readers[readerKey]++
-	refreshRequested := isAnchor && !time.Now().Before(selectedSnapshot.nextCheck)
 	h.mu.Unlock()
-	if refreshRequested {
-		h.requestCurrentPoll(selectedRootID, false)
-	}
 	h.markLastSeen(selectedRootID, time.Now().UTC())
 	defer func() {
 		h.mu.Lock()
@@ -638,7 +653,7 @@ func (h *GenerationManager) serveCurrent(w http.ResponseWriter, request *http.Re
 	}()
 	reader, err := h.config.Store.OpenObject(request.Context(), h.config.Tenant, selectedObject.Key)
 	if err != nil {
-		h.requestCurrentPoll(selectedRootID, true)
+		h.requestCurrentPoll(selectedRootID, true, time.Time{})
 		return false, 0, ""
 	}
 	defer func() { _ = reader.Close() }()

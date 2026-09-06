@@ -37,6 +37,11 @@ type TaskHandler func(context.Context) (*TaskOutcome, error)
 
 type TaskOutcome struct {
 	Result        string
+	Target        string
+	Reason        string
+	Phase         string
+	QueueDuration time.Duration
+	NoWork        bool
 	ContinueAfter time.Duration
 }
 
@@ -75,12 +80,16 @@ type TaskInfo struct {
 }
 
 type TaskRun struct {
-	Key        TaskKey
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Duration   time.Duration
-	Result     string
-	Err        string
+	Key           TaskKey
+	StartedAt     time.Time
+	FinishedAt    time.Time
+	Duration      time.Duration
+	Target        string
+	Reason        string
+	Phase         string
+	QueueDuration time.Duration
+	Result        string
+	Err           string
 }
 
 type scheduledTask struct {
@@ -270,6 +279,7 @@ func (s *Scheduler) runTask(key TaskKey) {
 		s.mu.Unlock()
 		return
 	}
+	previousStatus := task.info.Status
 	task.info.Status = StatusRunning
 	handler := task.handler
 	interval := task.info.Interval
@@ -290,8 +300,14 @@ func (s *Scheduler) runTask(key TaskKey) {
 	finished := time.Now()
 	run := TaskRun{Key: key, StartedAt: started, FinishedAt: finished, Duration: finished.Sub(started)}
 	var continueAfter time.Duration
+	noWork := false
 	if outcome != nil {
+		run.Target = outcome.Target
+		run.Reason = outcome.Reason
+		run.Phase = outcome.Phase
+		run.QueueDuration = outcome.QueueDuration
 		run.Result = outcome.Result
+		noWork = outcome.NoWork
 		continueAfter = outcome.ContinueAfter
 	}
 	if run.Result == "" {
@@ -300,11 +316,11 @@ func (s *Scheduler) runTask(key TaskKey) {
 	if err != nil {
 		run.Err = err.Error()
 		run.Result = "failed"
+		noWork = false
 	}
 
 	s.mu.Lock()
 	if current := s.tasks[key]; current != nil {
-		current.info.LastRun = finished
 		next := interval
 		if continueAfter > 0 && continueAfter < next {
 			next = continueAfter
@@ -315,21 +331,26 @@ func (s *Scheduler) runTask(key TaskKey) {
 		} else {
 			current.info.NextRun = finished.Add(next)
 		}
-		current.info.RunCount++
-		current.info.LastError = run.Err
-		if err != nil {
-			current.info.Status = StatusFailed
-			current.info.ErrCount++
+		if noWork {
+			current.info.Status = previousStatus
 		} else {
-			current.info.Status = StatusDone
+			current.info.LastRun = finished
+			current.info.RunCount++
+			current.info.LastError = run.Err
+			if err != nil {
+				current.info.Status = StatusFailed
+				current.info.ErrCount++
+			} else {
+				current.info.Status = StatusDone
+			}
 		}
 	}
 	observer := s.observer
 	s.mu.Unlock()
-	if persistentTask(key.typ) {
+	if persistentTask(key.typ) && !noWork {
 		_ = s.persist()
 	}
-	if observer != nil {
+	if observer != nil && !noWork {
 		observer(run)
 	}
 }

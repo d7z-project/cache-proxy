@@ -16,10 +16,11 @@ var fixtureTime = time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
 type fixtureServer struct {
 	root      string
 	publicURL string
-	countsMu  sync.RWMutex
+	mu        sync.RWMutex
 	counts    map[string]int
 	headers   map[string]http.Header
 	faults    map[string]int
+	cacheAges map[string]int64
 	updated   atomic.Bool
 }
 
@@ -40,6 +41,7 @@ func main() {
 		counts:    make(map[string]int),
 		headers:   make(map[string]http.Header),
 		faults:    make(map[string]int),
+		cacheAges: make(map[string]int64),
 	}
 	log.Printf("fixture listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, server))
@@ -50,17 +52,17 @@ func (s *fixtureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveControl(w, r)
 		return
 	}
-	s.countsMu.Lock()
+	s.mu.Lock()
 	s.counts[r.Method+" "+r.URL.Path]++
 	s.headers[r.Method+" "+r.URL.Path] = r.Header.Clone()
 	if r.Method == http.MethodGet && r.Header.Get("If-None-Match") == "" && r.Header.Get("If-Modified-Since") == "" {
 		s.counts["TRANSFER "+r.URL.Path]++
 	}
-	s.countsMu.Unlock()
+	s.mu.Unlock()
 	log.Printf("%s %s", r.Method, r.URL.RequestURI())
-	s.countsMu.RLock()
+	s.mu.RLock()
 	faultStatus := s.faults[r.URL.Path]
-	s.countsMu.RUnlock()
+	s.mu.RUnlock()
 	if faultStatus != 0 {
 		http.Error(w, http.StatusText(faultStatus), faultStatus)
 		return

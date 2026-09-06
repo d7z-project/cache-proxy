@@ -21,6 +21,7 @@ e2e_flatpak_install() {
 e2e_run_flatpak() {
   printf '\n[flatpak] remote/install, generation update, warm objects and offline cache persistence\n'
   e2e_reset_fixture
+  e2e_set_fixture_cache_age /flatpak/repo/summary.idx 1
   e2e_assert_transparent_paths flatpak /flatpak /flatpak/repo bypass
   local unrelated_summary upstream_unrelated proxy_unrelated
   unrelated_summary=$(e2e_run_client_shell "${E2E_RUN_ID}-flatpak-unrelated" "$E2E_TOOLS_IMAGE" \
@@ -30,6 +31,7 @@ e2e_run_flatpak() {
   e2e_set_fixture_fault "$upstream_unrelated" 404
   e2e_flatpak_install cold cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/flatpak/summary.idx"
+  e2e_assert_generation_poll_interval flatpak /flatpak/summary.idx /flatpak/repo/summary.idx
   e2e_assert_eq 0 "$(e2e_fixture_count GET "$upstream_unrelated")" 'Flatpak fetched an unrelated architecture summary'
   e2e_assert_bypass_status flatpak-unrelated-summary "$proxy_unrelated" 404
   e2e_clear_fixture_fault "$upstream_unrelated"

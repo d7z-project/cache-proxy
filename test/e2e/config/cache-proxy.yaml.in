@@ -76,23 +76,35 @@ instances:
     mode: flatpak
     path: /flatpak
     upstream: @FIXTURE_URL@/flatpak/repo
+    # Short interval is intentional: the fixture sets max-age=1s in this case
+    # to prove background polling follows this interval instead of freshness.
+    refresh:
+      interval: 30s
   - name: apk
     enabled: true
     mode: apk
     path: /apk
     upstream: @FIXTURE_URL@/apk
+    refresh:
+      interval: 30s
   - name: deb
     enabled: true
     mode: deb
     path: /deb
     upstream: @FIXTURE_URL@/deb
+    refresh:
+      interval: 30s
   - name: rpm
     enabled: true
     mode: rpm
     path: /rpm
     upstream: @FIXTURE_URL@/rpm
+    refresh:
+      interval: 30s
   - name: pacman
     enabled: true
     mode: pacman
     path: /pacman
     upstream: @FIXTURE_URL@/pacman
+    refresh:
+      interval: 30s

@@ -8,6 +8,7 @@ e2e_run_deb_repository() {
   local layout=$1 source=$2 anchor=$3 package_path=$4 metadata_path=$5 unavailable_path=$6
   printf '\n[deb-%s] apt update/install, generation update, warm package and offline restart\n' "$layout"
   e2e_reset_fixture
+  e2e_set_fixture_cache_age "$anchor" 1
   e2e_set_fixture_fault "$unavailable_path" 404
   e2e_client "deb-$layout" fixture-fault "$E2E_TOOLS_IMAGE" '
     status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" "$1$2")
@@ -28,6 +29,7 @@ e2e_run_deb_repository() {
   '
   e2e_client "deb-$layout" cold "$E2E_DEBIAN_IMAGE" "$script" "$E2E_PROXY_URL" "$source" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL$anchor"
+  e2e_assert_generation_poll_interval "deb-$layout" "$anchor"
   if [[ $layout == *-by-hash ]]; then
     e2e_assert_count_unchanged GET "$metadata_path" 0 "Debian $layout fetched a canonical index despite an available by-hash object"
     e2e_assert_count_unchanged GET "$unavailable_path" 1 "Debian $layout prefetched an unused index"

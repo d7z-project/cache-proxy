@@ -30,14 +30,17 @@ type diskSample struct {
 }
 
 type taskEvent struct {
-	Storage    string `json:"storage"`
-	TaskType   string `json:"task_type"`
-	Target     string `json:"target"`
-	StartedAt  string `json:"started_at"`
-	FinishedAt string `json:"finished_at"`
-	DurationMS int64  `json:"duration_ms"`
-	Result     string `json:"result"`
-	Message    string `json:"message,omitempty"`
+	Storage         string `json:"storage"`
+	TaskType        string `json:"task_type"`
+	Target          string `json:"target"`
+	StartedAt       string `json:"started_at"`
+	FinishedAt      string `json:"finished_at"`
+	DurationMS      int64  `json:"duration_ms"`
+	QueueDurationMS int64  `json:"queue_duration_ms"`
+	Result          string `json:"result"`
+	Reason          string `json:"reason,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	Message         string `json:"message,omitempty"`
 }
 
 type appStatus struct {
@@ -97,19 +100,25 @@ func (s *appStatus) stop(ctx context.Context) error {
 }
 
 func (s *appStatus) observeTaskRun(run scheduler.TaskRun) {
-	target := run.Key.RootID()
+	target := run.Target
+	if target == "" {
+		target = run.Key.RootID()
+	}
 	if target == "" {
 		target = "/"
 	}
 	s.appendEvent(taskEvent{
-		Storage:    run.Key.Instance(),
-		TaskType:   string(run.Key.Type()),
-		Target:     target,
-		StartedAt:  run.StartedAt.Format(time.RFC3339),
-		FinishedAt: run.FinishedAt.Format(time.RFC3339),
-		DurationMS: run.Duration.Milliseconds(),
-		Result:     run.Result,
-		Message:    run.Err,
+		Storage:         run.Key.Instance(),
+		TaskType:        string(run.Key.Type()),
+		Target:          target,
+		StartedAt:       run.StartedAt.Format(time.RFC3339),
+		FinishedAt:      run.FinishedAt.Format(time.RFC3339),
+		DurationMS:      run.Duration.Milliseconds(),
+		QueueDurationMS: run.QueueDuration.Milliseconds(),
+		Result:          run.Result,
+		Reason:          run.Reason,
+		Phase:           run.Phase,
+		Message:         run.Err,
 	})
 }
 

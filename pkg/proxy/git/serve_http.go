@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
@@ -24,17 +25,6 @@ type singleLoader struct {
 
 func (l *singleLoader) Load(_ *transport.Endpoint) (storer.Storer, error) {
 	return l.storer, nil
-}
-
-func serveGitHTTP(w http.ResponseWriter, r *http.Request, svr transport.Transport, name string) {
-	switch {
-	case r.URL.Path == "/info/refs" && r.URL.Query().Get("service") == "git-upload-pack":
-		handleInfoRefs(w, r, svr, name)
-	case r.URL.Path == "/git-upload-pack":
-		handleUploadPack(w, r, svr, name)
-	default:
-		http.NotFound(w, r)
-	}
 }
 
 func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
@@ -69,8 +59,14 @@ func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Reques
 	proxyRequest = proxytransport.WithAdmission(request.Context(), proxyRequest, proxytransport.AdmissionForeground)
 	response, err := h.bootstrapClient.Do(proxyRequest)
 	if err != nil {
-		if _, ok := proxyruntime.AdmissionRetryAfterSeconds(err); ok {
-			h.writeAdmissionError(w, err)
+		if seconds, ok := proxyruntime.AdmissionRetryAfterSeconds(err); ok {
+			status := http.StatusServiceUnavailable
+			var limited *proxyruntime.UpstreamRateLimitError
+			if errors.As(err, &limited) {
+				status = http.StatusTooManyRequests
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			proxytransport.WriteError(w, status)
 			return
 		}
 		if !errors.Is(err, request.Context().Err()) {
@@ -164,15 +160,4 @@ func handleUploadPack(w http.ResponseWriter, r *http.Request, svr transport.Tran
 	if err := resp.Encode(w); err != nil {
 		slog.Error("git upload-pack encode failed", "instance", name, "err", err)
 	}
-}
-
-func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
 }

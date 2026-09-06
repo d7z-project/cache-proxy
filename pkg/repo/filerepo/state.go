@@ -336,7 +336,11 @@ func (h *GenerationManager) restoreCurrentGeneration(repositoryName string, seen
 	if current.validatedAt.After(time.Now()) {
 		current.validatedAt = time.Time{}
 	}
-	current.nextCheck = h.nextCheckAt(marker.RootID, current.validatedAt, current.header)
+	now := time.Now()
+	current.nextPoll = h.nextPollAt(marker.RootID, current.validatedAt, current.snapshot.PublishedAt)
+	if current.snapshot.PublishedAt.After(now) || !current.nextPoll.After(now) {
+		current.nextPoll = now.Add(h.pollOffset(marker.RootID))
+	}
 	h.current[current.snapshot.RootID] = current
 	if len(previousSnapshots) == 0 {
 		delete(h.retained, current.snapshot.RootID)
@@ -431,6 +435,7 @@ func (h *GenerationManager) restorePendingAnchor(repositoryName string, seen las
 	if err != nil || info.Size < 0 || info.Size > h.config.AnchorMaxBytes {
 		return errors.New("pending metadata anchor is unavailable")
 	}
+	pending.reason, pending.queuedAt = "initial", time.Now()
 	h.pending[pending.RootID] = pending
 	if !seenPresent || seen.RootID != pending.RootID {
 		if h.lastSeen[pending.RootID].IsZero() {

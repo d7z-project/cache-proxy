@@ -172,12 +172,12 @@ func TestGenerationSchedulingAndValidationFailure(t *testing.T) {
 	h := newValidationManager(t, func(context.Context, string, http.Header) (*http.Response, error) { return nil, io.ErrUnexpectedEOF })
 	now := time.Now()
 	for _, root := range []string{"a", "b", "c", "long-root"} {
-		delay := h.nextCheckAt(root, now, nil).Sub(now)
-		require.GreaterOrEqual(t, delay, 12*time.Minute)
-		require.LessOrEqual(t, delay, 15*time.Minute)
-		require.Equal(t, delay, h.nextCheckAt(root, now, nil).Sub(now))
+		delay := h.nextPollAt(root, now, now).Sub(now)
+		require.GreaterOrEqual(t, delay, 15*time.Minute)
+		require.LessOrEqual(t, delay, 15*time.Minute+45*time.Second)
+		require.Equal(t, delay, h.nextPollAt(root, now, now).Sub(now))
 	}
-	more, err := h.refresh(context.Background(), 1)
+	more, _, err := h.runRefresh(context.Background(), 1)
 	require.NoError(t, err)
 	require.False(t, more)
 	req := httptest.NewRequest(http.MethodGet, "/repo/Release", nil)

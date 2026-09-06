@@ -87,3 +87,61 @@ func TestFixtureFaultTargetsOneExactPathAndResetClearsIt(t *testing.T) {
 	require.Equal(t, http.StatusOK, available.Code)
 	require.Equal(t, "release", available.Body.String())
 }
+
+func TestFixtureCacheAgeControlChangesHeadersAndResetRestoresDefault(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "initial", "file")
+	require.NoError(t, os.MkdirAll(directory, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "payload.txt"), []byte("payload"), 0o644))
+	server := &fixtureServer{
+		root: root, counts: make(map[string]int), headers: make(map[string]http.Header), faults: make(map[string]int),
+	}
+
+	setAge := httptest.NewRecorder()
+	server.ServeHTTP(setAge, httptest.NewRequest(http.MethodPost, "/__e2e/cache-age?path=%2Ffile%2Fpayload.txt&seconds=1", nil))
+	require.Equal(t, http.StatusNoContent, setAge.Code)
+
+	short := httptest.NewRecorder()
+	server.ServeHTTP(short, httptest.NewRequest(http.MethodGet, "/file/payload.txt", nil))
+	require.Equal(t, http.StatusOK, short.Code)
+	require.Equal(t, "public, max-age=1", short.Header().Get("Cache-Control"))
+
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "artifact.deb"), []byte("artifact"), 0o644))
+	unrelated := httptest.NewRecorder()
+	server.ServeHTTP(unrelated, httptest.NewRequest(http.MethodGet, "/file/artifact.deb", nil))
+	require.Equal(t, http.StatusOK, unrelated.Code)
+	require.Equal(t, "public, max-age=60", unrelated.Header().Get("Cache-Control"))
+
+	invalidPath := httptest.NewRecorder()
+	server.ServeHTTP(invalidPath, httptest.NewRequest(http.MethodPost, "/__e2e/cache-age?path=relative&seconds=1", nil))
+	require.Equal(t, http.StatusBadRequest, invalidPath.Code)
+	invalidControlPath := httptest.NewRecorder()
+	server.ServeHTTP(invalidControlPath, httptest.NewRequest(http.MethodPost, "/__e2e/cache-age?path=%2F__e2e%2Fready&seconds=1", nil))
+	require.Equal(t, http.StatusBadRequest, invalidControlPath.Code)
+
+	reset := httptest.NewRecorder()
+	server.ServeHTTP(reset, httptest.NewRequest(http.MethodPost, "/__e2e/reset", nil))
+	require.Equal(t, http.StatusNoContent, reset.Code)
+
+	defaultAge := httptest.NewRecorder()
+	server.ServeHTTP(defaultAge, httptest.NewRequest(http.MethodGet, "/file/payload.txt", nil))
+	require.Equal(t, http.StatusOK, defaultAge.Code)
+	require.Equal(t, "public, max-age=60", defaultAge.Header().Get("Cache-Control"))
+}
+
+func TestFixtureCacheAgeAcceptsOnlyBoundedIntegerSeconds(t *testing.T) {
+	for _, seconds := range []string{"0", "86400", "", "-1", "86401", "1s", "1.5"} {
+		t.Run(seconds, func(t *testing.T) {
+			server := &fixtureServer{}
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/__e2e/cache-age?path=/repo/Release&seconds="+seconds, nil))
+			if seconds == "0" || seconds == "86400" {
+				require.Equal(t, http.StatusNoContent, response.Code)
+				require.Len(t, server.cacheAges, 1)
+			} else {
+				require.Equal(t, http.StatusBadRequest, response.Code)
+				require.Empty(t, server.cacheAges)
+			}
+		})
+	}
+}

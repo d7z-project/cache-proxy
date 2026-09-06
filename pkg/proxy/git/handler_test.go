@@ -258,6 +258,17 @@ func TestGitHandlerAppliesDefaultOperationTimeout(t *testing.T) {
 	require.Equal(t, defaultOperationTimeout, handler.bootstrapClient.Timeout)
 }
 
+func TestGitUpstreamLogAddressRedactsCredentials(t *testing.T) {
+	for _, address := range []string{
+		"https://user:password@example.test/repo?token=secret#private",
+		"https://example.test/repo",
+	} {
+		handler := &gitHandler{upstream: address}
+		require.Equal(t, "https://example.test/repo", handler.redactedUpstream())
+		require.Equal(t, address, handler.upstream)
+	}
+}
+
 func TestGitHandlerRejectsRequestsAfterStop(t *testing.T) {
 	handler := newGitHandler(gitConfig{repositoryFS: memfs.New()})
 	require.NoError(t, handler.Stop(context.Background()))

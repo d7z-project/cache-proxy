@@ -51,7 +51,7 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 		Lifecycle: h.lifecycle,
 		Flights:   &h.flights,
 		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
-			return h.fetchUpstreamWithClass(ctx, method, requestPath, rawQuery, header, transport.AdmissionForeground)
+			return h.fetchUpstream(ctx, method, requestPath, rawQuery, header, transport.AdmissionForeground)
 		},
 		CacheKey: func(requestPath string, request *http.Request) string {
 			return artifactKey(origin, requestPath, request)
@@ -70,7 +70,7 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 		Store:           store,
 		Scheduler:       taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
-			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
+			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
 		Build: func(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
 			_, err := session.Fetch(ctx, filerepo.ObjectSpec{Path: anchor.Path + ".sig", AllowUnavailable: true})
@@ -151,7 +151,7 @@ func (h *handler) serveDatabaseAnchor(w http.ResponseWriter, request *http.Reque
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.fetchUpstreamWithClass(h.lifecycle.Context(), http.MethodGet, cleaned, "", header, transport.AdmissionForeground)
+	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, "", header, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -192,7 +192,7 @@ func (h *handler) serveDatabaseAnchor(w http.ResponseWriter, request *http.Reque
 	finished = true
 }
 
-func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned, rawQuery string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
+func (h *handler) fetchUpstream(ctx context.Context, method, cleaned, rawQuery string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
 	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), rawQuery)
 	if err != nil {
 		return nil, err

@@ -62,59 +62,12 @@ type App struct {
 	ready        atomic.Bool
 	closed       atomic.Bool
 
-	tenantUsageMu         sync.Mutex
-	tenantUsageCachedAt   time.Time
-	tenantUsageCache      map[string]int64
-	tenantUsageRefreshing atomic.Bool
-	tenantUsageClosing    bool
-	tenantUsageWG         sync.WaitGroup
-}
-
-func (a *App) tenantUsage(ctx context.Context, tenants []string) map[string]int64 {
-	a.tenantUsageMu.Lock()
-	prev := a.tenantUsageCachedAt
-	result := make(map[string]int64, len(a.tenantUsageCache))
-	for tenant, bytes := range a.tenantUsageCache {
-		result[tenant] = bytes
-	}
-	a.tenantUsageMu.Unlock()
-	if time.Since(prev) >= 5*time.Minute {
-		a.refreshTenantUsage(ctx, tenants)
-	}
-	return result
-}
-
-func (a *App) refreshTenantUsage(parent context.Context, tenants []string) {
-	if len(a.stores) == 0 || !a.tenantUsageRefreshing.CompareAndSwap(false, true) {
-		return
-	}
-	a.tenantUsageMu.Lock()
-	if a.tenantUsageClosing {
-		a.tenantUsageMu.Unlock()
-		a.tenantUsageRefreshing.Store(false)
-		return
-	}
-	a.tenantUsageWG.Add(1)
-	a.tenantUsageMu.Unlock()
-	names := append([]string(nil), tenants...)
-	go func() {
-		defer a.tenantUsageWG.Done()
-		defer a.tenantUsageRefreshing.Store(false)
-		baseCtx := a.lifecycleCtx
-		if baseCtx == nil {
-			baseCtx = parent
-		}
-		if baseCtx == nil {
-			baseCtx = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
-		defer cancel()
-		usage := collectInstanceUsage(ctx, names, a.stores)
-		a.tenantUsageMu.Lock()
-		a.tenantUsageCache = usage
-		a.tenantUsageCachedAt = time.Now()
-		a.tenantUsageMu.Unlock()
-	}()
+	instanceUsageMu         sync.Mutex
+	instanceUsageCachedAt   time.Time
+	instanceUsageCache      map[string]int64
+	instanceUsageRefreshing atomic.Bool
+	instanceUsageClosing    bool
+	instanceUsageWG         sync.WaitGroup
 }
 
 func Validate(doc *config.Document) error {
@@ -395,10 +348,10 @@ func (a *App) Close(ctx context.Context) error {
 	if a.stopRuntime != nil {
 		a.stopRuntime()
 	}
-	a.tenantUsageMu.Lock()
-	a.tenantUsageClosing = true
-	a.tenantUsageMu.Unlock()
-	if err := waitForGroup(ctx, &a.tenantUsageWG); err != nil {
+	a.instanceUsageMu.Lock()
+	a.instanceUsageClosing = true
+	a.instanceUsageMu.Unlock()
+	if err := waitForGroup(ctx, &a.instanceUsageWG); err != nil {
 		joined = errors.Join(joined, err)
 		drained = false
 	}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,7 +33,13 @@ func (s *fixtureServer) serveStatic(w http.ResponseWriter, r *http.Request, revi
 	}
 	_, _ = file.Seek(0, io.SeekStart)
 	w.Header().Set("ETag", `"`+hex.EncodeToString(digest.Sum(nil))+`"`)
-	w.Header().Set("Cache-Control", "public, max-age=60")
+	cacheAge := int64(60)
+	s.mu.RLock()
+	if configured, ok := s.cacheAges[r.URL.Path]; ok {
+		cacheAge = configured
+	}
+	s.mu.RUnlock()
+	w.Header().Set("Cache-Control", "public, max-age="+strconv.FormatInt(cacheAge, 10))
 	if strings.HasPrefix(r.URL.Path, "/oci/v2/") {
 		w.Header().Set("Docker-Content-Digest", "sha256:"+hex.EncodeToString(digest.Sum(nil)))
 		switch {

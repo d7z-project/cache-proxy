@@ -12,9 +12,11 @@ import (
 	"time"
 
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
+// Refresh starts or continues an explicit polling cycle and processes up to limit items.
 func (h *GenerationManager) Refresh(ctx context.Context, limit int) (bool, error) {
 	h.mu.Lock()
 	if len(h.pollQueue) == 0 && !h.pollCycleActive {
@@ -31,12 +33,15 @@ func (h *GenerationManager) Refresh(ctx context.Context, limit int) (bool, error
 		h.pollCycleActive = len(h.pollQueue) > 0
 	}
 	h.mu.Unlock()
-	return h.refresh(ctx, limit)
+	more, _, err := h.runRefresh(ctx, limit)
+	return more, err
 }
 
-func (h *GenerationManager) refresh(ctx context.Context, limit int) (bool, error) {
+// runRefresh only processes requested or due work; it does not start a polling cycle.
+func (h *GenerationManager) runRefresh(ctx context.Context, limit int) (bool, *scheduler.TaskOutcome, error) {
 	h.refreshMu.Lock()
 	defer h.refreshMu.Unlock()
+	outcome := &scheduler.TaskOutcome{NoWork: true}
 	defer func() {
 		h.mu.Lock()
 		close(h.changed)
@@ -44,7 +49,7 @@ func (h *GenerationManager) refresh(ctx context.Context, limit int) (bool, error
 		h.mu.Unlock()
 	}()
 	if err := h.flushLastSeen(ctx); err != nil {
-		return false, err
+		return false, outcome, err
 	}
 	if limit <= 0 {
 		h.mu.RLock()
@@ -54,50 +59,36 @@ func (h *GenerationManager) refresh(ctx context.Context, limit int) (bool, error
 	processed := 0
 	processedPending := false
 	for processed < limit {
+		var rootID string
+		var poll pollRequest
+		var pollReady bool
 		if h.pollBeforePending {
 			h.pollBeforePending = false
-			if rootID, forceRebuild, ok := h.nextCurrentPoll(time.Now()); ok {
+			rootID, poll, pollReady = h.nextCurrentPoll(time.Now())
+		}
+		if !pollReady {
+			if pending, retry, ok := h.nextPending(time.Now()); ok {
+				h.pollBeforePending = true
 				processed++
-				if err := h.pollCurrent(ctx, rootID, forceRebuild); err != nil {
-					return h.hasRunnableRefresh(time.Now()), err
+				processedPending = true
+				if err := h.refreshPending(ctx, pending, retry, outcome); err != nil {
+					h.recordRefreshFailure(pending.RootID, pending.CandidateID)
+					return h.hasRunnableRefresh(time.Now()), outcome, err
 				}
 				continue
 			}
-		}
-		if pending, retry, ok := h.nextPending(time.Now()); ok {
-			h.pollBeforePending = true
-			processed++
-			processedPending = true
-			if retry.candidateID == pending.CandidateID && retry.failures > 0 {
-				updated, replaced, err := h.revalidatePending(ctx, pending)
-				if err != nil {
-					h.recordRefreshFailure(pending.RootID, pending.CandidateID)
-					return h.hasRunnableRefresh(time.Now()), err
-				}
-				if replaced {
-					continue
-				}
-				pending = updated
+			if processedPending {
+				break
 			}
-			if err := h.refreshRoot(ctx, pending); err != nil {
-				h.recordRefreshFailure(pending.RootID, pending.CandidateID)
-				return h.hasRunnableRefresh(time.Now()), err
-			}
-			h.mu.Lock()
-			delete(h.retryWindows, pending.RootID)
-			h.mu.Unlock()
-			continue
+			rootID, poll, pollReady = h.nextCurrentPoll(time.Now())
 		}
-		if processedPending {
-			break
-		}
-		rootID, forceRebuild, ok := h.nextCurrentPoll(time.Now())
-		if !ok {
+		if !pollReady {
 			break
 		}
 		processed++
-		if err := h.pollCurrent(ctx, rootID, forceRebuild); err != nil {
-			return h.hasRunnableRefresh(time.Now()), err
+		*outcome = scheduler.TaskOutcome{Target: rootID, Reason: poll.reason, Phase: "check", QueueDuration: max(0, time.Since(poll.readyAt))}
+		if err := h.pollCurrent(ctx, rootID, poll.forceRebuild, outcome); err != nil {
+			return h.hasRunnableRefresh(time.Now()), outcome, err
 		}
 	}
 	h.mu.Lock()
@@ -105,7 +96,49 @@ func (h *GenerationManager) refresh(ctx context.Context, limit int) (bool, error
 		h.pollCycleActive = false
 	}
 	h.mu.Unlock()
-	return h.hasRunnableRefresh(time.Now()), nil
+	return h.hasRunnableRefresh(time.Now()), outcome, nil
+}
+
+func (h *GenerationManager) refreshPending(ctx context.Context, pending pendingAnchor, retry retryWindow, outcome *scheduler.TaskOutcome) error {
+	readyAt := pending.queuedAt
+	if readyAt.IsZero() {
+		readyAt = time.Now()
+	}
+	if retry.notBefore.After(readyAt) {
+		readyAt = retry.notBefore
+	}
+	*outcome = scheduler.TaskOutcome{Target: pending.RootID, Reason: pending.reason, Phase: "build", Result: "published", QueueDuration: max(0, time.Since(readyAt))}
+	if outcome.Reason == "" {
+		outcome.Reason = "initial"
+	}
+	if retry.candidateID == pending.CandidateID && retry.failures > 0 {
+		outcome.Reason, outcome.Phase = "retry", "check"
+		updated, replaced, err := h.revalidatePending(ctx, pending)
+		if err != nil {
+			return err
+		}
+		if replaced {
+			outcome.Result = "staged"
+			h.mu.RLock()
+			if _, exists := h.pending[pending.RootID]; !exists {
+				outcome.Result = "bypassed"
+			}
+			h.mu.RUnlock()
+			return nil
+		}
+		pending = updated
+		outcome.Phase = "build"
+	}
+	if err := h.refreshRoot(ctx, pending); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	delete(h.retryWindows, pending.RootID)
+	if h.current[pending.RootID] == nil {
+		outcome.Result = "bypassed"
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 func (h *GenerationManager) nextPending(now time.Time) (pendingAnchor, retryWindow, bool) {
@@ -137,27 +170,28 @@ func (h *GenerationManager) nextPending(now time.Time) (pendingAnchor, retryWind
 	return pending, retry, true
 }
 
-func (h *GenerationManager) nextCurrentPoll(now time.Time) (rootID string, forceRebuild, ok bool) {
+func (h *GenerationManager) nextCurrentPoll(now time.Time) (string, pollRequest, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.pollQueue) == 0 && !h.pollCycleActive {
-		roots := make([]string, 0, len(h.current))
-		for rootID, current := range h.current {
-			if _, pending := h.pending[rootID]; !pending && !now.Before(current.nextCheck) {
-				roots = append(roots, rootID)
-			}
+	roots := make([]string, 0, len(h.current))
+	for rootID, current := range h.current {
+		if _, pending := h.pending[rootID]; !pending && !now.Before(current.nextPoll) {
+			roots = append(roots, rootID)
 		}
-		sort.Strings(roots)
-		for _, rootID := range roots {
-			h.enqueuePollLocked(rootID, false)
-		}
-		h.pollCycleActive = len(h.pollQueue) != 0
 	}
+	sort.Strings(roots)
+	for _, rootID := range roots {
+		h.enqueuePollLocked(rootID, false)
+	}
+	h.pollCycleActive = len(h.pollQueue) != 0
 	for index, rootID := range h.pollQueue {
 		current := h.current[rootID]
 		if current == nil {
-			delete(h.pollQueued, rootID)
-			delete(h.forceRebuildQueued, rootID)
+			delete(h.pollRequests, rootID)
+			continue
+		}
+		poll, queued := h.pollRequests[rootID]
+		if !queued {
 			continue
 		}
 		if _, pending := h.pending[rootID]; pending {
@@ -170,15 +204,20 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (rootID string, force
 		copy(h.pollQueue[index:], h.pollQueue[index+1:])
 		h.pollQueue[len(h.pollQueue)-1] = ""
 		h.pollQueue = h.pollQueue[:len(h.pollQueue)-1]
-		delete(h.pollQueued, rootID)
-		forceRebuild := h.forceRebuildQueued[rootID]
-		delete(h.forceRebuildQueued, rootID)
+		delete(h.pollRequests, rootID)
+		if retry.candidateID == current.snapshot.CandidateID && retry.failures > 0 {
+			poll.reason = "retry"
+			if retry.notBefore.After(poll.readyAt) {
+				poll.readyAt = retry.notBefore
+			}
+		}
 		current.polling = true
-		return rootID, forceRebuild, true
+		current.pollingRebuild = poll.forceRebuild
+		return rootID, poll, true
 	}
 	compacted := h.pollQueue[:0]
 	for _, rootID := range h.pollQueue {
-		if h.current[rootID] != nil {
+		if _, queued := h.pollRequests[rootID]; queued && h.current[rootID] != nil {
 			compacted = append(compacted, rootID)
 		}
 	}
@@ -187,7 +226,7 @@ func (h *GenerationManager) nextCurrentPoll(now time.Time) (rootID string, force
 	if len(h.pollQueue) == 0 {
 		h.pollCycleActive = false
 	}
-	return "", false, false
+	return "", pollRequest{}, false
 }
 
 func (h *GenerationManager) recordRefreshFailure(rootID, candidateID string) {
@@ -208,18 +247,6 @@ func (h *GenerationManager) recordRefreshFailure(rootID, candidateID string) {
 	retry.failures++
 	retry.notBefore = time.Now().Add(refreshRetryDelay(candidateID, retry.failures))
 	h.retryWindows[rootID] = retry
-	if retry.failures > 1 {
-		roots := make([]string, 0, len(h.current))
-		for currentRootID, current := range h.current {
-			if _, pending := h.pending[currentRootID]; !pending && !time.Now().Before(current.nextCheck) {
-				roots = append(roots, currentRootID)
-			}
-		}
-		sort.Strings(roots)
-		for _, currentRootID := range roots {
-			h.enqueuePollLocked(currentRootID, false)
-		}
-	}
 }
 
 func refreshRetryDelay(candidateID string, failures int) time.Duration {
@@ -246,6 +273,12 @@ func (h *GenerationManager) hasRunnableRefresh(now time.Time) bool {
 		}
 	}
 	for _, rootID := range h.pollQueue {
+		if _, queued := h.pollRequests[rootID]; !queued {
+			continue
+		}
+		if _, pending := h.pending[rootID]; pending {
+			continue
+		}
 		if current := h.current[rootID]; current != nil {
 			retry := h.retryWindows[rootID]
 			if retry.candidateID != current.snapshot.CandidateID || !now.Before(retry.notBefore) {
@@ -256,7 +289,7 @@ func (h *GenerationManager) hasRunnableRefresh(now time.Time) bool {
 	return false
 }
 
-func (h *GenerationManager) nextRetryDelay(now time.Time) time.Duration {
+func (h *GenerationManager) nextRefreshDelay(now time.Time) time.Duration {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	var next time.Duration
@@ -264,7 +297,7 @@ func (h *GenerationManager) nextRetryDelay(now time.Time) time.Duration {
 		if _, pending := h.pending[rootID]; pending {
 			continue
 		}
-		due := current.nextCheck
+		due := current.nextPoll
 		if retry := h.retryWindows[rootID]; retry.notBefore.After(due) {
 			due = retry.notBefore
 		}
@@ -284,18 +317,41 @@ func (h *GenerationManager) nextRetryDelay(now time.Time) time.Duration {
 	return next
 }
 
-func (h *GenerationManager) enqueuePollLocked(rootID string, forceRebuild bool) {
+func (h *GenerationManager) enqueuePollLocked(rootID string, forceRebuild bool) bool {
 	if rootID == "" {
-		return
+		return false
+	}
+	poll, queued := h.pollRequests[rootID]
+	if queued {
+		if forceRebuild && !poll.forceRebuild {
+			poll.forceRebuild, poll.reason = true, "recovery"
+			h.pollRequests[rootID] = poll
+			return true
+		}
+		return false
+	}
+	poll = pollRequest{reason: "periodic", readyAt: time.Now(), forceRebuild: forceRebuild}
+	if current := h.current[rootID]; current != nil && current.nextPoll.Before(poll.readyAt) {
+		poll.readyAt = current.nextPoll
 	}
 	if forceRebuild {
-		h.forceRebuildQueued[rootID] = true
+		poll.reason, poll.readyAt = "recovery", time.Now()
 	}
-	if h.pollQueued[rootID] {
-		return
-	}
-	h.pollQueued[rootID] = true
+	h.pollRequests[rootID] = poll
 	h.pollQueue = append(h.pollQueue, rootID)
+	return true
+}
+
+func (h *GenerationManager) removePollLocked(rootID string) {
+	delete(h.pollRequests, rootID)
+	queued := h.pollQueue[:0]
+	for _, root := range h.pollQueue {
+		if root != rootID {
+			queued = append(queued, root)
+		}
+	}
+	clear(h.pollQueue[len(queued):])
+	h.pollQueue = queued
 }
 
 func (h *GenerationManager) revalidatePending(ctx context.Context, pending pendingAnchor) (pendingAnchor, bool, error) {
@@ -347,13 +403,13 @@ func (h *GenerationManager) revalidatePending(ctx context.Context, pending pendi
 		h.mu.Unlock()
 		return pending, false, nil
 	}
-	if err := h.StageAnchorID(storeio.WithResponseTiming(ctx, response), pending.RootID, pending.Root, pending.Path, response.Header, spool.File); err != nil {
+	if err := h.stageAnchor(storeio.WithResponseTiming(ctx, response), pending.RootID, pending.Root, pending.Path, response.Header, spool.File, "retry", false); err != nil {
 		return pending, false, err
 	}
 	return pending, true, nil
 }
 
-func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forceRebuild bool) (pollErr error) {
+func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forceRebuild bool, outcome *scheduler.TaskOutcome) (pollErr error) {
 	h.mu.RLock()
 	var snapshot *Snapshot
 	if current := h.current[rootID]; current != nil {
@@ -361,8 +417,10 @@ func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forc
 	}
 	h.mu.RUnlock()
 	if snapshot == nil {
+		outcome.NoWork = true
 		return nil
 	}
+	outcome.Result = "unchanged"
 	defer func() { h.finishCurrentPoll(snapshot, pollErr, forceRebuild) }()
 
 	validators := make(http.Header)
@@ -391,15 +449,17 @@ func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forc
 	policy := proxyruntime.ParseCachePolicy(response.Header, time.Now(), 0)
 	if policy.NoStore || policy.Private {
 		_ = response.Body.Close()
+		outcome.Result = "bypassed"
 		return h.retireCachedRoot(rootID)
 	}
 	if response.StatusCode == http.StatusNotModified {
 		_ = response.Body.Close()
 		if forceRebuild {
+			outcome.Result = "staged"
 			anchor := snapshot.byPath[snapshot.Anchor]
 			reader, err := h.config.Store.OpenObject(ctx, h.config.Tenant, anchor.Key)
 			if err == nil {
-				err = h.StageAnchorID(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.Root, snapshot.Anchor, proxyruntime.MergeRevalidationHeader(anchor.Header, response.Header), reader)
+				err = h.stageAnchor(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.Root, snapshot.Anchor, proxyruntime.MergeRevalidationHeader(anchor.Header, response.Header), reader, outcome.Reason, false)
 				_ = reader.Close()
 			}
 			return err
@@ -413,14 +473,16 @@ func (h *GenerationManager) pollCurrent(ctx context.Context, rootID string, forc
 	}
 	if spool.SHA256 == snapshot.Generation {
 		if forceRebuild {
-			err = h.StageAnchorID(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File)
+			outcome.Result = "staged"
+			err = h.stageAnchor(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File, outcome.Reason, false)
 			_ = spool.Close()
 			return err
 		}
 		_ = spool.Close()
 		return h.updateCurrentFreshness(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.CandidateID, response.Header)
 	}
-	err = h.StageAnchorID(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File)
+	outcome.Result = "staged"
+	err = h.stageAnchor(storeio.WithResponseTiming(ctx, response), snapshot.RootID, snapshot.Root, snapshot.Anchor, response.Header, spool.File, outcome.Reason, false)
 	_ = spool.Close()
 	return err
 }
@@ -430,6 +492,7 @@ func (h *GenerationManager) finishCurrentPoll(snapshot *Snapshot, pollErr error,
 	defer h.mu.Unlock()
 	if current := h.current[snapshot.RootID]; current != nil {
 		current.polling = false
+		current.pollingRebuild = false
 	}
 	if pollErr == nil {
 		delete(h.retryWindows, snapshot.RootID)
@@ -485,7 +548,7 @@ func (h *GenerationManager) updateCurrentFreshness(ctx context.Context, rootID, 
 		return err
 	}
 	updated.validatedAt, updated.header = validatedAt, merged
-	updated.nextCheck = h.nextCheckAt(rootID, validatedAt, merged)
+	updated.nextPoll = h.nextPollAt(rootID, validatedAt, updated.snapshot.PublishedAt)
 	updated.lastError = nil
 	h.mu.Lock()
 	h.current[rootID] = &updated
@@ -493,18 +556,16 @@ func (h *GenerationManager) updateCurrentFreshness(ctx context.Context, rootID, 
 	return nil
 }
 
-func (h *GenerationManager) nextCheckAt(rootID string, validated time.Time, header http.Header) time.Time {
-	if validated.IsZero() {
-		return time.Time{}
-	}
-	policy := proxyruntime.ParseCachePolicy(header, validated, h.config.RefreshInterval)
-	interval := policy.Lifetime
-	if interval <= 0 || policy.NoCache {
-		interval = h.config.RefreshInterval
-	}
+func (h *GenerationManager) pollOffset(rootID string) time.Duration {
 	digest := sha256.Sum256([]byte(h.config.Instance + "\x00" + rootID))
-	interval -= interval / 100 * time.Duration(int(digest[0])%21)
-	return validated.Add(max(time.Second, interval-proxyruntime.ResponseAge(header, validated, validated)))
+	return min(h.config.RefreshInterval/20, time.Minute) / 255 * time.Duration(digest[0])
+}
+
+func (h *GenerationManager) nextPollAt(rootID string, validated, published time.Time) time.Time {
+	if published.After(validated) {
+		validated = published
+	}
+	return validated.Add(h.config.RefreshInterval).Add(h.pollOffset(rootID))
 }
 
 func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnchor) error {
@@ -628,7 +689,8 @@ func (h *GenerationManager) refreshRoot(ctx context.Context, pending pendingAnch
 		return err
 	}
 	h.mu.Lock()
-	h.current[rootID] = &liveSnapshot{snapshot: snapshot, snapshotSHA256: digest, validatedAt: pending.ValidatedAt, header: pending.Header, nextCheck: h.nextCheckAt(rootID, pending.ValidatedAt, pending.Header)}
+	h.current[rootID] = &liveSnapshot{snapshot: snapshot, snapshotSHA256: digest, validatedAt: pending.ValidatedAt, header: pending.Header, nextPoll: h.nextPollAt(rootID, pending.ValidatedAt, snapshot.PublishedAt)}
+	h.removePollLocked(rootID)
 	if len(previousSnapshots) == 0 {
 		delete(h.retained, rootID)
 	} else {

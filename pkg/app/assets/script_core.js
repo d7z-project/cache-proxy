@@ -176,12 +176,32 @@
       targetCell.className = "event-target event-col-target";
       var compactContext = document.createElement("span");
       compactContext.className = "event-compact-context";
-      compactContext.textContent = storage + " / " + task + " / " + formatDateTime(event.finished_at);
+      compactContext.textContent = storage + " / " + task + " / " + formatDateTime(event.finished_at) +
+        " / " + text("duration", "Duration") + ": " + formatDuration(event.duration_ms);
       targetCell.appendChild(compactContext);
       var target = document.createElement("span");
       target.className = "event-target-main";
       target.textContent = event.target || "/";
       targetCell.appendChild(target);
+      var reason = String(event.reason || "").trim();
+      var phase = String(event.phase || "").trim();
+      var queueDuration = Number(event.queue_duration_ms) || 0;
+      if (reason || phase || queueDuration > 0) {
+        var metadata = document.createElement("span");
+        metadata.className = "event-detail event-detail-meta";
+        var metadataParts = [];
+        if (reason) {
+          metadataParts.push(text("reason", "Reason") + ": " + reason);
+        }
+        if (phase) {
+          metadataParts.push(text("phase", "Phase") + ": " + phase);
+        }
+        if (queueDuration > 0) {
+          metadataParts.push(text("queued", "Queued") + ": " + formatDuration(queueDuration));
+        }
+        metadata.textContent = metadataParts.join(" · ");
+        targetCell.appendChild(metadata);
+      }
       var message = String(event.message || "").trim();
       if (message) {
         var detail = document.createElement("span");
@@ -192,7 +212,9 @@
       var resultCell = appendCell(row, "");
       resultCell.className = "event-col-result";
       var chip = document.createElement("span");
-      chip.className = "status-chip status-chip-" + (result === "success" ? "success" : result === "skipped" ? "skipped" : "failure");
+      var successResults = ["success", "unchanged", "staged", "published", "bypassed"];
+      var resultClass = successResults.indexOf(result) >= 0 ? "success" : result === "skipped" ? "skipped" : "failure";
+      chip.className = "status-chip status-chip-" + resultClass;
       chip.textContent = result;
       resultCell.appendChild(chip);
       appendCell(row, formatDuration(event.duration_ms)).className = "event-col-duration";

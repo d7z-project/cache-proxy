@@ -54,7 +54,7 @@ func (a *App) homePageData(req *http.Request, entries []*proxyruntime.Entry, sin
 		for _, entry := range entries {
 			names = append(names, entry.Name)
 		}
-		usage = a.tenantUsage(req.Context(), names)
+		usage = a.instanceUsage(req.Context(), names)
 	}
 	if usage == nil {
 		usage = make(map[string]int64)
