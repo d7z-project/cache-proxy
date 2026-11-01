@@ -15,6 +15,10 @@ e2e_run_pypi() {
       --dest /tmp/download "e2e-pkg==$2" >/dev/null
     test -f "/tmp/download/e2e_pkg-$2-py3-none-any.whl"
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install pypi "$E2E_PYTHON_IMAGE" "$script" /pypi/files/e2e_pkg-1.0.0-py3-none-any.whl 1.0.0 2.0.0
+    return
+  fi
   e2e_client pypi cold "$E2E_PYTHON_IMAGE" "$script" "$E2E_PROXY_URL" 1.0.0
   local before native_accept
   before=$(e2e_fixture_count GET /pypi/files/e2e_pkg-1.0.0-py3-none-any.whl)

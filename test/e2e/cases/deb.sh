@@ -27,6 +27,10 @@ e2e_run_deb_repository() {
     apt-get -o Acquire::Check-Date=false install -y --no-install-recommends e2e-deb >/dev/null
     grep -qx "$3" /usr/share/e2e-deb/payload.txt
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install "deb-$layout" "$E2E_DEBIAN_IMAGE" "$script" "$package_path" "$source" "$source"
+    return
+  fi
   e2e_client "deb-$layout" cold "$E2E_DEBIAN_IMAGE" "$script" "$E2E_PROXY_URL" "$source" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL$anchor"
   e2e_assert_generation_poll_interval "deb-$layout" "$anchor"

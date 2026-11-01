@@ -113,7 +113,11 @@ func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 			fillErr = verifyAndStore(ctx, spool.path, cfg)
 		}
 		if fillErr != nil {
-			slog.Warn("cache fill failed", "path", cfg.ObjectPath, "err", fillErr)
+			if errors.Is(fillErr, context.Canceled) && ctx.Err() != nil {
+				slog.Debug("cache fill canceled", "path", cfg.ObjectPath)
+			} else {
+				slog.Warn("cache fill failed", "path", cfg.ObjectPath, "err", fillErr)
+			}
 		} else {
 			slog.Debug("download completed", "path", cfg.ObjectPath)
 		}

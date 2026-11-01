@@ -20,6 +20,10 @@ EOF
       -Dartifact="com.example:e2e-maven:$2" -Dtransitive=false >/tmp/maven.log 2>&1 || { cat /tmp/maven.log; exit 1; }
     test -f "/root/.m2/repository/com/example/e2e-maven/$2/e2e-maven-$2.jar"
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install maven "$E2E_MAVEN_CLIENT_IMAGE" "$script" /maven/com/example/e2e-maven/1.0.0/e2e-maven-1.0.0.jar 1.0.0 2.0.0
+    return
+  fi
   e2e_client maven cold "$E2E_MAVEN_CLIENT_IMAGE" "$script" "$E2E_PROXY_URL" 1.0.0
   local before
   before=$(e2e_fixture_count TRANSFER /maven/com/example/e2e-maven/1.0.0/e2e-maven-1.0.0.jar)

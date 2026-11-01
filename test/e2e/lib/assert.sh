@@ -293,7 +293,7 @@ e2e_assert_transparent_paths() {
   ' "$E2E_PROXY_URL" "$proxy_path" "$upstream_path"
   after=$(e2e_fixture_count GET "$upstream_path/__e2e_path__/asset.css")
   expected=2
-  if [[ $cache_unknown == cache ]]; then
+  if [[ $cache_unknown == cache && ${E2E_CACHE:-true} == true ]]; then
     expected=1
   fi
   e2e_assert_eq "$((before + expected))" "$after" "$mode unknown resource transfer count"

@@ -13,6 +13,10 @@ e2e_run_go() {
     go mod init client.example/e2e >/dev/null
     GOPROXY="$1/go" GOSUMDB=off GOPRIVATE= go mod download "example.com/e2e@$2"
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install go "$E2E_GO_IMAGE" "$script" /go/example.com/e2e/@v/v1.0.0.zip v1.0.0 v1.1.0
+    return
+  fi
   e2e_client go cold "$E2E_GO_IMAGE" "$script" "$E2E_PROXY_URL" v1.0.0
   local before
   before=$(e2e_fixture_count GET /go/example.com/e2e/@v/v1.0.0.zip)

@@ -129,6 +129,7 @@ func DefaultCleanupConfig() CleanupConfig {
 }
 
 type Instance struct {
+	Cache      *bool            `yaml:"cache,omitempty"`
 	Name       string           `yaml:"name"`
 	Enabled    bool             `yaml:"enabled"`
 	Mode       string           `yaml:"mode"`
@@ -140,6 +141,8 @@ type Instance struct {
 	Refresh    *RefreshConfig   `yaml:"refresh,omitempty"`
 	Options    *OptionsBlock    `yaml:"options,omitempty"`
 }
+
+func (i Instance) CacheEnabled() bool { return i.Cache == nil || *i.Cache }
 
 type RefreshConfig struct {
 	Interval Duration `yaml:"interval"`

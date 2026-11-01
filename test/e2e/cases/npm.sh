@@ -14,6 +14,10 @@ e2e_run_npm() {
     npm install --registry="$1/npm/" "${4:---prefer-online}" --ignore-scripts --no-fund --no-audit
     test "$(node -e "process.stdout.write(require(\"e2e-pkg\"))")" = "$3"
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install npm "$E2E_NODE_IMAGE" "$install_script" /npm/e2e-pkg/-/e2e-pkg-1.0.0.tgz 1.0.0 2.0.0
+    return
+  fi
   e2e_client npm cold "$E2E_NODE_IMAGE" "$install_script" "$E2E_PROXY_URL" 1.0.0 cache-proxy-e2e-initial
   e2e_client npm audit "$E2E_NODE_IMAGE" '
     mkdir /tmp/project && cd /tmp/project

@@ -22,6 +22,10 @@ EOF
     pacman -Sy --noconfirm --config /tmp/pacman.conf e2e-pacman >/dev/null
     grep -qx "$2" /usr/share/e2e-pacman/payload.txt
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install pacman "$E2E_ARCH_IMAGE" "$script" /pacman/e2e-pacman-1.0.0-1-any.pkg.tar.zst cache-proxy-e2e-initial cache-proxy-e2e-updated
+    return
+  fi
   e2e_client pacman cold "$E2E_ARCH_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/pacman/e2e.db"
   e2e_assert_generation_poll_interval pacman /pacman/e2e.db

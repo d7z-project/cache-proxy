@@ -31,7 +31,7 @@ func TestGitRequestPanicReleasesRepositoryLock(t *testing.T) {
 	branch := plumbing.NewBranchReferenceName("main")
 	require.NoError(t, storage.SetReference(plumbing.NewHashReference(branch, plumbing.NewHash(strings.Repeat("a", 40)))))
 	require.NoError(t, storage.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, branch)))
-	h := newGitHandler(gitConfig{name: "git", upstream: "https://git.example/repo", repositoryFS: memfs.New()})
+	h := newTestGitHandler(t, gitConfig{name: "git", upstream: "https://git.example/repo", repositoryFS: memfs.New()})
 	defer func() { require.NoError(t, h.Stop(context.Background())) }()
 	h.server = gitserver.NewServer(&singleLoader{storer: storage})
 	require.Panics(t, func() {
@@ -57,7 +57,7 @@ func (b unlockedRequestBody) Read([]byte) (int, error) {
 func (unlockedRequestBody) Close() error { return nil }
 
 func TestGitUploadPackRequestBoundaries(t *testing.T) {
-	h := newGitHandler(gitConfig{name: "git", upstream: "https://git.example/repo", repositoryFS: memfs.New()})
+	h := newTestGitHandler(t, gitConfig{name: "git", upstream: "https://git.example/repo", repositoryFS: memfs.New()})
 	defer func() { require.NoError(t, h.Stop(context.Background())) }()
 	h.server = gitserver.NewServer(&singleLoader{storer: memory.NewStorage()})
 	request := httptest.NewRequest(http.MethodPost, "/git-upload-pack", nil)
@@ -77,7 +77,7 @@ func TestGitUploadPackRequestBoundaries(t *testing.T) {
 }
 
 func TestGitUploadPackBodyReadDeadline(t *testing.T) {
-	h := newGitHandler(gitConfig{name: "git", upstream: "https://git.example/repo", repositoryFS: memfs.New(), operationTimeout: 20 * time.Millisecond})
+	h := newTestGitHandler(t, gitConfig{name: "git", upstream: "https://git.example/repo", repositoryFS: memfs.New(), operationTimeout: 20 * time.Millisecond})
 	defer func() { require.NoError(t, h.Stop(context.Background())) }()
 	server := httptest.NewServer(h)
 	defer server.Close()

@@ -9,7 +9,7 @@ container images, Git repositories, and HTTP files.
 
 Reduce repeated downloads across machines and CI jobs while continuing to use
 native package clients. Run multiple instances in one process, each with its own
-upstream, persistent cache, and refresh settings.
+upstream and independently configurable caching and refresh settings.
 
 [Quick Start](#quick-start) | [Installation](#installation) |
 [Configuration](#configuration) | [Client Setup](#client-setup) |
@@ -18,6 +18,7 @@ upstream, persistent cache, and refresh settings.
 ## Features
 
 - Protocol-aware caching and content verification.
+- Optional uncached forwarding per instance, with the same read-only access controls.
 - Persistent downloads shared across clients and service restarts.
 - Shared upstream transfers for concurrent requests to the same object.
 - Configurable refresh intervals, download concurrency, and request pacing.
@@ -43,7 +44,7 @@ upstream, persistent cache, and refresh settings.
 | `git` | Git repositories over smart HTTP |
 
 Each instance uses one HTTP(S) upstream. Repository layouts are detected
-automatically; each `git` instance mirrors one repository. All upstream access
+automatically; each `git` instance serves one repository. All upstream access
 is read-only. Offline availability depends on which content is cached and whether
 its freshness and protocol policies permit reuse.
 
@@ -153,6 +154,38 @@ such as `500ms`, `15m`, and `24h`; sizes accept binary units such as `MiB` and `
 
 For refresh behavior, upstream credentials, rate limits, storage, and deployment
 security, see the [operations guide](docs/operations.md).
+
+### Uncached Forwarding
+
+Set `cache: false` on an instance to forward requests through its configured
+upstream and `transport.proxy` without reading or storing cached content. The
+default is `true`; restart to apply changes. All modes support this setting,
+including authenticated OCI pulls and npm/PyPI download URL rewriting.
+
+```yaml
+instances:
+  - name: rocky
+    enabled: true
+    cache: false
+    mode: rpm
+    path: /rocky
+    upstream: https://download.rockylinux.org/pub/rocky
+    transport:
+      proxy: http://127.0.0.1:7890 # Optional outbound HTTP proxy.
+```
+
+Uncached instances do not create metadata snapshots, Git mirrors or background
+cache jobs. Refresh and retention settings are inactive; existing cache data is
+left untouched. Requests require a reachable upstream. Repository consistency
+comes from the upstream and native client checks, not a local snapshot.
+
+Connection reuse, rate limits, timeouts and read-only access controls remain.
+Bounded request-local buffers or temporary files can be used for rewriting and
+checksum verification; signing keys remain persistent. Cargo fetches registry
+configuration and checksums on demand, and OCI tokens are request-local.
+Unmodified responses preserve upstream cache directives. Rewritten metadata is
+private and requires revalidation before reuse; upstream `no-store` is retained.
+The dashboard labels uncached instances.
 
 ## Client Setup
 

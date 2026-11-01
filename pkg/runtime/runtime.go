@@ -50,15 +50,16 @@ func (h HandlerInstance) Stop(ctx context.Context) error {
 }
 
 type Entry struct {
-	Name       string
-	Mode       string
-	Enabled    bool
-	Path       string
-	Bind       string
-	DisplayURL string
-	Runtime    Instance
-	Ctx        context.Context
-	Cancel     context.CancelFunc
+	Name         string
+	Mode         string
+	Enabled      bool
+	CacheEnabled bool
+	Path         string
+	Bind         string
+	DisplayURL   string
+	Runtime      Instance
+	Ctx          context.Context
+	Cancel       context.CancelFunc
 }
 
 type Result struct {
@@ -131,9 +132,10 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 		return nil, fmt.Errorf("duplicate instance name %q", name)
 	}
 	entry := &Entry{
-		Name:    name,
-		Mode:    selected.Mode,
-		Enabled: selected.Enabled,
+		Name:         name,
+		Mode:         selected.Mode,
+		Enabled:      selected.Enabled,
+		CacheEnabled: decl.CacheEnabled(),
 	}
 	p.entries[name] = entry
 	plan := &InstancePlan{planContext: p, declaration: decl, selectedMode: selected, entry: entry}
@@ -141,6 +143,11 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 		return plan, nil
 	}
 	root := filepath.Join(p.backend, "instances", name, selected.Mode)
+	if !entry.CacheEnabled {
+		plan.storeRoot = filepath.Join(root, "forward")
+		return plan, nil
+	}
+	plan.storeRoot = root
 	for _, directory := range []string{"blobs", "state", "work"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
 			return nil, fmt.Errorf("instance %s: create %s directory: %w", name, directory, err)
@@ -160,7 +167,6 @@ func (p *PlanContext) Instance(decl config.Instance, selected config.SelectedMod
 		return nil, fmt.Errorf("instance %s: open blob store: %w", name, err)
 	}
 	plan.store = store
-	plan.storeRoot = root
 	p.stores[name] = store
 	return plan, nil
 }
@@ -198,6 +204,7 @@ func (p *PlanContext) ReservePathPrefix(pathValue, owner string) {
 }
 
 func (i *InstancePlan) Name() string                        { return i.entry.Name }
+func (i *InstancePlan) CacheEnabled() bool                  { return i.entry.CacheEnabled }
 func (i *InstancePlan) Enabled() bool                       { return i.entry.Enabled }
 func (i *InstancePlan) Store() *blobfs.Store                { return i.store }
 func (i *InstancePlan) StoreRoot() string                   { return i.storeRoot }

@@ -1,4 +1,6 @@
 {
+  "cache_enabled": "Caching enabled",
+  "cache_disabled": "Uncached forwarding",
   "validation": "Validation",
   "cache_age": "Cache age",
   "freshness_lifetime": "Freshness lifetime",

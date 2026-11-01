@@ -94,6 +94,7 @@ func (h *handler) trimTokenCacheLocked(now time.Time, keepKey string) {
 }
 
 func (h *handler) Stop(ctx context.Context) error {
+	h.client.CloseIdleConnections()
 	return h.lifecycle.Close(ctx)
 }
 
@@ -175,7 +176,7 @@ func (h *handler) Cleanup(ctx context.Context, opts config.CleanupConfig) (bool,
 			h.cleanupPhase, h.cleanupCursor = "blobs", ""
 		case "blobs":
 			complete, err := h.cleanupWalk(ctx, "oci/blobs", batch, func(current string) (bool, error) {
-				if _, active := h.downloads.Load(current); active {
+				if h.blobFlights.Active(current) {
 					return true, nil
 				}
 				return false, h.cleanupExpiredObject(ctx, current, "blob", opts)
@@ -283,6 +284,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (h *handler) serve(ctx context.Context, w http.ResponseWriter, req *http.Request, resolved request) (int, string, uint64, error) {
+	if h.uncached {
+		headers := map[string]string{}
+		for _, key := range []string{"Accept", "Accept-Encoding", "Range", "If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "Cache-Control", "Pragma"} {
+			if value := req.Header.Get(key); value != "" {
+				headers[key] = value
+			}
+		}
+		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", headers)
+	}
 	if resolved.kind == requestPing {
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 		w.Header().Set("X-Cache", "LOCAL")
@@ -418,13 +428,11 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		slog.Debug("oci blob cache hit", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
 		return status, "HIT", bytes, nil
 	}
-	ready := make(chan struct{})
-	if active, downloading := h.downloads.LoadOrStore(objectPath, ready); downloading {
+	flight, leader := h.blobFlights.Begin(objectPath)
+	if !leader {
 		slog.Debug("oci blob already downloading, waiting", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
-		select {
-		case <-ctx.Done():
+		if err := h.blobFlights.Wait(ctx, flight); err != nil && ctx.Err() != nil {
 			return 0, "", 0, ctx.Err()
-		case <-active.(chan struct{}):
 		}
 		if status, bytes, cacheErr := h.serveCachedObject(ctx, w, req, objectPath, "COALESCED"); cacheErr == nil {
 			return status, "COALESCED", bytes, nil
@@ -432,7 +440,7 @@ func (h *handler) serveBlob(ctx context.Context, w http.ResponseWriter, req *htt
 		return h.serveUpstream(ctx, w, req, resolved.upstreamPath, "BYPASS", nil)
 	}
 	slog.Debug("oci blob miss, fetching", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest)
-	return h.fetchBlob(w, req, resolved, ready)
+	return h.fetchBlob(w, req, resolved, flight)
 }
 
 func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, req *http.Request, objectPath, cache string) (int, uint64, error) {

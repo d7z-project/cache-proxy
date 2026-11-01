@@ -81,9 +81,6 @@ func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method
 	if err != nil || authorization == "" {
 		return nil, err
 	}
-	h.auth.tokenMu.Lock()
-	h.auth.preemptive = authorization
-	h.auth.tokenMu.Unlock()
 	return send(authorization)
 }
 

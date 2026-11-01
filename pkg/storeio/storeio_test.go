@@ -83,6 +83,24 @@ func TestFlightGroupJoinsSameKey(t *testing.T) {
 	require.Equal(t, int32(1), runs.Load())
 }
 
+func TestFlightGroupActiveTracksOwnedFlight(t *testing.T) {
+	group := &FlightGroup{}
+	require.False(t, group.Active("object"))
+
+	flight, leader := group.Begin("object")
+	require.True(t, leader)
+	require.True(t, group.Active("object"))
+	joined, leader := group.Begin("object")
+	require.False(t, leader)
+	require.Same(t, flight, joined)
+
+	group.Finish("object", &Flight{done: make(chan struct{})}, errors.New("stale"))
+	require.True(t, group.Active("object"))
+	group.Finish("object", flight, nil)
+	require.False(t, group.Active("object"))
+	group.Finish("object", flight, nil)
+}
+
 func TestStreamEOFDoesNotWaitForCachePublication(t *testing.T) {
 	group := &FlightGroup{}
 	flight, leader := group.Begin("object")

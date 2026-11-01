@@ -50,7 +50,9 @@ func (l *Lifecycle) Go(run func(context.Context)) error {
 	return nil
 }
 
-func (l *Lifecycle) Close(ctx context.Context) error {
+// BeginClose rejects new work and cancels the lifecycle without waiting for
+// already admitted work to return. It is safe to call more than once.
+func (l *Lifecycle) BeginClose() {
 	l.mu.Lock()
 	if !l.closing {
 		l.closing = true
@@ -60,12 +62,15 @@ func (l *Lifecycle) Close(ctx context.Context) error {
 			close(l.done)
 		}()
 	}
-	done := l.done
 	l.mu.Unlock()
+}
+
+func (l *Lifecycle) Close(ctx context.Context) error {
+	l.BeginClose()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-done:
+	case <-l.done:
 		return nil
 	}
 }

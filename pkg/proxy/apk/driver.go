@@ -19,6 +19,9 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if !plan.Enabled() {
 		return nil
 	}
+	if !plan.CacheEnabled() {
+		return transport.BindForward(plan, config.ModeAPK)
+	}
 	origin, err := url.Parse(plan.Upstream())
 	if err != nil {
 		return fmt.Errorf("instance %s: parse upstream: %w", plan.Name(), err)

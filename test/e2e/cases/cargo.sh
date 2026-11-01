@@ -27,6 +27,10 @@ registry = "sparse+$1/cargo/"
 EOF
     cargo fetch --locked 2>/dev/null || cargo fetch
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install cargo "$E2E_RUST_IMAGE" "$script" /cargo/api/v1/crates/e2e-crate/1.0.0/download 1.0.0 2.0.0
+    return
+  fi
   e2e_client cargo cold "$E2E_RUST_IMAGE" "$script" "$E2E_PROXY_URL" 1.0.0
   local before
   before=$(e2e_fixture_count GET /cargo/api/v1/crates/e2e-crate/1.0.0/download)

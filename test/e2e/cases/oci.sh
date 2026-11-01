@@ -16,6 +16,10 @@ e2e_oci_pull() {
 e2e_run_oci() {
 	printf '\n[oci] Distribution pull, tag update, warm blobs and offline restart\n'
 	e2e_reset_fixture
+	if [[ ${E2E_CACHE:-true} == false ]]; then
+	  e2e_uncached_native oci /oci/v2/e2e/image/blobs/ "http://$E2E_OCI_URL/v2/e2e/image/manifests/latest" e2e_oci_pull initial updated
+	  return
+	fi
 	e2e_assert_strict_path oci "http://$E2E_OCI_URL" "" /oci
   e2e_oci_pull cold initial
   local blobs_before blobs_after

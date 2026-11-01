@@ -1,4 +1,6 @@
 {
+  "cache_enabled": "Cache actif",
+  "cache_disabled": "Transfert sans cache",
   "validation": "Validation",
   "cache_age": "Age du cache",
   "freshness_lifetime": "Duree de fraicheur",

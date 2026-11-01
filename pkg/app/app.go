@@ -46,6 +46,7 @@ type App struct {
 
 	scheduler *scheduler.Scheduler
 	status    *appStatus
+	requests  *storeio.Lifecycle
 
 	entries      map[string]*proxyruntime.Entry
 	handlers     []proxyruntime.Instance
@@ -60,7 +61,7 @@ type App struct {
 	stopRuntime  context.CancelFunc
 	started      bool
 	ready        atomic.Bool
-	closed       atomic.Bool
+	closed       bool
 
 	instanceUsageMu         sync.Mutex
 	instanceUsageCachedAt   time.Time
@@ -117,7 +118,16 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	storeio.CleanStaleWorkFiles(filepath.Join(doc.Server.Backend, "instances"), 24*time.Hour)
+	for _, instance := range doc.Instances {
+		if !instance.Enabled {
+			continue
+		}
+		root := filepath.Join(doc.Server.Backend, "instances", instance.Name, instance.Mode)
+		if !instance.CacheEnabled() {
+			root = filepath.Join(root, "forward")
+		}
+		storeio.CleanStaleWorkFiles(root, 24*time.Hour)
+	}
 	metricsRegistry := prometheus.NewRegistry()
 	stats := metrics.NewStats(metricsRegistry)
 	upstreamGate := proxyruntime.NewUpstreamGate(upstreamGateConfig(doc.Storage.Download))
@@ -163,6 +173,7 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		metricsRegistry: metricsRegistry,
 		scheduler:       taskScheduler,
 		status:          status,
+		requests:        storeio.NewLifecycle(),
 		entries:         entries,
 		pathHandlers:    map[string]http.Handler{},
 		bindHandlers:    map[string]http.Handler{},
@@ -190,7 +201,7 @@ func Open(ctx context.Context, doc *config.Document) (*App, error) {
 		})
 	}
 
-	app.mainServer = newHTTPServer(doc.Server.Bind, app)
+	app.mainServer = newHTTPServer(doc.Server.Bind, app.requests, app)
 	app.checkOrphans(lifecycleCtx)
 	return app, nil
 }
@@ -241,7 +252,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (a *App) Start() error {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	if a.closed.Load() {
+	if a.closed {
 		return errors.New("app is closed")
 	}
 	if a.started {
@@ -272,7 +283,7 @@ func (a *App) Start() error {
 		}
 	}()
 	for addr, listener := range bindListeners {
-		server := newHTTPServer(addr, bindDispatchHandler{app: a, addr: addr})
+		server := newHTTPServer(addr, a.requests, bindDispatchHandler{app: a, addr: addr})
 		a.bindServers[addr] = server
 		go func(server *http.Server, listener net.Listener) {
 			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -283,13 +294,25 @@ func (a *App) Start() error {
 	return nil
 }
 
-func newHTTPServer(addr string, handler http.Handler) *http.Server {
+func newHTTPServer(addr string, requests *storeio.Lifecycle, handler http.Handler) *http.Server {
+	next := handler
+	handler = http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_, done, err := requests.Begin()
+		if err != nil {
+			w.Header().Set("Retry-After", "1")
+			proxyruntime.WriteError(w, http.StatusServiceUnavailable)
+			return
+		}
+		defer done()
+		next.ServeHTTP(w, request)
+	})
 	return &http.Server{
 		Addr:              addr,
 		Handler:           downstreamWriteIdle(handler, downstreamWriteIdleTimeout),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
+		BaseContext:       func(net.Listener) context.Context { return requests.Context() },
 	}
 }
 
@@ -321,29 +344,12 @@ func downstreamWriteIdle(next http.Handler, timeout time.Duration) http.Handler 
 func (a *App) Close(ctx context.Context) error {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	if a.closed.Load() {
+	if a.closed {
 		return nil
 	}
 	a.ready.Store(false)
-	var joined error
-	drained := true
-	if a.scheduler != nil {
-		if err := a.scheduler.Stop(ctx); err != nil {
-			joined = errors.Join(joined, err)
-			drained = false
-		}
-	}
-	if a.mainServer != nil {
-		if err := a.mainServer.Shutdown(ctx); err != nil {
-			joined = errors.Join(joined, err)
-			drained = false
-		}
-	}
-	for _, server := range a.bindServers {
-		if err := server.Shutdown(ctx); err != nil {
-			joined = errors.Join(joined, err)
-			drained = false
-		}
+	if a.requests != nil {
+		a.requests.BeginClose()
 	}
 	if a.stopRuntime != nil {
 		a.stopRuntime()
@@ -351,31 +357,60 @@ func (a *App) Close(ctx context.Context) error {
 	a.instanceUsageMu.Lock()
 	a.instanceUsageClosing = true
 	a.instanceUsageMu.Unlock()
-	if err := waitForGroup(ctx, &a.instanceUsageWG); err != nil {
-		joined = errors.Join(joined, err)
-		drained = false
-	}
+
 	a.routesMu.RLock()
 	handlers := make([]proxyruntime.Instance, len(a.handlers))
 	copy(handlers, a.handlers)
 	a.routesMu.RUnlock()
-	for _, handler := range handlers {
-		if err := handler.Stop(ctx); err != nil {
-			joined = errors.Join(joined, err)
-			drained = false
-		}
+
+	var stopGroup sync.WaitGroup
+	var stopMu sync.Mutex
+	var stopErr error
+	stop := func(name string, closeFn func() error) {
+		stopGroup.Go(func() {
+			if err := closeFn(); err != nil {
+				stopMu.Lock()
+				stopErr = errors.Join(stopErr, fmt.Errorf("stop %s: %w", name, err))
+				stopMu.Unlock()
+			}
+		})
 	}
+	if a.scheduler != nil {
+		stop("scheduler", func() error { return a.scheduler.Stop(ctx) })
+	}
+	for index, handler := range handlers {
+		stop(fmt.Sprintf("handler %d", index), func() error { return handler.Stop(ctx) })
+	}
+	if a.requests != nil {
+		stop("requests", func() error { return a.requests.Close(ctx) })
+	}
+	stop("instance usage", func() error { return waitForGroup(ctx, &a.instanceUsageWG) })
 	if a.status != nil {
-		if err := a.status.stop(ctx); err != nil {
-			joined = errors.Join(joined, err)
-			drained = false
+		stop("status", func() error { return a.status.stop(ctx) })
+	}
+
+	var joined error
+	closeServer := func(server *http.Server) {
+		if server == nil {
+			return
+		}
+		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			joined = errors.Join(joined, fmt.Errorf("close server %s: %w", server.Addr, err))
 		}
 	}
-	if drained {
+	closeServer(a.mainServer)
+	for _, server := range a.bindServers {
+		closeServer(server)
+	}
+	slog.Info("network connections interrupted")
+
+	stopGroup.Wait()
+	joined = errors.Join(joined, stopErr)
+	if stopErr == nil {
 		joined = errors.Join(joined, closeStores(a.stores))
 		joined = errors.Join(joined, a.backendLock.Close())
 		if joined == nil {
-			a.closed.Store(true)
+			a.closed = true
 		}
 	}
 	return joined
@@ -398,7 +433,9 @@ func waitForGroup(ctx context.Context, group *sync.WaitGroup) error {
 func closeStores(stores map[string]*blobfs.Store) error {
 	var joined error
 	for name, store := range stores {
-		joined = errors.Join(joined, store.Close())
+		if err := store.Close(); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("close store %s: %w", name, err))
+		}
 		delete(stores, name)
 	}
 	return joined
@@ -450,7 +487,7 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 		entry.Cancel = entryCancel
 		if err := entry.Runtime.Start(entryCtx); err != nil {
 			entryCancel()
-			a.stopHandlers()
+			a.stopPreparedHandlers()
 			return fmt.Errorf("instance %s: %w", entry.Name, err)
 		}
 		a.handlers = append(a.handlers, entry.Runtime)
@@ -474,7 +511,7 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 	return nil
 }
 
-func (a *App) stopHandlers() {
+func (a *App) stopPreparedHandlers() {
 	for _, entry := range a.entries {
 		if entry.Cancel != nil {
 			entry.Cancel()

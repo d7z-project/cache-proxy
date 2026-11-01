@@ -17,6 +17,9 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if !plan.Enabled() {
 		return nil
 	}
+	if !plan.CacheEnabled() {
+		return transport.BindForward(plan, config.ModeDEB)
+	}
 	client, err := transport.NewPlanClient(plan, config.ModeDEB)
 	if err != nil {
 		return err

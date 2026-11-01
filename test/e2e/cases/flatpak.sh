@@ -21,6 +21,10 @@ e2e_flatpak_install() {
 e2e_run_flatpak() {
   printf '\n[flatpak] remote/install, generation update, warm objects and offline cache persistence\n'
   e2e_reset_fixture
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_native flatpak /flatpak/repo/objects/ "$E2E_PROXY_URL/flatpak/summary.idx" e2e_flatpak_install cache-proxy-e2e-initial cache-proxy-e2e-updated
+    return
+  fi
   e2e_set_fixture_cache_age /flatpak/repo/summary.idx 1
   e2e_assert_transparent_paths flatpak /flatpak /flatpak/repo bypass
   local unrelated_summary upstream_unrelated proxy_unrelated

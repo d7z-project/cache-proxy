@@ -1,4 +1,6 @@
 {
+  "cache_enabled": "キャッシュ有効",
+  "cache_disabled": "キャッシュなし転送",
   "validation": "検証条件",
   "cache_age": "キャッシュ経過時間",
   "freshness_lifetime": "有効期間",

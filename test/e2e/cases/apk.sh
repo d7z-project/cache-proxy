@@ -14,6 +14,10 @@ e2e_run_apk() {
     apk add --no-cache --allow-untrusted --repositories-file /tmp/repositories e2e-apk >/dev/null
     grep -qx "$2" /usr/share/e2e-apk/payload.txt
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install apk "$E2E_ALPINE_IMAGE" "$script" /apk/v3.20/main/x86_64/e2e-apk-1.0.0-r0.apk cache-proxy-e2e-initial cache-proxy-e2e-updated
+    return
+  fi
   e2e_client apk cold "$E2E_ALPINE_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/apk/v3.20/main/x86_64/APKINDEX.tar.gz"
   e2e_assert_generation_poll_interval apk /apk/v3.20/main/x86_64/APKINDEX.tar.gz

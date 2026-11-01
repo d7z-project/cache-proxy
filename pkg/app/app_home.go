@@ -14,6 +14,7 @@ import (
 )
 
 type homeInstance struct {
+	CacheLabel  string
 	Name        string
 	Mode        string
 	URL         string
@@ -131,6 +132,10 @@ func buildHomeInstance(
 		URL:  instanceURL,
 	}
 	instanceView.SetupNote, instanceView.SetupCmd = setupCommand(entry.Mode, instanceURL)
+	instanceView.CacheLabel = i18nStr(i18n, "cache_enabled")
+	if !entry.CacheEnabled {
+		instanceView.CacheLabel = i18nStr(i18n, "cache_disabled")
+	}
 	if instanceView.SetupNote != "" {
 		instanceView.SetupCopy = instanceView.SetupNote + "\n" + instanceView.SetupCmd
 	} else {
@@ -139,7 +144,7 @@ func buildHomeInstance(
 	instanceView.Requests = formatCompact(stats.Requests)
 	instanceView.HitRate = formatHitRate(stats.Cache)
 	instanceView.DiskUsage = formatBytes(diskBytes)
-	if statusSource, ok := entry.Runtime.(proxyruntime.StatusSource); ok {
+	if statusSource, ok := entry.Runtime.(proxyruntime.StatusSource); ok && entry.CacheEnabled {
 		instanceView.StatusColor, instanceView.StatusLabel, instanceView.StatusExtra = statusSource.DashboardStatus()
 	} else {
 		if stats.UpstreamRequests == 0 {

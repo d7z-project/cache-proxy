@@ -363,6 +363,37 @@ func TestOCIBearerTokenSingleflight(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&tokenRequests))
 }
 
+func TestOCIUncachedAuthenticationIsRequestLocal(t *testing.T) {
+	var tokens, manifests atomic.Int32
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/token" {
+			tokens.Add(1)
+			_, _ = io.WriteString(w, `{"token":"registry-token","expires_in":3600}`)
+			return
+		}
+		if req.Header.Get("Authorization") != "Bearer registry-token" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="`+upstream.URL+`/token",service="registry.test",scope="repository:example:pull"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		manifests.Add(1)
+		_, _ = io.WriteString(w, `{"schemaVersion":2}`)
+	}))
+	defer upstream.Close()
+	handler := newHandler("oci", Block{Upstream: upstream.URL}, config.DefaultRetention, nil, metrics.NewStats(prometheus.NewRegistry()), nil)
+	handler.uncached = true
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+	for range 2 {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v2/example/manifests/latest", nil))
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, "BYPASS", w.Header().Get("X-Cache"))
+	}
+	require.EqualValues(t, 2, tokens.Load())
+	require.EqualValues(t, 2, manifests.Load())
+}
+
 func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testing.T) {
 	const browserUserAgent = "Mozilla/5.0 Firefox/127.0"
 	tokenUserAgent := make(chan string, 1)
@@ -642,8 +673,194 @@ func TestOCIBlobFetchClearsBusyStateOnUpstreamError(t *testing.T) {
 	require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
 
 	objectPath := handler.blobPath(blobDigest)
-	_, busy := handler.downloads.Load(objectPath)
-	require.False(t, busy)
+	require.False(t, handler.blobFlights.Active(objectPath))
+}
+
+func TestOCIBlobFlightCoalescesSuccessAndFallsBackAfterFailure(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		firstBody     string
+		followerCache string
+		requests      int32
+	}{
+		{name: "success", firstBody: "expected", followerCache: "COALESCED", requests: 1},
+		{name: "failed fill", firstBody: "corrupt", followerCache: "BYPASS", requests: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			digest := sha256Digest("expected")
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+			var requests atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requestNumber := requests.Add(1)
+				body := "expected"
+				if requestNumber == 1 {
+					close(started)
+					<-release
+					body = test.firstBody
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			t.Cleanup(upstream.Close)
+			store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			handler := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+			t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+			requestPath := "/v2/library/alpine/blobs/" + digest
+			leaderDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestPath, nil))
+				leaderDone <- recorder
+			}()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("leader did not reach upstream")
+			}
+			objectPath := handler.blobPath(digest)
+			require.True(t, handler.blobFlights.Active(objectPath))
+
+			followerDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestPath, nil))
+				followerDone <- recorder
+			}()
+			select {
+			case <-followerDone:
+				t.Fatal("follower completed before leader flight")
+			case <-time.After(20 * time.Millisecond):
+			}
+			require.EqualValues(t, 1, requests.Load())
+			releaseOnce.Do(func() { close(release) })
+
+			var leader, follower *httptest.ResponseRecorder
+			select {
+			case leader = <-leaderDone:
+			case <-time.After(time.Second):
+				t.Fatal("leader did not finish")
+			}
+			select {
+			case follower = <-followerDone:
+			case <-time.After(time.Second):
+				t.Fatal("follower did not finish")
+			}
+			require.Equal(t, http.StatusOK, leader.Code)
+			require.Equal(t, test.firstBody, leader.Body.String())
+			require.Equal(t, http.StatusOK, follower.Code)
+			require.Equal(t, "expected", follower.Body.String())
+			require.Equal(t, test.followerCache, follower.Header().Get("X-Cache"))
+			require.Equal(t, test.requests, requests.Load())
+			require.False(t, handler.blobFlights.Active(objectPath))
+		})
+	}
+}
+
+func TestOCIBlobFlightFollowerCancellationKeepsLeader(t *testing.T) {
+	body := "expected"
+	digest := sha256Digest(body)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		close(started)
+		<-release
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(upstream.Close)
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+	requestPath := "/v2/library/alpine/blobs/" + digest
+	leaderDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestPath, nil))
+		leaderDone <- recorder
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("leader did not reach upstream")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	follower := httptest.NewRecorder()
+	handler.ServeHTTP(follower, httptest.NewRequest(http.MethodGet, requestPath, nil).WithContext(ctx))
+	require.Equal(t, http.StatusBadGateway, follower.Code)
+	objectPath := handler.blobPath(digest)
+	require.True(t, handler.blobFlights.Active(objectPath))
+	require.EqualValues(t, 1, requests.Load())
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case leader := <-leaderDone:
+		require.Equal(t, http.StatusOK, leader.Code)
+		require.Equal(t, body, leader.Body.String())
+	case <-time.After(time.Second):
+		t.Fatal("leader did not finish")
+	}
+	require.Eventually(t, func() bool { return !handler.blobFlights.Active(objectPath) }, time.Second, time.Millisecond)
+}
+
+func TestOCIBlobFlightOutlivesClientWriteFailure(t *testing.T) {
+	body := "complete blob"
+	digest := sha256Digest(body)
+	upstreamStarted := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseUpstream) }) })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = io.WriteString(w, body[:4])
+		w.(http.Flusher).Flush()
+		close(upstreamStarted)
+		<-releaseUpstream
+		_, _ = io.WriteString(w, body[4:])
+	}))
+	defer upstream.Close()
+
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: upstream.URL}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+	t.Cleanup(func() { require.NoError(t, handler.Stop(context.Background())) })
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		handler.ServeHTTP(&failingOCIResponseWriter{header: make(http.Header)}, httptest.NewRequest(http.MethodGet, "/v2/library/alpine/blobs/"+digest, nil))
+	}()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blob request did not reach upstream")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("client write failure did not end request")
+	}
+	objectPath := handler.blobPath(digest)
+	require.True(t, handler.blobFlights.Active(objectPath))
+
+	releaseOnce.Do(func() { close(releaseUpstream) })
+	require.Eventually(t, func() bool { return !handler.blobFlights.Active(objectPath) }, time.Second, time.Millisecond)
+	reader, err := store.OpenObject(context.Background(), handler.name, objectPath)
+	require.NoError(t, err)
+	cached, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	require.Equal(t, body, string(cached))
 }
 
 func TestOCIManifestDigestMismatchFails(t *testing.T) {
@@ -1031,6 +1248,34 @@ func TestOCICleanupBlobsWithoutRefDirectory(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestOCICleanupSkipsActiveBlobFlight(t *testing.T) {
+	ctx := context.Background()
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	handler := newHandler("oci", Block{Upstream: "https://registry.example"}, config.Expiration(time.Hour), store, metrics.NewStats(prometheus.NewRegistry()), nil)
+	body := "blob"
+	objectPath := handler.blobPath(sha256Digest(body))
+	require.NoError(t, handler.storeObject(ctx, objectPath, strings.NewReader(body), map[string]string{
+		"fetched-at": time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano),
+	}))
+	flight, leader := handler.blobFlights.Begin(objectPath)
+	require.True(t, leader)
+
+	more, err := handler.Cleanup(ctx, config.DefaultCleanupConfig())
+	require.NoError(t, err)
+	require.True(t, more)
+	_, err = store.StatObject(ctx, handler.name, objectPath)
+	require.NoError(t, err)
+
+	handler.blobFlights.Finish(objectPath, flight, nil)
+	more, err = handler.Cleanup(ctx, config.DefaultCleanupConfig())
+	require.NoError(t, err)
+	require.False(t, more)
+	_, err = store.StatObject(ctx, handler.name, objectPath)
+	require.Error(t, err)
+}
+
 func TestOCICleanupRemovesAbandonedStateStagingObject(t *testing.T) {
 	ctx := context.Background()
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
@@ -1142,6 +1387,14 @@ func TestOCITokenCacheIsBounded(t *testing.T) {
 	latestKey := "scope-" + strconv.Itoa(maxTokenCacheEntries+99)
 	require.Equal(t, "tok-"+strconv.Itoa(maxTokenCacheEntries+99), handler.auth.tokens[latestKey].value)
 }
+
+type failingOCIResponseWriter struct {
+	header http.Header
+}
+
+func (w *failingOCIResponseWriter) Header() http.Header     { return w.header }
+func (*failingOCIResponseWriter) WriteHeader(int)           {}
+func (*failingOCIResponseWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func sha256Digest(value string) string {
 	sum := sha256.Sum256([]byte(value))

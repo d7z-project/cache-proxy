@@ -46,7 +46,9 @@ storage:
     max_active: 64 # Process-wide active upstream request limit. Default: 256.
     max_active_per_host: 4 # Per-host concurrency across instances. Default: 16.
     min_interval: 200ms # Minimum time between request starts per host. Default: 5ms.
-    max_cache_object_size: 2GiB # Maximum cached object size. Default: 2GiB.
+    # Maximum cached object or request-local verification spool size. Default: 2GiB.
+    # Direct streaming responses do not use this limit.
+    max_cache_object_size: 2GiB
     # Process-wide temporary download budget, not a total backend quota. Default: 8GiB.
     max_active_spool_size: 8GiB
     # Per-host overrides. Default: empty; hosts use the shared settings above.
@@ -69,6 +71,9 @@ storage:
 # Shared instance fields:
 #   name: required unique identifier using letters, digits, underscores or hyphens.
 #   enabled: starts the instance when true; default: false.
+#   cache: enables local content caching; default: true. Set false for forwarding
+#     through the same transport/proxy without cache reads, writes or refresh jobs.
+#     Request-local verification buffers and signing secrets are still used.
 #   mode: required protocol implementation; no default.
 #   upstream: required single HTTP(S) upstream base URL; no default.
 #   path: mount on server.bind; no default. Specify exactly one of path or bind.
@@ -92,13 +97,15 @@ instances:
   # No architecture or repository-layout setting is needed.
   - name: debian
     enabled: true
+    cache: true # Local content caching. Default: true; false forwards every request.
     mode: deb
     path: /debian
     upstream: https://deb.debian.org/debian
     refresh:
       interval: 30m # Repository metadata polling. Default: 15m.
     # Shared HTTP transport settings. Omit this block to use the defaults below.
-    # Git uses transport.proxy and options.operation_timeout for its own transport.
+    # Git mirror synchronization uses transport.proxy and options.operation_timeout.
+    # Git HTTP forwarding applies the shared HTTP settings below.
     transport:
       # Outbound proxy. Default: HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment behavior.
       # Supported schemes: http, https, socks5, socks5h.

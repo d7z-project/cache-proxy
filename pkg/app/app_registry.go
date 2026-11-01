@@ -23,6 +23,9 @@ func (a *App) checkOrphans(ctx context.Context) {
 		name := entry.Name()
 		configuredMode := ""
 		if configured, ok := a.entries[name]; ok && configured.Enabled {
+			if !configured.CacheEnabled {
+				continue
+			}
 			configuredMode = configured.Mode
 		}
 		if configuredMode != "" {

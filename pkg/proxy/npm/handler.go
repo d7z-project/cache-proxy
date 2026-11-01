@@ -36,6 +36,7 @@ const tarballAuthorizationTTL = 24 * time.Hour
 const packumentFreshness = time.Minute
 
 type handler struct {
+	uncached  bool
 	name      string
 	origin    *url.URL
 	workDir   string
@@ -112,6 +113,16 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		return status, "BYPASS"
 	}
 	variant := "full"
+	if h.uncached {
+		status, err := transport.ForwardTransformed(request.Context(), h.client, h.origin, w, request, cleaned, h.spooler, maxPackumentSize, func(source io.Reader, output io.Writer, _ http.Header) error {
+			return h.rewritePackument(source, output, packageName, proxyruntime.ExternalBaseURL(request), credentialScope(request))
+		})
+		if err != nil && status == 0 {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
+		return status, "BYPASS"
+	}
 	if strings.Contains(request.Header.Get("Accept"), "application/vnd.npm.install-v1+json") {
 		variant = "abbreviated"
 	}
@@ -119,7 +130,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	key := "packuments/" + variant + "/" + hashKey(h.origin.String()+"\x00"+packageName+"\x00"+request.Header.Get("Accept")+"\x00"+credentialScope(request)+"\x00"+externalBase)
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); err == nil {
 		if time.Since(cached.CreatedAt) < tarballAuthorizationTTL/2 && proxyruntime.ResponseFresh(cached.Header, cached.ValidatedAt, min(h.client.RefreshInterval(packumentFreshness), tarballAuthorizationTTL/2)) && !proxyruntime.RequestForcesRevalidation(request) {
-			return serveCached(w, request, cached, "HIT"), "HIT"
+			return transport.ServeStoredResponse(w, request, cached, "", "HIT"), "HIT"
 		}
 		_ = cached.Reader.Close()
 		leader, revalidated := false, false
@@ -166,7 +177,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 				return http.StatusBadGateway, "ERROR"
 			}
 			if stale, openErr := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); openErr == nil {
-				return serveCached(w, request, stale, "STALE"), "STALE"
+				return transport.ServeStoredResponse(w, request, stale, "", "STALE"), "STALE"
 			}
 			transport.WriteError(w, http.StatusBadGateway)
 			return http.StatusBadGateway, "ERROR"
@@ -176,7 +187,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 			return transport.WriteResponse(w, request, direct, "BYPASS"), "BYPASS"
 		}
 		if leader && validated != nil {
-			return serveCached(w, request, validated, "REVALIDATED"), "REVALIDATED"
+			return transport.ServeStoredResponse(w, request, validated, "", "REVALIDATED"), "REVALIDATED"
 		}
 		if leader && fallback != nil {
 			defer fallback.close()
@@ -196,7 +207,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		} else if leader {
 			result = "REFRESH"
 		}
-		return serveCached(w, request, refreshed, result), result
+		return transport.ServeStoredResponse(w, request, refreshed, "", result), result
 	}
 
 	leader := false
@@ -239,7 +250,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	if err != nil {
 		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
-	return serveCached(w, request, cached, "MISS"), "MISS"
+	return transport.ServeStoredResponse(w, request, cached, "", "MISS"), "MISS"
 }
 
 func (h *handler) fetchPackument(request *http.Request, packageName string, cached *storeio.ResponseObject) (*http.Response, error) {
@@ -476,12 +487,31 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 		return http.StatusForbidden, "ERROR"
 	}
 	key := "tarballs/url/" + hashKey(authorization.URL+"\x00"+credentialScope(request))
+	if h.uncached {
+		target, _ := url.Parse(authorization.URL)
+		header := request.Header.Clone()
+		header.Del("Authorization")
+		header.Del("Cookie")
+		if target.Scheme == h.origin.Scheme && strings.EqualFold(target.Host, h.origin.Host) {
+			copyCredential(header, request.Header)
+		}
+		var verify func(io.ReadSeeker) error
+		if authorization.Integrity != "" || authorization.Shasum != "" {
+			verify = func(reader io.ReadSeeker) error { return verifyTarball(reader, authorization) }
+		}
+		status, err := transport.ForwardVerified(request.Context(), h.client, target, w, request, header, h.spooler, verify)
+		if err != nil && status == 0 {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
+		return status, "BYPASS"
+	}
 	if authorization.Integrity != "" {
 		key = "tarballs/integrity/" + hashKey(authorization.Integrity+"\x00"+credentialScope(request))
 	}
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); err == nil {
 		if authorization.Integrity != "" || authorization.Shasum != "" || time.Since(cached.ValidatedAt) < time.Hour {
-			return serveCached(w, request, cached, "HIT"), "HIT"
+			return transport.ServeStoredResponse(w, request, cached, "", "HIT"), "HIT"
 		}
 		_ = cached.Reader.Close()
 	}
@@ -511,7 +541,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 		if cached, err := storeio.OpenResponse(request.Context(), h.store, npmTenant, key); err == nil {
 			if authorization.Integrity != "" || authorization.Shasum != "" || time.Since(cached.ValidatedAt) < time.Hour {
 				h.flights.Finish(key, flight, nil)
-				return serveCached(w, request, cached, "HIT"), "HIT"
+				return transport.ServeStoredResponse(w, request, cached, "", "HIT"), "HIT"
 			}
 			_ = cached.Reader.Close()
 		}
@@ -568,7 +598,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway, "ERROR"
 	}
-	return serveCached(w, request, cached, "COALESCED"), "COALESCED"
+	return transport.ServeStoredResponse(w, request, cached, "", "COALESCED"), "COALESCED"
 }
 
 func verifyTarball(reader io.ReadSeeker, authorization tarballAuthorization) error {
@@ -601,23 +631,12 @@ func verifyTarball(reader io.ReadSeeker, authorization tarballAuthorization) err
 }
 
 func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
-	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), request.URL.RawQuery)
-	if err != nil {
+	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
+	if err != nil && status == 0 {
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway
 	}
-	upstreamRequest, err := http.NewRequestWithContext(request.Context(), request.Method, target.String(), nil)
-	if err != nil {
-		transport.WriteError(w, http.StatusBadGateway)
-		return http.StatusBadGateway
-	}
-	transport.CopyReadRequestHeaders(upstreamRequest.Header, request.Header)
-	response, err := h.client.DoRead(request.Context(), upstreamRequest, transport.AdmissionForeground)
-	if err != nil {
-		transport.WriteError(w, http.StatusBadGateway)
-		return http.StatusBadGateway
-	}
-	return transport.WriteResponse(w, request, response, "BYPASS")
+	return status
 }
 
 func (h *handler) proxyAudit(w http.ResponseWriter, request *http.Request, cleaned string) int {
@@ -750,14 +769,4 @@ func (p *transformedPackument) close() {
 func hashKey(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
-}
-
-func serveCached(w http.ResponseWriter, request *http.Request, cached *storeio.ResponseObject, result string) int {
-	defer func() { _ = cached.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), cached.ResponseHeader())
-	w.Header().Del("X-Source-ETag")
-	w.Header().Del("X-Source-Last-Modified")
-	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, "", cached.ValidatedAt, cached.Reader)
-	return http.StatusOK
 }

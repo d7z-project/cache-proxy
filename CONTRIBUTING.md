@@ -36,6 +36,9 @@ E2E_RUNTIME=podman E2E_SUITE=deb make test-e2e
 `E2E_SUITE` accepts a mode from the README's
 [supported modes](README.md#supported-modes); omitting it runs every mode.
 Each run cleans up its own labeled resources.
+Each selected mode runs with caching enabled and with `cache: false`. Cached
+cases cover cold and warm requests, upstream updates, and offline restarts;
+uncached cases verify forwarding and fresh upstream reads across restarts.
 
 Keep changes focused, include tests for affected behavior, and update user
 documentation when public behavior or configuration changes. Run the related

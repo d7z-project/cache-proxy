@@ -1,4 +1,6 @@
 {
+  "cache_enabled": "캐시 사용",
+  "cache_disabled": "캐시 없이 전달",
   "validation": "검증 조건",
   "cache_age": "캐시 경과 시간",
   "freshness_lifetime": "유효 기간",

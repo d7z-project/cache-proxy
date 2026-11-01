@@ -35,7 +35,10 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err != nil {
 		return fmt.Errorf("instance %s: %w", plan.Name(), err)
 	}
-	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), pypiTenant, plan.Store(), plan.CleanupConfig())
+	handler.uncached = !plan.CacheEnabled()
+	if plan.CacheEnabled() {
+		storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), pypiTenant, plan.Store(), plan.CleanupConfig())
+	}
 	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{Handler: handler, CloseContext: handler.CloseContext})
 }
 

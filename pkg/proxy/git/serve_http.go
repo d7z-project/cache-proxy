@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -56,8 +57,14 @@ func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Reques
 	if auth, ok := h.auth.(interface{ SetAuth(*http.Request) }); ok {
 		auth.SetAuth(proxyRequest)
 	}
-	proxyRequest = proxytransport.WithAdmission(request.Context(), proxyRequest, proxytransport.AdmissionForeground)
-	response, err := h.bootstrapClient.Do(proxyRequest)
+	ctx, cancel := context.WithTimeout(request.Context(), h.operationTimeout)
+	defer cancel()
+	var response *http.Response
+	if proxyRequest.Method == http.MethodPost {
+		response, err = h.client.DoReadOnlyPost(ctx, proxyRequest, proxytransport.AdmissionForeground)
+	} else {
+		response, err = h.client.DoRead(ctx, proxyRequest, proxytransport.AdmissionForeground)
+	}
 	if err != nil {
 		if seconds, ok := proxyruntime.AdmissionRetryAfterSeconds(err); ok {
 			status := http.StatusServiceUnavailable
@@ -70,13 +77,14 @@ func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Reques
 			return
 		}
 		if !errors.Is(err, request.Context().Err()) {
-			slog.Warn("git bootstrap proxy failed", "instance", h.name, "upstream", h.redactedUpstream(), "err", err)
+			slog.Warn("git upstream request failed", "instance", h.name, "upstream", h.redactedUpstream(), "err", err)
 		}
 		proxytransport.WriteError(w, http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
 	proxytransport.CopyEndToEndHeaders(w.Header(), response.Header)
+	w.Header().Set("X-Cache", "BYPASS")
 	w.WriteHeader(response.StatusCode)
 	if request.Method != http.MethodHead {
 		_, _ = io.Copy(w, response.Body)

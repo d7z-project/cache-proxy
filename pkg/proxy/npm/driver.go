@@ -29,6 +29,9 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if err != nil {
 		return err
 	}
-	storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), npmTenant, plan.Store(), plan.CleanupConfig())
+	handler.uncached = !plan.CacheEnabled()
+	if plan.CacheEnabled() {
+		storeio.RegisterResponseCleanup(plan.Scheduler(), plan.Name(), npmTenant, plan.Store(), plan.CleanupConfig())
+	}
 	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{Handler: handler, CloseContext: handler.CloseContext})
 }

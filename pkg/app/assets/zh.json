@@ -1,4 +1,6 @@
 {
+  "cache_enabled": "缓存启用",
+  "cache_disabled": "无缓存转发",
   "validation": "验证条件",
   "cache_age": "缓存年龄",
   "freshness_lifetime": "新鲜有效期",

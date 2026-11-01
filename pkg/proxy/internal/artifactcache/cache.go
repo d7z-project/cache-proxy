@@ -47,7 +47,7 @@ func (c *Cache) Serve(w http.ResponseWriter, request *http.Request, requestPath 
 			freshness = c.FreshnessForPath(requestPath)
 		}
 		if proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, freshness) && !proxyruntime.RequestForcesRevalidation(request) {
-			return serveCached(w, request, object, "HIT"), "HIT"
+			return transport.ServeStoredResponse(w, request, object, path.Base(request.URL.Path), "HIT"), "HIT"
 		}
 		if request.Method == http.MethodHead || request.Header.Get("Range") != "" {
 			_ = object.Reader.Close()
@@ -66,13 +66,13 @@ func (c *Cache) Serve(w http.ResponseWriter, request *http.Request, requestPath 
 			return http.StatusBadGateway, "ERROR"
 		}
 		if cached, err := storeio.OpenResponse(request.Context(), c.Store, c.Tenant, key); err == nil {
-			return serveCached(w, request, cached, "COALESCED"), "COALESCED"
+			return transport.ServeStoredResponse(w, request, cached, path.Base(request.URL.Path), "COALESCED"), "COALESCED"
 		}
 		return c.forwardUpstream(w, request, requestPath)
 	}
 	if cached, err := storeio.OpenResponse(request.Context(), c.Store, c.Tenant, key); err == nil {
 		c.Flights.Finish(key, flight, nil)
-		return serveCached(w, request, cached, "HIT"), "HIT"
+		return transport.ServeStoredResponse(w, request, cached, path.Base(request.URL.Path), "HIT"), "HIT"
 	}
 
 	response, err := c.FetchUpstream(c.Lifecycle.Context(), http.MethodGet, requestPath, request.URL.RawQuery, request.Header)
@@ -96,12 +96,12 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 		if updated, err := storeio.OpenResponse(request.Context(), c.Store, c.Tenant, key); err == nil {
 			if updated.ValidatedAt.After(object.ValidatedAt) {
 				_ = object.Reader.Close()
-				return serveCached(w, request, updated, "COALESCED"), "COALESCED"
+				return transport.ServeStoredResponse(w, request, updated, path.Base(request.URL.Path), "COALESCED"), "COALESCED"
 			}
 			_ = updated.Reader.Close()
 		}
 		if proxyruntime.StaleAllowed(request, object.Header) {
-			return serveCached(w, request, object, "STALE"), "STALE"
+			return transport.ServeStoredResponse(w, request, object, path.Base(request.URL.Path), "STALE"), "STALE"
 		}
 		_ = object.Reader.Close()
 		transport.WriteError(w, http.StatusBadGateway)
@@ -130,7 +130,7 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 			_ = response.Body.Close()
 		}
 		c.Flights.Finish(flightKey, flight, err)
-		return serveCached(w, request, object, "STALE"), "STALE"
+		return transport.ServeStoredResponse(w, request, object, path.Base(request.URL.Path), "STALE"), "STALE"
 	}
 	if response.StatusCode == http.StatusNotModified {
 		_ = response.Body.Close()
@@ -143,7 +143,7 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 		if err != nil {
 			result = "BYPASS"
 		}
-		return serveCached(w, request, object, result), result
+		return transport.ServeStoredResponse(w, request, object, path.Base(request.URL.Path), result), result
 	}
 
 	_ = object.Reader.Close()
@@ -184,12 +184,4 @@ func (c *Cache) forwardUpstream(w http.ResponseWriter, request *http.Request, re
 		return http.StatusBadGateway, "ERROR"
 	}
 	return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
-}
-
-func serveCached(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) int {
-	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
-	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, path.Base(request.URL.Path), object.ValidatedAt, object.Reader)
-	return http.StatusOK
 }

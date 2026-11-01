@@ -29,7 +29,7 @@ func TestCheckOrphansKeepsCurrentAndCleansOrphanedStorage(t *testing.T) {
 			Storage: config.StorageConfig{OrphanPolicy: "auto"},
 		},
 		entries: map[string]*proxyruntime.Entry{
-			"active":   {Name: "active", Mode: config.ModeNPM, Enabled: true},
+			"active":   {Name: "active", Mode: config.ModeNPM, Enabled: true, CacheEnabled: true},
 			"disabled": {Name: "disabled", Mode: config.ModeFile, Enabled: false},
 		},
 	}

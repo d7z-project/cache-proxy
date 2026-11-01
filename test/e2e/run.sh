@@ -7,6 +7,7 @@ source "$E2E_ROOT/test/e2e/lib/runtime.sh"
 source "$E2E_ROOT/test/e2e/lib/assert.sh"
 source "$E2E_ROOT/test/e2e/lib/client.sh"
 source "$E2E_ROOT/test/e2e/lib/lifecycle.sh"
+source "$E2E_ROOT/test/e2e/lib/uncached.sh"
 
 suite=${E2E_SUITE:-all}
 all_modes=(file npm go maven cargo pypi deb apk rpm pacman git oci flatpak)
@@ -57,10 +58,19 @@ for mode in "${selected_modes[@]}"; do
   "e2e_prepare_$mode"
 done
 
+E2E_CACHE=true
 e2e_init_lifecycle
 e2e_start_fixture
 e2e_start_proxy
 
+for mode in "${selected_modes[@]}"; do
+  "e2e_run_$mode"
+done
+
+e2e_stop_proxy
+E2E_CACHE=false
+e2e_write_config
+e2e_start_proxy
 for mode in "${selected_modes[@]}"; do
   "e2e_run_$mode"
 done

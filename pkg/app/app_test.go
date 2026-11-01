@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/file"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/scheduler"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 func TestValidateRejectsConflictingPaths(t *testing.T) {
@@ -369,9 +371,13 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	app := &App{
 		stopRuntime: func() {},
 		stores:      map[string]*blobfs.Store{"test": store},
-		handlers: []proxyruntime.Instance{
-			blockingInstance{},
-		},
+		handlers: []proxyruntime.Instance{proxyruntime.HandlerInstance{
+			Handler: http.NotFoundHandler(),
+			CloseContext: func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -382,6 +388,124 @@ func TestAppCloseRespectsContextWhenHandlerStopBlocks(t *testing.T) {
 	_, err = store.Stats(context.Background())
 	require.NoError(t, err, "store must remain open while a handler has not drained")
 	require.NoError(t, store.Close())
+}
+
+func TestAppCloseInterruptsConnectionBeforeClosingStore(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	requests := storeio.NewLifecycle()
+	release := make(chan struct{})
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	instance := proxyruntime.HandlerInstance{Handler: http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+		close(canceled)
+		<-release
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := newHTTPServer(listener.Addr().String(), requests, instance)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		_ = server.Close()
+		_ = store.Close()
+	})
+
+	app := &App{
+		requests:    requests,
+		mainServer:  server,
+		bindServers: map[string]*http.Server{},
+		stopRuntime: func() {},
+		stores:      map[string]*blobfs.Store{"test": store},
+		handlers:    []proxyruntime.Instance{instance},
+	}
+	client := &http.Client{}
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		response, err := client.Get("http://" + listener.Addr().String())
+		if err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach handler")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- app.Close(closeCtx) }()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("active request was not canceled promptly")
+	}
+	_, err = store.Stats(context.Background())
+	require.NoError(t, err, "store closed before the interrupted handler returned")
+	select {
+	case err := <-closeDone:
+		t.Fatalf("shutdown completed before the interrupted handler returned: %v", err)
+	default:
+	}
+
+	close(release)
+	require.NoError(t, <-closeDone)
+	_, err = store.Stats(context.Background())
+	require.Error(t, err, "store remained open after every handler returned")
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("client request did not end after connection interruption")
+	}
+}
+
+func TestAppCloseStopsHandlersConcurrently(t *testing.T) {
+	started := make(chan int, 2)
+	release := make(chan struct{})
+	app := &App{
+		requests:    storeio.NewLifecycle(),
+		bindServers: map[string]*http.Server{},
+		stopRuntime: func() {},
+		stores:      map[string]*blobfs.Store{},
+	}
+	for id := 1; id <= 2; id++ {
+		app.handlers = append(app.handlers, proxyruntime.HandlerInstance{
+			Handler: http.NotFoundHandler(),
+			CloseContext: func(ctx context.Context) error {
+				started <- id
+				select {
+				case <-release:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		})
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- app.Close(context.Background()) }()
+	seen := map[int]bool{}
+	for range 2 {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-time.After(time.Second):
+			t.Fatal("handler stops were serialized")
+		}
+	}
+	require.Equal(t, map[int]bool{1: true, 2: true}, seen)
+	close(release)
+	require.NoError(t, <-closeDone)
 }
 
 func TestPrepareHandlersUsesPerInstanceContext(t *testing.T) {
@@ -980,15 +1104,6 @@ func closeApp(t *testing.T, app *App) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, app.Close(ctx))
-}
-
-type blockingInstance struct{}
-
-func (blockingInstance) ServeHTTP(http.ResponseWriter, *http.Request) {}
-func (blockingInstance) Start(context.Context) error                  { return nil }
-func (blockingInstance) Stop(ctx context.Context) error {
-	<-ctx.Done()
-	return ctx.Err()
 }
 
 type startContextInstance struct {

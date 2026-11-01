@@ -29,6 +29,13 @@ func (g *FlightGroup) Begin(key string) (*Flight, bool) {
 	return current, true
 }
 
+func (g *FlightGroup) Active(key string) bool {
+	g.mu.Lock()
+	active := g.flights[key] != nil
+	g.mu.Unlock()
+	return active
+}
+
 func (g *FlightGroup) Wait(ctx context.Context, current *Flight) error {
 	if current == nil {
 		return nil

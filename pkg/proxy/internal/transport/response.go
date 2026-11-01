@@ -8,6 +8,7 @@ import (
 	"time"
 
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
 // EscapePathSegments preserves path separators while escaping each protocol
@@ -58,3 +59,29 @@ func WriteResponse(w http.ResponseWriter, request *http.Request, response *http.
 	}
 	return response.StatusCode
 }
+
+// ServeStoredResponse serves a validated cached representation and releases its
+// reader lease. The filename controls MIME inference when Content-Type is absent.
+func ServeStoredResponse(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, filename, cacheResult string) int {
+	defer object.Reader.Close()
+	CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
+	w.Header().Del("X-Source-ETag")
+	w.Header().Del("X-Source-Last-Modified")
+	w.Header().Set("X-Cache", cacheResult)
+	recorder := &contentStatusWriter{ResponseWriter: w, status: http.StatusOK}
+	http.ServeContent(recorder, request, filename, object.ValidatedAt, object.Reader)
+	return recorder.status
+}
+
+// contentStatusWriter records ServeContent's conditional and range statuses.
+type contentStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *contentStatusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *contentStatusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

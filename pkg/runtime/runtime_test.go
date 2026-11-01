@@ -42,3 +42,17 @@ func TestBindPathRegistersRuntime(t *testing.T) {
 	require.Equal(t, "/cache", result.Entries[0].Path)
 	require.NotNil(t, result.Entries[0].Runtime)
 }
+
+func TestUncachedInstanceUsesIsolatedForwardRoot(t *testing.T) {
+	backend := t.TempDir()
+	plan := NewPlanContext(backend, metrics.NewStats(prometheus.NewRegistry()), nil, NewSpoolBudget(8<<30), 2<<30, config.DefaultCleanupConfig(), "127.0.0.1:8080", "/metrics", nil)
+	cache := false
+	instance, err := plan.Instance(
+		config.Instance{Name: "forward", Enabled: true, Cache: &cache},
+		config.SelectedMode{Name: "forward", Mode: config.ModeFile, Enabled: true},
+	)
+	require.NoError(t, err)
+	require.False(t, instance.CacheEnabled())
+	require.Equal(t, filepath.Join(backend, "instances", "forward", "file", "forward"), instance.StoreRoot())
+	require.Nil(t, instance.Store())
+}

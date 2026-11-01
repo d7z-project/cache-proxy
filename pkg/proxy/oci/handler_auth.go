@@ -39,6 +39,10 @@ func (h *handler) basicAuthorization() string {
 }
 
 func (h *handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (string, error) {
+	if h.uncached {
+		token, _, err := h.fetchBearerToken(ctx, challenge, time.Now())
+		return token, err
+	}
 	key := challenge.realm + "\x00" + challenge.params["service"] + "\x00" + challenge.params["scope"]
 	now := time.Now()
 	h.auth.tokenMu.Lock()

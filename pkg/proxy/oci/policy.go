@@ -61,6 +61,10 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if plan.DisplayURL() != "" {
 		plan.SetHomeDisplayURL(plan.DisplayURL())
 	}
+	handler.uncached = !plan.CacheEnabled()
+	if handler.uncached {
+		return plan.BindAddr(plan.Bind(), handler)
+	}
 	plan.Scheduler().Register(scheduler.TaskDef{
 		Key:      scheduler.NewTaskKey(plan.Name(), scheduler.TypeExpireCleanup, ""),
 		Interval: 6 * time.Hour,

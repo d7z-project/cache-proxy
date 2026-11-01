@@ -36,6 +36,7 @@ type handlerConfig struct {
 }
 
 type handler struct {
+	uncached    bool
 	name        string
 	origin      *url.URL
 	passHeaders []string
@@ -81,7 +82,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		http.Error(w, "invalid file path", http.StatusBadRequest)
 		return http.StatusBadRequest, "ERROR"
 	}
-	if cleaned == "" || strings.HasSuffix(cleaned, "/") {
+	if h.uncached || cleaned == "" || strings.HasSuffix(cleaned, "/") {
 		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 	policy := h.policy(cleaned)

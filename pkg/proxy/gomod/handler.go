@@ -50,6 +50,7 @@ type moduleRequest struct {
 }
 
 type handler struct {
+	uncached  bool
 	name      string
 	options   *Config
 	origin    *url.URL
@@ -121,6 +122,18 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		return http.StatusNotFound, "BYPASS"
 	}
 	key := "objects/" + hashKey(h.origin.String()+"\x00"+parsed.cacheKey+"\x00"+goCredentialScope(request))
+	if h.uncached {
+		if request.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader {
+			http.NotFound(w, request)
+			return http.StatusNotFound, "BYPASS"
+		}
+		status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, parsed.cacheKey)
+		if err != nil && status == 0 {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
+		return status, "BYPASS"
+	}
 	var cached *storeio.ResponseObject
 	if object, err := storeio.OpenResponse(request.Context(), h.store, goTenant, key); err == nil {
 		cached = object
@@ -130,7 +143,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		}
 		fresh := proxyruntime.ResponseFresh(cached.Header, cached.ValidatedAt, freshness) && !proxyruntime.RequestForcesRevalidation(request)
 		if request.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader || fresh {
-			return serveStoredGoResponse(w, request, cached, "HIT"), "HIT"
+			return transport.ServeStoredResponse(w, request, cached, "", "HIT"), "HIT"
 		}
 		_ = cached.Reader.Close()
 	} else if request.Header.Get(disableModuleFetchHeader) != "" && h.options.DisableModuleFetchHeader {
@@ -154,7 +167,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		if current, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
 			if cached == nil || current.ValidatedAt.After(cached.ValidatedAt) {
 				h.flights.Finish(flightKey, flight, nil)
-				return serveStoredGoResponse(w, request, current, "HIT"), "HIT"
+				return transport.ServeStoredResponse(w, request, current, "", "HIT"), "HIT"
 			}
 			_ = current.Reader.Close()
 		}
@@ -166,7 +179,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 	}
 	if updated, openErr := storeio.OpenResponse(request.Context(), h.store, goTenant, key); openErr == nil {
 		if cached == nil || updated.ValidatedAt.After(cached.ValidatedAt) || proxyruntime.StaleAllowed(request, updated.Header) {
-			return serveStoredGoResponse(w, request, updated, "COALESCED"), "COALESCED"
+			return transport.ServeStoredResponse(w, request, updated, "", "COALESCED"), "COALESCED"
 		}
 		_ = updated.Reader.Close()
 	}
@@ -194,7 +207,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 					transport.WriteError(w, http.StatusBadGateway)
 					return http.StatusBadGateway, "ERROR"
 				}
-				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+				return transport.ServeStoredResponse(w, request, stale, "", "STALE"), "STALE"
 			}
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -205,7 +218,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 		refreshed, updateErr := storeio.RevalidateResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, goTenant, objectKey, response.Header)
 		h.flights.Finish(flightKey, flight, updateErr)
 		if refreshed != nil {
-			return serveStoredGoResponse(w, request, refreshed, "REVALIDATED"), "REVALIDATED"
+			return transport.ServeStoredResponse(w, request, refreshed, "", "REVALIDATED"), "REVALIDATED"
 		}
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway, "ERROR"
@@ -220,7 +233,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 					transport.WriteError(w, http.StatusBadGateway)
 					return http.StatusBadGateway, "ERROR"
 				}
-				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+				return transport.ServeStoredResponse(w, request, stale, "", "STALE"), "STALE"
 			}
 		}
 		h.flights.Finish(flightKey, flight, nil)
@@ -302,11 +315,19 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 		return http.StatusNotFound, "BYPASS"
 	}
 	stable := strings.HasPrefix(sumTarget, "lookup/") || strings.HasPrefix(sumTarget, "tile/")
+	if h.uncached {
+		status, err := transport.ForwardRead(request.Context(), h.client, h.sumDB, w, request, sumTarget)
+		if err != nil && status == 0 {
+			transport.WriteError(w, http.StatusBadGateway)
+			return http.StatusBadGateway, "ERROR"
+		}
+		return status, "BYPASS"
+	}
 	key := "sumdb/" + hashKey(h.sumDB.String()+"\x00"+sumTarget)
 	object, _ := storeio.OpenResponse(request.Context(), h.store, goTenant, key)
 	if object != nil {
 		if stable || proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, h.client.RefreshInterval(time.Minute)) && !proxyruntime.RequestForcesRevalidation(request) {
-			status := serveStoredGoResponse(w, request, object, "HIT")
+			status := transport.ServeStoredResponse(w, request, object, "", "HIT")
 			return status, "HIT"
 		}
 		_ = object.Reader.Close()
@@ -328,7 +349,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 				transport.WriteError(w, http.StatusBadGateway)
 				return http.StatusBadGateway, "ERROR"
 			}
-			return serveStoredGoResponse(w, request, joined, "COALESCED"), "COALESCED"
+			return transport.ServeStoredResponse(w, request, joined, "", "COALESCED"), "COALESCED"
 		}
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway, "ERROR"
@@ -336,7 +357,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 	defer h.flights.Finish(key, flight, nil)
 	if current, err := storeio.OpenResponse(request.Context(), h.store, goTenant, key); err == nil {
 		if object == nil || current.ValidatedAt.After(object.ValidatedAt) {
-			return serveStoredGoResponse(w, request, current, "HIT"), "HIT"
+			return transport.ServeStoredResponse(w, request, current, "", "HIT"), "HIT"
 		}
 		_ = current.Reader.Close()
 	}
@@ -358,7 +379,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 					transport.WriteError(w, http.StatusBadGateway)
 					return http.StatusBadGateway, "ERROR"
 				}
-				return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+				return transport.ServeStoredResponse(w, request, stale, "", "STALE"), "STALE"
 			}
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -367,7 +388,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 	if response.StatusCode == http.StatusNotModified && object != nil {
 		_ = response.Body.Close()
 		if refreshed, _ := storeio.RevalidateResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, goTenant, key, response.Header); refreshed != nil {
-			return serveStoredGoResponse(w, request, refreshed, "REVALIDATED"), "REVALIDATED"
+			return transport.ServeStoredResponse(w, request, refreshed, "", "REVALIDATED"), "REVALIDATED"
 		}
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway, "ERROR"
@@ -380,7 +401,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 				transport.WriteError(w, http.StatusBadGateway)
 				return http.StatusBadGateway, "ERROR"
 			}
-			return serveStoredGoResponse(w, request, stale, "STALE"), "STALE"
+			return transport.ServeStoredResponse(w, request, stale, "", "STALE"), "STALE"
 		}
 	}
 	if response.StatusCode != http.StatusOK {
@@ -436,14 +457,6 @@ func (h *handler) fetchUpstream(ctx context.Context, origin *url.URL, method, re
 func (h *handler) CloseContext(ctx context.Context) error {
 	h.client.CloseIdleConnections()
 	return h.lifecycle.Close(ctx)
-}
-
-func serveStoredGoResponse(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) int {
-	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
-	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, "", object.ValidatedAt, object.Reader)
-	return http.StatusOK
 }
 
 func parseModuleRequest(target string) (moduleRequest, error) {

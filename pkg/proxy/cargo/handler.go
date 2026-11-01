@@ -33,6 +33,7 @@ const (
 )
 
 type handler struct {
+	uncached  bool
 	origin    *url.URL
 	stateDir  string
 	spooler   *storeio.Spooler
@@ -49,8 +50,10 @@ type sparseRecord struct {
 }
 
 func newHandler(origin *url.URL, stateDir, workDir string, store *blobfs.Store, client *transport.Client) (*handler, error) {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return nil, err
+	if store != nil {
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return nil, err
+		}
 	}
 	return &handler{
 		origin:    origin,
@@ -97,13 +100,35 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
+	if h.uncached {
+		status, err := transport.ForwardTransformed(request.Context(), h.client, h.origin, w, request, "config.json", h.spooler, maxCargoConfigSize, func(source io.Reader, output io.Writer, _ http.Header) error {
+			body, err := io.ReadAll(source)
+			if err != nil {
+				return err
+			}
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(body, &document); err != nil {
+				return err
+			}
+			var download string
+			if err := json.Unmarshal(document["dl"], &download); err != nil || download == "" {
+				return errors.New("invalid cargo download configuration")
+			}
+			document["dl"], _ = json.Marshal(strings.TrimRight(proxyruntime.ExternalBaseURL(request), "/") + "/-/crate/{crate}/{version}/download")
+			return json.NewEncoder(output).Encode(document)
+		})
+		if err != nil && status == 0 {
+			transport.WriteError(w, http.StatusBadGateway)
+		}
+		return
+	}
 	scope := cargoCredentialScope(request)
 	externalBase := proxyruntime.ExternalBaseURL(request)
 	key := cargoRefKey("config", h.origin.String(), scope, request.Header.Get("Accept"), externalBase)
 	object, _ := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key)
 	if object != nil {
 		if proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, h.client.RefreshInterval(cargoRefFreshness)) && !proxyruntime.RequestForcesRevalidation(request) {
-			serveCargoObject(w, request, object, "HIT")
+			transport.ServeStoredResponse(w, request, object, "", "HIT")
 			return
 		}
 		_ = object.Reader.Close()
@@ -121,7 +146,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 				h.forwardUpstream(w, request, "config.json")
 				return
 			}
-			serveCargoObject(w, request, joined, "COALESCED")
+			transport.ServeStoredResponse(w, request, joined, "", "COALESCED")
 			return
 		}
 		h.forwardUpstream(w, request, "config.json")
@@ -130,7 +155,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 	defer h.flights.Finish("ref:"+key, flight, nil)
 	if current, err := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); err == nil {
 		if object == nil || current.ValidatedAt.After(object.ValidatedAt) {
-			serveCargoObject(w, request, current, "HIT")
+			transport.ServeStoredResponse(w, request, current, "", "HIT")
 			return
 		}
 		_ = current.Reader.Close()
@@ -152,7 +177,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 				transport.WriteError(w, http.StatusBadGateway)
 				return
 			}
-			serveCargoObject(w, request, stale, "STALE")
+			transport.ServeStoredResponse(w, request, stale, "", "STALE")
 			return
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -161,7 +186,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotModified && object != nil {
 		if refreshed, _ := storeio.RevalidateResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, cargoTenant, key, transport.SourceRevalidationHeader(response.Header)); refreshed != nil {
-			serveCargoObject(w, request, refreshed, "REVALIDATED")
+			transport.ServeStoredResponse(w, request, refreshed, "", "REVALIDATED")
 			return
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -174,7 +199,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 				transport.WriteError(w, http.StatusBadGateway)
 				return
 			}
-			serveCargoObject(w, request, stale, "STALE")
+			transport.ServeStoredResponse(w, request, stale, "", "STALE")
 			return
 		}
 	}
@@ -246,12 +271,16 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 }
 
 func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request, cleaned string) {
+	if h.uncached {
+		h.forwardUpstream(w, request, cleaned)
+		return
+	}
 	scope := cargoCredentialScope(request)
 	key := cargoRefKey("index", h.origin.String(), scope, cleaned)
 	object, _ := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key)
 	if object != nil {
 		if proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, h.client.RefreshInterval(cargoRefFreshness)) && !proxyruntime.RequestForcesRevalidation(request) {
-			serveCargoObject(w, request, object, "HIT")
+			transport.ServeStoredResponse(w, request, object, "", "HIT")
 			return
 		}
 		_ = object.Reader.Close()
@@ -269,7 +298,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 				h.forwardUpstream(w, request, cleaned)
 				return
 			}
-			serveCargoObject(w, request, joined, "COALESCED")
+			transport.ServeStoredResponse(w, request, joined, "", "COALESCED")
 			return
 		}
 		h.forwardUpstream(w, request, cleaned)
@@ -278,7 +307,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 	defer h.flights.Finish("ref:"+key, flight, nil)
 	if current, err := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); err == nil {
 		if object == nil || current.ValidatedAt.After(object.ValidatedAt) {
-			serveCargoObject(w, request, current, "HIT")
+			transport.ServeStoredResponse(w, request, current, "", "HIT")
 			return
 		}
 		_ = current.Reader.Close()
@@ -300,7 +329,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 				transport.WriteError(w, http.StatusBadGateway)
 				return
 			}
-			serveCargoObject(w, request, stale, "STALE")
+			transport.ServeStoredResponse(w, request, stale, "", "STALE")
 			return
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -309,7 +338,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotModified && object != nil {
 		if refreshed, _ := storeio.RevalidateResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, cargoTenant, key, response.Header); refreshed != nil {
-			serveCargoObject(w, request, refreshed, "REVALIDATED")
+			transport.ServeStoredResponse(w, request, refreshed, "", "REVALIDATED")
 			return
 		}
 		transport.WriteError(w, http.StatusBadGateway)
@@ -322,7 +351,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 				transport.WriteError(w, http.StatusBadGateway)
 				return
 			}
-			serveCargoObject(w, request, stale, "STALE")
+			transport.ServeStoredResponse(w, request, stale, "", "STALE")
 			return
 		}
 	}
@@ -373,6 +402,10 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 		return
 	}
 	name, version := strings.ToLower(parts[0]), parts[1]
+	if h.uncached {
+		h.serveUncachedCrate(w, request, name, version)
+		return
+	}
 	scope := cargoCredentialScope(request)
 	registry, err := loadRegistryState(h.stateDir, scope)
 	if err != nil {
@@ -395,7 +428,7 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 	}
 	key := "crates/sha256/" + checksum
 	if object, err := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); err == nil {
-		serveCargoObject(w, request, object, "HIT")
+		transport.ServeStoredResponse(w, request, object, "", "HIT")
 		return
 	}
 	target, err := cargoDownloadURL(registry.Download, name, version, checksum)
@@ -423,7 +456,7 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 	if leader {
 		if object, err := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); err == nil {
 			h.flights.Finish(key, flight, nil)
-			serveCargoObject(w, request, object, "HIT")
+			transport.ServeStoredResponse(w, request, object, "", "HIT")
 			return
 		}
 		upstreamRequest, err := http.NewRequestWithContext(h.lifecycle.Context(), http.MethodGet, target.String(), nil)
@@ -487,7 +520,7 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 		return
 	}
 	if object, openErr := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); openErr == nil {
-		serveCargoObject(w, request, object, "COALESCED")
+		transport.ServeStoredResponse(w, request, object, "", "COALESCED")
 		return
 	}
 	transport.WriteError(w, http.StatusBadGateway)
@@ -640,15 +673,6 @@ func cargoRefKey(kind string, values ...string) string {
 
 func cargoCacheable(request *http.Request, response *http.Response) bool {
 	return transport.ResponseCacheable(response, cargoCredentialScope(request) != "anonymous")
-}
-
-func serveCargoObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) {
-	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
-	w.Header().Del("X-Source-ETag")
-	w.Header().Del("X-Source-Last-Modified")
-	w.Header().Set("X-Cache", result)
-	http.ServeContent(w, request, "", object.ValidatedAt, object.Reader)
 }
 
 func writeCargoBytes(w http.ResponseWriter, request *http.Request, header http.Header, body []byte, result string) {

@@ -40,6 +40,7 @@ e2e_init_lifecycle() {
 
 e2e_write_config() {
   sed \
+    -e "/^    enabled: true/a\\    cache: ${E2E_CACHE:-true}" \
     -e "s|@PROXY_PORT@|$E2E_PROXY_PORT|g" \
     -e "s|@PROXY_URL@|$E2E_PROXY_URL|g" \
     -e "s|@OCI_PORT@|$E2E_OCI_PORT|g" \

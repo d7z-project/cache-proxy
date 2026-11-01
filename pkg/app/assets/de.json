@@ -1,4 +1,6 @@
 {
+  "cache_enabled": "Cache aktiviert",
+  "cache_disabled": "Weiterleitung ohne Cache",
   "validation": "Validierung",
   "cache_age": "Cache-Alter",
   "freshness_lifetime": "Frischezeit",

@@ -23,6 +23,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 
+	"gopkg.d7z.net/cache-proxy/pkg/config"
+	"gopkg.d7z.net/cache-proxy/pkg/metrics"
 	proxytransport "gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
@@ -40,6 +42,9 @@ type gitConfig struct {
 	proxyURL         string
 	operationTimeout time.Duration
 	upstreamGate     *proxytransport.UpstreamGate
+	transportConfig  *config.TransportConfig
+	stats            *metrics.Stats
+	uncached         bool
 }
 
 type gitHandler struct {
@@ -49,8 +54,9 @@ type gitHandler struct {
 	proxyURL         string
 	operationTimeout time.Duration
 	repositoryFS     billy.Filesystem
-	bootstrapClient  *http.Client
+	client           *proxytransport.Client
 	upstreamGate     *proxytransport.UpstreamGate
+	uncached         bool
 
 	repositoryMu sync.RWMutex
 	repository   *gitlib.Repository
@@ -59,31 +65,25 @@ type gitHandler struct {
 	lifecycle    *storeio.Lifecycle
 }
 
-func newGitHandler(cfg gitConfig) *gitHandler {
+func newGitHandler(cfg gitConfig) (*gitHandler, error) {
 	if cfg.operationTimeout <= 0 {
 		cfg.operationTimeout = defaultOperationTimeout
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DisableCompression = true
-	transport.MaxResponseHeaderBytes = 1 << 20
-	if cfg.proxyURL != "" {
-		if proxyURL, err := url.Parse(cfg.proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
+	client, err := proxytransport.NewClient(cfg.name, config.ModeGit, cfg.transportConfig, cfg.upstreamGate, cfg.stats)
+	if err != nil {
+		return nil, err
 	}
-	bootstrapClient := &http.Client{
-		Transport: transport, Timeout: cfg.operationTimeout,
-		CheckRedirect: proxytransport.CheckReadOnlyRedirect,
-	}
-	proxytransport.ConfigureAdmission(bootstrapClient, cfg.upstreamGate)
 	return &gitHandler{
 		name: cfg.name, upstream: cfg.upstream, auth: cfg.auth, proxyURL: cfg.proxyURL,
 		operationTimeout: cfg.operationTimeout, repositoryFS: cfg.repositoryFS,
-		bootstrapClient: bootstrapClient, upstreamGate: cfg.upstreamGate, lifecycle: storeio.NewLifecycle(),
-	}
+		client: client, upstreamGate: cfg.upstreamGate, uncached: cfg.uncached, lifecycle: storeio.NewLifecycle(),
+	}, nil
 }
 
 func (h *gitHandler) Start(context.Context) error {
+	if h.uncached {
+		return nil
+	}
 	storage := filesystem.NewStorage(h.repositoryFS, cache.NewObjectLRUDefault())
 	repository, err := gitlib.Open(storage, nil)
 	if err != nil {
@@ -100,7 +100,7 @@ func (h *gitHandler) Start(context.Context) error {
 }
 
 func (h *gitHandler) Stop(ctx context.Context) error {
-	h.bootstrapClient.CloseIdleConnections()
+	h.client.CloseIdleConnections()
 	return h.lifecycle.Close(ctx)
 }
 
@@ -230,7 +230,7 @@ func (h *gitHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		req.Body = io.NopCloser(bytes.NewReader(body))
 	}
-	if !isGitReadRequest(req) || shouldForwardGitRead(req) {
+	if h.uncached || !isGitReadRequest(req) || shouldForwardGitRead(req) {
 		h.forwardUpstream(w, req, cleaned)
 		return
 	}

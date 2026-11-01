@@ -86,6 +86,7 @@
           <span class="instance-state state-{{.StatusColor}}"><span class="status-dot"></span>{{.StatusLabel}}</span>
         </header>
         {{if .StatusExtra}}<p class="instance-detail">{{.StatusExtra}}</p>{{end}}
+        <p class="instance-detail">{{.CacheLabel}}</p>
 
         <div class="endpoint-block">
           <span class="field-label">{{t "endpoint"}}</span>

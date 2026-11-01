@@ -9,7 +9,40 @@ import (
 	"strings"
 
 	proxyruntime "gopkg.d7z.net/cache-proxy/pkg/runtime"
+	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
+
+// BindForward serves transparent read-only protocols without cache resources.
+func BindForward(plan *proxyruntime.InstancePlan, mode string) error {
+	client, err := NewClient(plan.Name(), mode, plan.Transport(), plan.UpstreamGate(), plan.Stats())
+	if err != nil {
+		return err
+	}
+	origin, err := url.Parse(plan.Upstream())
+	if err != nil {
+		return err
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !proxyruntime.RequireReadMethod(w, req.Method) {
+			return
+		}
+		cleaned, err := storeio.CleanURLPath(req.URL)
+		if err != nil {
+			http.Error(w, "invalid upstream path", http.StatusBadRequest)
+			return
+		}
+		status, err := ForwardRead(req.Context(), client, origin, w, req, cleaned)
+		if err != nil && status == 0 {
+			status = http.StatusBadGateway
+			WriteError(w, status)
+		}
+		plan.Stats().RecordRequest(plan.Name(), mode, req.Method, "BYPASS", status, 0)
+	})
+	return plan.BindPath(plan.Path(), proxyruntime.HandlerInstance{Handler: handler, CloseContext: func(context.Context) error {
+		client.CloseIdleConnections()
+		return nil
+	}})
+}
 
 func ForwardRead(ctx context.Context, client *Client, origin *url.URL, writer http.ResponseWriter, inbound *http.Request, requestPath string) (int, error) {
 	target, err := JoinURL(origin, EscapePathSegments(strings.TrimPrefix(requestPath, "/")), inbound.URL.RawQuery)

@@ -210,14 +210,13 @@ func manifestResponseHeaders(state refState, cache string) map[string]string {
 	return headers
 }
 
-func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, ready chan struct{}) (int, string, uint64, error) {
+func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved request, flight *storeio.Flight) (int, string, uint64, error) {
 	slog.Debug("oci fetch blob", "instance", h.name, "repo", resolved.repo, "digest", resolved.digest, "upstream", h.upstream)
 	objectPath := h.blobPath(resolved.digest)
-	cleanupDownload := true
+	finishFlight := true
 	defer func() {
-		if cleanupDownload {
-			close(ready)
-			h.downloads.Delete(objectPath)
+		if finishFlight {
+			h.blobFlights.Finish(objectPath, flight, nil)
 		}
 	}()
 
@@ -253,9 +252,8 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		ExpectedSize: &response.ContentLength,
 		StatsStart:   func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, 1) },
 		StatsDone:    func() { h.stats.AddActiveDownload(h.name, config.ModeOCI, -1) },
-		Done: func(error) {
-			close(ready)
-			h.downloads.Delete(objectPath)
+		Done: func(err error) {
+			h.blobFlights.Finish(objectPath, flight, err)
 		},
 		VerifyFn: func(r io.ReadSeeker) error {
 			return verifyDigestReader(resolved.digest, r)
@@ -271,7 +269,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		return status, "BYPASS", bytes, copyErr
 	}
 	defer func() { _ = pr.Close() }()
-	cleanupDownload = false
+	finishFlight = false
 
 	headers := objectHeaders(respHeader, contentLen, "MISS")
 	status, bytes, err := h.writeResponse(w, req.Method, headers, pr)

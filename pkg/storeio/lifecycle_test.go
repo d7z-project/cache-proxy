@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 func TestLifecycleAdmissionAndCloseDoNotRace(t *testing.T) {
 	for range 100 {
 		lifecycle := NewLifecycle()
-		var started atomic.Int64
 		var workers sync.WaitGroup
 		for range 32 {
 			workers.Add(1)
@@ -22,10 +20,11 @@ func TestLifecycleAdmissionAndCloseDoNotRace(t *testing.T) {
 				defer workers.Done()
 				_, done, err := lifecycle.Begin()
 				if err != nil {
-					require.ErrorIs(t, err, ErrLifecycleClosed)
+					if !errors.Is(err, ErrLifecycleClosed) {
+						t.Errorf("begin lifecycle: %v", err)
+					}
 					return
 				}
-				started.Add(1)
 				time.Sleep(time.Microsecond)
 				done()
 				done()
@@ -36,6 +35,24 @@ func TestLifecycleAdmissionAndCloseDoNotRace(t *testing.T) {
 		_, done, err := lifecycle.Begin()
 		require.Nil(t, done)
 		require.True(t, errors.Is(err, ErrLifecycleClosed))
-		require.GreaterOrEqual(t, started.Load(), int64(0))
 	}
+}
+
+func TestLifecycleBeginCloseCancelsBeforeWaiting(t *testing.T) {
+	lifecycle := NewLifecycle()
+	workCtx, done, err := lifecycle.Begin()
+	require.NoError(t, err)
+
+	lifecycle.BeginClose()
+	lifecycle.BeginClose()
+	require.ErrorIs(t, workCtx.Err(), context.Canceled)
+	_, rejectedDone, err := lifecycle.Begin()
+	require.Nil(t, rejectedDone)
+	require.ErrorIs(t, err, ErrLifecycleClosed)
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, lifecycle.Close(waitCtx), context.DeadlineExceeded)
+	done()
+	require.NoError(t, lifecycle.Close(context.Background()))
 }

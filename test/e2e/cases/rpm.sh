@@ -25,6 +25,10 @@ EOF
     dnf -y --setopt=timeout=5 --setopt=retries=1 --setopt=reposdir=/tmp/repos --disablerepo="*" --enablerepo=e2e --nogpgcheck install e2e-rpm >/dev/null
     grep -qx "$2" /usr/share/e2e-rpm/payload.txt
   '
+  if [[ ${E2E_CACHE:-true} == false ]]; then
+    e2e_uncached_install rpm "$E2E_FEDORA_IMAGE" "$script" /rpm/e2e-rpm-1.0.0-1.noarch.rpm cache-proxy-e2e-initial cache-proxy-e2e-updated
+    return
+  fi
   e2e_client rpm cold "$E2E_FEDORA_IMAGE" "$script" "$E2E_PROXY_URL" cache-proxy-e2e-initial
   e2e_wait_cache_hit "$E2E_PROXY_URL/rpm/repodata/repomd.xml"
   e2e_assert_generation_poll_interval rpm /rpm/repodata/repomd.xml

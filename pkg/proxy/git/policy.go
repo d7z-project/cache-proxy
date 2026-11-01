@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
@@ -60,14 +61,16 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 	if !plan.Enabled() {
 		return nil
 	}
-
-	repositoryRoot := filepath.Join(plan.StoreRoot(), "repository")
-	if err := os.MkdirAll(repositoryRoot, 0o755); err != nil {
-		return fmt.Errorf("instance %s: create git repository directory: %w", plan.Name(), err)
+	var repositoryFS billy.Filesystem
+	if plan.CacheEnabled() {
+		repositoryRoot := filepath.Join(plan.StoreRoot(), "repository")
+		if err := os.MkdirAll(repositoryRoot, 0o755); err != nil {
+			return fmt.Errorf("instance %s: create git repository directory: %w", plan.Name(), err)
+		}
+		repositoryFS = osfs.New(repositoryRoot, osfs.WithBoundOS())
 	}
-	repositoryFS := osfs.New(repositoryRoot, osfs.WithBoundOS())
 
-	handler := newGitHandler(gitConfig{
+	handler, err := newGitHandler(gitConfig{
 		name:             plan.Name(),
 		repositoryFS:     repositoryFS,
 		upstream:         upstream,
@@ -75,9 +78,18 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		proxyURL:         proxyURL,
 		operationTimeout: block.OperationTimeout.Duration(),
 		upstreamGate:     plan.UpstreamGate(),
+		transportConfig:  plan.Transport(),
+		stats:            plan.Stats(),
+		uncached:         !plan.CacheEnabled(),
 	})
+	if err != nil {
+		return fmt.Errorf("instance %s: %w", plan.Name(), err)
+	}
 
 	plan.SetHomeDisplayURL(upstream)
+	if !plan.CacheEnabled() {
+		return plan.BindPath(plan.Path(), handler)
+	}
 	syncInterval := block.SyncInterval.Duration()
 	if syncInterval <= 0 {
 		syncInterval = 5 * time.Minute

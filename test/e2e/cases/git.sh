@@ -16,6 +16,10 @@ e2e_git_clone() {
 e2e_run_git() {
 	printf '\n[git] smart HTTP clone, local mirror update and offline restart\n'
 	e2e_reset_fixture
+	if [[ ${E2E_CACHE:-true} == false ]]; then
+	  e2e_uncached_native git /git/repo.git/info/refs "$E2E_PROXY_URL/git/info/refs?service=git-upload-pack" e2e_git_clone cache-proxy-e2e-initial cache-proxy-e2e-updated
+	  return
+	fi
 	e2e_assert_transparent_paths git /git /git/repo.git bypass
   e2e_git_clone cold cache-proxy-e2e-initial
 

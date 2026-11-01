@@ -78,11 +78,24 @@ func main() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	<-signals
+	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
 
+	shutdownStarted := time.Now()
+	slog.Info("shutdown started")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := application.Close(shutdownCtx); err != nil {
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- application.Close(shutdownCtx) }()
+	select {
+	case err := <-shutdownDone:
+		cancel()
+		if err == nil {
+			slog.Info("shutdown completed", "duration", time.Since(shutdownStarted))
+			return
+		}
 		slog.Error("shutdown failed", "err", err)
+		os.Exit(1)
+	case <-shutdownCtx.Done():
+		slog.Error("shutdown timed out", "timeout", shutdownTimeout)
 		os.Exit(1)
 	}
 }

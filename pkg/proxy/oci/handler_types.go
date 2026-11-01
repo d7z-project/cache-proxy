@@ -17,10 +17,9 @@ import (
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.oci.artifact.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v1+json, application/json"
 
 type authHandler struct {
-	tokenMu    sync.Mutex
-	tokens     map[string]ociToken
-	preemptive string
-	group      singleflight.Group
+	tokenMu sync.Mutex
+	tokens  map[string]ociToken
+	group   singleflight.Group
 }
 
 type refState struct {
@@ -51,6 +50,7 @@ type ociChallenge struct {
 }
 
 type handler struct {
+	uncached        bool
 	manifestFlights storeio.FlightGroup
 	name            string
 	upstream        string
@@ -65,7 +65,7 @@ type handler struct {
 	upstreamGate    *transport.UpstreamGate
 	lifecycle       *storeio.Lifecycle
 	auth            authHandler
-	downloads       sync.Map
+	blobFlights     storeio.FlightGroup
 	refLocks        *referenceLocks
 	manifestMu      sync.Mutex
 	manifestReaders map[string]int

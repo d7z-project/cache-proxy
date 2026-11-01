@@ -59,7 +59,7 @@ func planEntries(
 	stats *metrics.Stats,
 	upstreamGate *proxyruntime.UpstreamGate,
 	taskScheduler *scheduler.Scheduler,
-) (*proxyruntime.Result, error) {
+) (result *proxyruntime.Result, err error) {
 	plan := proxyruntime.NewPlanContext(
 		doc.Server.Backend,
 		stats,
@@ -72,34 +72,29 @@ func planEntries(
 		taskScheduler,
 	)
 	plan.ReservePathPrefix(statusAPIPath, "status API")
-	for _, configured := range doc.Instances {
-		decl := configured
-		selected, err := decl.SelectMode()
+	defer func() {
 		if err != nil {
 			plan.CloseStores()
+		}
+	}()
+	for _, decl := range doc.Instances {
+		selected, err := decl.SelectMode()
+		if err != nil {
 			return nil, err
 		}
 		planMode, ok := modePlanners[selected.Mode]
 		if !ok {
-			plan.CloseStores()
 			return nil, fmt.Errorf("instance %s: unsupported mode %q", selected.Name, selected.Mode)
 		}
 		instancePlan, err := plan.Instance(decl, selected)
 		if err != nil {
-			plan.CloseStores()
 			return nil, err
 		}
 		if err := planMode(ctx, instancePlan); err != nil {
-			plan.CloseStores()
 			return nil, err
 		}
 	}
-	result, err := plan.Finalize()
-	if err != nil {
-		plan.CloseStores()
-		return nil, err
-	}
-	return result, nil
+	return plan.Finalize()
 }
 
 func normalizeDocument(doc *config.Document) {

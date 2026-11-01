@@ -19,6 +19,12 @@ fields support environment variable expansion.
 
 ## Refresh and Rate Limits
 
+These refresh and cache maintenance policies apply to instances with caching
+enabled. With `cache: false`, requests use the same upstream transport and rate
+limits but do not consult saved content or run background cache work. Existing
+cache directories are preserved. Offline reuse and local repository snapshots
+require caching; see [uncached forwarding](../README.md#uncached-forwarding).
+
 Set `refresh: {interval: 30m}` on an instance to adjust its repository background
 polling interval or mutable-object freshness setting. The minimum is `1s`.
 
@@ -76,8 +82,12 @@ selection is automatic for standard, nested, and flat layouts.
 
 ## Storage and Upgrades
 
-Use a dedicated persistent backend volume with one writer process. Send `SIGINT`
-or `SIGTERM` for graceful shutdown.
+Use a dedicated persistent backend volume with one writer process. The first
+`SIGINT` or `SIGTERM` immediately closes listeners and active downstream and
+upstream connections. The process then allows up to ten seconds for request
+handlers, background work, temporary resources, storage checkpoints, and the
+backend lock to close cleanly. Later stop signals are ignored while this single
+shutdown sequence runs.
 
 Backend formats are internal and have no compatibility guarantee across builds.
 Plan for cache repopulation when upgrading.

@@ -56,6 +56,19 @@ instances:
 	require.NoError(t, selected.Options.DecodeStrict(&options))
 }
 
+func TestInstanceCacheSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		value   string
+		enabled bool
+	}{{"", true}, {"    cache: true\n", true}, {"    cache: false\n", false}} {
+		doc, err := Decode(strings.NewReader("instances:\n  - name: packages\n    enabled: true\n    mode: npm\n    path: /npm\n    upstream: https://registry.npmjs.org\n" + tc.value))
+		require.NoError(t, err)
+		require.Equal(t, tc.enabled, doc.Instances[0].CacheEnabled())
+	}
+	_, err := Decode(strings.NewReader("instances:\n  - name: packages\n    mode: npm\n    cache: 42\n"))
+	require.Error(t, err)
+}
+
 func TestInstanceRefreshInterval(t *testing.T) {
 	for _, interval := range []string{"0s", "-1s", "999ms", "1s", "30m"} {
 		doc, err := Decode(strings.NewReader("instances:\n  - name: test\n    mode: deb\n    path: /deb\n    upstream: https://example.test\n    refresh:\n      interval: " + interval + "\n"))
