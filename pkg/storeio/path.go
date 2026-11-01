@@ -11,20 +11,31 @@ func CleanURLPath(target *url.URL) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cleaned := strings.TrimPrefix(decoded, "/")
-	if cleaned == "" {
+	relative := strings.TrimPrefix(decoded, "/")
+	if relative == "" {
 		return "", nil
 	}
-	trailingSlash := strings.HasSuffix(cleaned, "/")
-	cleaned = strings.TrimSuffix(cleaned, "/")
-	cleaned, err = CleanRelative(cleaned)
-	if err != nil {
-		return "", err
+	trailingSlash := strings.HasSuffix(relative, "/")
+	relative = strings.TrimSuffix(relative, "/")
+	segments := strings.Split(relative, "/")
+	cleaned := segments[:0]
+	for _, segment := range segments {
+		switch segment {
+		case "":
+			return "", errors.New("invalid request path")
+		case ".":
+			continue
+		case "..":
+			return "", errors.New("parent path segment is not allowed")
+		default:
+			cleaned = append(cleaned, segment)
+		}
 	}
-	if trailingSlash {
-		cleaned += "/"
+	result := strings.Join(cleaned, "/")
+	if trailingSlash && result != "" {
+		result += "/"
 	}
-	return cleaned, nil
+	return result, nil
 }
 
 // DecodeURLPath validates the escaped request path before returning its

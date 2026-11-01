@@ -108,6 +108,26 @@ func TestUncachedInstancesForwardWithoutOpeningExistingStores(t *testing.T) {
 	}
 }
 
+func TestUncachedDebianFlatPathNormalizesCurrentDirectorySegment(t *testing.T) {
+	upstreamPath := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		upstreamPath <- request.URL.RequestURI()
+		_, _ = io.WriteString(w, "Packages")
+	}))
+	t.Cleanup(upstream.Close)
+	doc, err := config.Decode(strings.NewReader(fmt.Sprintf("server:\n  backend: %s\ninstances:\n  - name: deb\n    mode: deb\n    enabled: true\n    cache: false\n    path: /deb\n    upstream: %s/root\n", t.TempDir(), upstream.URL)))
+	require.NoError(t, err)
+	application, err := Open(context.Background(), doc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, application.Close(context.Background())) })
+
+	response := httptest.NewRecorder()
+	application.entries["deb"].Runtime.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/flat/./Packages?arch=amd64", nil))
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "Packages", response.Body.String())
+	require.Equal(t, "/root/flat/Packages?arch=amd64", <-upstreamPath)
+}
+
 func TestUncachedProtocolRewritingAndVerifiedDownloads(t *testing.T) {
 	for _, mode := range []string{config.ModeNPM, config.ModePyPI, config.ModeCargo} {
 		t.Run(mode, func(t *testing.T) {

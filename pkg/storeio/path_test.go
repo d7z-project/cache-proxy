@@ -19,12 +19,27 @@ func TestCleanRelativeDoesNotRewriteSegments(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCleanURLPathRejectsEncodedSeparators(t *testing.T) {
-	for _, raw := range []string{"/a%2fb", "/a%2Fb", "/a%5cb", "/a%00b", "/a/%2e%2e/b", "/a\\b"} {
+func TestCleanURLPathRejectsUnsafeSegmentsAndEscapes(t *testing.T) {
+	for _, raw := range []string{"/a%2fb", "/a%2Fb", "/a%5cb", "/a%00b", "/a/%2e%2e/b", "/a/../b", "/a//b", "/a\\b"} {
 		target, err := url.ParseRequestURI(raw)
 		require.NoError(t, err)
 		_, err = CleanURLPath(target)
 		require.Error(t, err, raw)
+	}
+}
+
+func TestCleanURLPathNormalizesCurrentDirectorySegments(t *testing.T) {
+	for raw, expected := range map[string]string{
+		"/./":                    "",
+		"/deb/flat/./Packages":   "deb/flat/Packages",
+		"/deb/flat/%2e/Packages": "deb/flat/Packages",
+		"/deb/flat/./":           "deb/flat/",
+	} {
+		target, err := url.ParseRequestURI(raw)
+		require.NoError(t, err)
+		cleaned, err := CleanURLPath(target)
+		require.NoError(t, err, raw)
+		require.Equal(t, expected, cleaned)
 	}
 }
 

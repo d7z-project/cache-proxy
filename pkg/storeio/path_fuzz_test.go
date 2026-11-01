@@ -39,6 +39,8 @@ func FuzzCleanURLPath(f *testing.F) {
 		"/a%2eb",
 		"/a%20b",
 		"/a%2fb",
+		"/deb/flat/./Packages",
+		"/deb/flat/%2e/Packages",
 		"/a/%2e%2e/b",
 		"/",
 		"/repository/",
