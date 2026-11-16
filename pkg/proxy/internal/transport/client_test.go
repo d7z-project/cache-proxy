@@ -61,6 +61,36 @@ func TestClientReadAPIRejectsMutationBeforeUpstream(t *testing.T) {
 	require.Zero(t, requests.Load())
 }
 
+func TestClientDoReadPathBuildsSanitizedUpstreamRequest(t *testing.T) {
+	requests := make(chan *http.Request, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests <- request.Clone(request.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	origin, err := url.Parse(upstream.URL + "/root/")
+	require.NoError(t, err)
+	client, err := NewClient("test", "file", nil, nil, metrics.NewStats(prometheus.NewRegistry()))
+	require.NoError(t, err)
+
+	header := http.Header{
+		"Accept":          {"application/json"},
+		"Content-Type":    {"text/plain"},
+		"X-Forwarded-For": {"192.0.2.1"},
+	}
+	response, err := client.DoReadPath(context.Background(), origin, http.MethodGet, "/scope/a b/#file", "page=1", header, AdmissionForeground)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+
+	seen := <-requests
+	require.Equal(t, "/root/scope/a%20b/%23file?page=1", seen.RequestURI)
+	require.Equal(t, "application/json", seen.Header.Get("Accept"))
+	require.Empty(t, seen.Header.Get("Content-Type"))
+	require.Empty(t, seen.Header.Get("X-Forwarded-For"))
+	require.Equal(t, DefaultUserAgent, seen.UserAgent())
+	require.Equal(t, "1.1 gateway", seen.Header.Get("Via"))
+}
+
 func TestClientCreatesOneSpoolerConcurrently(t *testing.T) {
 	client, err := NewClient("test", "file", nil, nil, metrics.NewStats(prometheus.NewRegistry()))
 	require.NoError(t, err)
@@ -136,7 +166,8 @@ func TestClientFailureReleasesAdmissionAcrossHTTPVersions(t *testing.T) {
 				gate := proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{MaxActive: 1, MaxActivePerHost: 1})
 				client, err := NewClient("test", "rpm", &config.TransportConfig{HeaderTimeout: config.Duration(200 * time.Millisecond), IdleBodyTimeout: config.Duration(100 * time.Millisecond)}, gate, metrics.NewStats(prometheus.NewRegistry()))
 				require.NoError(t, err)
-				base := client.httpClient.Transport.(*admissionRoundTripper).base.(*http.Transport)
+				boundary := client.httpClient.Transport.(*headerBoundaryRoundTripper)
+				base := boundary.base.(*admissionRoundTripper).base.(*http.Transport)
 				base.TLSClientConfig = upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 				t.Cleanup(base.CloseIdleConnections)
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -240,7 +271,13 @@ func TestSameOriginIncludesSchemeAndEffectivePort(t *testing.T) {
 func TestClientsDisableCompression(t *testing.T) {
 	client, err := NewClient("test", "file", nil, proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{}), metrics.NewStats(prometheus.NewRegistry()))
 	require.NoError(t, err)
-	httpTransport, ok := client.httpClient.Transport.(*http.Transport)
+	boundary, ok := client.httpClient.Transport.(*headerBoundaryRoundTripper)
+	require.True(t, ok)
+	base := boundary.base
+	if admission, wrapped := base.(*admissionRoundTripper); wrapped {
+		base = admission.base
+	}
+	httpTransport, ok := base.(*http.Transport)
 	require.True(t, ok)
 	require.True(t, httpTransport.DisableCompression)
 	require.Equal(t, int64(maxResponseHeaderBytes), httpTransport.MaxResponseHeaderBytes)
@@ -254,10 +291,9 @@ func TestClientsDisableCompression(t *testing.T) {
 }
 
 func TestClientsStripCredentialsOnCrossOriginRedirect(t *testing.T) {
-	var authorization, cookie string
+	var received http.Header
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		authorization = req.Header.Get("Authorization")
-		cookie = req.Header.Get("Cookie")
+		received = req.Header.Clone()
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer target.Close()
@@ -267,16 +303,22 @@ func TestClientsStripCredentialsOnCrossOriginRedirect(t *testing.T) {
 	defer origin.Close()
 
 	assertStripped := func(do func(*http.Request) (*http.Response, error)) {
-		authorization, cookie = "unseen", "unseen"
+		received = nil
 		request, err := http.NewRequest(http.MethodGet, origin.URL, nil)
 		require.NoError(t, err)
 		request.Header.Set("Authorization", "Bearer secret")
 		request.Header.Set("Cookie", "session=secret")
+		request.Header.Set("Git-Protocol", "version=2")
+		request.Header.Set("X-Api-Key", "custom-secret")
+		request.Header.Set("X-Request-ID", "private-id")
+		request.Header.Set("Accept", "application/octet-stream")
 		response, err := do(request)
 		require.NoError(t, err)
 		require.NoError(t, response.Body.Close())
-		require.Empty(t, authorization)
-		require.Empty(t, cookie)
+		require.Equal(t, "application/octet-stream", received.Get("Accept"))
+		for _, name := range []string{"Authorization", "Cookie", "Git-Protocol", "X-Api-Key", "X-Request-ID"} {
+			require.Empty(t, received.Values(name), name)
+		}
 	}
 
 	client, err := NewClient("test", "file", nil, proxyruntime.NewUpstreamGate(proxyruntime.UpstreamGateConfig{}), metrics.NewStats(prometheus.NewRegistry()))
@@ -286,6 +328,7 @@ func TestClientsStripCredentialsOnCrossOriginRedirect(t *testing.T) {
 	})
 	wrapper := NewUpstreamHTTPClient()
 	ConfigureHTTPClient(wrapper, "test", nil)
+	ConfigureHeaderBoundary(wrapper.Client, wrapper.UserAgent)
 	assertStripped(wrapper.Do)
 }
 
@@ -365,19 +408,21 @@ func TestJoinURLPreservesEscapingAndQuery(t *testing.T) {
 	require.False(t, strings.Contains(RedactedURL(target), "a=1"))
 }
 
-func TestCopyEndToEndHeadersRemovesConnectionHeaders(t *testing.T) {
+func TestCopyDownstreamResponseHeadersRemovesPrivateAndConnectionHeaders(t *testing.T) {
 	source := http.Header{
 		"Connection":          {"keep-alive, X-Internal"},
 		"Keep-Alive":          {"timeout=5"},
 		"X-Internal":          {"secret"},
 		"X-Protocol-Response": {"preserved"},
+		"Server":              {"upstream"},
 	}
 	destination := http.Header{}
 
-	CopyEndToEndHeaders(destination, source)
+	CopyDownstreamResponseHeaders(destination, source)
 
 	require.Empty(t, destination.Get("Connection"))
 	require.Empty(t, destination.Get("Keep-Alive"))
 	require.Empty(t, destination.Get("X-Internal"))
+	require.Empty(t, destination.Get("Server"))
 	require.Equal(t, "preserved", destination.Get("X-Protocol-Response"))
 }

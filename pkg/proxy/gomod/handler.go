@@ -286,7 +286,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	defer func() { _ = reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), response.Header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	result := "MISS"
 	if cached != nil {
 		result = "REFRESH"
@@ -430,7 +430,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 		result = "BYPASS"
 	}
 	_, _ = spool.File.Seek(0, io.SeekStart)
-	transport.CopyEndToEndHeaders(w.Header(), response.Header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	w.Header().Set("X-Cache", result)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, spool.File)

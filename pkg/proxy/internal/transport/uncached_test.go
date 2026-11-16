@@ -125,7 +125,9 @@ func TestUncachedHTTPSUsesHTTPConnectProxy(t *testing.T) {
 	defer client.CloseIdleConnections()
 	certificates := x509.NewCertPool()
 	certificates.AddCert(upstream.Certificate())
-	client.httpClient.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: certificates, MinVersion: tls.VersionTLS12}
+	boundary := client.httpClient.Transport.(*headerBoundaryRoundTripper)
+	base := boundary.base.(*http.Transport)
+	base.TLSClientConfig = &tls.Config{RootCAs: certificates, MinVersion: tls.VersionTLS12}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/object", nil)
 	status, err := ForwardReadTarget(req.Context(), client, target, w, req, nil)

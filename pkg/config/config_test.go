@@ -111,6 +111,9 @@ func TestSelectModeValidatesCommonDeclaration(t *testing.T) {
 		{name: "both binds", instance: Instance{Name: "x", Mode: ModeOCI, Path: "/x", Bind: ":5000", Upstream: "https://example.test"}, contains: "exactly one of path or bind"},
 		{name: "no upstream", instance: Instance{Name: "x", Mode: ModeNPM, Path: "/x"}, contains: "upstream is required"},
 		{name: "bad upstream", instance: Instance{Name: "x", Mode: ModeNPM, Path: "/x", Upstream: "file:///tmp"}, contains: "valid absolute URL"},
+		{name: "upstream user information", instance: Instance{Name: "x", Mode: ModeNPM, Path: "/x", Upstream: "https://user:secret@example.test"}, contains: "user information"},
+		{name: "display user information", instance: Instance{Name: "x", Mode: ModeOCI, Bind: ":5000", DisplayURL: "https://user:secret@example.test", Upstream: "https://example.test"}, contains: "display_url"},
+		{name: "display query", instance: Instance{Name: "x", Mode: ModeOCI, Bind: ":5000", DisplayURL: "https://example.test?token=secret", Upstream: "https://example.test"}, contains: "query or fragment"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -118,6 +121,21 @@ func TestSelectModeValidatesCommonDeclaration(t *testing.T) {
 			require.ErrorContains(t, err, test.contains)
 		})
 	}
+}
+
+func TestValidateTransportProxyAndUserAgent(t *testing.T) {
+	require.NoError(t, ValidateTransport(&TransportConfig{Proxy: "http://user:secret@proxy.example:8080"}))
+	for _, proxy := range []string{
+		"http://proxy.example:8080/",
+		"http://proxy.example:8080/path",
+		"http://proxy.example:8080?token=secret",
+		"http://proxy.example:8080#fragment",
+		"file:///tmp/proxy",
+	} {
+		require.Error(t, ValidateTransport(&TransportConfig{Proxy: proxy}), proxy)
+	}
+	require.Error(t, ValidateTransport(&TransportConfig{UserAgent: "cache-proxy\r\nX-Injected: value"}))
+	require.Error(t, ValidateTransport(&TransportConfig{UserAgent: " cache-proxy"}))
 }
 
 func TestDurationAndExpiration(t *testing.T) {

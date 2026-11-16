@@ -22,6 +22,7 @@ upstream and independently configurable caching and refresh settings.
 - Persistent downloads shared across clients and service restarts.
 - Shared upstream transfers for concurrent requests to the same object.
 - Configurable refresh intervals, download concurrency, and request pacing.
+- A fixed outbound identity that does not forward ingress, tracing, or client-address headers.
 - Built-in dashboard with client configuration, cache usage, and maintenance status.
 - Prometheus metrics for monitoring.
 
@@ -149,6 +150,12 @@ need. Validate your configuration before starting the service:
 - `transport` configures outbound connections, proxies, and timeouts;
   `storage.download` controls shared concurrency and request pacing.
 
+Upstream, public, and display URLs cannot contain user information. Upstream
+URLs also cannot contain a query or fragment. Proxy credentials may be supplied
+as URL user information in `transport.proxy`; proxy URLs cannot contain a path,
+query, or fragment. The outbound `User-Agent` is the instance's `transport.ua`
+value, or `cache-proxy` by default, independent of the downstream client.
+
 Unknown YAML fields and invalid settings are rejected. Durations use Go syntax
 such as `500ms`, `15m`, and `24h`; sizes accept binary units such as `MiB` and `GiB`.
 
@@ -179,13 +186,9 @@ cache jobs. Refresh and retention settings are inactive; existing cache data is
 left untouched. Requests require a reachable upstream. Repository consistency
 comes from the upstream and native client checks, not a local snapshot.
 
-Connection reuse, rate limits, timeouts and read-only access controls remain.
-Bounded request-local buffers or temporary files can be used for rewriting and
-checksum verification; signing keys remain persistent. Cargo fetches registry
-configuration and checksums on demand, and OCI tokens are request-local.
-Unmodified responses preserve upstream cache directives. Rewritten metadata is
-private and requires revalidation before reuse; upstream `no-store` is retained.
-The dashboard labels uncached instances.
+Connection reuse, rate limits, timeouts, protocol rewriting, verification, and
+read-only access controls remain active. The dashboard identifies uncached
+instances.
 
 ## Client Setup
 
@@ -217,7 +220,7 @@ For example, standard and flat Debian sources in
 `/etc/apt/sources.list.d/cache-proxy.list`:
 
 ```text
-deb https://mirrors.example.com/debian bookworm main
+deb https://mirrors.example.com/debian stable main
 deb [signed-by=/usr/share/keyrings/vendor-archive-keyring.gpg] https://mirrors.example.com/debian-flat ./
 ```
 
@@ -229,7 +232,7 @@ For OCI, expose its dedicated listener through a TLS endpoint, for example
 example configuration's Docker Hub upstream:
 
 ```bash
-docker pull registry.example.com/library/alpine:3.20
+docker pull registry.example.com/library/alpine:latest
 ```
 
 ## Monitoring and Support

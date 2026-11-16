@@ -27,7 +27,7 @@ func (h *handler) serveUncachedCrate(w http.ResponseWriter, request *http.Reques
 		path  string
 		limit int64
 	}{{"config.json", maxCargoConfigSize}, {indexPath, maxSparseIndexSize}} {
-		response, err := h.fetchUpstream(request.Context(), http.MethodGet, object.path, header)
+		response, err := h.client.DoReadPath(request.Context(), h.origin, http.MethodGet, object.path, "", header, transport.AdmissionForeground)
 		if err != nil {
 			transport.WriteError(w, http.StatusBadGateway)
 			return

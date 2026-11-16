@@ -56,7 +56,8 @@ func (t *admissionRoundTripper) RoundTrip(request *http.Request) (*http.Response
 	if !ok {
 		admission = admissionRequest{ctx: request.Context(), class: AdmissionForeground}
 	}
-	release, err := t.gate.Acquire(admission.ctx, request.URL.String(), admission.class)
+	upstream := RedactedURL(request.URL)
+	release, err := t.gate.Acquire(admission.ctx, upstream, admission.class)
 	if err != nil {
 		return nil, err
 	}
@@ -66,10 +67,16 @@ func (t *admissionRoundTripper) RoundTrip(request *http.Request) (*http.Response
 		return nil, err
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		_ = t.gate.RateLimited(request.URL.String(), response.Header.Get("Retry-After"))
+		_ = t.gate.RateLimited(upstream, response.Header.Get("Retry-After"))
 	}
 	response.Body = &admissionBody{ReadCloser: response.Body, release: release}
 	return response, nil
+}
+
+func (t *admissionRoundTripper) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func (b *admissionBody) Read(buffer []byte) (int, error) {

@@ -167,7 +167,7 @@ func TestOCIReadOnlyBoundaryDoesNotReachUpstream(t *testing.T) {
 
 	require.Equal(t, http.StatusMethodNotAllowed, response.Code)
 	require.Zero(t, writes.Load())
-	_, err = handler.readUpstream(context.Background(), context.Background(), http.MethodPatch, "/v2/library/demo", "", "", nil)
+	_, err = handler.readUpstream(context.Background(), context.Background(), http.MethodPatch, "/v2/library/demo", "", nil)
 	require.ErrorContains(t, err, "must use GET or HEAD")
 	require.Zero(t, writes.Load())
 }
@@ -332,7 +332,7 @@ func TestOCIBearerTokenSingleflight(t *testing.T) {
 	defer tokenServer.Close()
 
 	handler := newHandler("oci", Block{
-		Upstream: "https://registry.example",
+		Upstream: "http://registry.example",
 		Options: Options{
 			Auth: &AuthConfig{Type: "basic", Username: "user", Password: "pass"},
 		},
@@ -394,7 +394,7 @@ func TestOCIUncachedAuthenticationIsRequestLocal(t *testing.T) {
 	require.EqualValues(t, 2, manifests.Load())
 }
 
-func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testing.T) {
+func TestOCIChallengeUsesFixedUserAgentForEveryOrigin(t *testing.T) {
 	const browserUserAgent = "Mozilla/5.0 Firefox/127.0"
 	tokenUserAgent := make(chan string, 1)
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -429,8 +429,8 @@ func TestOCIChallengePreservesBrowserUserAgentButTokenUsesInternalAgent(t *testi
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, browserUserAgent, <-registryUserAgents)
-	require.Equal(t, browserUserAgent, <-registryUserAgents)
+	require.Equal(t, transport.DefaultUserAgent, <-registryUserAgents)
+	require.Equal(t, transport.DefaultUserAgent, <-registryUserAgents)
 	require.Equal(t, transport.DefaultUserAgent, <-tokenUserAgent)
 }
 
@@ -471,7 +471,7 @@ func TestOCIChallengeReleasesHostAdmissionBeforeTokenRequest(t *testing.T) {
 	require.EqualValues(t, 2, registryRequests.Load())
 }
 
-func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
+func TestOCIFixedUserAgentIsCacheableAndVaryStarIsNot(t *testing.T) {
 	const browserUserAgent = "Mozilla/5.0 Chrome/126.0 Safari/537.36"
 	blobBody := "browser-varying-blob"
 	blobDigest := sha256Digest(blobBody)
@@ -483,7 +483,7 @@ func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 		switch req.URL.Path {
 		case "/v2/library/alpine/manifests/latest":
 			manifestRequests.Add(1)
-			require.Equal(t, browserUserAgent, req.UserAgent())
+			require.Equal(t, transport.DefaultUserAgent, req.UserAgent())
 			w.Header().Set("Vary", "User-Agent")
 			w.Header().Set("Docker-Content-Digest", manifestDigest)
 			_, _ = io.WriteString(w, manifestBody)
@@ -492,7 +492,7 @@ func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 			_, _ = io.WriteString(w, manifestBody)
 		case "/v2/library/alpine/blobs/" + blobDigest:
 			blobRequests.Add(1)
-			require.Equal(t, browserUserAgent, req.UserAgent())
+			require.Equal(t, transport.DefaultUserAgent, req.UserAgent())
 			w.Header().Set("Vary", "*")
 			_, _ = io.WriteString(w, blobBody)
 		default:
@@ -508,17 +508,21 @@ func TestOCIBrowserVaryResponsesAreNotPublished(t *testing.T) {
 		Upstream: upstream.URL,
 	}, config.DefaultRetention, store, metrics.NewStats(prometheus.NewRegistry()), nil)
 
-	for range 2 {
+	for index := range 2 {
 		req := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/latest", nil)
 		req.Header.Set("User-Agent", browserUserAgent)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
-		require.Equal(t, "BYPASS", rec.Header().Get("X-Cache"))
+		expected := "MISS"
+		if index == 1 {
+			expected = "HIT"
+		}
+		require.Equal(t, expected, rec.Header().Get("X-Cache"))
 	}
 	_, err = store.StatObject(context.Background(), "oci", handler.refStatePath("library/alpine", "latest"))
-	require.Error(t, err)
-	require.Equal(t, int32(2), manifestRequests.Load())
+	require.NoError(t, err)
+	require.Equal(t, int32(1), manifestRequests.Load())
 
 	storedManifest := httptest.NewRequest(http.MethodGet, "/v2/library/alpine/manifests/stored", nil)
 	storedManifest.Header.Set("User-Agent", "container-client/1")
@@ -1032,7 +1036,6 @@ func TestOCIManifestHitUsesOnlyStateDigest(t *testing.T) {
 	oldDigest := sha256Digest(oldBody)
 	require.NoError(t, handler.storeObject(context.Background(), handler.manifestPath(oldDigest), strings.NewReader(oldBody), map[string]string{
 		"docker-content-digest": oldDigest,
-		userAgentReviewedOption: "true",
 	}))
 	require.NoError(t, handler.writeState(context.Background(), refState{
 		Repo: "library/alpine", Ref: "latest", FetchedAt: time.Now(),

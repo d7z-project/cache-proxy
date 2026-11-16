@@ -16,16 +16,13 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/storeio"
 )
 
-func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method, upstreamPath, rawQuery, userAgent string, headers map[string]string) (*http.Response, error) {
+func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method, upstreamPath, rawQuery string, headers map[string]string) (*http.Response, error) {
 	if method != http.MethodGet && method != http.MethodHead {
 		return nil, errors.New("oci upstream read must use GET or HEAD")
 	}
 	targetURL := h.upstream + "/" + transport.EscapePathSegments(strings.TrimLeft(upstreamPath, "/"))
 	if rawQuery != "" {
 		targetURL += "?" + rawQuery
-	}
-	if userAgent == "" {
-		userAgent = h.client.UserAgent
 	}
 	send := func(authorization string) (*http.Response, error) {
 		request, err := http.NewRequestWithContext(transferCtx, method, targetURL, nil)
@@ -36,14 +33,13 @@ func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method
 		for key, value := range headers {
 			request.Header.Set(key, value)
 		}
-		request.Header.Set("User-Agent", userAgent)
 		if auth := h.options.Auth; authorization == "" && auth != nil && strings.ToLower(auth.Type) == "bearer" && auth.Token != "" {
 			authorization = "Bearer " + auth.Token
 		}
 		if authorization != "" {
 			request.Header.Set("Authorization", authorization)
 		}
-		slog.Debug("oci upstream request", "instance", h.name, "method", method, "url", targetURL)
+		slog.Debug("oci upstream request", "instance", h.name, "method", method, "url", transport.RedactedURLString(targetURL))
 		releaseStats := h.stats.BeginUpstreamRequest(h.name, config.ModeOCI, h.upstream)
 		start := time.Now()
 		response, err := h.client.Do(request)
@@ -51,9 +47,9 @@ func (h *handler) readUpstream(admissionCtx, transferCtx context.Context, method
 		if err != nil {
 			releaseStats()
 			h.stats.RecordUpstreamRequest(h.name, config.ModeOCI, h.upstream, method, 0, latency, 0)
-			return nil, err
+			return nil, transport.RedactHTTPError(err)
 		}
-		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", targetURL, "status", response.StatusCode)
+		slog.Debug("oci upstream response", "instance", h.name, "method", method, "url", transport.RedactedURLString(targetURL), "status", response.StatusCode)
 		counted := &countingReadCloser{ReadCloser: h.client.WrapBody(response.Body)}
 		storeio.RecordResponseTiming(response, start, time.Now())
 		status := response.StatusCode
@@ -108,7 +104,7 @@ func (b *closeCallbackBody) Close() error {
 }
 
 func (h *handler) copyRemote(w http.ResponseWriter, req *http.Request, response *http.Response, cache string) (int, uint64, error) {
-	transport.CopyEndToEndHeaders(w.Header(), response.Header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	w.Header().Set("X-Cache", cache)
 	w.WriteHeader(response.StatusCode)
 	if req.Method == http.MethodHead {

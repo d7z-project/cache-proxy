@@ -23,16 +23,14 @@ import (
 const maxResponseHeaderBytes = 1 << 20
 
 type Client struct {
-	instance            string
-	mode                string
-	httpClient          *http.Client
-	stats               *metrics.Stats
-	userAgent           string
-	userAgentConfigured bool
-	idleBodyTimeout     time.Duration
-	spoolMu             sync.Mutex
-	spooler             *storeio.Spooler
-	refreshInterval     time.Duration
+	instance        string
+	mode            string
+	httpClient      *http.Client
+	stats           *metrics.Stats
+	idleBodyTimeout time.Duration
+	spoolMu         sync.Mutex
+	spooler         *storeio.Spooler
+	refreshInterval time.Duration
 }
 
 func (c *Client) EnsureSpooler(workDir string) *storeio.Spooler {
@@ -54,14 +52,13 @@ func NewClient(instance, mode string, cfg *config.TransportConfig, gate *Upstrea
 	}
 	ConfigureHTTPClient(baseClient, instance, cfg)
 	ConfigureAdmission(baseClient.Client, gate)
+	ConfigureHeaderBoundary(baseClient.Client, baseClient.UserAgent)
 	result := &Client{
-		instance:            instance,
-		mode:                mode,
-		httpClient:          baseClient.Client,
-		stats:               stats,
-		userAgent:           baseClient.UserAgent,
-		userAgentConfigured: baseClient.UserAgentConfigured,
-		idleBodyTimeout:     baseClient.IdleBodyTimeout,
+		instance:        instance,
+		mode:            mode,
+		httpClient:      baseClient.Client,
+		stats:           stats,
+		idleBodyTimeout: baseClient.IdleBodyTimeout,
 	}
 	return result, nil
 }
@@ -87,7 +84,6 @@ func (c *Client) RefreshInterval(fallback time.Duration) time.Duration {
 
 func ConfigureHTTPClient(client *UpstreamHTTPClient, instance string, cfg *config.TransportConfig) {
 	client.UserAgent = DefaultUserAgent
-	client.UserAgentConfigured = false
 	base, ok := client.Transport.(*http.Transport)
 	if !ok {
 		slog.Warn("cannot configure transport", "instance", instance)
@@ -101,7 +97,6 @@ func ConfigureHTTPClient(client *UpstreamHTTPClient, instance string, cfg *confi
 	}
 	if cfg.UserAgent != "" {
 		client.UserAgent = cfg.UserAgent
-		client.UserAgentConfigured = true
 	}
 	if cfg.Proxy != "" {
 		if proxyURL, err := url.Parse(strings.TrimSpace(cfg.Proxy)); err == nil {
@@ -132,6 +127,21 @@ func (c *Client) DoRead(ctx context.Context, request *http.Request, class Admiss
 	return c.send(ctx, request, class)
 }
 
+// DoReadPath sends a bodyless request to a validated logical path below origin.
+// Exact or already escaped URLs, such as signed downloads, must use DoRead.
+func (c *Client) DoReadPath(ctx context.Context, origin *url.URL, method, requestPath, rawQuery string, header http.Header, class AdmissionClass) (*http.Response, error) {
+	target, err := JoinURL(origin, EscapePathSegments(strings.TrimPrefix(requestPath, "/")), rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	CopyUpstreamReadHeaders(request.Header, header)
+	return c.DoRead(ctx, request, class)
+}
+
 func (c *Client) DoReadOnlyPost(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
 	if request == nil || request.Method != http.MethodPost {
 		return nil, errors.New("upstream read-only query must use POST")
@@ -144,13 +154,11 @@ func (c *Client) send(ctx context.Context, request *http.Request, class Admissio
 		return nil, errors.New("invalid upstream request")
 	}
 	releaseStats := c.stats.BeginUpstreamRequest(c.instance, c.mode, RedactedURL(request.URL))
-	if c.userAgentConfigured || request.Header.Get("User-Agent") == "" {
-		request.Header.Set("User-Agent", c.userAgent)
-	}
 	started := time.Now()
 	request = WithAdmission(ctx, request.WithContext(ctx), class)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
+		err = RedactHTTPError(err)
 		releaseStats()
 		c.stats.RecordUpstreamRequest(c.instance, c.mode, RedactedURL(request.URL), request.Method, 0, time.Since(started), 0)
 		return nil, fmt.Errorf("upstream request: %w", err)
@@ -169,15 +177,6 @@ func (c *Client) send(ctx context.Context, request *http.Request, class Admissio
 	}
 	return response, nil
 }
-
-func (c *Client) RequestUserAgent(request *http.Request) (string, bool) {
-	if c.userAgentConfigured || !IsBrowserRequest(request) {
-		return c.userAgent, false
-	}
-	return request.UserAgent(), true
-}
-
-func (c *Client) UserAgentConfigured() bool { return c.userAgentConfigured }
 
 func SameOrigin(left, right *url.URL) bool {
 	if left == nil || right == nil || !strings.EqualFold(left.Scheme, right.Scheme) {
@@ -199,8 +198,7 @@ func CheckReadOnlyRedirect(request *http.Request, via []*http.Request) error {
 		}
 	}
 	if !SameOrigin(request.URL, previous.URL) {
-		request.Header.Del("Authorization")
-		request.Header.Del("Cookie")
+		retainCrossOriginRedirectHeaders(request.Header)
 	}
 	return nil
 }
@@ -249,7 +247,7 @@ func (b *observedBody) finish() {
 }
 
 func JoinURL(base *url.URL, escapedPath, rawQuery string) (*url.URL, error) {
-	if base == nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+	if base == nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil {
 		return nil, errors.New("invalid upstream base URL")
 	}
 	result := *base
@@ -274,8 +272,4 @@ func RedactedURL(value *url.URL) string {
 	redacted.RawQuery = ""
 	redacted.Fragment = ""
 	return redacted.String()
-}
-
-func CopyEndToEndHeaders(destination, source http.Header) {
-	proxyruntime.CopyEndToEndHeaders(destination, source)
 }

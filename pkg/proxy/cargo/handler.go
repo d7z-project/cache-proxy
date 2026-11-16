@@ -169,7 +169,7 @@ func (h *handler) serveConfig(w http.ResponseWriter, request *http.Request) {
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, "config.json", upstreamHeader)
+	response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, "config.json", "", upstreamHeader, transport.AdmissionForeground)
 	if err != nil {
 		if stale, openErr := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); openErr == nil {
 			if !proxyruntime.StaleAllowed(request, stale.Header) {
@@ -321,7 +321,7 @@ func (h *handler) serveSparseIndex(w http.ResponseWriter, request *http.Request,
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, upstreamHeader)
+	response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, "", upstreamHeader, transport.AdmissionForeground)
 	if err != nil {
 		if stale, openErr := storeio.OpenResponse(request.Context(), h.store, cargoTenant, key); openErr == nil {
 			if !proxyruntime.StaleAllowed(request, stale.Header) {
@@ -508,7 +508,7 @@ func (h *handler) serveCrate(w http.ResponseWriter, request *http.Request, route
 			transport.WriteResponse(w, request, response, "BYPASS")
 			return
 		}
-		transport.CopyEndToEndHeaders(w.Header(), header)
+		transport.CopyDownstreamResponseHeaders(w.Header(), header)
 		w.Header().Set("X-Cache", "MISS")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, reader)
@@ -591,19 +591,6 @@ func cargoDownloadURL(template, name, version, checksum string) (*url.URL, error
 	return target, nil
 }
 
-func (h *handler) fetchUpstream(ctx context.Context, method, cleaned string, header http.Header) (*http.Response, error) {
-	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), "")
-	if err != nil {
-		return nil, err
-	}
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	transport.CopyReadRequestHeaders(request.Header, header)
-	return h.client.DoRead(ctx, request, transport.AdmissionForeground)
-}
-
 func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
@@ -622,8 +609,8 @@ func (h *handler) forwardGitUploadPack(w http.ResponseWriter, request *http.Requ
 		transport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	transport.CopyEndToEndHeaders(upstream.Header, request.Header)
-	transport.SanitizeMethodOverrideHeaders(upstream.Header)
+	upstream.ContentLength = request.ContentLength
+	transport.CopyUpstreamPostHeaders(upstream.Header, request.Header, "Git-Protocol")
 	response, err := h.client.DoReadOnlyPost(request.Context(), upstream, transport.AdmissionForeground)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
@@ -634,7 +621,7 @@ func (h *handler) forwardGitUploadPack(w http.ResponseWriter, request *http.Requ
 
 func (h *handler) writeSpooled(w http.ResponseWriter, header http.Header, file *os.File, result string) {
 	_, _ = file.Seek(0, io.SeekStart)
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Set("X-Cache", result)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, file)
@@ -676,7 +663,7 @@ func cargoCacheable(request *http.Request, response *http.Response) bool {
 }
 
 func writeCargoBytes(w http.ResponseWriter, request *http.Request, header http.Header, body []byte, result string) {
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Del("X-Source-ETag")
 	w.Header().Del("X-Source-Last-Modified")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))

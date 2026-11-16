@@ -158,7 +158,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 			upstreamHeader.Set("If-Modified-Since", value)
 		}
 	}
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, upstreamHeader)
+	response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, request.URL.RawQuery, upstreamHeader, transport.AdmissionForeground)
 	if err != nil || response.StatusCode >= 500 {
 		if response != nil {
 			_ = response.Body.Close()
@@ -481,7 +481,7 @@ func (h *handler) serveFile(w http.ResponseWriter, request *http.Request, route 
 			transport.WriteResponse(w, request, response, "BYPASS")
 			return
 		}
-		transport.CopyEndToEndHeaders(w.Header(), header)
+		transport.CopyDownstreamResponseHeaders(w.Header(), header)
 		w.Header().Set("X-Cache", "MISS")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, reader)
@@ -553,19 +553,6 @@ func (h *handler) rewriteProjectURL(rawTarget, externalBase string) (string, boo
 	return strings.TrimRight(externalBase, "/") + "/simple/" + url.PathEscape(normalizeProjectName(parts[len(parts)-1])) + "/", true
 }
 
-func (h *handler) fetchUpstream(ctx context.Context, method, cleaned, rawQuery string, header http.Header) (*http.Response, error) {
-	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), rawQuery)
-	if err != nil {
-		return nil, err
-	}
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	transport.CopyReadRequestHeaders(request.Header, header)
-	return h.client.DoRead(ctx, request, transport.AdmissionForeground)
-}
-
 func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
 	status, err := transport.ForwardRead(request.Context(), h.client, h.origin, w, request, cleaned)
 	if err != nil && status == 0 {
@@ -575,7 +562,7 @@ func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, 
 
 func (h *handler) writeSpool(w http.ResponseWriter, request *http.Request, header http.Header, file *os.File, result string) {
 	_, _ = file.Seek(0, io.SeekStart)
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Del("X-Source-ETag")
 	w.Header().Del("X-Source-Last-Modified")
 	w.Header().Set("X-Cache", result)

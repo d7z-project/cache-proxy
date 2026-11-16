@@ -55,7 +55,7 @@ func TestOCIUpstreamBodyLifecycle(t *testing.T) {
 					})
 					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: reader, Request: request}, nil
 				})
-				response, err := h.readUpstream(context.Background(), context.Background(), http.MethodGet, "v2/demo/blobs/digest", "", "", nil)
+				response, err := h.readUpstream(context.Background(), context.Background(), http.MethodGet, "v2/demo/blobs/digest", "", nil)
 				require.NoError(t, err)
 				defer func() { require.NoError(t, response.Body.Close()) }()
 				body, err := io.ReadAll(response.Body)
@@ -89,4 +89,17 @@ func TestOCITokenBodyIdleTimeout(t *testing.T) {
 		_, _, err := h.fetchBearerToken(context.Background(), ociChallenge{realm: "https://registry.example/token"}, time.Now())
 		require.ErrorIs(t, err, transport.ErrIdleBodyTimeout)
 	})
+}
+
+func TestOCITokenRealmRejectsCredentialsAndHTTPSDowngrade(t *testing.T) {
+	h := newHandler("oci", Block{Upstream: "https://registry.example"}, config.Expiration(time.Hour), nil, metrics.NewStats(prometheus.NewRegistry()), nil)
+	defer func() { require.NoError(t, h.Stop(context.Background())) }()
+	for _, realm := range []string{
+		"https://user:secret@auth.example/token",
+		"https://auth.example/token#fragment",
+		"http://auth.example/token",
+	} {
+		_, _, err := h.fetchBearerToken(context.Background(), ociChallenge{realm: realm}, time.Now())
+		require.Error(t, err, realm)
+	}
 }

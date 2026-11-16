@@ -1,15 +1,10 @@
 package oci
 
 import (
-	"net/http"
 	"strings"
 	"sync"
 	"unicode"
-
-	"gopkg.d7z.net/cache-proxy/pkg/proxy/internal/transport"
 )
-
-const userAgentReviewedOption = "user-agent-reviewed"
 
 func safePath(value string) bool {
 	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
@@ -21,13 +16,6 @@ func safePath(value string) bool {
 		}
 	}
 	return true
-}
-
-func cacheSupportsRequestUserAgent(client *transport.UpstreamHTTPClient, request *http.Request, options map[string]string) bool {
-	if client.UserAgentConfigured || !transport.IsBrowserRequest(request) {
-		return true
-	}
-	return options[userAgentReviewedOption] == "true" && !transport.VariesByUserAgent(options["vary"])
 }
 
 const referenceLockShardCount = 4096

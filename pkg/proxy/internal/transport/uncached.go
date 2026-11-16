@@ -23,7 +23,7 @@ func ForwardTransformed(ctx context.Context, client *Client, origin *url.URL, w 
 	if err != nil {
 		return 0, err
 	}
-	CopyReadRequestHeaders(upstream.Header, req.Header)
+	CopyUpstreamReadHeaders(upstream.Header, req.Header)
 	for _, key := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "Range", "If-Range"} {
 		upstream.Header.Del(key)
 	}
@@ -59,7 +59,7 @@ func ForwardTransformed(ctx context.Context, client *Client, origin *url.URL, w 
 	if rewriteErr != nil {
 		return 0, rewriteErr
 	}
-	CopyEndToEndHeaders(w.Header(), response.Header)
+	CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	for _, key := range []string{"Content-Length", "Content-Encoding", "Content-MD5", "Digest", "Content-Digest", "Repr-Digest", "Last-Modified", "ETag"} {
 		w.Header().Del(key)
 	}
@@ -87,7 +87,7 @@ func ForwardVerified(ctx context.Context, client *Client, target *url.URL, w htt
 	if err != nil {
 		return 0, err
 	}
-	CopyReadRequestHeaders(upstream.Header, header)
+	CopyUpstreamReadHeaders(upstream.Header, header)
 	upstream.Header.Set("Accept-Encoding", "identity")
 	response, err := client.DoRead(ctx, upstream, AdmissionForeground)
 	if err != nil {
@@ -109,7 +109,7 @@ func ForwardVerified(ctx context.Context, client *Client, target *url.URL, w htt
 	if _, err := spool.File.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
-	CopyEndToEndHeaders(w.Header(), response.Header)
+	CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	w.Header().Set("X-Cache", "BYPASS")
 	modified, _ := http.ParseTime(response.Header.Get("Last-Modified"))
 	recorder := &contentStatusWriter{ResponseWriter: w, status: http.StatusOK}

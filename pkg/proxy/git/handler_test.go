@@ -120,6 +120,7 @@ func TestGitReadOnlyProtocolSurface(t *testing.T) {
 		requests.Add(1)
 		require.Equal(t, http.MethodPost, request.Method)
 		require.Equal(t, "/repo/git-upload-pack", request.URL.Path)
+		require.Equal(t, int64(len("fetch")), request.ContentLength)
 		body, err := io.ReadAll(request.Body)
 		require.NoError(t, err)
 		require.Equal(t, "fetch", string(body))

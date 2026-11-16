@@ -51,7 +51,7 @@ func ResponseCacheable(response *http.Response, allowPrivate bool) bool {
 // WriteResponse forwards an upstream response and closes its body.
 func WriteResponse(w http.ResponseWriter, request *http.Request, response *http.Response, cacheResult string) int {
 	defer func() { _ = response.Body.Close() }()
-	CopyEndToEndHeaders(w.Header(), response.Header)
+	CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	w.Header().Set("X-Cache", cacheResult)
 	w.WriteHeader(response.StatusCode)
 	if request.Method != http.MethodHead {
@@ -64,7 +64,7 @@ func WriteResponse(w http.ResponseWriter, request *http.Request, response *http.
 // reader lease. The filename controls MIME inference when Content-Type is absent.
 func ServeStoredResponse(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, filename, cacheResult string) int {
 	defer object.Reader.Close()
-	CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
+	CopyDownstreamResponseHeaders(w.Header(), object.ResponseHeader())
 	w.Header().Del("X-Source-ETag")
 	w.Header().Del("X-Source-Last-Modified")
 	w.Header().Set("X-Cache", cacheResult)

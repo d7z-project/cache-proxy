@@ -128,7 +128,7 @@ func TestValidateServerConfigRejectsInvalidDownloadSettings(t *testing.T) {
 }
 
 func TestValidateServerConfigRejectsInvalidPublicURL(t *testing.T) {
-	for _, publicURL := range []string{"cache.example", "file:///tmp/cache", "https://cache.example/base?tenant=a", "https://cache.example/#status"} {
+	for _, publicURL := range []string{"cache.example", "file:///tmp/cache", "https://user:secret@cache.example", "https://cache.example/base?tenant=a", "https://cache.example/#status"} {
 		doc := testDocument(t.TempDir(), nil)
 		doc.Server.PublicURL = publicURL
 		normalizeDocument(doc)

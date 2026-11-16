@@ -55,20 +55,7 @@ func newHandler(origin *url.URL, workDir string, store *blobfs.Store, client *tr
 		Lifecycle: h.lifecycle,
 		Flights:   &h.flights,
 		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
-			target, err := transport.JoinURL(origin, transport.EscapePathSegments(requestPath), rawQuery)
-			if err != nil {
-				return nil, err
-			}
-			upstreamRequest, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
-			if err != nil {
-				return nil, err
-			}
-			for _, name := range []string{"Accept", "Accept-Encoding", "Cache-Control", "If-None-Match", "If-Modified-Since", "User-Agent"} {
-				for _, value := range header.Values(name) {
-					upstreamRequest.Header.Add(name, value)
-				}
-			}
-			return client.DoRead(ctx, upstreamRequest, transport.AdmissionForeground)
+			return client.DoReadPath(ctx, origin, method, requestPath, rawQuery, header, transport.AdmissionForeground)
 		},
 		CacheKey: func(requestPath string, request *http.Request) string {
 			return mavenKey(origin, requestPath, request)

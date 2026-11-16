@@ -57,7 +57,7 @@ func newHandler(instance, stateDir string, origin *url.URL, workDir string, stor
 		Store:           store,
 		Scheduler:       taskScheduler,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
-			return h.fetchUpstreamWithClass(ctx, http.MethodGet, requestPath, header, transport.AdmissionRefresh)
+			return h.client.DoReadPath(ctx, h.origin, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
 		Build: func(ctx context.Context, session *filerepo.RefreshSession, anchor filerepo.Anchor) error {
 			switch anchor.Path {
@@ -183,7 +183,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, header)
+	response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, "", header, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -243,7 +243,7 @@ func (h *handler) serveVerifiedObject(w http.ResponseWriter, request *http.Reque
 			upstreamHeader.Del("Range")
 			upstreamHeader.Del("If-Range")
 		}
-		response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, upstreamHeader)
+		response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, "", upstreamHeader, transport.AdmissionForeground)
 		if err != nil {
 			h.flights.Finish(key, flight, err)
 			transport.WriteError(w, http.StatusBadGateway)
@@ -292,7 +292,7 @@ func (h *handler) serveVerifiedObject(w http.ResponseWriter, request *http.Reque
 			serveFlatpakObject(w, request, object, "MISS")
 			return
 		}
-		transport.CopyEndToEndHeaders(w.Header(), header)
+		transport.CopyDownstreamResponseHeaders(w.Header(), header)
 		w.Header().Set("X-Cache", "MISS")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, reader)
@@ -370,7 +370,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		conditional.Set("If-None-Match", object.Header.Get("ETag"))
 		conditional.Set("If-Modified-Since", object.Header.Get("Last-Modified"))
 	}
-	response, fetchErr := h.fetchUpstream(h.lifecycle.Context(), cleaned, conditional)
+	response, fetchErr := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, "", conditional, transport.AdmissionForeground)
 	if fetchErr != nil || response.StatusCode >= 500 {
 		if response != nil {
 			_ = response.Body.Close()
@@ -424,7 +424,7 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, reader)
@@ -463,7 +463,7 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 		return
 	}
 	defer h.flights.Finish(key, flight, nil)
-	response, err := h.fetchUpstream(h.lifecycle.Context(), cleaned, request.Header)
+	response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, "", request.Header, transport.AdmissionForeground)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
 		return
@@ -497,27 +497,10 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest[:]), bytes.NewReader(body)); err != nil {
 		result = "BYPASS"
 	}
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Set("X-Cache", result)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
-}
-
-func (h *handler) fetchUpstream(ctx context.Context, cleaned string, header http.Header) (*http.Response, error) {
-	return h.fetchUpstreamWithClass(ctx, http.MethodGet, cleaned, header, transport.AdmissionForeground)
-}
-
-func (h *handler) fetchUpstreamWithClass(ctx context.Context, method, cleaned string, header http.Header, class transport.AdmissionClass) (*http.Response, error) {
-	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(cleaned), "")
-	if err != nil {
-		return nil, err
-	}
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	transport.CopyReadRequestHeaders(request.Header, header)
-	return h.client.DoRead(ctx, request, class)
 }
 
 func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) {
@@ -543,7 +526,7 @@ func flatpakRefKey(values ...string) string {
 
 func serveFlatpakObject(w http.ResponseWriter, request *http.Request, object *storeio.ResponseObject, result string) {
 	defer func() { _ = object.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), object.ResponseHeader())
+	transport.CopyDownstreamResponseHeaders(w.Header(), object.ResponseHeader())
 	w.Header().Set("X-Cache", result)
 	if object.Status != http.StatusOK {
 		w.WriteHeader(object.Status)

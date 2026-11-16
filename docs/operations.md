@@ -17,6 +17,23 @@ Without an explicit setting, HTTP transport follows the proxy environment
 variables. Git and OCI credentials are configured in `options.auth`; credential
 fields support environment variable expansion.
 
+### Upstream HTTP Boundary
+
+Upstream requests use the target URL's authority and a fixed User-Agent. The
+default is `cache-proxy`; set `transport.ua` to replace it for an instance.
+Ingress routing, client-address, tracing, browser-origin, connection, and method
+override headers are not forwarded.
+
+Credentials are limited to their authorized origin. Cross-origin redirects drop
+cookies, authorization, and protocol-specific credentials. Redirect and OCI
+authentication hosts use their own admission limits. Responses do not expose
+upstream proxy, CDN, routing, tracing, or internal control headers.
+
+Upstream, public, and display URLs reject embedded credentials. A
+`transport.proxy` URL may contain user information for proxy authentication but
+cannot contain a path, query, or fragment. Logs, status data, metrics, and HTTP
+client errors omit URL user information, queries, and fragments.
+
 ## Refresh and Rate Limits
 
 These refresh and cache maintenance policies apply to instances with caching
@@ -73,8 +90,7 @@ cancellation stops waiting, not background publication.
 
 Repository metadata is verified before an updated snapshot replaces the cached
 one. A failed refresh leaves the committed cache intact, subject to expiry and
-validation requirements. Debian `Valid-Until` remains effective. Unversioned
-repository URLs can still change between separate client requests.
+validation requirements. Debian `Valid-Until` remains effective.
 
 Debian repositories advertising `Acquire-By-Hash: yes` download and verify indexes
 on demand. Other Debian repositories cache complete metadata snapshots. This

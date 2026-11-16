@@ -24,6 +24,16 @@ import (
 
 const objectTenant = "objects"
 
+var representationRequestHeaders = []string{
+	"Accept",
+	"Accept-Charset",
+	"Accept-Encoding",
+	"Accept-Language",
+	"Want-Content-Digest",
+	"Want-Digest",
+	"Want-Repr-Digest",
+}
+
 type handlerConfig struct {
 	name        string
 	upstream    string
@@ -90,7 +100,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request) (int, stri
 		return h.forwardUpstream(w, request, cleaned), "BYPASS"
 	}
 
-	key := cacheKey(h.origin, cleaned, request)
+	key := h.cacheKey(cleaned, request)
 	if cached, err := storeio.OpenResponse(request.Context(), h.store, objectTenant, key); err == nil {
 		fresh := policy == "immutable" || proxyruntime.ResponseFresh(cached.Header, cached.ValidatedAt, h.client.RefreshInterval(0))
 		if proxyruntime.RequestForcesRevalidation(request) {
@@ -191,7 +201,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 		return status, "STALE", true
 	}
 	_ = cached.Reader.Close()
-	if response.StatusCode != http.StatusOK || !cacheable(request, response) {
+	if response.StatusCode != http.StatusOK || !h.cacheable(request, response) {
 		if response.StatusCode == http.StatusOK {
 			_ = storeio.DeleteResponse(h.lifecycle.Context(), h.store, objectTenant, key)
 		}
@@ -203,7 +213,7 @@ func (h *handler) revalidate(w http.ResponseWriter, request *http.Request, clean
 }
 
 func (h *handler) fill(w http.ResponseWriter, request *http.Request, cleaned string) (int, string) {
-	key := cacheKey(h.origin, cleaned, request)
+	key := h.cacheKey(cleaned, request)
 	flight, leader := h.flights.Begin(key)
 	if !leader {
 		waitErr := h.flights.Wait(request.Context(), flight)
@@ -238,7 +248,7 @@ func (h *handler) fill(w http.ResponseWriter, request *http.Request, cleaned str
 		h.flights.Finish(key, flight, err)
 		return localError(w, http.StatusBadGateway), "ERROR"
 	}
-	if response.StatusCode != http.StatusOK || !cacheable(request, response) {
+	if response.StatusCode != http.StatusOK || !h.cacheable(request, response) {
 		h.flights.Finish(key, flight, nil)
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
@@ -262,7 +272,7 @@ func (h *handler) streamAndStoreFlight(w http.ResponseWriter, request *http.Requ
 		h.flights.Finish(key, flight, err)
 		return transport.WriteResponse(w, request, response, "BYPASS")
 	}
-	transport.CopyEndToEndHeaders(w.Header(), headers)
+	transport.CopyDownstreamResponseHeaders(w.Header(), headers)
 	w.Header().Set("X-Cache", result)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, reader)
@@ -289,20 +299,7 @@ func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, 
 }
 
 func (h *handler) copyRequestHeaders(destination, source http.Header) {
-	for _, name := range []string{"Accept", "Accept-Encoding", "Authorization", "Cache-Control", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "Range", "Content-Type"} {
-		for _, value := range source.Values(name) {
-			destination.Add(name, value)
-		}
-	}
-	for _, name := range h.passHeaders {
-		destination.Del(name)
-		for _, value := range source.Values(name) {
-			destination.Add(name, value)
-		}
-	}
-	if destination.Get("User-Agent") == "" {
-		destination.Set("User-Agent", transport.DefaultUserAgent)
-	}
+	transport.CopyUpstreamReadHeaders(destination, source, h.passHeaders...)
 }
 
 func (h *handler) CloseContext(ctx context.Context) error {
@@ -310,20 +307,23 @@ func (h *handler) CloseContext(ctx context.Context) error {
 	return h.lifecycle.Close(ctx)
 }
 
-func cacheKey(origin *url.URL, cleaned string, request *http.Request) string {
+func (h *handler) cacheKey(cleaned string, request *http.Request) string {
 	hash := sha256.New()
-	for _, value := range []string{origin.String(), cleaned, request.URL.RawQuery} {
+	for _, value := range []string{h.origin.String(), cleaned, request.URL.RawQuery} {
 		_, _ = io.WriteString(hash, value)
 		_, _ = hash.Write([]byte{0})
 	}
-	names := make([]string, 0, len(request.Header))
-	for name := range request.Header {
-		canonical := http.CanonicalHeaderKey(name)
-		switch canonical {
-		case "Cache-Control", "Connection", "If-Match", "If-Modified-Since", "If-None-Match", "If-Range", "If-Unmodified-Since", "Pragma", "Range":
-			continue
+	names := make([]string, 0, len(representationRequestHeaders)+len(h.passHeaders))
+	seen := make(map[string]struct{}, cap(names))
+	for _, group := range [][]string{representationRequestHeaders, h.passHeaders} {
+		for _, name := range group {
+			canonical := http.CanonicalHeaderKey(name)
+			if _, exists := seen[canonical]; exists {
+				continue
+			}
+			seen[canonical] = struct{}{}
+			names = append(names, canonical)
 		}
-		names = append(names, canonical)
 	}
 	sort.Strings(names)
 	for _, name := range names {
@@ -337,15 +337,35 @@ func cacheKey(origin *url.URL, cleaned string, request *http.Request) string {
 	return path.Join("file", hex.EncodeToString(hash.Sum(nil)))
 }
 
-func cacheable(request *http.Request, response *http.Response) bool {
+func (h *handler) cacheable(request *http.Request, response *http.Response) bool {
 	requestControl := strings.ToLower(request.Header.Get("Cache-Control"))
-	return response.StatusCode == http.StatusOK && !strings.Contains(requestControl, "no-store") &&
-		transport.ResponseCacheable(response, false)
+	if response.StatusCode != http.StatusOK || request.Header.Get("Range") != "" || strings.Contains(requestControl, "no-store") ||
+		!transport.ResponseCacheable(response, false) {
+		return false
+	}
+	allowed := make(map[string]struct{}, len(representationRequestHeaders)+len(h.passHeaders)+3)
+	for _, group := range [][]string{representationRequestHeaders, h.passHeaders} {
+		for _, name := range group {
+			allowed[http.CanonicalHeaderKey(name)] = struct{}{}
+		}
+	}
+	for _, name := range []string{"Host", "User-Agent", "Via"} {
+		allowed[name] = struct{}{}
+	}
+	for _, value := range response.Header.Values("Vary") {
+		for field := range strings.SplitSeq(value, ",") {
+			field = http.CanonicalHeaderKey(strings.TrimSpace(field))
+			if _, represented := allowed[field]; !represented {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func serveStored(w http.ResponseWriter, request *http.Request, cached *storeio.ResponseObject, cacheResult string) int {
 	defer func() { _ = cached.Reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), cached.ResponseHeader())
+	transport.CopyDownstreamResponseHeaders(w.Header(), cached.ResponseHeader())
 	w.Header().Set("X-Cache", cacheResult)
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", mime.TypeByExtension(path.Ext(request.URL.Path)))

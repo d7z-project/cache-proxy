@@ -231,6 +231,7 @@ func TestNPMAuditIsTheOnlyReadOnlyPOST(t *testing.T) {
 		requests.Add(1)
 		require.Equal(t, http.MethodPost, request.Method)
 		require.Equal(t, "/-/npm/v1/security/advisories/bulk", request.URL.Path)
+		require.Equal(t, int64(len("audit")), request.ContentLength)
 		body, _ := io.ReadAll(request.Body)
 		require.Equal(t, "audit", string(body))
 		_, _ = io.WriteString(w, `{}`)

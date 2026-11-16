@@ -75,7 +75,7 @@ func TestCacheCoalescesAndRefreshesArtifacts(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			transport.CopyReadRequestHeaders(request.Header, header)
+			transport.CopyUpstreamReadHeaders(request.Header, header)
 			return upstream.Client().Do(request)
 		},
 	}

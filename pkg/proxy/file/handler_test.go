@@ -65,7 +65,7 @@ func TestHTTPFileCacheRevalidatesAndHandlesClientCondition(t *testing.T) {
 	require.Equal(t, http.StatusOK, first.Code)
 	require.Equal(t, "payload-v1", first.Body.String())
 
-	key := cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
+	key := handler.cacheKey("artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Eventually(t, func() bool {
 		reader, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, key)
 		if err == nil {
@@ -118,7 +118,7 @@ func TestFileNoStoreRefreshDropsPreviousReference(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 	req := httptest.NewRequest(http.MethodGet, "/artifact", nil)
-	key := cacheKey(h.origin, "artifact", req)
+	key := h.cacheKey("artifact", req)
 	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
 	req.Header.Set("Cache-Control", "no-cache")
 	w := httptest.NewRecorder()
@@ -237,7 +237,7 @@ func TestFileConcurrentRevalidationUsesSingleTransfer(t *testing.T) {
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Equal(t, http.StatusOK, first.Code)
-	key := cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
+	key := handler.cacheKey("artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Eventually(t, func() bool {
 		object, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, key)
 		if err != nil {
@@ -303,7 +303,7 @@ func TestFileCredentialsBypassAndCachedRangeUsesCompleteObject(t *testing.T) {
 	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/artifact", nil))
 	require.Equal(t, http.StatusOK, first.Code)
 	require.Eventually(t, func() bool {
-		object, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, cacheKey(handler.origin, "artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil)))
+		object, err := storeio.OpenResponse(context.Background(), handler.store, objectTenant, handler.cacheKey("artifact", httptest.NewRequest(http.MethodGet, "/artifact", nil)))
 		if err != nil {
 			return false
 		}
@@ -326,4 +326,118 @@ func TestFileCredentialsBypassAndCachedRangeUsesCompleteObject(t *testing.T) {
 	require.Equal(t, http.StatusOK, private.Code)
 	require.Equal(t, "BYPASS", private.Header().Get("X-Cache"))
 	require.Equal(t, int32(2), requests.Load())
+}
+
+func TestFileCacheIdentityUsesOnlyForwardedRepresentationHeaders(t *testing.T) {
+	t.Run("ignored ingress metadata", func(t *testing.T) {
+		var requests atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			requests.Add(1)
+			for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Request-ID", "Traceparent"} {
+				require.Empty(t, request.Header.Values(name), name)
+			}
+			w.Header().Set("Cache-Control", "max-age=3600")
+			_, _ = io.WriteString(w, "artifact")
+		}))
+		t.Cleanup(upstream.Close)
+		h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+
+		firstRequest := httptest.NewRequest(http.MethodGet, "/artifact", nil)
+		firstRequest.Header.Set("Forwarded", "for=192.0.2.1")
+		firstRequest.Header.Set("X-Request-ID", "first")
+		firstRequest.Header.Set("Traceparent", "00-first")
+		first := httptest.NewRecorder()
+		h.ServeHTTP(first, firstRequest)
+		require.Equal(t, http.StatusOK, first.Code)
+		key := h.cacheKey("artifact", firstRequest)
+		require.Eventually(t, func() bool {
+			object, err := storeio.OpenResponse(context.Background(), h.store, objectTenant, key)
+			if err == nil {
+				_ = object.Reader.Close()
+			}
+			return err == nil
+		}, time.Second, time.Millisecond)
+
+		secondRequest := httptest.NewRequest(http.MethodGet, "/artifact", nil)
+		secondRequest.Header.Set("Forwarded", "for=198.51.100.2")
+		secondRequest.Header.Set("X-Request-ID", "second")
+		secondRequest.Header.Set("Traceparent", "00-second")
+		require.Equal(t, key, h.cacheKey("artifact", secondRequest))
+		second := httptest.NewRecorder()
+		h.ServeHTTP(second, secondRequest)
+		require.Equal(t, "HIT", second.Header().Get("X-Cache"))
+		require.EqualValues(t, 1, requests.Load())
+	})
+
+	t.Run("configured representation header", func(t *testing.T) {
+		var requests atomic.Int32
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			requests.Add(1)
+			w.Header().Set("Cache-Control", "max-age=3600")
+			w.Header().Set("Vary", "X-Flavor")
+			_, _ = io.WriteString(w, request.Header.Get("X-Flavor"))
+		}))
+		t.Cleanup(upstream.Close)
+		h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+		h.passHeaders = []string{"X-Flavor"}
+
+		for _, flavor := range []string{"vanilla", "chocolate"} {
+			request := httptest.NewRequest(http.MethodGet, "/artifact", nil)
+			request.Header.Set("X-Flavor", flavor)
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, request)
+			require.Equal(t, flavor, response.Body.String())
+			require.Eventually(t, func() bool {
+				object, err := storeio.OpenResponse(context.Background(), h.store, objectTenant, h.cacheKey("artifact", request))
+				if err == nil {
+					_ = object.Reader.Close()
+				}
+				return err == nil
+			}, time.Second, time.Millisecond)
+		}
+		require.EqualValues(t, 2, requests.Load())
+	})
+}
+
+func TestFileUnrepresentedVaryBypassesCache(t *testing.T) {
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Vary", "X-Unrepresented")
+		_, _ = io.WriteString(w, "artifact")
+	}))
+	t.Cleanup(upstream.Close)
+	h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
+	for range 2 {
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/artifact", nil))
+		require.Equal(t, "BYPASS", response.Header().Get("X-Cache"))
+	}
+	require.EqualValues(t, 2, requests.Load())
+}
+
+func TestFileHistoricalCacheHeadersAreSanitized(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(upstream.Close)
+	h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "immutable"}})
+	request := httptest.NewRequest(http.MethodGet, "/artifact", nil)
+	key := h.cacheKey("artifact", request)
+	header := http.Header{
+		"Content-Type":  {"application/octet-stream"},
+		"Server":        {"historical-upstream"},
+		"Via":           {"historical-proxy"},
+		"X-Cache":       {"historical-hit"},
+		"X-Source-ETag": {`"internal"`},
+	}
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), http.StatusOK, header, "", strings.NewReader("artifact")))
+
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "artifact", response.Body.String())
+	require.Equal(t, "HIT", response.Header().Get("X-Cache"))
+	for _, name := range []string{"Server", "Via", "X-Source-ETag"} {
+		require.Empty(t, response.Header().Values(name), name)
+	}
 }

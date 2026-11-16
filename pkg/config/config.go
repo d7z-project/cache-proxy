@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,6 +50,9 @@ func parseHTTPURL(raw string) (*url.URL, error) {
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, errors.New("must use http or https")
+	}
+	if parsed.User != nil {
+		return nil, errors.New("must not contain user information")
 	}
 	return parsed, nil
 }
@@ -164,7 +168,7 @@ func ValidateTransport(transport *TransportConfig) error {
 	}
 	if rawProxy := strings.TrimSpace(transport.Proxy); rawProxy != "" {
 		parsed, err := url.Parse(rawProxy)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
 			return errors.New("proxy must be a valid absolute URL")
 		}
 		switch parsed.Scheme {
@@ -172,6 +176,12 @@ func ValidateTransport(transport *TransportConfig) error {
 		default:
 			return fmt.Errorf("proxy scheme %q is not supported", parsed.Scheme)
 		}
+		if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("proxy must not contain a path, query, or fragment")
+		}
+	}
+	if transport.UserAgent != "" && (strings.TrimSpace(transport.UserAgent) != transport.UserAgent || !httpguts.ValidHeaderFieldValue(transport.UserAgent)) {
+		return errors.New("ua must be a valid trimmed HTTP header value")
 	}
 	for _, field := range []struct {
 		name  string
@@ -268,6 +278,15 @@ func (i Instance) validateDeclaration() error {
 	}
 	if err := ValidateHTTPUpstream(i.Upstream); err != nil {
 		return fmt.Errorf("upstream: %w", err)
+	}
+	if displayURL := strings.TrimSpace(i.DisplayURL); displayURL != "" {
+		parsed, err := parseHTTPURL(displayURL)
+		if err != nil {
+			return fmt.Errorf("display_url: %w", err)
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("display_url must not contain a query or fragment")
+		}
 	}
 	if err := ValidateTransport(i.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)

@@ -63,7 +63,7 @@ func CaptureResponse(ctx context.Context, w http.ResponseWriter, response *http.
 		}
 	}()
 
-	proxyruntime.CopyEndToEndHeaders(w.Header(), response.Header)
+	proxyruntime.CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	w.Header().Set("X-Cache", cacheStatus)
 	w.WriteHeader(response.StatusCode)
 

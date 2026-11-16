@@ -63,7 +63,7 @@ func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, c
 		Lifecycle: h.lifecycle,
 		Flights:   &h.flights,
 		FetchUpstream: func(ctx context.Context, method, requestPath, rawQuery string, header http.Header) (*http.Response, error) {
-			return h.fetchUpstream(ctx, method, requestPath, rawQuery, header, transport.AdmissionForeground)
+			return h.client.DoReadPath(ctx, h.origin, method, requestPath, rawQuery, header, transport.AdmissionForeground)
 		},
 		CacheKey: h.artifactKey,
 	}
@@ -81,7 +81,7 @@ func newHandler(name, upstream, stateDir, workDir string, blobs *blobfs.Store, c
 		Scheduler:       taskScheduler,
 		KeepPrevious:    2,
 		Fetch: func(ctx context.Context, requestPath string, header http.Header) (*http.Response, error) {
-			return h.fetchUpstream(ctx, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
+			return h.client.DoReadPath(ctx, h.origin, http.MethodGet, requestPath, "", header, transport.AdmissionRefresh)
 		},
 		Build: h.buildSnapshot,
 	})
@@ -179,7 +179,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 	}()
 	header := request.Header.Clone()
 	header.Set("Accept-Encoding", "identity")
-	response, err := h.fetchUpstream(h.lifecycle.Context(), http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
+	response, err := h.client.DoReadPath(h.lifecycle.Context(), h.origin, http.MethodGet, cleaned, request.URL.RawQuery, header, transport.AdmissionForeground)
 	if err != nil {
 		h.flights.Finish(flightKey, flight, err)
 		finished = true
@@ -321,30 +321,12 @@ func isArtifactPath(cleaned string) bool {
 }
 
 func (h *handler) forwardUpstream(w http.ResponseWriter, request *http.Request, cleaned string) int {
-	response, err := h.fetchUpstream(request.Context(), request.Method, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
+	response, err := h.client.DoReadPath(request.Context(), h.origin, request.Method, cleaned, request.URL.RawQuery, request.Header, transport.AdmissionForeground)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway
 	}
 	return transport.WriteResponse(w, request, response, "BYPASS")
-}
-
-func (h *handler) fetchUpstream(ctx context.Context, method, requestPath, rawQuery string, headers http.Header, class transport.AdmissionClass) (*http.Response, error) {
-	target, err := transport.JoinURL(h.origin, transport.EscapePathSegments(requestPath), "")
-	if err != nil {
-		return nil, err
-	}
-	target.RawQuery = rawQuery
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range []string{"Accept", "Accept-Encoding", "Authorization", "Range", "If-None-Match", "If-Modified-Since", "User-Agent", "Cache-Control", "Pragma"} {
-		for _, value := range headers.Values(name) {
-			request.Header.Add(name, value)
-		}
-	}
-	return h.client.DoRead(ctx, request, class)
 }
 
 func (h *handler) CloseContext(ctx context.Context) error {

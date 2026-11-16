@@ -169,12 +169,12 @@ func (d indexDescriptor) matchesResponse(cached *storeio.ResponseObject, upstrea
 }
 
 func (h *handler) fetchIndex(ctx context.Context, method string, descriptor indexDescriptor, header http.Header) (*http.Response, error) {
-	response, err := h.fetchUpstream(ctx, method, descriptor.FetchPath, "", header, transport.AdmissionForeground)
+	response, err := h.client.DoReadPath(ctx, h.origin, method, descriptor.FetchPath, "", header, transport.AdmissionForeground)
 	if err != nil || descriptor.FallbackPath == "" || response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusForbidden {
 		return response, err
 	}
 	_ = response.Body.Close()
-	return h.fetchUpstream(ctx, method, descriptor.FallbackPath, "", header, transport.AdmissionForeground)
+	return h.client.DoReadPath(ctx, h.origin, method, descriptor.FallbackPath, "", header, transport.AdmissionForeground)
 }
 
 func (d indexDescriptor) verifyResponse(ctx context.Context, spooler *storeio.Spooler, response *http.Response) (*storeio.SpoolResult, error) {
@@ -307,7 +307,7 @@ func (h *handler) serveVerifiedIndex(w http.ResponseWriter, request *http.Reques
 }
 
 func serveIndexContent(w http.ResponseWriter, request *http.Request, body io.ReadSeeker, header http.Header, result string) int {
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Del("Content-Length")
 	w.Header().Set("X-Cache", result)
 	modified, _ := http.ParseTime(header.Get("Last-Modified"))

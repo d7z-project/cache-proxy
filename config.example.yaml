@@ -73,24 +73,22 @@ storage:
 #   enabled: starts the instance when true; default: false.
 #   cache: enables local content caching; default: true. Set false for forwarding
 #     through the same transport/proxy without cache reads, writes or refresh jobs.
-#     Request-local verification buffers and signing secrets are still used.
+#     Protocol validation and rewriting still apply.
 #   mode: required protocol implementation; no default.
-#   upstream: required single HTTP(S) upstream base URL; no default.
+#   upstream: required single HTTP(S) upstream base URL without credentials,
+#     query or fragment; no default.
 #   path: mount on server.bind; no default. Specify exactly one of path or bind.
 #   bind: dedicated listener; no default. Required instead of path for OCI.
-#   display_url: external OCI client address; default: derived from the listener.
+#   display_url: external OCI client address without credentials, query or
+#     fragment; default: derived from the listener.
 #   transport: optional instance HTTP settings; defaults illustrated below.
 #   options: optional mode-specific settings; defaults documented per mode below.
 #
 # refresh.interval controls repository background polling and mutable-object
-# freshness; minimum: 1s. For repository generations, polling uses this interval
-# plus a stable positive 0..min(interval/20, 1m) stagger. A 1h interval therefore
-# schedules the next check after 60 to 61 minutes; a busy scheduler may delay it.
-# A shorter upstream max-age does not accelerate idle polling.
-# Initial fills, required request validation, and missing objects
-# can trigger earlier work. Immutable objects, protocol expiry and signed URL
-# expiry retain their own policies. Shorter intervals trade more upstream traffic
-# for faster updates.
+# freshness; minimum: 1s. Repository polling is staggered and may be delayed by
+# other maintenance work. Initial fills, required validation, and missing objects
+# can contact the upstream before the next poll. Protocol expiry and upstream
+# cache policy still apply. Shorter intervals increase upstream traffic.
 # Git uses options.sync_interval instead. Each example below notes its mode's defaults.
 instances:
   # Debian standard, nested and flat repositories are detected automatically.
@@ -103,21 +101,18 @@ instances:
     upstream: https://deb.debian.org/debian
     refresh:
       interval: 30m # Repository metadata polling. Default: 15m.
-    # Shared HTTP transport settings. Omit this block to use the defaults below.
-    # Git mirror synchronization uses transport.proxy and options.operation_timeout.
-    # Git HTTP forwarding applies the shared HTTP settings below.
-    transport:
-      # Outbound proxy. Default: HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment behavior.
-      # Supported schemes: http, https, socks5, socks5h.
-      # proxy: http://127.0.0.1:7890
-      # Upstream User-Agent override. Default: cache-proxy; browser requests may
-      # retain their inbound User-Agent when no explicit override is configured.
-      # ua: cache-proxy
-      dial_timeout: 10s # Connection establishment timeout. Default: 3s.
-      header_timeout: 30s # Upstream header wait; excludes body and client validation wait. Default: 30s.
-      idle_body_timeout: 30s # Timeout for a blocked upstream body read. Default: 5m.
-      max_request_duration: 30m # Total HTTP request timeout. Default: 30m.
-      max_idle_conns: 64 # Maximum idle connections per transport. Default: 100.
+    # Optional shared HTTP transport settings:
+    # transport:
+    #   # Outbound proxy. Default: HTTP_PROXY/HTTPS_PROXY/NO_PROXY environment behavior.
+    #   # Supported schemes: http, https, socks5, socks5h. URL user information
+    #   # may carry proxy credentials; paths, queries and fragments are rejected.
+    #   proxy: http://proxy-user:proxy-password@127.0.0.1:7890
+    #   ua: cache-proxy # Fixed User-Agent for every upstream hop. Default: cache-proxy.
+    #   dial_timeout: 3s # Connection establishment timeout. Default: 3s.
+    #   header_timeout: 30s # Upstream response-header timeout. Default: 30s.
+    #   idle_body_timeout: 5m # Timeout for a blocked upstream body read. Default: 5m.
+    #   max_request_duration: 30m # Total HTTP request timeout. Default: 30m.
+    #   max_idle_conns: 100 # Maximum idle connections per transport. Default: 100.
 
   # Separate instance for security updates, with a shorter example polling interval.
   - name: debian-security
@@ -256,7 +251,10 @@ instances:
       # an explicit upstream freshness lifetime when this interval is omitted.
       interval: 30m
     options:
-      pass_headers: [] # Additional request headers allowed upstream. Default: [].
+      # Additional representation or credential headers sent upstream and
+      # included in the cache identity. Routing, tracing, connection, browser
+      # context and method-override headers are rejected. Default: [].
+      pass_headers: []
       # Default: no rules (passthrough). Last matching rule wins.
       # Match paths are relative to the instance root, without a leading slash.
       # http_cache follows HTTP caching policy; passthrough forwards directly;

@@ -36,7 +36,6 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 	defer h.stats.AddActiveDownload(h.name, config.ModeOCI, -1)
 
 	slog.Debug("oci fetch manifest", "instance", h.name, "repo", resolved.repo, "ref", resolved.ref, "upstream", h.upstream)
-	userAgent, _ := h.client.RequestUserAgent(req)
 	representation := req.Header.Get("Accept")
 	if representation == "" {
 		representation = manifestAccept
@@ -54,7 +53,7 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 			requestHeaders["If-Modified-Since"] = previousState.LastModified
 		}
 	}
-	response, err := h.readUpstream(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, requestHeaders)
+	response, err := h.readUpstream(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, requestHeaders)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -87,10 +86,6 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		return status, "REVALIDATED", bytes, serveErr
 	}
 	if response.StatusCode != http.StatusOK {
-		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
-		return status, "BYPASS", bytes, copyErr
-	}
-	if !h.client.UserAgentConfigured && transport.VariesByUserAgent(response.Header.Values("Vary")...) {
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr
 	}
@@ -160,7 +155,6 @@ func (h *handler) fetchManifest(ctx context.Context, w http.ResponseWriter, req 
 		"content-length":        strconv.FormatInt(size, 10),
 		"fetched-at":            fetchedAt.Format(time.RFC3339Nano),
 		"docker-content-digest": manifestDigest,
-		userAgentReviewedOption: "true",
 	}
 	manifestPath := h.manifestPath(manifestDigest)
 	info, statErr := h.store.StatObject(cacheCtx, h.name, manifestPath)
@@ -220,17 +214,11 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 		}
 	}()
 
-	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.readUpstream(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, userAgent, nil)
+	response, err := h.readUpstream(req.Context(), h.lifecycle.Context(), http.MethodGet, resolved.upstreamPath, req.URL.RawQuery, nil)
 	if err != nil {
 		return 0, "", 0, err
 	}
 	if response.StatusCode != http.StatusOK {
-		defer func() { _ = response.Body.Close() }()
-		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
-		return status, "BYPASS", bytes, copyErr
-	}
-	if !h.client.UserAgentConfigured && transport.VariesByUserAgent(response.Header.Values("Vary")...) {
 		defer func() { _ = response.Body.Close() }()
 		status, bytes, copyErr := h.copyRemote(w, req, response, "BYPASS")
 		return status, "BYPASS", bytes, copyErr

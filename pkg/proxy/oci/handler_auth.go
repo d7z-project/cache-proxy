@@ -76,11 +76,15 @@ func (h *handler) ociBearerToken(ctx context.Context, challenge ociChallenge) (s
 
 func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, now time.Time) (string, time.Time, error) {
 	tokenURL, err := url.Parse(challenge.realm)
-	if err != nil || tokenURL.Scheme == "" || tokenURL.Host == "" {
+	if err != nil || tokenURL.Scheme == "" || tokenURL.Host == "" || tokenURL.Opaque != "" || tokenURL.User != nil || tokenURL.Fragment != "" {
 		return "", time.Time{}, errors.New("invalid OCI token realm")
 	}
 	if tokenURL.Scheme != "http" && tokenURL.Scheme != "https" {
 		return "", time.Time{}, errors.New("oci token realm must use http or https")
+	}
+	upstreamURL, _ := url.Parse(h.upstream)
+	if upstreamURL != nil && upstreamURL.Scheme == "https" && tokenURL.Scheme != "https" {
+		return "", time.Time{}, errors.New("oci token realm must not downgrade HTTPS")
 	}
 	query := tokenURL.Query()
 	for _, key := range []string{"service", "scope"} {
@@ -93,21 +97,20 @@ func (h *handler) fetchBearerToken(ctx context.Context, challenge ociChallenge, 
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	request.Header.Set("User-Agent", h.client.UserAgent)
 	if basic := h.basicAuthorization(); basic != "" {
 		request.Header.Set("Authorization", basic)
 	}
 	request = transport.WithAdmission(ctx, request, transport.AdmissionForeground)
 	response, err := h.client.Do(request)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, transport.RedactHTTPError(err)
 	}
 	response.Body = h.client.WrapBody(response.Body)
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusTooManyRequests {
-		limitedURL := tokenURL.String()
+		limitedURL := transport.RedactedURL(tokenURL)
 		if response.Request != nil && response.Request.URL != nil {
-			limitedURL = response.Request.URL.String()
+			limitedURL = transport.RedactedURL(response.Request.URL)
 		}
 		return "", time.Time{}, h.upstreamGate.RateLimited(limitedURL, response.Header.Get("Retry-After"))
 	}

@@ -63,13 +63,13 @@ func ForwardReadTarget(ctx context.Context, client *Client, target *url.URL, wri
 	if err != nil {
 		return 0, err
 	}
-	CopyReadRequestHeaders(request.Header, header)
+	CopyUpstreamReadHeaders(request.Header, header)
 	response, err := client.DoRead(ctx, request, AdmissionForeground)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = response.Body.Close() }()
-	CopyEndToEndHeaders(writer.Header(), response.Header)
+	CopyDownstreamResponseHeaders(writer.Header(), response.Header)
 	writer.Header().Set("X-Cache", "BYPASS")
 	writer.WriteHeader(response.StatusCode)
 	if inbound.Method != http.MethodHead {
@@ -80,14 +80,10 @@ func ForwardReadTarget(ctx context.Context, client *Client, target *url.URL, wri
 	return response.StatusCode, nil
 }
 
-func CopyReadRequestHeaders(destination, source http.Header) {
-	CopyEndToEndHeaders(destination, source)
-	SanitizeReadRequestHeaders(destination)
-}
-
 func SanitizeReadRequestHeaders(header http.Header) {
 	for _, name := range []string{
-		"Content-Encoding", "Content-Length", "Content-MD5", "Content-Type", "Digest", "Expect",
+		"Content-Digest", "Content-Encoding", "Content-Language", "Content-Length", "Content-MD5",
+		"Content-Type", "Digest", "Expect", "Repr-Digest",
 	} {
 		header.Del(name)
 	}

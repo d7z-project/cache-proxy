@@ -3,7 +3,6 @@ package file
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -31,8 +30,8 @@ func Plan(_ context.Context, plan *proxyruntime.InstancePlan) error {
 		return err
 	}
 	for _, header := range options.PassHeaders {
-		if strings.TrimSpace(header) == "" || http.CanonicalHeaderKey(header) == "" {
-			return fmt.Errorf("instance %s: invalid pass header %q", plan.Name(), header)
+		if err := transport.ValidatePassHeader(header); err != nil {
+			return fmt.Errorf("instance %s: invalid pass header %q: %w", plan.Name(), header, err)
 		}
 	}
 	for index, rule := range options.Rules {

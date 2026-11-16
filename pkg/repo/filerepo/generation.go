@@ -766,7 +766,7 @@ func (h *GenerationManager) Current(rootID string) *Snapshot {
 }
 
 func copyHeaders(destination, source http.Header) {
-	proxyruntime.CopyEndToEndHeaders(destination, source)
+	proxyruntime.CopyDownstreamResponseHeaders(destination, source)
 	destination.Del("Content-Length")
 }
 

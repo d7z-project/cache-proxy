@@ -170,7 +170,7 @@ func (c *Cache) streamAndCache(w http.ResponseWriter, request *http.Request, res
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
 	defer func() { _ = reader.Close() }()
-	transport.CopyEndToEndHeaders(w.Header(), header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), header)
 	w.Header().Set("X-Cache", result)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, reader)

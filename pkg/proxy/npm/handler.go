@@ -583,7 +583,7 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 			return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 		}
 		defer func() { _ = reader.Close() }()
-		transport.CopyEndToEndHeaders(w.Header(), header)
+		transport.CopyDownstreamResponseHeaders(w.Header(), header)
 		w.Header().Set("X-Cache", "MISS")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, reader)
@@ -650,8 +650,8 @@ func (h *handler) proxyAudit(w http.ResponseWriter, request *http.Request, clean
 		transport.WriteError(w, http.StatusBadGateway)
 		return http.StatusBadGateway
 	}
-	transport.CopyEndToEndHeaders(upstreamRequest.Header, request.Header)
-	transport.SanitizeMethodOverrideHeaders(upstreamRequest.Header)
+	upstreamRequest.ContentLength = request.ContentLength
+	transport.CopyUpstreamPostHeaders(upstreamRequest.Header, request.Header, "Npm-Auth-Type", "Npm-Scope")
 	response, err := h.client.DoReadOnlyPost(request.Context(), upstreamRequest, transport.AdmissionForeground)
 	if err != nil {
 		transport.WriteError(w, http.StatusBadGateway)
@@ -742,7 +742,7 @@ func npmCacheable(request *http.Request, response *http.Response) bool {
 }
 
 func (p *transformedPackument) serve(w http.ResponseWriter, request *http.Request, result string) int {
-	transport.CopyEndToEndHeaders(w.Header(), p.header)
+	transport.CopyDownstreamResponseHeaders(w.Header(), p.header)
 	w.Header().Del("X-Source-ETag")
 	w.Header().Del("X-Source-Last-Modified")
 	w.Header().Set("X-Cache", result)

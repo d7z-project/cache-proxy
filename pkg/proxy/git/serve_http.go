@@ -48,11 +48,11 @@ func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Reques
 		proxytransport.WriteError(w, http.StatusBadGateway)
 		return
 	}
-	proxytransport.CopyEndToEndHeaders(proxyRequest.Header, request.Header)
 	if request.Method == http.MethodPost {
-		proxytransport.SanitizeMethodOverrideHeaders(proxyRequest.Header)
+		proxyRequest.ContentLength = request.ContentLength
+		proxytransport.CopyUpstreamPostHeaders(proxyRequest.Header, request.Header, "Git-Protocol")
 	} else {
-		proxytransport.SanitizeReadRequestHeaders(proxyRequest.Header)
+		proxytransport.CopyUpstreamReadHeaders(proxyRequest.Header, request.Header, "Git-Protocol")
 	}
 	if auth, ok := h.auth.(interface{ SetAuth(*http.Request) }); ok {
 		auth.SetAuth(proxyRequest)
@@ -83,7 +83,7 @@ func (h *gitHandler) forwardUpstream(w http.ResponseWriter, request *http.Reques
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
-	proxytransport.CopyEndToEndHeaders(w.Header(), response.Header)
+	proxytransport.CopyDownstreamResponseHeaders(w.Header(), response.Header)
 	w.Header().Set("X-Cache", "BYPASS")
 	w.WriteHeader(response.StatusCode)
 	if request.Method != http.MethodHead {

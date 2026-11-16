@@ -41,6 +41,7 @@ func newHandler(name string, block Block, expireAfter config.Expiration, store *
 	client := transport.NewUpstreamHTTPClient()
 	transport.ConfigureHTTPClient(client, name, block.Transport)
 	transport.ConfigureAdmission(client.Client, upstreamGate)
+	transport.ConfigureHeaderBoundary(client.Client, client.UserAgent)
 	return &handler{
 		name:            name,
 		upstream:        strings.TrimRight(block.Upstream, "/"),
@@ -405,8 +406,7 @@ func (h *handler) serveManifestState(ctx context.Context, w http.ResponseWriter,
 	}
 	defer func() { _ = reader.Close() }()
 	info := reader.Info()
-	if info.Options["docker-content-digest"] != state.ManifestDigest ||
-		!cacheSupportsRequestUserAgent(h.client, req, info.Options) {
+	if info.Options["docker-content-digest"] != state.ManifestDigest {
 		return 0, 0, errors.New("cached OCI manifest does not match committed state")
 	}
 	return h.writeResponse(w, req.Method, manifestResponseHeaders(state, cache), reader)
@@ -450,9 +450,6 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 	}
 	defer func() { _ = reader.Close() }()
 	info := reader.Info()
-	if !cacheSupportsRequestUserAgent(h.client, req, info.Options) {
-		return 0, 0, errors.New("cached OCI object has unknown or incompatible User-Agent variance")
-	}
 	headers := map[string]string{
 		"Content-Length": info.Options["content-length"],
 		"Content-Type":   info.Options["content-type"],
@@ -471,8 +468,7 @@ func (h *handler) serveCachedObject(ctx context.Context, w http.ResponseWriter, 
 }
 
 func (h *handler) serveUpstream(ctx context.Context, w http.ResponseWriter, req *http.Request, upstreamPath, cache string, headers map[string]string) (int, string, uint64, error) {
-	userAgent, _ := h.client.RequestUserAgent(req)
-	response, err := h.readUpstream(ctx, ctx, req.Method, upstreamPath, req.URL.RawQuery, userAgent, headers)
+	response, err := h.readUpstream(ctx, ctx, req.Method, upstreamPath, req.URL.RawQuery, headers)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -483,9 +479,8 @@ func (h *handler) serveUpstream(ctx context.Context, w http.ResponseWriter, req 
 
 func (h *handler) putObjectFromReader(ctx context.Context, objectPath string, body io.Reader, size int64, headers http.Header, extra map[string]string) error {
 	meta := map[string]string{
-		"content-type":          headers.Get("Content-Type"),
-		"fetched-at":            time.Now().UTC().Format(time.RFC3339Nano),
-		userAgentReviewedOption: "true",
+		"content-type": headers.Get("Content-Type"),
+		"fetched-at":   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if size >= 0 {
 		meta["content-length"] = strconv.FormatInt(size, 10)

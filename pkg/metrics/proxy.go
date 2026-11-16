@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -53,6 +54,9 @@ const maxUpstreamOrigins = 64
 
 // upstreamOrigin excludes resource paths and credentials from long-lived stats.
 func upstreamOrigin(rawURL string) string {
+	if !utf8.ValidString(rawURL) {
+		return "other"
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" {
 		return "other"

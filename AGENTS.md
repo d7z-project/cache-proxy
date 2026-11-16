@@ -23,6 +23,7 @@
 
 - 每个 instance 只有一个必填 HTTP(S) `upstream`，所有上游操作只读。辅助端点、重定向及持久化状态不能扩大允许访问的 origin 或凭据范围。
 - 普通请求仅允许无 body 的 `GET` / `HEAD`；只读 `POST` 仅限现有精确 Git/Cargo upload-pack 和 npm audit 端点。其他方法在认证、连接和状态变更前拒绝。
+- 回源使用目标 URL 的 authority 与实例固定 UA；协议只选择必要请求字段，最终传输边界清理客户端地址、反向代理、追踪、浏览器上下文和 method override。跨 origin 重定向不携带凭据或协议扩展；下游响应不暴露上游代理/CDN、追踪及内部控制字段。
 - 移除 method override 与不适用的实体 header；非 read 重定向不得改变 origin、method 或 path。
 - 路径先做一次 percent decode，再按逻辑 segment 校验；在 clean/join 前拒绝编码分隔符、反斜线、NUL 和父目录段。回源重新转义，缓存身份不依赖客户端 `RawPath`。
 - 保留透明 mode 的根、目录尾斜线、query 和安全 unknown 资源透传；Go/OCI 保持严格端点边界。内部 metadata 引用使用严格相对路径。
