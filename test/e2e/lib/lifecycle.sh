@@ -47,6 +47,11 @@ e2e_write_config() {
     -e "s|@OCI_URL@|$E2E_OCI_URL|g" \
     -e "s|@FIXTURE_URL@|$E2E_FIXTURE_URL|g" \
     "$E2E_ROOT/test/e2e/config/cache-proxy.yaml.in" >"$E2E_CONFIG_FILE"
+  e2e_runtime run --rm --network host \
+    --name "${E2E_RUN_ID}-validate-$RANDOM" \
+    --label "$E2E_OWNER_LABEL" \
+    -v "$E2E_CONFIG_FILE:/etc/cache-proxy.yaml:ro" \
+    "$E2E_PROXY_IMAGE" -config /etc/cache-proxy.yaml -validate
 }
 
 e2e_start_fixture() {
@@ -102,11 +107,11 @@ e2e_dump_diagnostics() {
   printf '\n===== E2E diagnostics (%s) =====\n' "$E2E_RUN_ID" >&2
   printf '%s\n' '--- proxy logs ---' >&2
   if [[ -n ${E2E_PROXY_CONTAINER:-} ]]; then
-    e2e_runtime logs "$E2E_PROXY_CONTAINER" >&2 2>/dev/null || true
+    e2e_runtime logs "$E2E_PROXY_CONTAINER" >&2 2>&1 || true
   fi
   printf '%s\n' '--- fixture logs ---' >&2
   if [[ -n ${E2E_FIXTURE_CONTAINER:-} ]]; then
-    e2e_runtime logs "$E2E_FIXTURE_CONTAINER" >&2 2>/dev/null || true
+    e2e_runtime logs "$E2E_FIXTURE_CONTAINER" >&2 2>&1 || true
   fi
   printf '%s\n' '--- owned resources ---' >&2
   e2e_runtime ps -a --filter "label=$E2E_OWNER_LABEL" >&2 2>/dev/null || true

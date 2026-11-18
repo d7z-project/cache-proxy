@@ -44,7 +44,7 @@ instances:
     enabled: true
     mode: oci
     bind: 127.0.0.1:@OCI_PORT@
-    display_url: @OCI_URL@
+    display_url: http://@OCI_URL@
     upstream: @FIXTURE_URL@/oci
   - name: npm
     enabled: true

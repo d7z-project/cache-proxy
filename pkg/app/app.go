@@ -348,6 +348,22 @@ func (a *App) Close(ctx context.Context) error {
 		return nil
 	}
 	a.ready.Store(false)
+
+	var joined error
+	closeServer := func(server *http.Server) {
+		if server == nil {
+			return
+		}
+		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			joined = errors.Join(joined, fmt.Errorf("close server %s: %w", server.Addr, err))
+		}
+	}
+	closeServer(a.mainServer)
+	for _, server := range a.bindServers {
+		closeServer(server)
+	}
+	slog.Info("network connections interrupted")
+
 	if a.requests != nil {
 		a.requests.BeginClose()
 	}
@@ -388,21 +404,6 @@ func (a *App) Close(ctx context.Context) error {
 	if a.status != nil {
 		stop("status", func() error { return a.status.stop(ctx) })
 	}
-
-	var joined error
-	closeServer := func(server *http.Server) {
-		if server == nil {
-			return
-		}
-		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-			joined = errors.Join(joined, fmt.Errorf("close server %s: %w", server.Addr, err))
-		}
-	}
-	closeServer(a.mainServer)
-	for _, server := range a.bindServers {
-		closeServer(server)
-	}
-	slog.Info("network connections interrupted")
 
 	stopGroup.Wait()
 	joined = errors.Join(joined, stopErr)
