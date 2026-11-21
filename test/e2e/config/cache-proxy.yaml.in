@@ -29,8 +29,6 @@ instances:
     bind: 127.0.0.1:@OPENVSX_PORT@
     display_url: @OPENVSX_URL@
     upstream: @FIXTURE_URL@
-    refresh:
-      interval: 1s
   - name: file
     enabled: true
     mode: file

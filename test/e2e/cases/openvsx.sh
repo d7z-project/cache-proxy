@@ -67,15 +67,23 @@ e2e_run_openvsx() {
     directory=$(curl --fail --silent --show-error "$1/vscode/unpkg/e2e/extension/1.0.0/extension")
     printf "%s" "$directory" | grep -Fq "$1/vscode/unpkg/e2e/extension/1.0.0/extension/module.wasm"
     ! printf "%s" "$directory" | grep -Fq "$2"
-    curl --fail --silent --show-error "$1/vscode/unpkg/e2e/extension/1.0.0/extension/module.wasm" |
-      grep -Fq e2e-openvsx-unpkg
+    curl --fail --silent --show-error --dump-header /tmp/unpkg.headers \
+      --output /tmp/unpkg.wasm "$1/vscode/unpkg/e2e/extension/1.0.0/extension/module.wasm"
+    grep -Fq e2e-openvsx-unpkg /tmp/unpkg.wasm || {
+      cat /tmp/unpkg.headers /tmp/unpkg.wasm >&2
+      exit 1
+    }
   ' "$E2E_OPENVSX_URL" "$E2E_FIXTURE_URL"
   local unpkg_before
   unpkg_before=$(e2e_fixture_count GET /openvsx-cdn/unpkg-module.wasm)
   ((unpkg_before == 1)) || e2e_fail 'Open VSX unpkg redirect did not reach the CDN fixture exactly once'
   e2e_client openvsx unpkg-warm "$E2E_TOOLS_IMAGE" '
-    curl --fail --silent --show-error "$1/vscode/unpkg/e2e/extension/1.0.0/extension/module.wasm" |
-      grep -Fq e2e-openvsx-unpkg
+    curl --fail --silent --show-error --dump-header /tmp/unpkg.headers \
+      --output /tmp/unpkg.wasm "$1/vscode/unpkg/e2e/extension/1.0.0/extension/module.wasm"
+    grep -Fq e2e-openvsx-unpkg /tmp/unpkg.wasm || {
+      cat /tmp/unpkg.headers /tmp/unpkg.wasm >&2
+      exit 1
+    }
   ' "$E2E_OPENVSX_URL"
   if [[ ${E2E_CACHE:-true} == true ]]; then
     e2e_assert_count_unchanged GET /openvsx-cdn/unpkg-module.wasm "$unpkg_before" 'Open VSX warm unpkg file was fetched again'
@@ -84,12 +92,20 @@ e2e_run_openvsx() {
   local upstream_ua
   upstream_ua=$(e2e_fixture_header GET /api/e2e/extension User-Agent)
   [[ $upstream_ua == cache-proxy* ]] || e2e_fail "Open VSX client bypassed the proxy: upstream UA was $upstream_ua"
+  local metadata_accept metadata_language
+  metadata_accept=$(e2e_fixture_header GET /api/e2e/extension Accept)
+  metadata_language=$(e2e_fixture_header GET /api/e2e/extension Accept-Language)
 
   e2e_set_fixture_state updated
   e2e_client openvsx refresh "$E2E_TOOLS_IMAGE" '
-    curl --fail --silent --show-error -H "Cache-Control: no-cache" "$1/api/e2e/extension" |
-      grep -Fq '"'"'"version"'"'"':"'"'"2.0.0"'"'"''
-  ' "$E2E_OPENVSX_URL"
+    curl --fail --silent --show-error -H "Cache-Control: no-cache" \
+      -H "Accept: $2" -H "Accept-Language: $3" \
+      --output /tmp/metadata.json "$1/api/e2e/extension"
+    grep -Fq "\"version\":\"2.0.0\"" /tmp/metadata.json || {
+      cat /tmp/metadata.json >&2
+      exit 1
+    }
+  ' "$E2E_OPENVSX_URL" "$metadata_accept" "$metadata_language"
   e2e_client openvsx update "$E2E_OPENVSX_CLIENT_IMAGE" '
     ovsx get e2e.extension --registryUrl "$1" --output /tmp/e2e.vsix
     grep -Fq e2e-openvsx-v2.0.0 /tmp/e2e.vsix
