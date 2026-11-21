@@ -197,7 +197,7 @@ func (h *handler) serveMetadataAnchor(w http.ResponseWriter, request *http.Reque
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, filerepo.DefaultMaxObject, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, filerepo.DefaultMaxObject)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)
@@ -261,11 +261,11 @@ func (h *handler) serveVerifiedObject(w http.ResponseWriter, request *http.Reque
 		}
 		header := response.Header.Clone()
 		header.Del("Content-Length")
-		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+		reader, err := storeio.StartStream(storeio.StreamConfig{
 			Body: response.Body, ObjectPath: key, Spooler: h.spooler, MaxBytes: maxBytes, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: verify,
 			StoreFn: func(ctx context.Context, body io.Reader) error {
-				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, digest, body)
+				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, flatpakTenant, key, h.origin.String(), response.Header, digest, body)
 			}, Done: func(err error) { h.flights.Finish(key, flight, err) },
 		})
 		if err != nil {
@@ -313,10 +313,6 @@ func (h *handler) serveVerifiedObject(w http.ResponseWriter, request *http.Reque
 func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cleaned string, freshness time.Duration) {
 	key := flatpakRefKey(h.origin.String(), cleaned, request.Header.Get("Accept-Encoding"))
 	object, _ := storeio.OpenResponse(request.Context(), h.store, flatpakTenant, key)
-	if object != nil && object.Status != http.StatusOK {
-		_ = object.Reader.Close()
-		object = nil
-	}
 	if object != nil && proxyruntime.ResponseFresh(object.Header, object.ValidatedAt, freshness) && !proxyruntime.RequestForcesRevalidation(request) {
 		serveFlatpakObject(w, request, object, "HIT")
 		return
@@ -412,10 +408,10 @@ func (h *handler) serveMutable(w http.ResponseWriter, request *http.Request, cle
 	}
 	header := response.Header.Clone()
 	header.Del("Content-Length")
-	reader, streamErr := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+	reader, streamErr := storeio.StartStream(storeio.StreamConfig{
 		Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, response.Header, "", body)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, flatpakTenant, key, h.origin.String(), response.Header, "", body)
 		},
 		Done: func(err error) { h.flights.Finish(flightKey, flight, err) },
 	})
@@ -494,7 +490,7 @@ func (h *handler) serveDescriptor(w http.ResponseWriter, request *http.Request, 
 	header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	header.Set("ETag", `"sha256-`+hex.EncodeToString(digest[:])+`"`)
 	result := "MISS"
-	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest[:]), bytes.NewReader(body)); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, flatpakTenant, key, h.origin.String(), header, hex.EncodeToString(digest[:]), bytes.NewReader(body)); err != nil {
 		result = "BYPASS"
 	}
 	transport.CopyDownstreamResponseHeaders(w.Header(), header)
@@ -528,12 +524,5 @@ func serveFlatpakObject(w http.ResponseWriter, request *http.Request, object *st
 	defer func() { _ = object.Reader.Close() }()
 	transport.CopyDownstreamResponseHeaders(w.Header(), object.ResponseHeader())
 	w.Header().Set("X-Cache", result)
-	if object.Status != http.StatusOK {
-		w.WriteHeader(object.Status)
-		if request.Method != http.MethodHead {
-			_, _ = io.Copy(w, object.Reader)
-		}
-		return
-	}
 	http.ServeContent(w, request, path.Base(request.URL.Path), object.ValidatedAt, object.Reader)
 }

@@ -163,7 +163,7 @@ func (h *handler) indexResponseKey(cachePath string) string {
 }
 
 func (d indexDescriptor) matchesResponse(cached *storeio.ResponseObject, upstream string) bool {
-	return cached.Status == http.StatusOK && cached.Origin == upstream &&
+	return cached.Origin == upstream &&
 		(d.Size < 0 || cached.WireSize == d.Size) &&
 		(d.SHA256 == "" || cached.SHA256 == d.SHA256)
 }
@@ -296,7 +296,7 @@ func (h *handler) serveVerifiedIndex(w http.ResponseWriter, request *http.Reques
 				continue
 			}
 			_, _ = spool.File.Seek(0, io.SeekStart)
-			if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, debIndexTenant, cacheKey, h.origin.String(), http.StatusOK, response.Header, spool.SHA256, spool.File); err != nil {
+			if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, debIndexTenant, cacheKey, h.origin.String(), response.Header, spool.SHA256, spool.File); err != nil {
 				slog.Warn("debian index cache publication failed", "path", descriptor.FetchPath, "err", err)
 			}
 		}

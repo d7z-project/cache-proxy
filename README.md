@@ -43,6 +43,7 @@ upstream and independently configurable caching and refresh settings.
 | `flatpak` | Flatpak/OSTree summaries, objects, and static deltas |
 | `oci` | OCI Distribution manifests and blobs |
 | `git` | Git repositories over smart HTTP |
+| `openvsx` | Open VSX Gallery queries, extension metadata, web UI, static resources, and VSIX downloads |
 
 Each instance uses one HTTP(S) upstream. Repository layouts are detected
 automatically; each `git` instance serves one repository. All upstream access
@@ -144,7 +145,9 @@ need. Validate your configuration before starting the service:
   in containers and allow only one writer process per backend.
 - Each instance requires a unique `name`, a `mode`, an `upstream`, and exactly one
   of `path` or `bind`. Set `enabled: true` to start it.
-- OCI requires a dedicated `bind`; set `display_url` to its public client address.
+- OCI and Open VSX require a dedicated `bind`; set `display_url` to the public
+  address routed to that listener. Open VSX must occupy the root of a dedicated
+  origin because its clients and web UI use root-relative endpoints.
 - `refresh.interval` controls repository background polling or mutable-object
   freshness. Git uses `options.sync_interval`.
 - `transport` configures outbound connections, proxies, and timeouts;
@@ -186,8 +189,10 @@ cache jobs. Refresh and retention settings are inactive; existing cache data is
 left untouched. Requests require a reachable upstream. Repository consistency
 comes from the upstream and native client checks, not a local snapshot.
 
-Connection reuse, rate limits, timeouts, protocol rewriting, verification, and
-read-only access controls remain active. The dashboard identifies uncached
+Connection reuse, rate limits, timeouts, required protocol rewriting, and
+read-only access controls remain active. Protocols that rewrite digest-bearing
+download URLs still verify those downloads; repository passthrough relies on the
+upstream and native client integrity checks. The dashboard identifies uncached
 instances.
 
 ## Client Setup
@@ -235,6 +240,19 @@ example configuration's Docker Hub upstream:
 docker pull registry.example.com/library/alpine:latest
 ```
 
+For Open VSX, expose its dedicated listener at a separate origin such as
+`https://openvsx.example.com`. Point `OVSX_REGISTRY_URL` at that origin for the
+`ovsx` client:
+
+```bash
+OVSX_REGISTRY_URL=https://openvsx.example.com ovsx get publisher.extension
+```
+
+VS Code-compatible products can use the `extensionsGallery` object shown on the
+dashboard. Gallery APIs, the Open VSX web UI, first-party resources, and package
+download redirects remain behind cache-proxy; external project or homepage links
+are left as ordinary links.
+
 ## Monitoring and Support
 
 Use the dashboard at `/` to inspect instances, storage usage, network activity,
@@ -253,7 +271,6 @@ build or image tag, mode, configuration without credentials, and relevant logs.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test requirements.
-Pull requests should include tests for the affected behavior.
 
 ## License
 

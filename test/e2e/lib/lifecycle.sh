@@ -22,16 +22,21 @@ e2e_init_lifecycle() {
   while [[ $E2E_OCI_PORT == "$E2E_FIXTURE_PORT" || $E2E_OCI_PORT == "$E2E_PROXY_PORT" ]]; do
     E2E_OCI_PORT=$(e2e_find_port)
   done
+  E2E_OPENVSX_PORT=$(e2e_find_port)
+  while [[ $E2E_OPENVSX_PORT == "$E2E_FIXTURE_PORT" || $E2E_OPENVSX_PORT == "$E2E_PROXY_PORT" || $E2E_OPENVSX_PORT == "$E2E_OCI_PORT" ]]; do
+    E2E_OPENVSX_PORT=$(e2e_find_port)
+  done
 
   E2E_FIXTURE_URL="http://127.0.0.1:$E2E_FIXTURE_PORT"
   E2E_PROXY_URL="http://127.0.0.1:$E2E_PROXY_PORT"
   E2E_OCI_URL="127.0.0.1:$E2E_OCI_PORT"
+  E2E_OPENVSX_URL="http://127.0.0.1:$E2E_OPENVSX_PORT"
   E2E_FIXTURE_CONTAINER="${E2E_RUN_ID}-fixture"
   E2E_PROXY_CONTAINER="${E2E_RUN_ID}-proxy"
   E2E_BACKEND_VOLUME="${E2E_RUN_ID}-backend"
   E2E_CONFIG_FILE="$E2E_WORK_DIR/cache-proxy.yaml"
-  export E2E_FIXTURE_PORT E2E_PROXY_PORT E2E_OCI_PORT
-  export E2E_FIXTURE_URL E2E_PROXY_URL E2E_OCI_URL
+  export E2E_FIXTURE_PORT E2E_PROXY_PORT E2E_OCI_PORT E2E_OPENVSX_PORT
+  export E2E_FIXTURE_URL E2E_PROXY_URL E2E_OCI_URL E2E_OPENVSX_URL
   export E2E_FIXTURE_CONTAINER E2E_PROXY_CONTAINER E2E_BACKEND_VOLUME E2E_CONFIG_FILE
 
   e2e_runtime volume create --label "$E2E_OWNER_LABEL" "$E2E_BACKEND_VOLUME" >/dev/null
@@ -45,6 +50,8 @@ e2e_write_config() {
     -e "s|@PROXY_URL@|$E2E_PROXY_URL|g" \
     -e "s|@OCI_PORT@|$E2E_OCI_PORT|g" \
     -e "s|@OCI_URL@|$E2E_OCI_URL|g" \
+    -e "s|@OPENVSX_PORT@|$E2E_OPENVSX_PORT|g" \
+    -e "s|@OPENVSX_URL@|$E2E_OPENVSX_URL|g" \
     -e "s|@FIXTURE_URL@|$E2E_FIXTURE_URL|g" \
     "$E2E_ROOT/test/e2e/config/cache-proxy.yaml.in" >"$E2E_CONFIG_FILE"
   e2e_runtime run --rm --network host \
@@ -79,6 +86,9 @@ e2e_start_proxy() {
     -v "$E2E_CONFIG_FILE:/etc/cache-proxy.yaml:ro" \
     "$E2E_PROXY_IMAGE" -config /etc/cache-proxy.yaml >/dev/null
   e2e_wait_http "${E2E_RUN_ID}-wait-proxy" "$E2E_PROXY_URL/-/status/summary"
+  if [[ ${E2E_OPENVSX_SELECTED:-0} == 1 ]]; then
+    e2e_wait_http "${E2E_RUN_ID}-wait-openvsx" "$E2E_OPENVSX_URL/"
+  fi
   if [[ ${E2E_OFFLINE:-0} != 1 ]]; then
     e2e_wait_http "${E2E_RUN_ID}-wait-oci" "http://$E2E_OCI_URL/v2/"
   fi
@@ -129,7 +139,7 @@ e2e_cleanup() {
   if [[ -n ${E2E_BACKEND_VOLUME:-} ]]; then
     e2e_runtime volume rm -f "$E2E_BACKEND_VOLUME" >/dev/null 2>&1 || true
   fi
-  for image in "$E2E_PROXY_IMAGE" "$E2E_FIXTURE_IMAGE" "$E2E_TOOLS_IMAGE" "$E2E_MAVEN_CLIENT_IMAGE" "$E2E_FLATPAK_CLIENT_IMAGE"; do
+  for image in "$E2E_PROXY_IMAGE" "$E2E_FIXTURE_IMAGE" "$E2E_TOOLS_IMAGE" "$E2E_MAVEN_CLIENT_IMAGE" "$E2E_FLATPAK_CLIENT_IMAGE" "$E2E_OPENVSX_CLIENT_IMAGE"; do
     e2e_runtime image rm -f "$image" >/dev/null 2>&1 || true
   done
   rm -rf "$E2E_WORK_DIR"

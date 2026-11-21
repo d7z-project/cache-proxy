@@ -146,15 +146,12 @@ type contextReader struct {
 
 type countingReader struct {
 	reader io.Reader
-	count  int64
 	read   bool
 }
 
 func (r *countingReader) Read(p []byte) (int, error) {
 	r.read = true
-	n, err := r.reader.Read(p)
-	r.count += int64(n)
-	return n, err
+	return r.reader.Read(p)
 }
 
 func (r *contextReader) Read(p []byte) (int, error) {

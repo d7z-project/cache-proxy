@@ -408,6 +408,29 @@ func TestJoinURLPreservesEscapingAndQuery(t *testing.T) {
 	require.False(t, strings.Contains(RedactedURL(target), "a=1"))
 }
 
+func TestReadNoRedirectReturnsFirstResponse(t *testing.T) {
+	var followed atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/final" {
+			followed.Store(true)
+			_, _ = io.WriteString(w, "final")
+			return
+		}
+		http.Redirect(w, request, "/final", http.StatusFound)
+	}))
+	defer upstream.Close()
+	client, err := NewClient("test", "openvsx", nil, nil, metrics.NewStats(prometheus.NewRegistry()))
+	require.NoError(t, err)
+	request, err := http.NewRequest(http.MethodGet, upstream.URL+"/start", nil)
+	require.NoError(t, err)
+	response, err := client.DoReadNoRedirect(context.Background(), request, AdmissionForeground)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusFound, response.StatusCode)
+	require.Equal(t, "/final", response.Header.Get("Location"))
+	require.False(t, followed.Load())
+}
+
 func TestCopyDownstreamResponseHeadersRemovesPrivateAndConnectionHeaders(t *testing.T) {
 	source := http.Header{
 		"Connection":          {"keep-alive, X-Internal"},

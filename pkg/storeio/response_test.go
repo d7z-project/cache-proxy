@@ -18,7 +18,7 @@ func TestResponseRoundTripAndTouch(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	ctx := context.Background()
-	require.NoError(t, PutResponse(ctx, store, "maven", "refs/a", "https://repo.test", http.StatusOK,
+	require.NoError(t, PutResponse(ctx, store, "maven", "refs/a", "https://repo.test",
 		http.Header{"Etag": {`"one"`}}, "abc", strings.NewReader("payload")))
 
 	object, err := OpenResponse(ctx, store, "maven", "refs/a")
@@ -46,7 +46,7 @@ func TestResponseTimingSurvivesPublicationAndValidation(t *testing.T) {
 	response := &http.Response{Header: http.Header{"Age": {"10"}, "Cache-Control": {"max-age=60"}}}
 	RecordResponseTiming(response, now.Add(-25*time.Second), now.Add(-20*time.Second))
 	ctx := WithResponseTiming(context.Background(), response)
-	require.NoError(t, PutResponse(ctx, store, "test", "ref", "https://upstream.test", http.StatusOK, response.Header, "", strings.NewReader("body")))
+	require.NoError(t, PutResponse(ctx, store, "test", "ref", "https://upstream.test", response.Header, "", strings.NewReader("body")))
 	object, err := OpenResponse(ctx, store, "test", "ref")
 	require.NoError(t, err)
 	require.Equal(t, now.Add(-20*time.Second), object.ValidatedAt)
@@ -71,7 +71,7 @@ func TestRestrictedValidationKeepsOnlyActiveReader(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	ctx := context.Background()
 	for _, header := range []http.Header{{"Cache-Control": {"no-store"}}, {"Cache-Control": {"private"}}, {"Vary": {"*"}}} {
-		require.NoError(t, PutResponse(ctx, store, "test", "ref", "https://example.test", http.StatusOK, nil, "", strings.NewReader("verified")))
+		require.NoError(t, PutResponse(ctx, store, "test", "ref", "https://example.test", nil, "", strings.NewReader("verified")))
 		object, err := RevalidateResponse(ctx, store, "test", "ref", header)
 		require.NoError(t, err)
 		require.NotNil(t, object)
@@ -84,19 +84,27 @@ func TestRestrictedValidationKeepsOnlyActiveReader(t *testing.T) {
 	}
 }
 
-func TestResponseTouchPreservesRetentionAndDeleteVerifiesLogicalKey(t *testing.T) {
+func TestResponseTouchRefreshesExpiryAndDeleteVerifiesLogicalKey(t *testing.T) {
 	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	ctx := context.Background()
 	key := "refs/retained"
-	require.NoError(t, putResponseWithRetention(ctx, store, "responses", key, "https://repo.test", http.StatusOK, nil, "", time.Hour, strings.NewReader("body")))
+	require.NoError(t, putResponseWithRetention(ctx, store, "responses", key, "https://repo.test", nil, "", time.Hour, strings.NewReader("body")))
 	for range 2 {
 		require.NoError(t, TouchResponse(ctx, store, "responses", key, nil))
 		object, err := OpenResponse(ctx, store, "responses", key)
 		require.NoError(t, err)
-		require.WithinDuration(t, time.Now().Add(time.Hour), object.DeleteAt, time.Second)
 		require.NoError(t, object.Reader.Close())
+		info, err := store.StatObject(ctx, "responses", responsePath(key))
+		require.NoError(t, err)
+		metadata, err := decodeResponseMetadata(info.Options["metadata"])
+		require.NoError(t, err)
+		retainedAt := metadata.CreatedAt
+		if metadata.ValidatedAt.After(retainedAt) {
+			retainedAt = metadata.ValidatedAt
+		}
+		require.WithinDuration(t, time.Now().Add(time.Hour), retainedAt.Add(metadata.Retention), time.Second)
 	}
 
 	objectPath := responsePath(key)
@@ -133,7 +141,7 @@ func TestResponseMetadataValidation(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, store.Close()) })
 			ctx := context.Background()
-			require.NoError(t, PutResponse(ctx, store, "test", "ref", "https://example.test", http.StatusOK, nil, "", strings.NewReader("body")))
+			require.NoError(t, PutResponse(ctx, store, "test", "ref", "https://example.test", nil, "", strings.NewReader("body")))
 			info, err := store.StatObject(ctx, "test", responsePath("ref"))
 			require.NoError(t, err)
 			var metadata map[string]any
@@ -160,7 +168,7 @@ func TestResponseStorageBoundsMetadata(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	ctx := context.Background()
 	key := strings.Repeat("x", maxResponseMetadataSize)
-	err = PutResponse(ctx, store, "test", key, "https://example.test", http.StatusOK, nil, "", strings.NewReader("body"))
+	err = PutResponse(ctx, store, "test", key, "https://example.test", nil, "", strings.NewReader("body"))
 	require.ErrorContains(t, err, "metadata exceeds")
 	_, err = store.StatObject(ctx, "test", responsePath(key))
 	require.Error(t, err)
@@ -178,7 +186,7 @@ func TestResponseHeaderIsIndependent(t *testing.T) {
 }
 
 func FuzzResponseMetadata(f *testing.F) {
-	f.Add(`{"status":200,"origin":"https://example.test","validated_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z","delete_at":"2026-02-01T00:00:00Z","retention":3600000000000,"logical_key":"ref"}`)
+	f.Add(`{"origin":"https://example.test","validated_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z","retention":3600000000000,"logical_key":"ref"}`)
 	f.Add(`null`)
 	f.Add(`{} {}`)
 	f.Fuzz(func(t *testing.T, raw string) {

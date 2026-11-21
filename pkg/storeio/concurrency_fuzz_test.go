@@ -184,7 +184,7 @@ func FuzzParallelStreams(f *testing.F) {
 				declaredSize = &expectedSize
 			}
 			upstreams[i] = &chunkedReadCloser{reader: bytes.NewReader(body), chunkSize: chunkSize}
-			reader, err := StartStream(context.Background(), StreamConfig{
+			reader, err := StartStream(StreamConfig{
 				Body:         upstreams[i],
 				ObjectPath:   fmt.Sprintf("object-%d", i),
 				Spooler:      spooler,

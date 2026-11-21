@@ -80,7 +80,7 @@ func TestServeStoredResponse(t *testing.T) {
 	header.Set("X-Source-ETag", `"upstream"`)
 	header.Set("X-Source-Last-Modified", "Mon, 02 Nov 2026 00:00:00 GMT")
 	header.Set("Cache-Control", "public, max-age=60")
-	require.NoError(t, storeio.PutResponse(ctx, store, "test", "response", "https://example.test", http.StatusOK, header, "", strings.NewReader("payload")))
+	require.NoError(t, storeio.PutResponse(ctx, store, "test", "response", "https://example.test", header, "", strings.NewReader("payload")))
 	for _, test := range []struct {
 		name, method, header, value string
 		status                      int

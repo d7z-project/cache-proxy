@@ -119,7 +119,7 @@ func TestFileNoStoreRefreshDropsPreviousReference(t *testing.T) {
 	h := newTestHandler(t, upstream.URL, []Rule{{Match: "**", Policy: "http_cache"}})
 	req := httptest.NewRequest(http.MethodGet, "/artifact", nil)
 	key := h.cacheKey("artifact", req)
-	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
 	req.Header.Set("Cache-Control", "no-cache")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -430,7 +430,7 @@ func TestFileHistoricalCacheHeadersAreSanitized(t *testing.T) {
 		"X-Cache":       {"historical-hit"},
 		"X-Source-ETag": {`"internal"`},
 	}
-	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), http.StatusOK, header, "", strings.NewReader("artifact")))
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, objectTenant, key, h.origin.String(), header, "", strings.NewReader("artifact")))
 
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)

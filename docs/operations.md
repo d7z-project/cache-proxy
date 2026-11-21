@@ -9,8 +9,9 @@ access controls at your ingress. `metrics.token` protects only the Prometheus
 endpoint, not the dashboard or proxy routes. Upstream credentials authenticate
 cache-proxy to the upstream; they do not restrict client access.
 
-Set `server.public_url` to the public address behind a reverse proxy. OCI uses a
-dedicated listener and its own `display_url`.
+Set `server.public_url` to the public address behind a reverse proxy. OCI and
+Open VSX use dedicated listeners and their own `display_url`; Open VSX requires
+the complete display origin to route to that listener.
 
 Use `transport.proxy` for an outbound HTTP, HTTPS, SOCKS5, or SOCKS5H proxy.
 Without an explicit setting, HTTP transport follows the proxy environment
@@ -51,12 +52,13 @@ polling interval or mutable-object freshness setting. The minimum is `1s`.
 | npm, PyPI, Cargo, Go and Maven mutable metadata; Flatpak mutable refs | 1m |
 | OCI tags | 2m |
 | Maven SNAPSHOT files | 5m |
+| Open VSX metadata and transformed web resources | 10m |
 | Git mirror synchronization, using `options.sync_interval` | 5m |
 
-Repository polling is staggered: a `1h` interval schedules the next check 60 to
-61 minutes after the latest successful validation or publication. A busy service
-may delay the check. The interval applies to each discovered repository root, not
-the instance's combined event stream.
+Repository polling is staggered with a small, stable positive offset for each
+discovered repository root. The interval is measured from the latest successful
+validation or publication, and a busy service may delay the check. It does not
+describe the instance's combined event stream.
 
 Background polling is independent of HTTP freshness. Shorter upstream freshness
 does not accelerate an idle poll, but a client requiring validation, an initial
@@ -80,7 +82,8 @@ Tune both refresh intervals and download limits to upstream quotas.
 Cached content can remain available during transient failures when request,
 upstream, and protocol policies allow reuse. Offline access is limited to content
 already cached and eligible for reuse; cache-proxy is not a complete upstream
-mirror. Responses marked `no-store` are not retained.
+mirror. Only protocol-approved successful representations are stored; upstream
+error responses and responses marked `no-store` are not retained.
 
 Explicit `no-cache` or `max-age=0` requests require validation even when content
 is cached. APT normally requests index validation; offline use requires client

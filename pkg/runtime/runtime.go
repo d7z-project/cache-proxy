@@ -57,6 +57,7 @@ type Entry struct {
 	Path         string
 	Bind         string
 	DisplayURL   string
+	OwnsBindRoot bool
 	Runtime      Instance
 	Ctx          context.Context
 	Cancel       context.CancelFunc
@@ -243,14 +244,22 @@ func (i *InstancePlan) RejectOptions() error {
 }
 
 func (i *InstancePlan) BindPath(pathValue string, runtime Instance) error {
-	if err := i.bind(pathValue, "", runtime); err != nil {
+	if err := i.bind(pathValue, "", false, runtime); err != nil {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
 }
 
 func (i *InstancePlan) BindAddr(addr string, runtime Instance) error {
-	if err := i.bind("", addr, runtime); err != nil {
+	if err := i.bind("", addr, false, runtime); err != nil {
+		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
+	}
+	return nil
+}
+
+// BindAddrRoot binds a dedicated address whose handler owns the root path.
+func (i *InstancePlan) BindAddrRoot(addr string, runtime Instance) error {
+	if err := i.bind("", addr, true, runtime); err != nil {
 		return fmt.Errorf("instance %s: %w", i.entry.Name, err)
 	}
 	return nil
@@ -260,7 +269,7 @@ func (i *InstancePlan) SetHomeDisplayURL(url string) {
 	i.entry.DisplayURL = strings.TrimSpace(url)
 }
 
-func (i *InstancePlan) bind(pathValue, addr string, runtime Instance) error {
+func (i *InstancePlan) bind(pathValue, addr string, ownsBindRoot bool, runtime Instance) error {
 	if !i.entry.Enabled {
 		return nil
 	}
@@ -298,6 +307,7 @@ func (i *InstancePlan) bind(pathValue, addr string, runtime Instance) error {
 		}
 		i.planContext.bindOwners[trimmed] = i.entry.Name
 		i.entry.Bind = trimmed
+		i.entry.OwnsBindRoot = ownsBindRoot
 	}
 	i.entry.Runtime = runtime
 	i.bound = true

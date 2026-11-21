@@ -46,7 +46,7 @@ func TestStreamAbandonedFallbackReleasesResources(t *testing.T) {
 			}
 			budget := proxyruntime.NewSpoolBudget(1024)
 			lifecycle := NewLifecycle()
-			reader, err := StartStream(context.Background(), StreamConfig{
+			reader, err := StartStream(StreamConfig{
 				Body: body, ObjectPath: "object", Spooler: NewSpooler(t.TempDir(), limit, budget), Lifecycle: lifecycle,
 				StoreFn: func(context.Context, io.Reader) error { t.Error("incomplete body was published"); return nil },
 			})

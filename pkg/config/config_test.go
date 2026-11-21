@@ -114,6 +114,12 @@ func TestSelectModeValidatesCommonDeclaration(t *testing.T) {
 		{name: "upstream user information", instance: Instance{Name: "x", Mode: ModeNPM, Path: "/x", Upstream: "https://user:secret@example.test"}, contains: "user information"},
 		{name: "display user information", instance: Instance{Name: "x", Mode: ModeOCI, Bind: ":5000", DisplayURL: "https://user:secret@example.test", Upstream: "https://example.test"}, contains: "display_url"},
 		{name: "display query", instance: Instance{Name: "x", Mode: ModeOCI, Bind: ":5000", DisplayURL: "https://example.test?token=secret", Upstream: "https://example.test"}, contains: "query or fragment"},
+		{name: "openvsx path mount", instance: Instance{Name: "x", Mode: ModeOpenVSX, Path: "/openvsx", DisplayURL: "https://openvsx.proxy.test", Upstream: "https://open-vsx.org"}, contains: "requires bind"},
+		{name: "openvsx missing display URL", instance: Instance{Name: "x", Mode: ModeOpenVSX, Bind: ":5004", Upstream: "https://open-vsx.org"}, contains: "display_url"},
+		{name: "openvsx display path", instance: Instance{Name: "x", Mode: ModeOpenVSX, Bind: ":5004", DisplayURL: "https://proxy.test/openvsx", Upstream: "https://open-vsx.org"}, contains: "root origins"},
+		{name: "openvsx upstream path", instance: Instance{Name: "x", Mode: ModeOpenVSX, Bind: ":5004", DisplayURL: "https://proxy.test", Upstream: "https://open-vsx.org/registry"}, contains: "root origins"},
+		{name: "openvsx origin loop", instance: Instance{Name: "x", Mode: ModeOpenVSX, Bind: ":5004", DisplayURL: "https://open-vsx.org", Upstream: "https://open-vsx.org"}, contains: "different origins"},
+		{name: "openvsx default port origin loop", instance: Instance{Name: "x", Mode: ModeOpenVSX, Bind: ":5004", DisplayURL: "https://open-vsx.org:443", Upstream: "https://open-vsx.org"}, contains: "different origins"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -121,6 +127,15 @@ func TestSelectModeValidatesCommonDeclaration(t *testing.T) {
 			require.ErrorContains(t, err, test.contains)
 		})
 	}
+}
+
+func TestSelectOpenVSXMode(t *testing.T) {
+	selected, err := (Instance{
+		Name: "openvsx", Mode: ModeOpenVSX, Bind: "127.0.0.1:5004",
+		DisplayURL: "https://openvsx.proxy.test", Upstream: "https://open-vsx.org/",
+	}).SelectMode()
+	require.NoError(t, err)
+	require.Equal(t, ModeOpenVSX, selected.Mode)
 }
 
 func TestValidateTransportProxyAndUserAgent(t *testing.T) {

@@ -83,6 +83,8 @@ ENTRYPOINT ["/usr/local/bin/e2e-fixture"]
 FROM fixture-runtime AS fixture-file
 COPY --from=file /out/ /srv/fixture/
 
+FROM fixture-runtime AS fixture-openvsx
+
 FROM fixture-runtime AS fixture-npm
 COPY --from=npm /out/ /srv/fixture/
 

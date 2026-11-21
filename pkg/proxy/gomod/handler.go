@@ -257,7 +257,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 		h.flights.Finish(flightKey, flight, errors.New("go module response exceeds size limit"))
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
-	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+	reader, err := storeio.StartStream(storeio.StreamConfig{
 		Body: response.Body, ObjectPath: objectKey, Spooler: h.spooler, MaxBytes: maxSize, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		VerifyFn: func(reader io.ReadSeeker) error {
 			size, err := reader.Seek(0, io.SeekEnd)
@@ -277,7 +277,7 @@ func (h *handler) fetchModule(w http.ResponseWriter, request *http.Request, pars
 			return validateModuleResponse(parsed, file)
 		},
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, goTenant, objectKey, h.origin.String(), http.StatusOK, response.Header, "", body)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, goTenant, objectKey, h.origin.String(), response.Header, "", body)
 		},
 		Done: func(err error) { h.flights.Finish(flightKey, flight, err) },
 	})
@@ -426,7 +426,7 @@ func (h *handler) serveSumDB(w http.ResponseWriter, request *http.Request, targe
 	if object != nil {
 		result = "REFRESH"
 	}
-	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, goTenant, key, h.sumDB.String(), http.StatusOK, response.Header, spool.SHA256, spool.File); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, goTenant, key, h.sumDB.String(), response.Header, spool.SHA256, spool.File); err != nil {
 		result = "BYPASS"
 	}
 	_, _ = spool.File.Seek(0, io.SeekStart)

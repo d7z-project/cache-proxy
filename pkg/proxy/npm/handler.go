@@ -334,7 +334,7 @@ func (h *handler) transformAndCommit(request *http.Request, packageName, key str
 	if _, err := output.Seek(0, io.SeekStart); err != nil {
 		return originalFallback()
 	}
-	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, npmTenant, key, h.origin.String(), http.StatusOK, headers, "", output); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, npmTenant, key, h.origin.String(), headers, "", output); err != nil {
 		if _, seekErr := output.Seek(0, io.SeekStart); seekErr != nil {
 			return nil, errors.Join(err, seekErr)
 		}
@@ -570,11 +570,11 @@ func (h *handler) serveTarball(w http.ResponseWriter, request *http.Request, rou
 		}
 		header := response.Header.Clone()
 		header.Del("Content-Length")
-		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+		reader, err := storeio.StartStream(storeio.StreamConfig{
 			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error { return verifyTarball(reader, authorization) },
 			StoreFn: func(ctx context.Context, body io.Reader) error {
-				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, npmTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, "", body)
+				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, npmTenant, key, target.Scheme+"://"+target.Host, response.Header, "", body)
 			},
 			Done: func(err error) { h.flights.Finish(key, flight, err) },
 		})

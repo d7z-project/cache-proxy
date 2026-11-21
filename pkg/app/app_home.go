@@ -221,6 +221,15 @@ func setupCommand(mode, instanceURL string) (note, command string) {
 		return "# Replace {image} and {tag}\n# Docker / Podman image references must not include http:// or https://",
 			"docker pull " + registry + "/{image}:{tag}\n" +
 				"podman pull " + registry + "/{image}:{tag}"
+	case config.ModeOpenVSX:
+		return "# Add this object to product.json or the VSCodium product configuration", "\"extensionsGallery\": {\n" +
+			"  \"serviceUrl\": \"" + instanceURL + "/vscode/gallery\",\n" +
+			"  \"itemUrl\": \"" + instanceURL + "/vscode/item\",\n" +
+			"  \"resourceUrlTemplate\": \"" + instanceURL + "/vscode/unpkg/{publisher}/{name}/{version}/{path}\",\n" +
+			"  \"extensionUrlTemplate\": \"" + instanceURL + "/vscode/gallery/{publisher}/{name}/latest\",\n" +
+			"  \"controlUrl\": \"\",\n" +
+			"  \"recommendationsUrl\": \"\"\n" +
+			"}"
 	case config.ModeAPK:
 		return "# Repository URL; apk fetches APKINDEX.tar.gz from this directory", instanceURL
 	case config.ModeDEB:

@@ -497,10 +497,14 @@ func (a *App) prepareHandlers(ctx context.Context) error {
 			a.pathPrefixes = append(a.pathPrefixes, entry.Path)
 			continue
 		}
-		a.bindHandlers[entry.Bind] = bindHomeHandler{
-			app:   a,
-			entry: entry,
-			next:  entry.Runtime,
+		if entry.OwnsBindRoot {
+			a.bindHandlers[entry.Bind] = entry.Runtime
+		} else {
+			a.bindHandlers[entry.Bind] = bindHomeHandler{
+				app:   a,
+				entry: entry,
+				next:  entry.Runtime,
+			}
 		}
 	}
 	sort.Slice(a.pathPrefixes, func(i, j int) bool {

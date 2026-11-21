@@ -24,22 +24,18 @@ import (
 type ResponseObject struct {
 	Reader      *blobfs.ObjectReader
 	Header      http.Header
-	Status      int
 	Origin      string
 	ValidatedAt time.Time
 	CreatedAt   time.Time
 	SHA256      string
 	WireSize    int64
-	DeleteAt    time.Time
 }
 
 type storedResponseMetadata struct {
-	Status      int           `json:"status"`
 	Origin      string        `json:"origin"`
 	ValidatedAt time.Time     `json:"validated_at"`
 	CreatedAt   time.Time     `json:"created_at"`
 	SHA256      string        `json:"sha256,omitempty"`
-	DeleteAt    time.Time     `json:"delete_at"`
 	Retention   time.Duration `json:"retention"`
 	LogicalKey  string        `json:"logical_key"`
 }
@@ -123,22 +119,22 @@ func OpenResponse(ctx context.Context, store *blobfs.Store, tenant, key string) 
 	return &ResponseObject{
 		Reader:      reader,
 		Header:      header,
-		Status:      metadata.Status,
 		Origin:      metadata.Origin,
 		ValidatedAt: metadata.ValidatedAt,
 		CreatedAt:   metadata.CreatedAt,
 		SHA256:      metadata.SHA256,
 		WireSize:    reader.Info().Size,
-		DeleteAt:    metadata.DeleteAt,
 	}, nil
 }
 
-func PutResponse(ctx context.Context, store *blobfs.Store, tenant, key, origin string, status int, header http.Header, sha256Digest string, body io.Reader) error {
-	return putResponseWithRetention(ctx, store, tenant, key, origin, status, header, sha256Digest, defaultReferenceRetention, body)
+// PutResponse stores one successful wire representation. Protocol handlers
+// decide whether a response is eligible before calling it.
+func PutResponse(ctx context.Context, store *blobfs.Store, tenant, key, origin string, header http.Header, sha256Digest string, body io.Reader) error {
+	return putResponseWithRetention(ctx, store, tenant, key, origin, header, sha256Digest, defaultReferenceRetention, body)
 }
 
-func putResponseWithRetention(ctx context.Context, store *blobfs.Store, tenant, key, origin string, status int, header http.Header, sha256Digest string, retention time.Duration, body io.Reader) error {
-	if key == "" || origin == "" || status < 100 || status > 599 || retention <= 0 || body == nil {
+func putResponseWithRetention(ctx context.Context, store *blobfs.Store, tenant, key, origin string, header http.Header, sha256Digest string, retention time.Duration, body io.Reader) error {
+	if key == "" || origin == "" || retention <= 0 || body == nil {
 		return errors.New("response storage parameters are invalid")
 	}
 	canonicalHeader := make(http.Header, len(header))
@@ -164,12 +160,10 @@ func putResponseWithRetention(ctx context.Context, store *blobfs.Store, tenant, 
 	}
 	now := time.Now().UTC()
 	metadata, err := json.Marshal(storedResponseMetadata{
-		Status:      status,
 		Origin:      origin,
 		ValidatedAt: validatedAt,
 		CreatedAt:   now,
 		SHA256:      sha256Digest,
-		DeleteAt:    now.Add(retention),
 		Retention:   retention,
 		LogicalKey:  key,
 	})
@@ -213,7 +207,6 @@ func TouchResponse(ctx context.Context, store *blobfs.Store, tenant, key string,
 		return DeleteResponse(ctx, store, tenant, key)
 	}
 	metadata.ValidatedAt, header = ResponseTimingHeader(ctx, header)
-	metadata.DeleteAt = metadata.ValidatedAt.Add(metadata.Retention)
 	encodedHeader, err := json.Marshal(header)
 	if err != nil {
 		return err
@@ -282,8 +275,7 @@ func decodeResponseMetadata(raw string) (storedResponseMetadata, error) {
 		}
 		return metadata, errors.New("stored response metadata contains trailing data")
 	}
-	if metadata.Status < 100 || metadata.Status > 599 || metadata.Origin == "" ||
-		metadata.ValidatedAt.IsZero() || metadata.CreatedAt.IsZero() || metadata.DeleteAt.IsZero() ||
+	if metadata.Origin == "" || metadata.ValidatedAt.IsZero() || metadata.CreatedAt.IsZero() ||
 		metadata.Retention <= 0 || metadata.LogicalKey == "" {
 		return metadata, errors.New("stored response metadata is invalid")
 	}

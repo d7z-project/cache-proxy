@@ -33,6 +33,8 @@ type Client struct {
 	refreshInterval time.Duration
 }
 
+type noRedirectContextKey struct{}
+
 func (c *Client) EnsureSpooler(workDir string) *storeio.Spooler {
 	c.spoolMu.Lock()
 	defer c.spoolMu.Unlock()
@@ -127,6 +129,12 @@ func (c *Client) DoRead(ctx context.Context, request *http.Request, class Admiss
 	return c.send(ctx, request, class)
 }
 
+// DoReadNoRedirect performs a bodyless read and returns the first redirect
+// response so protocol handlers can rewrite client-visible navigation targets.
+func (c *Client) DoReadNoRedirect(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
+	return c.DoRead(context.WithValue(ctx, noRedirectContextKey{}, true), request, class)
+}
+
 // DoReadPath sends a bodyless request to a validated logical path below origin.
 // Exact or already escaped URLs, such as signed downloads, must use DoRead.
 func (c *Client) DoReadPath(ctx context.Context, origin *url.URL, method, requestPath, rawQuery string, header http.Header, class AdmissionClass) (*http.Response, error) {
@@ -147,6 +155,12 @@ func (c *Client) DoReadOnlyPost(ctx context.Context, request *http.Request, clas
 		return nil, errors.New("upstream read-only query must use POST")
 	}
 	return c.send(ctx, request, class)
+}
+
+// DoReadOnlyPostNoRedirect performs an authorized read-only POST without
+// following its response redirect.
+func (c *Client) DoReadOnlyPostNoRedirect(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
+	return c.DoReadOnlyPost(context.WithValue(ctx, noRedirectContextKey{}, true), request, class)
 }
 
 func (c *Client) send(ctx context.Context, request *http.Request, class AdmissionClass) (*http.Response, error) {
@@ -192,6 +206,9 @@ func CheckReadOnlyRedirect(request *http.Request, via []*http.Request) error {
 		return nil
 	}
 	previous := via[len(via)-1]
+	if request.Context().Value(noRedirectContextKey{}) == true {
+		return http.ErrUseLastResponse
+	}
 	if via[0].Method != http.MethodGet && via[0].Method != http.MethodHead {
 		if request.Method != via[0].Method || !SameOrigin(request.URL, previous.URL) || request.URL.EscapedPath() != via[0].URL.EscapedPath() {
 			return errors.New("non-read redirect changed upstream operation")

@@ -16,7 +16,7 @@ import (
 // CaptureResponse forwards an upstream response immediately while independently
 // capturing a complete copy. Once headers are written, capture failures are
 // returned only to the caller and never replace the upstream status downstream.
-func CaptureResponse(ctx context.Context, w http.ResponseWriter, response *http.Response, spooler *Spooler, maxBytes int64, cacheStatus string) (*SpoolResult, error) {
+func CaptureResponse(ctx context.Context, w http.ResponseWriter, response *http.Response, spooler *Spooler, maxBytes int64) (*SpoolResult, error) {
 	if response == nil || response.Body == nil {
 		return nil, &SpoolError{Err: errors.New("capture response body is nil")}
 	}
@@ -64,7 +64,7 @@ func CaptureResponse(ctx context.Context, w http.ResponseWriter, response *http.
 	}()
 
 	proxyruntime.CopyDownstreamResponseHeaders(w.Header(), response.Header)
-	w.Header().Set("X-Cache", cacheStatus)
+	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(response.StatusCode)
 
 	hash := sha256.New()

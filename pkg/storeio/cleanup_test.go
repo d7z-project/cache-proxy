@@ -18,7 +18,7 @@ func TestResponseCleanupCursorProgressesWithoutDeletions(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	for _, key := range []string{"first", "second", "third"} {
-		require.NoError(t, putResponseWithRetention(context.Background(), store, "responses", key, "https://example.test", 200, nil, "", time.Hour, strings.NewReader(key)))
+		require.NoError(t, putResponseWithRetention(context.Background(), store, "responses", key, "https://example.test", nil, "", time.Hour, strings.NewReader(key)))
 	}
 	cleaner := &responseCleaner{store: store, tenant: "responses", opts: config.CleanupConfig{BatchSize: 1}}
 	seen := make(map[string]struct{})
@@ -56,5 +56,19 @@ func TestResponseCleanupDeletesCorruptOwnedMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, more)
 	_, err = store.StatObject(ctx, "responses", objectPath)
+	require.Error(t, err)
+}
+
+func TestResponseCleanupDeletesExpiredResponse(t *testing.T) {
+	store, err := blobfs.Open(t.TempDir(), blobfs.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	ctx := context.Background()
+	key := "expired"
+	require.NoError(t, putResponseWithRetention(ctx, store, "responses", key, "https://example.test", nil, "", time.Nanosecond, strings.NewReader("body")))
+
+	_, err = (&responseCleaner{store: store, tenant: "responses", opts: config.CleanupConfig{BatchSize: 1}}).cleanBatch(ctx)
+	require.NoError(t, err)
+	_, err = store.StatObject(ctx, "responses", responsePath(key))
 	require.Error(t, err)
 }

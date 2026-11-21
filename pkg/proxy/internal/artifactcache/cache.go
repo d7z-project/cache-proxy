@@ -158,10 +158,10 @@ func (c *Cache) revalidate(w http.ResponseWriter, request *http.Request, request
 func (c *Cache) streamAndCache(w http.ResponseWriter, request *http.Request, response *http.Response, key, flightKey string, flight *storeio.Flight, result string) (int, string) {
 	header := response.Header.Clone()
 	header.Del("Content-Length")
-	reader, err := storeio.StartStream(c.Lifecycle.Context(), storeio.StreamConfig{
+	reader, err := storeio.StartStream(storeio.StreamConfig{
 		Body: response.Body, ObjectPath: key, Spooler: c.Spooler, Lifecycle: c.Lifecycle, ExpectedSize: &response.ContentLength,
 		StoreFn: func(ctx context.Context, body io.Reader) error {
-			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), c.Store, c.Tenant, key, c.Upstream, http.StatusOK, response.Header, "", body)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), c.Store, c.Tenant, key, c.Upstream, response.Header, "", body)
 		},
 		Done: func(err error) { c.Flights.Finish(flightKey, flight, err) },
 	})

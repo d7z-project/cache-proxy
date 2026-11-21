@@ -36,6 +36,7 @@ const (
 	ModeDEB     = "deb"
 	ModeRPM     = "rpm"
 	ModePacman  = "pacman"
+	ModeOpenVSX = "openvsx"
 )
 
 func ValidateHTTPURL(raw string) error {
@@ -252,7 +253,7 @@ func (i Instance) SelectMode() (SelectedMode, error) {
 	mode := strings.TrimSpace(i.Mode)
 	switch mode {
 	case ModeFile, ModeGit, ModeOCI, ModeNPM, ModeGo, ModeMaven, ModeCargo,
-		ModePyPI, ModeFlatpak, ModeAPK, ModeDEB, ModeRPM, ModePacman:
+		ModePyPI, ModeFlatpak, ModeAPK, ModeDEB, ModeRPM, ModePacman, ModeOpenVSX:
 	default:
 		return SelectedMode{}, fmt.Errorf("instance %q has unsupported mode %q", i.Name, mode)
 	}
@@ -267,10 +268,10 @@ func (i Instance) validateDeclaration() error {
 	if (strings.TrimSpace(i.Path) == "") == (strings.TrimSpace(i.Bind) == "") {
 		return errors.New("must define exactly one of path or bind")
 	}
-	if i.Mode == ModeOCI && strings.TrimSpace(i.Bind) == "" {
-		return errors.New("oci mode requires bind")
+	if (i.Mode == ModeOCI || i.Mode == ModeOpenVSX) && strings.TrimSpace(i.Bind) == "" {
+		return fmt.Errorf("%s mode requires bind", i.Mode)
 	}
-	if i.Mode != ModeOCI && strings.TrimSpace(i.Path) == "" {
+	if i.Mode != ModeOCI && i.Mode != ModeOpenVSX && strings.TrimSpace(i.Path) == "" {
 		return fmt.Errorf("%s mode requires path", i.Mode)
 	}
 	if strings.TrimSpace(i.Upstream) == "" {
@@ -288,11 +289,37 @@ func (i Instance) validateDeclaration() error {
 			return errors.New("display_url must not contain a query or fragment")
 		}
 	}
+	if i.Mode == ModeOpenVSX {
+		displayURL, err := parseHTTPURL(i.DisplayURL)
+		if err != nil {
+			return fmt.Errorf("display_url: %w", err)
+		}
+		upstream, _ := parseHTTPURL(i.Upstream)
+		if (displayURL.EscapedPath() != "" && displayURL.EscapedPath() != "/") ||
+			(upstream.EscapedPath() != "" && upstream.EscapedPath() != "/") {
+			return errors.New("openvsx upstream and display_url must be root origins")
+		}
+		if strings.EqualFold(displayURL.Scheme, upstream.Scheme) &&
+			strings.EqualFold(displayURL.Hostname(), upstream.Hostname()) &&
+			httpURLPort(displayURL) == httpURLPort(upstream) {
+			return errors.New("openvsx upstream and display_url must use different origins")
+		}
+	}
 	if err := ValidateTransport(i.Transport); err != nil {
 		return fmt.Errorf("transport: %w", err)
 	}
 
 	return nil
+}
+
+func httpURLPort(target *url.URL) string {
+	if port := target.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(target.Scheme, "https") {
+		return "443"
+	}
+	return "80"
 }
 
 func LoadFile(path string) (*Document, error) {

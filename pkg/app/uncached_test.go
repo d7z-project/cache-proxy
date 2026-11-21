@@ -49,10 +49,14 @@ func TestUncachedInstancesForwardWithoutOpeningExistingStores(t *testing.T) {
 				require.NoError(t, os.Chtimes(path, old, old))
 			}
 			mount := "path: /test"
-			if mode == config.ModeOCI {
+			if mode == config.ModeOCI || mode == config.ModeOpenVSX {
 				mount = "bind: 127.0.0.1:0"
 			}
-			doc, err := config.Decode(strings.NewReader(fmt.Sprintf("server:\n  backend: %s\nstorage:\n  orphan_policy: auto\ninstances:\n  - name: test\n    mode: %s\n    enabled: true\n    cache: false\n    %s\n    upstream: %s\n", root, mode, mount, upstream.URL)))
+			displayURL := ""
+			if mode == config.ModeOpenVSX {
+				displayURL = "    display_url: https://openvsx.proxy.test\n"
+			}
+			doc, err := config.Decode(strings.NewReader(fmt.Sprintf("server:\n  backend: %s\nstorage:\n  orphan_policy: auto\ninstances:\n  - name: test\n    mode: %s\n    enabled: true\n    cache: false\n    %s\n%s    upstream: %s\n", root, mode, mount, displayURL, upstream.URL)))
 			require.NoError(t, err)
 			application, err := Open(context.Background(), doc)
 			require.NoError(t, err)

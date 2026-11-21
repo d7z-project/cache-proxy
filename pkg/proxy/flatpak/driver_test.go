@@ -46,7 +46,7 @@ func TestFlatpakMutableErrorPreservesCommittedReference(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	h := newFlatpakTestHandler(t, upstream.URL)
 	key := flatpakRefKey(h.origin.String(), "refs/heads/stable", "")
-	require.NoError(t, storeio.PutResponse(context.Background(), h.store, flatpakTenant, key, h.origin.String(), http.StatusOK, http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, flatpakTenant, key, h.origin.String(), http.Header{"Cache-Control": {"max-age=60"}}, "", strings.NewReader("old")))
 	req := httptest.NewRequest(http.MethodGet, "/refs/heads/stable", nil)
 	req.Header.Set("Cache-Control", "no-cache")
 	w := httptest.NewRecorder()

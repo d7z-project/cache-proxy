@@ -93,7 +93,11 @@ func (c *responseCleaner) cleanBatch(ctx context.Context) (bool, error) {
 				if statErr == nil {
 					metadata, decodeErr := decodeResponseMetadata(info.Options["metadata"])
 					corrupt := decodeErr != nil || responsePath(metadata.LogicalKey) != objectPath
-					if (corrupt || !now.Before(metadata.DeleteAt)) && !c.opts.DryRun {
+					retainedAt := metadata.CreatedAt
+					if metadata.ValidatedAt.After(retainedAt) {
+						retainedAt = metadata.ValidatedAt
+					}
+					if (corrupt || !now.Before(retainedAt.Add(metadata.Retention))) && !c.opts.DryRun {
 						if deleteErr := c.store.DeleteObject(ctx, c.tenant, objectPath); deleteErr != nil && !errors.Is(deleteErr, fs.ErrNotExist) {
 							return false, deleteErr
 						}

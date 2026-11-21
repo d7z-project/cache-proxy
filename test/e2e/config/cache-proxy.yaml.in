@@ -23,6 +23,14 @@ storage:
     max_cache_object_size: 256MiB
     max_active_spool_size: 1GiB
 instances:
+  - name: openvsx
+    enabled: true
+    mode: openvsx
+    bind: 127.0.0.1:@OPENVSX_PORT@
+    display_url: @OPENVSX_URL@
+    upstream: @FIXTURE_URL@
+    refresh:
+      interval: 1s
   - name: file
     enabled: true
     mode: file

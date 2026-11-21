@@ -381,7 +381,7 @@ func TestDebianInvalidCachedIndexIsReplaced(t *testing.T) {
 	h := newDebianTestHandler(t, server.URL)
 	target := fmt.Sprintf("flat/by-hash/SHA256/%x", digest)
 	wrong := sha256.Sum256([]byte("wrong"))
-	require.NoError(t, storeio.PutResponse(context.Background(), h.store, debIndexTenant, h.indexResponseKey(target), h.origin.String(), 200, nil, fmt.Sprintf("%x", wrong), strings.NewReader("wrong")))
+	require.NoError(t, storeio.PutResponse(context.Background(), h.store, debIndexTenant, h.indexResponseKey(target), h.origin.String(), nil, fmt.Sprintf("%x", wrong), strings.NewReader("wrong")))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	for range 2 {

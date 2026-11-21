@@ -73,14 +73,16 @@ storage:
 #   enabled: starts the instance when true; default: false.
 #   cache: enables local content caching; default: true. Set false for forwarding
 #     through the same transport/proxy without cache reads, writes or refresh jobs.
-#     Protocol validation and rewriting still apply.
+#     Required protocol routing and rewriting still apply. Rewritten downloads
+#     with a trusted digest are verified; repository passthrough relies on the client.
 #   mode: required protocol implementation; no default.
 #   upstream: required single HTTP(S) upstream base URL without credentials,
 #     query or fragment; no default.
 #   path: mount on server.bind; no default. Specify exactly one of path or bind.
-#   bind: dedicated listener; no default. Required instead of path for OCI.
-#   display_url: external OCI client address without credentials, query or
-#     fragment; default: derived from the listener.
+#   bind: dedicated listener; no default. Required instead of path for OCI and
+#     Open VSX.
+#   display_url: external OCI/Open VSX client address without credentials,
+#     query or fragment. Required for Open VSX; default: derived for OCI.
 #   transport: optional instance HTTP settings; defaults illustrated below.
 #   options: optional mode-specific settings; defaults documented per mode below.
 #
@@ -222,6 +224,19 @@ instances:
       # support environment expansion, e.g. password: "${REGISTRY_PASSWORD}".
       auth:
         type: none
+
+  # Open VSX uses root-relative registry and web UI endpoints, so it requires a
+  # dedicated listener and a public root URL. Route the complete public origin
+  # to this listener; do not mount it below a path.
+  - name: openvsx
+    enabled: false
+    mode: openvsx
+    bind: 127.0.0.1:15001
+    display_url: https://openvsx.example.com
+    upstream: https://open-vsx.org
+    refresh:
+      # Mutable metadata and transformed web resources. Default: 10m.
+      interval: 10m
 
   - name: git
     enabled: false

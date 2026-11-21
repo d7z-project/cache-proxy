@@ -10,7 +10,7 @@ source "$E2E_ROOT/test/e2e/lib/lifecycle.sh"
 source "$E2E_ROOT/test/e2e/lib/uncached.sh"
 
 suite=${E2E_SUITE:-all}
-all_modes=(file npm go maven cargo pypi deb apk rpm pacman git oci flatpak)
+all_modes=(file npm go maven cargo pypi deb apk rpm pacman git oci flatpak openvsx)
 if [[ $suite == all ]]; then
   selected_modes=("${all_modes[@]}")
 else
@@ -39,8 +39,10 @@ E2E_FIXTURE_IMAGE="localhost/cache-proxy-e2e-fixture:$E2E_RUN_ID"
 E2E_TOOLS_IMAGE="localhost/cache-proxy-e2e-tools:$E2E_RUN_ID"
 E2E_MAVEN_CLIENT_IMAGE="localhost/cache-proxy-e2e-maven:$E2E_RUN_ID"
 E2E_FLATPAK_CLIENT_IMAGE="localhost/cache-proxy-e2e-flatpak:$E2E_RUN_ID"
+E2E_OPENVSX_CLIENT_IMAGE="localhost/cache-proxy-e2e-openvsx:$E2E_RUN_ID"
 export E2E_ROOT E2E_RUN_ID E2E_OWNER_LABEL E2E_WORK_DIR
 export E2E_PROXY_IMAGE E2E_FIXTURE_IMAGE E2E_TOOLS_IMAGE E2E_MAVEN_CLIENT_IMAGE E2E_FLATPAK_CLIENT_IMAGE
+export E2E_OPENVSX_CLIENT_IMAGE
 
 for mode in "${selected_modes[@]}"; do
   source "$E2E_ROOT/test/e2e/cases/$mode.sh"

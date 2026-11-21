@@ -192,7 +192,7 @@ func (h *handler) serve(w http.ResponseWriter, request *http.Request, cleaned st
 		finished = true
 		return transport.WriteResponse(w, request, response, "BYPASS"), "BYPASS"
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, maxReleaseSize, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, maxReleaseSize)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)

@@ -246,7 +246,7 @@ func (h *handler) serveSimple(w http.ResponseWriter, request *http.Request, clea
 	header.Set("Content-Length", fmt.Sprintf("%d", size))
 	header.Set("ETag", `"sha256-`+hex.EncodeToString(digest.Sum(nil))+`"`)
 	_, _ = output.Seek(0, io.SeekStart)
-	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, pypiTenant, key, h.origin.String(), http.StatusOK, header, hex.EncodeToString(digest.Sum(nil)), output); err != nil {
+	if err := storeio.PutResponse(storeio.WithResponseTiming(h.lifecycle.Context(), response), h.store, pypiTenant, key, h.origin.String(), header, hex.EncodeToString(digest.Sum(nil)), output); err != nil {
 		_, _ = output.Seek(0, io.SeekStart)
 		h.writeSpool(w, request, header, output, "BYPASS")
 		return
@@ -469,11 +469,11 @@ func (h *handler) serveFile(w http.ResponseWriter, request *http.Request, route 
 		}
 		header := response.Header.Clone()
 		header.Del("Content-Length")
-		reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+		reader, err := storeio.StartStream(storeio.StreamConfig{
 			Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 			VerifyFn: func(reader io.ReadSeeker) error { return verifyPyPIFile(reader, authorization) },
 			StoreFn: func(ctx context.Context, body io.Reader) error {
-				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, pypiTenant, key, target.Scheme+"://"+target.Host, http.StatusOK, response.Header, authorization.Digest, body)
+				return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, pypiTenant, key, target.Scheme+"://"+target.Host, response.Header, authorization.Digest, body)
 			}, Done: func(err error) { h.flights.Finish(key, flight, err) },
 		})
 		if err != nil {

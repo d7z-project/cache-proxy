@@ -85,6 +85,9 @@ func (s *fixtureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.updated.Load() {
 		revision = fixtureRevision{directory: "updated", packageMajor: 2}
 	}
+	if s.serveOpenVSX(w, r, revision) {
+		return
+	}
 	if strings.Contains(r.URL.Path, "/__e2e_path__/") ||
 		r.URL.Path == "/file/" || r.URL.Path == "/npm/" || r.URL.Path == "/maven/" ||
 		r.URL.Path == "/cargo/" || r.URL.Path == "/pypi/" || r.URL.Path == "/deb/" ||

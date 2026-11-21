@@ -164,7 +164,7 @@ func (h *handler) serveDatabaseAnchor(w http.ResponseWriter, request *http.Reque
 		transport.WriteResponse(w, request, response, "BYPASS")
 		return
 	}
-	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, filerepo.DefaultMaxObject, "MISS")
+	spool, err := storeio.CaptureResponse(h.lifecycle.Context(), w, response, h.spooler, filerepo.DefaultMaxObject)
 	if err != nil {
 		if storeio.SpoolBodyUntouched(err) {
 			h.flights.Finish(flightKey, flight, err)

@@ -259,12 +259,12 @@ func (h *handler) fill(w http.ResponseWriter, request *http.Request, cleaned str
 func (h *handler) streamAndStoreFlight(w http.ResponseWriter, request *http.Request, key, origin string, response *http.Response, result string, flight *storeio.Flight) int {
 	headers := response.Header.Clone()
 	headers.Del("Content-Length")
-	reader, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+	reader, err := storeio.StartStream(storeio.StreamConfig{
 		Body: response.Body, ObjectPath: key, Spooler: h.spooler, Lifecycle: h.lifecycle, ExpectedSize: &response.ContentLength,
 		StatsStart: func() { h.stats.AddActiveDownload(h.name, "file", 1) },
 		StatsDone:  func() { h.stats.AddActiveDownload(h.name, "file", -1) },
 		StoreFn: func(ctx context.Context, reader io.Reader) error {
-			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, objectTenant, key, origin, http.StatusOK, response.Header, "", reader)
+			return storeio.PutResponse(storeio.WithResponseTiming(ctx, response), h.store, objectTenant, key, origin, response.Header, "", reader)
 		},
 		Done: func(err error) { h.flights.Finish(key, flight, err) },
 	})

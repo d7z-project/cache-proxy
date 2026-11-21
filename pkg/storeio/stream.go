@@ -33,7 +33,7 @@ type StreamConfig struct {
 // StartStream downloads independently of clients. Download completion is
 // published before verification and storage so local cache work cannot stall
 // downstream EOF or retain an upstream admission slot.
-func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
+func StartStream(cfg StreamConfig) (io.ReadCloser, error) {
 	if cfg.Body == nil {
 		return nil, errors.New("stream body is nil")
 	}
@@ -87,7 +87,7 @@ func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 		cfg.StatsStart()
 	}
 	slog.Debug("download started", "path", cfg.ObjectPath, "temp", spool.path)
-	run := func() {
+	run := func(ctx context.Context) {
 		if cfg.StatsDone != nil {
 			defer cfg.StatsDone()
 		}
@@ -125,7 +125,7 @@ func StartStream(ctx context.Context, cfg StreamConfig) (io.ReadCloser, error) {
 			cfg.Done(fillErr)
 		}
 	}
-	if err := cfg.Lifecycle.Go(func(context.Context) { run() }); err != nil {
+	if err := cfg.Lifecycle.Go(run); err != nil {
 		if cfg.StatsDone != nil {
 			cfg.StatsDone()
 		}

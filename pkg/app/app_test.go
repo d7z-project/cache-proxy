@@ -297,6 +297,7 @@ func TestSetupCommandGeneration(t *testing.T) {
 		{"cargo", "http://cache/cargo", "{source_name}", "sparse+http://cache/cargo/"},
 		{"pypi", "http://cache/pypi", "{package}", "pip install --index-url http://cache/pypi/simple {package}"},
 		{"oci", "http://cache:5000", "must not include http:// or https://", "docker pull cache:5000/{image}:{tag}"},
+		{"openvsx", "https://openvsx.cache", "product.json", "\"serviceUrl\": \"https://openvsx.cache/vscode/gallery\""},
 		{"apk", "http://cache/apk", "APKINDEX.tar.gz", "http://cache/apk"},
 		{"deb", "http://cache/deb", "{distribution}", "deb [trusted=yes] http://cache/deb ./"},
 		{"rpm", "http://cache/rpm", "repomd.xml", "baseurl=http://cache/rpm"},
@@ -332,6 +333,9 @@ func TestSetupCommandGeneration(t *testing.T) {
 			}
 		})
 	}
+	_, openVSX := setupCommand("openvsx", "https://openvsx.cache")
+	require.Contains(t, openVSX, `"resourceUrlTemplate": "https://openvsx.cache/vscode/unpkg/{publisher}/{name}/{version}/{path}"`)
+	require.Contains(t, openVSX, `"extensionUrlTemplate": "https://openvsx.cache/vscode/gallery/{publisher}/{name}/latest"`)
 }
 
 func TestSetupCommandGenerationOCIStripsHTTPScheme(t *testing.T) {
@@ -620,6 +624,31 @@ func TestPrepareHandlersWrapsBindHomePage(t *testing.T) {
 	app.bindHandlers[entry.Bind].ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "/v2/", rec.Body.String())
+}
+
+func TestPrepareHandlersPreservesOwnedBindRoot(t *testing.T) {
+	entry := &proxyruntime.Entry{
+		Name:         "openvsx",
+		Mode:         config.ModeOpenVSX,
+		Enabled:      true,
+		Bind:         "127.0.0.1:5001",
+		OwnsBindRoot: true,
+		Runtime: proxyruntime.HandlerInstance{Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			_, _ = io.WriteString(w, "registry:"+req.URL.Path)
+		})},
+	}
+	app := &App{
+		config:       &config.Document{Metrics: config.MetricsConfig{Path: "/metrics"}},
+		pathHandlers: map[string]http.Handler{},
+		bindHandlers: map[string]http.Handler{},
+		entries:      map[string]*proxyruntime.Entry{"openvsx": entry},
+	}
+	require.NoError(t, app.prepareHandlers(context.Background()))
+
+	recorder := httptest.NewRecorder()
+	app.bindHandlers[entry.Bind].ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "registry:/", recorder.Body.String())
 }
 
 func TestBindHomePageHeadReturnsOK(t *testing.T) {

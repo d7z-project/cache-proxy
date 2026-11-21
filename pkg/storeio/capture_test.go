@@ -58,7 +58,7 @@ func TestCaptureResponseEmitsHeadersBeforeEOFAndSurvivesClientFailure(t *testing
 	}
 	done := make(chan result, 1)
 	go func() {
-		spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 32, budget), 32, "MISS")
+		spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 32, budget), 32)
 		done <- result{spool: spool, err: err}
 	}()
 
@@ -92,7 +92,7 @@ func TestCaptureResponseEmitsBodyBeforeUpstreamEOF(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 32, nil), 32, "MISS")
+		spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 32, nil), 32)
 		done <- result{spool: spool, err: err}
 	}()
 
@@ -123,10 +123,10 @@ func TestCaptureResponseBudgetFailureLeavesBodyUntouched(t *testing.T) {
 	require.True(t, ok)
 	source := &countingReader{reader: bytes.NewBufferString("body")}
 	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(source), ContentLength: -1}
-	_, err := CaptureResponse(context.Background(), newCaptureResponseWriter(false), response, NewSpooler(t.TempDir(), 4, budget), 4, "MISS")
+	_, err := CaptureResponse(context.Background(), newCaptureResponseWriter(false), response, NewSpooler(t.TempDir(), 4, budget), 4)
 	require.ErrorIs(t, err, ErrSpoolBusy)
 	require.True(t, SpoolBodyUntouched(err))
-	require.Zero(t, source.count)
+	require.False(t, source.read)
 	held.Release()
 }
 
@@ -134,7 +134,7 @@ func TestCaptureResponseOversizeStillFinishesDownstream(t *testing.T) {
 	budget := proxyruntime.NewSpoolBudget(4)
 	writer := newCaptureResponseWriter(false)
 	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString("oversized")), ContentLength: -1}
-	spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 4, budget), 4, "MISS")
+	spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 4, budget), 4)
 	require.Nil(t, spool)
 	require.ErrorIs(t, err, ErrObjectTooLarge)
 	writer.mu.Lock()
@@ -148,7 +148,7 @@ func TestCaptureResponseDeclaredLengthCannotExceedReservation(t *testing.T) {
 	budget := proxyruntime.NewSpoolBudget(8)
 	writer := newCaptureResponseWriter(false)
 	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString("body")), ContentLength: 1}
-	spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 8, budget), 8, "MISS")
+	spool, err := CaptureResponse(context.Background(), writer, response, NewSpooler(t.TempDir(), 8, budget), 8)
 	require.Nil(t, spool)
 	require.ErrorContains(t, err, "declared length")
 	writer.mu.Lock()

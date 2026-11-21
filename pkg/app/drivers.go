@@ -14,6 +14,7 @@ import (
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/maven"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/npm"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/oci"
+	"gopkg.d7z.net/cache-proxy/pkg/proxy/openvsx"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/pacman"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/pypi"
 	"gopkg.d7z.net/cache-proxy/pkg/proxy/rpm"
@@ -31,6 +32,7 @@ var modePlanners = map[string]func(context.Context, *proxyruntime.InstancePlan) 
 	config.ModeMaven:   maven.Plan,
 	config.ModeNPM:     npm.Plan,
 	config.ModeOCI:     oci.Plan,
+	config.ModeOpenVSX: openvsx.Plan,
 	config.ModePacman:  pacman.Plan,
 	config.ModePyPI:    pypi.Plan,
 	config.ModeRPM:     rpm.Plan,

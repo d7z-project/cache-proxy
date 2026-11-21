@@ -232,7 +232,7 @@ func (h *handler) fetchBlob(w http.ResponseWriter, req *http.Request, resolved r
 	contentLen := response.ContentLength
 	respHeader := response.Header
 
-	pr, err := storeio.StartStream(h.lifecycle.Context(), storeio.StreamConfig{
+	pr, err := storeio.StartStream(storeio.StreamConfig{
 		Body:         response.Body,
 		ObjectPath:   objectPath,
 		Spooler:      h.spooler,
